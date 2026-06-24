@@ -84,6 +84,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'facts_extraction_health',
   'facts_health',
   'frontmatter_integrity',
+  'entity_link_coverage',
   'grade_confidence_drift',
   'graph_coverage',
   'graph_signals_coverage',
@@ -176,6 +177,7 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
  */
 export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   'cycle_phase_scope',
+  'dangling_aliases',
   'eval_capture',
   'minions_migration',
   'multi_source_drift',
