@@ -1016,6 +1016,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'emotional_weight.user_holder',
   // Cycle phase config
   'cycle.grade_takes.write_gstack_learnings',
+  // Doctor thresholds
+  'doctor.brain_score_warn_below',
   // Content sanity (v0.41)
   'content_sanity.bytes_warn',
   'content_sanity.bytes_block',
@@ -1084,6 +1086,7 @@ export const KNOWN_CONFIG_KEY_PREFIXES: readonly string[] = [
   'models.',           // models.* (tier, aliases, per-task)
   'dream.',            // dream.synthesize.*, dream.patterns.*
   'cycle.',            // cycle.<phase>.*
+  'doctor.',           // doctor.* operator thresholds
   'embedding_columns.', // per-column overrides
   'provider_base_urls.', // per-provider base URL overrides
   'provider_chat_options.', // per-provider / per-model chat providerOptions
