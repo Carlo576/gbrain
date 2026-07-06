@@ -221,6 +221,37 @@ describe('op-layer capture — search', () => {
     await waitForCapture();
     expect(await engine.listEvalCandidates()).toHaveLength(0);
   });
+
+  test('explicit source_id overrides ctx.sourceId for search retrieval', async () => {
+    const ctx = makeCtx({
+      sourceId: 'default',
+      config: makeConfig({ capture: false }),
+    });
+
+    const results = await searchOp.handler(ctx, {
+      query: 'sourceoverrideunique',
+      source_id: 'testsrc',
+    }) as Array<{ slug: string }>;
+
+    expect(results.map(r => r.slug)).toContain('notes/source-override-testsrc');
+    expect(results.map(r => r.slug)).not.toContain('notes/source-override-default');
+  });
+
+  test('all_sources spans sources for trusted local search callers', async () => {
+    const ctx = makeCtx({
+      sourceId: 'testsrc',
+      remote: false,
+      config: makeConfig({ capture: false }),
+    });
+
+    const results = await searchOp.handler(ctx, {
+      query: 'sourceoverrideunique',
+      all_sources: true,
+    }) as Array<{ slug: string }>;
+
+    expect(results.map(r => r.slug)).toContain('notes/source-override-testsrc');
+    expect(results.map(r => r.slug)).toContain('notes/source-override-default');
+  });
 });
 
 describe('op-layer capture — non-query/search ops are NOT captured', () => {

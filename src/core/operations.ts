@@ -1600,14 +1600,28 @@ const search: Operation = {
     limit: { type: 'number', description: 'Max results (default 20)' },
     offset: { type: 'number', description: 'Skip first N results (for pagination)' },
     mode: { type: 'string', description: 'Search mode (conservative|balanced|tokenmax). Local callers only.' },
+    source_id: {
+      type: 'string',
+      description:
+        "Scope search to a single source. Defaults to OperationContext.sourceId. Pass '__all__' to span every source for trusted local callers, or your granted sources for remote callers.",
+    },
+    all_sources: {
+      type: 'boolean',
+      description: "Span every source for trusted local callers; for remote callers, span only the caller's granted sources.",
+    },
   },
   handler: async (ctx, p) => {
     const startedAt = Date.now();
     const queryText = p.query as string;
     const limit = (p.limit as number) || 20;
     const offset = (p.offset as number) || 0;
-    // #2561: unqualified trusted-local search spans federated sources.
-    const scope = federatedSearchScope(ctx);
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    // #2561: unqualified trusted-local search spans federated sources, while
+    // explicit source/all-source requests still pass through the central
+    // trust-and-grant resolver.
+    const scope = p.all_sources === true
+      ? resolveRequestedScope(ctx, sourceIdParam, true)
+      : federatedSearchScope(ctx, sourceIdParam);
 
     // T4/D5 — per-call mode honored ONLY for trusted/local callers so a remote
     // OAuth client can't escalate to the costly tokenmax bundle. Local + unknown
