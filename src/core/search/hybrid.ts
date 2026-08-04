@@ -48,6 +48,32 @@ import {
 
 export const RRF_K = 60;
 const COMPILED_TRUTH_BOOST = 2.0;
+
+/**
+ * Which detail levels get the compiled_truth boost (#3430).
+ *
+ * ONLY `low`. The documented contract (`src/core/operations.ts`) is
+ * "low (compiled truth only), medium (default, all with dedup), high (all
+ * chunks)" — so `low` is the level that privileges compiled truth, and both
+ * `medium` and `high` are supposed to see everything on equal footing.
+ *
+ * This was previously spelled `detail !== 'high'`, i.e. written as though
+ * `high` were the special case. Because COMPILED_TRUTH_BOOST is applied AFTER
+ * RRF normalization, and RRF's whole range over a 100-deep pool is 1/60 → 1/160,
+ * a 2.0x multiplier is not a tilt — break-even is `2/(60+r) >= 1/60`, so any
+ * boosted chunk inside the first 60 ranks outranks an unboosted rank-1 chunk.
+ * At the default detail that made search categorically compiled-truth-only:
+ * a page whose answer lived in a `fenced_code` chunk returned the prose chunk,
+ * and the code chunk fell out of the window entirely.
+ *
+ * Extracted as a named predicate rather than left inline at three call sites so
+ * the detail→boost mapping is directly testable. An inline expression can only
+ * be covered through a full `hybridSearch` round trip, which is why the
+ * original inversion went unnoticed.
+ */
+export function shouldBoostCompiledTruth(detail: string | null | undefined): boolean {
+  return detail === 'low';
+}
 const pendingCacheWrites = new Set<Promise<unknown>>();
 
 /**
@@ -841,11 +867,12 @@ export async function embedQueryBounded(
   embedOpts: { embeddingModel?: string; dimensions?: number } | undefined,
   dl: QueryEmbedDeadline,
 ): Promise<Float32Array> {
-  const p = embedQuery(text, { ...(embedOpts ?? {}), abortSignal: dl.signal });
-  p.catch(() => { /* swallow the loser's late rejection */ });
   // Floor the budget so a healthy embed isn't starved when the shared absolute
   // deadline was mostly consumed by prior work (codex). Still bounded overall.
   const remaining = Math.max(MIN_QUERY_EMBED_BUDGET_MS, dl.deadlineAt - Date.now());
+  const signal = AbortSignal.timeout(remaining);
+  const p = embedQuery(text, { ...(embedOpts ?? {}), abortSignal: signal });
+  p.catch(() => { /* swallow the loser's late rejection */ });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(
@@ -858,6 +885,41 @@ export async function embedQueryBounded(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * #3442 — resolve the public `since`/`until` contract (SearchOpts v0.29.1):
+ * ISO-8601 passes through, relative durations ('7d', '2w', '1y') resolve to a
+ * concrete timestamp, and a plain YYYY-MM-DD `until` lands at end-of-day.
+ * The relative form was documented since v0.29.1 but never implemented — the
+ * raw string ('60d') flowed into the engines' `::timestamptz` casts, every
+ * arm failed fail-open, and the date filter was SILENTLY ignored.
+ * Unparseable input now throws loudly instead of degrading.
+ */
+export function resolveDateBoundary(
+  raw: string | undefined,
+  boundary: 'since' | 'until',
+): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const s = String(raw).trim();
+  if (!s) return undefined;
+  const rel = /^(\d+)\s*([dwmy])$/i.exec(s);
+  if (rel) {
+    const n = parseInt(rel[1], 10);
+    const unit = rel[2].toLowerCase();
+    // m = months (30d). Minutes make no sense for an effective_date filter.
+    const days = unit === 'd' ? n : unit === 'w' ? n * 7 : unit === 'm' ? n * 30 : n * 365;
+    return new Date(Date.now() - days * 86400000).toISOString();
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    // Plain date: `until` lands at end-of-day (documented SearchOpts
+    // semantics); `since` keeps UTC start-of-day.
+    return boundary === 'until' ? `${s}T23:59:59.999Z` : s;
+  }
+  if (Number.isFinite(Date.parse(s))) return s;
+  throw new Error(
+    `Invalid ${boundary} value "${s}" — expected ISO-8601 (YYYY-MM-DD or timestamp) or a relative duration like '7d', '2w', '1y'.`,
+  );
 }
 
 export async function hybridSearch(
@@ -954,8 +1016,10 @@ export async function hybridSearch(
     // v0.29.1: since/until take precedence over deprecated afterDate/beforeDate.
     // The engine still consumes the legacy field names; this aliasing keeps
     // PR #618 callers compiling while the new names are the public surface.
-    afterDate: opts?.since ?? opts?.afterDate,
-    beforeDate: opts?.until ?? opts?.beforeDate,
+    // #3442: resolveDateBoundary implements the documented contract (relative
+    // durations + end-of-day for plain-date `until`) at this single seam.
+    afterDate: resolveDateBoundary(opts?.since ?? opts?.afterDate, 'since'),
+    beforeDate: resolveDateBoundary(opts?.until ?? opts?.beforeDate, 'until'),
     // v0.34.1 (#861, D9 — P0 leak seal): thread source-scoping through so the
     // inner engine.searchKeyword / engine.searchVector calls apply the
     // WHERE source_id filter at SQL level. Pre-fix, this explicit pick
@@ -1169,7 +1233,7 @@ export async function hybridSearch(
       const noEmbedLists = [{ list: keywordResults, k: fk }];
       if (titleResults.length > 0) noEmbedLists.push({ list: titleResults, k: fk });
       if (relationalList.length > 0) noEmbedLists.push({ list: relationalList, k: fk });
-      noEmbedResults = rrfFusionWeighted(noEmbedLists, detailResolved !== 'high');
+      noEmbedResults = rrfFusionWeighted(noEmbedLists, shouldBoostCompiledTruth(detailResolved));
     }
     if (noEmbedResults.length > 0) {
       await runPostFusionStages(engine, noEmbedResults, postFusionOpts);
@@ -1413,7 +1477,7 @@ export async function hybridSearch(
       const fallbackLists = [{ list: keywordResults, k: fk }];
       if (titleResults.length > 0) fallbackLists.push({ list: titleResults, k: fk });
       if (relationalList.length > 0) fallbackLists.push({ list: relationalList, k: fk });
-      fallbackResults = rrfFusionWeighted(fallbackLists, detail !== 'high');
+      fallbackResults = rrfFusionWeighted(fallbackLists, shouldBoostCompiledTruth(detail));
     }
     if (fallbackResults.length > 0) {
       await runPostFusionStages(engine, fallbackResults, postFusionOpts);
@@ -1500,7 +1564,7 @@ export async function hybridSearch(
   // arms BEFORE fusion so the compiled-truth authority boost skips them.
   await stampUnverifiedExtractions(engine, allLists.flatMap((l) => l.list));
 
-  let fused = rrfFusionWeighted(allLists, detail !== 'high');
+  let fused = rrfFusionWeighted(allLists, shouldBoostCompiledTruth(detail));
 
   // Cosine re-scoring before dedup so semantically better chunks survive.
   // v0.36 (D9): hydrate from the active embedding column so rescore happens
@@ -1803,12 +1867,19 @@ export async function hybridSearchCached(
     opts?.adaptiveReturn,
     cfgCached as unknown as Record<string, unknown> | null,
   );
+  // #3442: date-filtered requests skip the cache — since/until are not part
+  // of knobsHash, so a filtered result set could be served to an unfiltered
+  // lookup (and vice versa). Relative forms ('60d') also resolve to a
+  // now-relative timestamp, which a persisted cache row can't express.
+  const dateFiltered =
+    Boolean(opts?.since ?? opts?.afterDate) || Boolean(opts?.until ?? opts?.beforeDate);
   const skipCache =
     !cache.isEnabled() ||
     (opts?.walkDepth ?? 0) > 0 ||
     Boolean(opts?.nearSymbol) ||
     isNonDefaultColumn ||
-    adaptiveReturnOn;
+    adaptiveReturnOn ||
+    dateFiltered;
 
   let cacheStatus: 'hit' | 'miss' | 'disabled' = skipCache ? 'disabled' : 'miss';
   let cacheSimilarity: number | undefined;

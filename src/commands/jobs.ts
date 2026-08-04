@@ -233,7 +233,7 @@ USAGE
   gbrain jobs get <id>
   gbrain jobs cancel <id>
   gbrain jobs retry <id>
-  gbrain jobs prune [--older-than 30d]
+  gbrain jobs prune [--older-than 30d] [--dry-run]
   gbrain jobs delete <id>
   gbrain jobs stats
   gbrain jobs smoke
@@ -633,8 +633,15 @@ HANDLER TYPES (built in)
       try { await queue.ensureSchema(); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
 
-      const count = await queue.prune({ olderThan: new Date(Date.now() - days * 86400000) });
-      console.log(`Pruned ${count} jobs older than ${days} days.`);
+      // #2712: --dry-run previews the count without deleting. It used to be
+      // silently ignored (the destructive default ran anyway).
+      const dryRun = hasFlag(args, '--dry-run');
+      const count = await queue.prune({ olderThan: new Date(Date.now() - days * 86400000), dryRun });
+      if (dryRun) {
+        console.log(`[dry-run] Would prune ${count} jobs older than ${days} days. Nothing deleted.`);
+      } else {
+        console.log(`Pruned ${count} jobs older than ${days} days.`);
+      }
       break;
     }
 
@@ -2187,8 +2194,9 @@ export async function registerBuiltinHandlers(
   // migration that retypes 25K+ pages, creates alias rows, converts edge-
   // shaped pages to link rows, AND flips the active pack at end of run.
   // manual_only via src/core/onboard/render.ts:MANUAL_ONLY_PROTECTED_JOBS.
-  // Operator path: `gbrain jobs submit unify-types --allow-protected --params
-  // '{"target_pack":"gbrain-base-v2"}'`.
+  // Dry-run preview: `gbrain jobs submit unify-types --allow-protected
+  // --params '{"target_pack":"gbrain-base-v2"}'`; apply with
+  // '{"target_pack":"gbrain-base-v2","apply":true}'.
   worker.register('unify-types', async (job) => {
     const { runUnifyTypes } = await import('../core/schema-pack/unify-types-handler.ts');
     const data = (job.data ?? {}) as {
@@ -2206,7 +2214,11 @@ export async function registerBuiltinHandlers(
     } as unknown as import('../core/operations.ts').OperationContext;
     return await runUnifyTypes(ctx, {
       target_pack: data.target_pack,
-      apply: data.apply ?? true,
+      // #1575: default matches the handler interface's "Default false
+      // (dry-run)" — a destructive one-shot migration must be opted into
+      // with apply:true (the onboard remediation + the printed migration
+      // command both carry it explicitly).
+      apply: data.apply ?? false,
       sourceId: data.sourceId,
       onProgress: (msg: string) => {
         job.updateProgress({ phase: 'unify-types', message: msg }).catch(() => {});
