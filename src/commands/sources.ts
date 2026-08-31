@@ -1118,25 +1118,27 @@ async function runAudit(engine: BrainEngine, args: string[]): Promise<void> {
     console.error(`Source ${sourceId} has no local_path — cannot audit on disk`);
     process.exit(1);
   }
+  const localPath = src.local_path;
 
   // Lazy-load FS + walker bits so the command stays import-cheap when
   // not invoked (every subcommand pays the import cost on dispatch).
   const { readFileSync, readdirSync, lstatSync, existsSync: _exists } =
     await import('fs');
   const { join: pathJoin } = await import('path');
-  const { pruneDir } = await import('../core/sync.ts');
+  const { pruneDir, isSyncable, repoSyncableOptions } = await import('../core/sync.ts');
   const { assessContentSanity } = await import('../core/content-sanity.ts');
   const { loadOperatorLiterals } = await import('../core/content-sanity-literals.ts');
   const { parseMarkdown } = await import('../core/markdown.ts');
 
-  if (!_exists(src.local_path)) {
-    console.error(`local_path does not exist on disk: ${src.local_path}`);
+  if (!_exists(localPath)) {
+    console.error(`local_path does not exist on disk: ${localPath}`);
     process.exit(1);
   }
 
   // Walk recursively. Mirror gbrain sync's descent rules so the file set
   // we audit matches the file set that would actually be ingested.
   const files: string[] = [];
+  const syncableOpts = repoSyncableOptions(localPath, 'markdown');
   function walk(dir: string): void {
     let entries: string[];
     try {
@@ -1156,12 +1158,12 @@ async function runAudit(engine: BrainEngine, args: string[]): Promise<void> {
         // pruneDir returns true = descend, false = prune (see core/sync.ts).
         if (!pruneDir(entry, dir)) continue;
         walk(full);
-      } else if (entry.endsWith('.md')) {
+      } else if (entry.endsWith('.md') && isSyncable(full.slice(localPath.length + 1), syncableOpts)) {
         files.push(full);
       }
     }
   }
-  walk(src.local_path);
+  walk(localPath);
 
   const literals = loadOperatorLiterals();
   // Disposition-aware labelling (Codex #5): under the default `quarantine`

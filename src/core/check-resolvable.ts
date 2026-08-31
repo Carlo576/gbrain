@@ -218,7 +218,9 @@ export function parseResolverEntries(resolverContent: string): ResolverEntry[] {
 // needed for AGENTS.md-only OpenClaw deployments. See D-CX-12 / F-ENG-1.
 
 /**
- * Simple YAML frontmatter parser — extracts triggers array if present.
+ * Extract the routing contract from skill frontmatter. The GBrain extension
+ * `triggers:` wins when present; otherwise the standard AgentSkills
+ * `description:` field is the model-visible trigger contract.
  *
  * Normalizes CRLF → LF before parsing so Windows checkouts (where
  * `core.autocrlf=true` is the default) parse correctly. Without this,
@@ -233,11 +235,17 @@ export function extractTriggers(skillContent: string): string[] {
   if (!fmMatch) return [];
   const fm = fmMatch[1];
   const triggersMatch = fm.match(/^triggers:\s*\n((?:\s+-\s+.+\n?)*)/m);
-  if (!triggersMatch) return [];
-  return triggersMatch[1]
-    .split('\n')
-    .map(l => l.replace(/^\s+-\s+/, '').replace(/^["']|["']$/g, '').trim())
-    .filter(Boolean);
+  if (triggersMatch) {
+    return triggersMatch[1]
+      .split('\n')
+      .map(l => l.replace(/^\s+-\s+/, '').replace(/^["']|["']$/g, '').trim())
+      .filter(Boolean);
+  }
+  const descriptionMatch = fm.match(/^description:\s*(?:"([^"\n]+)"|'([^'\n]+)'|([^\n]+))\s*$/m);
+  const description = descriptionMatch
+    ? (descriptionMatch[1] ?? descriptionMatch[2] ?? descriptionMatch[3]).trim()
+    : '';
+  return description ? [description] : [];
 }
 
 /**
@@ -494,8 +502,8 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
           type: 'mece_gap',
           severity: 'warning',
           skill: skill.name,
-          message: `Skill '${skill.name}' has no triggers: field in its SKILL.md frontmatter`,
-          action: `Add a triggers: array to the frontmatter of skills/${skill.path}`,
+          message: `Skill '${skill.name}' has neither a standard description nor a triggers: field in its SKILL.md frontmatter`,
+          action: `Add a trigger-critical description to skills/${skill.path}`,
           fix: {
             type: 'add_frontmatter',
             file: skillPath,

@@ -49,7 +49,6 @@ shipping the v0.23.2 round-trip E2E (`type: 'reflection'` is not a
 member of `PageType`). Run `bun run typecheck` once before push, even
 when only test files changed.
 
-
 ## CHANGELOG + VERSION are branch-scoped
 
 **VERSION and CHANGELOG describe what THIS branch adds vs master, not how we got
@@ -339,7 +338,6 @@ the migration orchestrator emits a structured TODO to
 TODOs using `skills/migrations/v0.11.0.md` — stays host-agnostic, still
 canonical.
 
-
 ## Schema state tracking
 
 `~/.gbrain/update-state.json` tracks which recommended schema directories the user
@@ -465,4 +463,3 @@ Why this over alternatives: adding `garrytan-agents` as a collaborator, or
 flipping the repo-wide "send secrets to fork PRs" toggle, both broaden
 secret distribution to every fork PR from that account or any fork. Moving
 the branch keeps secret scope tight to just the one PR being shipped.
-

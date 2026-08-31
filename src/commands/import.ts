@@ -14,6 +14,8 @@ import {
   matchesAnyGlob,
   pruneDir,
   SYNC_SKIP_FILES,
+  repoSyncableOptions,
+  isSyncable,
   type SyncStrategy,
 } from '../core/sync.ts';
 import { sortNewestFirst } from '../core/sort-newest-first.ts';
@@ -722,9 +724,12 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   // vendored data/fixtures). `--cached --others --exclude-standard` = tracked
   // PLUS untracked-not-ignored, so uncommitted source is still indexed. Non-git
   // dirs (or git unavailable) fall through to the FS walk below.
+  const syncableOpts = repoSyncableOptions(dir, strategy);
   if (!opts.includeGitignored) {
     const gitFiles = gitListSyncableFiles(dir, strategy, multimodalOn);
-    if (gitFiles) return gitFiles;
+    if (gitFiles) {
+      return gitFiles.filter(file => isSyncable(relative(dir, file), syncableOpts));
+    }
   }
 
   const maxDepth = resolveMaxWalkDepth();
@@ -773,6 +778,7 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
         walk(full, depth + 1);
       } else if (stat.isFile()) {
         if (!isCollectibleForWalker(entry, strategy, multimodalOn)) continue;
+        if (!isSyncable(relative(dir, full), syncableOpts)) continue;
         files.push(full);
       }
     }

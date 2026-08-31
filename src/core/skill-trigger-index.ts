@@ -84,7 +84,10 @@ function loadFrontmatterEntries(skillsDir: string): SkillTriggerEntry[] {
   }
 
   for (const dirent of dirents) {
-    if (!dirent.isDirectory()) continue;
+    // OpenClaw commonly canonicalizes shared skills as directory symlinks.
+    // Treat a symlink as a candidate only when its direct SKILL.md exists;
+    // broken/non-skill links still fall through below.
+    if (!dirent.isDirectory() && !dirent.isSymbolicLink()) continue;
     const name = dirent.name;
     if (name.startsWith('_') || name.startsWith('.')) continue;
     if (FRONTMATTER_SKIP_DIRS.has(name)) continue;
@@ -118,10 +121,16 @@ function loadFrontmatterEntries(skillsDir: string): SkillTriggerEntry[] {
       continue;
     }
 
-    if (!parsed || !parsed.triggers || parsed.triggers.length === 0) continue;
+    if (!parsed) continue;
+    const declaredTriggers = parsed.triggers && parsed.triggers.length > 0
+      ? parsed.triggers
+      : parsed.description
+        ? [parsed.description]
+        : [];
+    if (declaredTriggers.length === 0) continue;
 
     const skillPath = `skills/${name}/SKILL.md`;
-    for (const trigger of parsed.triggers) {
+    for (const trigger of declaredTriggers) {
       const t = trigger.trim();
       if (t.length === 0) continue;
       out.push({

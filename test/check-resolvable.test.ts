@@ -218,9 +218,9 @@ describe("extractTriggers", () => {
     expect(extractTriggers("# Just a body, no frontmatter\n")).toEqual([]);
   });
 
-  test("returns [] when triggers field is absent from frontmatter", () => {
+  test("uses description when triggers field is absent from frontmatter", () => {
     const fm = "---\nname: query\ndescription: Test\ntools:\n  - search\n---\n";
-    expect(extractTriggers(fm)).toEqual([]);
+    expect(extractTriggers(fm)).toEqual(["Test"]);
   });
 
   test("strips surrounding quotes from trigger values", () => {
@@ -450,4 +450,3 @@ function afterEachCleanup(fn: () => void) {
   const { afterEach } = require("bun:test");
   afterEach(fn);
 }
-

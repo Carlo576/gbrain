@@ -14,7 +14,12 @@ import {
   unsyncableReason,
   SYNC_SKIP_FILES,
   type SyncableReason,
+  loadGbrainIgnore,
+  repoSyncableOptions,
 } from '../src/core/sync.ts';
+import { mkdtempSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 describe('#1433 — isSyncable / unsyncableReason are duals of one classifier', () => {
   const cases: Array<{ path: string; expected: SyncableReason | null; note: string }> = [
@@ -61,5 +66,16 @@ describe('#1433 — isSyncable / unsyncableReason are duals of one classifier', 
     for (const c of cases) {
       expect(isSyncable(c.path)).toBe(unsyncableReason(c.path) === null);
     }
+  });
+});
+
+describe('.gbrainignore', () => {
+  test('loads comments, rooted paths, and directory shorthand', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-ignore-'));
+    writeFileSync(join(dir, '.gbrainignore'), '# generated\n/export/\n**/*.zd9-*\n');
+    expect(loadGbrainIgnore(dir)).toEqual(['export/**', '**/*.zd9-*']);
+    const opts = repoSyncableOptions(dir, 'markdown');
+    expect(isSyncable('export/copy.md', opts)).toBe(false);
+    expect(isSyncable('wiki/current.md', opts)).toBe(true);
   });
 });

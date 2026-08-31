@@ -15,7 +15,7 @@ import { SLUG_WORD_CHARS } from './cjk.ts';
 // v0.37.7.0 #1169 submodule-detection helpers. Bottom-of-file already
 // aliases existsSync as `_existsSync` for other purposes; the top-of-file
 // import keeps the pruneDir helper's deps near its callsite.
-import { existsSync, statSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { join as pathJoin } from 'path';
 
 export interface SyncManifest {
@@ -33,10 +33,46 @@ export interface RawManifestEntry {
 
 export type SyncStrategy = 'markdown' | 'code' | 'auto';
 
-interface SyncableOptions {
+export interface SyncableOptions {
   strategy?: SyncStrategy;
   include?: string[];
   exclude?: string[];
+}
+
+/**
+ * Load repository-local sync exclusions from `.gbrainignore`.
+ *
+ * The file deliberately uses the same glob syntax as SyncableOptions.exclude.
+ * Blank lines and comments are ignored; a trailing slash means the whole
+ * directory tree. Unlike `.gitignore`, these exclusions also apply to tracked
+ * files, which is the point for generated exports committed for distribution.
+ */
+export function loadGbrainIgnore(repoPath: string): string[] {
+  const file = pathJoin(repoPath, '.gbrainignore');
+  if (!existsSync(file)) return [];
+  try {
+    return readFileSync(file, 'utf8')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.startsWith('#'))
+      .map(line => {
+        const unrooted = line.startsWith('/') ? line.slice(1) : line;
+        return unrooted.endsWith('/') ? `${unrooted}**` : unrooted;
+      });
+  } catch {
+    return [];
+  }
+}
+
+export function repoSyncableOptions(
+  repoPath: string,
+  strategy?: SyncStrategy,
+): SyncableOptions {
+  const exclude = loadGbrainIgnore(repoPath);
+  return {
+    ...(strategy ? { strategy } : {}),
+    ...(exclude.length > 0 ? { exclude } : {}),
+  };
 }
 
 // v0.19.0 shipped a 9-extension allowlist (ts/tsx/js/jsx/mjs/cjs/py/rb/go). The

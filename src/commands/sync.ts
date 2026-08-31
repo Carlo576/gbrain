@@ -19,6 +19,7 @@ import {
   isSkippablePath,
   resolveAutoSkipThreshold,
   DEFAULT_SOURCE_ID,
+  repoSyncableOptions,
 } from '../core/sync.ts';
 import {
   computeSyncDelta,
@@ -2359,7 +2360,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     opts.exclude !== undefined && opts.exclude.length > 0 && matchesAnyGlob(scopeRel(p), opts.exclude);
 
   // Filter to syncable files (strategy-aware + scope-aware + exclude-aware)
-  const syncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
+  const syncOpts = repoSyncableOptions(repoPath, opts.strategy);
   // #1970 (F-C): a rename whose DESTINATION is unsyncable drops out of BOTH
   // `renamed` (only `r.to` is kept below) AND `deleted` (git emits it as `R`,
   // not `D`), leaving the OLD page stale. Fold the source side into the delete
@@ -3826,7 +3827,12 @@ async function performFullSync(
   let reconciledDeletes = 0;
   if (opts.sourceId) {
     const sid = opts.sourceId;
-    const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
+    // Reconciliation must also remove pages that became excluded by
+    // .gitignore/.gbrainignore after an earlier import. Use the base strategy
+    // gate for the stale-page safety check; `current` below already reflects
+    // the repository-specific excludes. Metafiles such as README remain
+    // protected because they fail the base isSyncable gate.
+    const reconcileBaseOpts = { strategy: opts.strategy ?? 'markdown' } as const;
     // collectSyncableFiles returns ABSOLUTE paths; source_path is stored
     // repo-relative (importFile uses `relative(dir, filePath)`), so relativize
     // to the same form before membership-testing — otherwise every page looks
@@ -3857,7 +3863,7 @@ async function performFullSync(
     const plan = planReconcileDeletes(
       rows,
       currentFiles,
-      p => (scopePrefix === '' || p.startsWith(scopePrefix)) && isSyncable(p, reconcileSyncOpts),
+      p => (scopePrefix === '' || p.startsWith(scopePrefix)) && isSyncable(p, reconcileBaseOpts),
     );
     if (plan.staleSlugs.length > 0 && plan.massDelete && !massReconcileAllowed()) {
       // #2828 mass-delete safety valve: a reconcile that would sweep more than

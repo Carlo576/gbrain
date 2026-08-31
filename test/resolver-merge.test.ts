@@ -126,6 +126,22 @@ describe('checkResolvable merges resolver files', () => {
     }
   });
 
+  it('AgentSkills description is a routing contract when private triggers are absent', () => {
+    for (const name of ['alpha', 'beta', 'gamma']) {
+      writeFileSync(
+        join(skillsDir, name, 'SKILL.md'),
+        `---\nname: ${name}\ndescription: "Use for ${name} work."\n---\n# ${name}\n`,
+      );
+    }
+    const report = checkResolvable(skillsDir);
+    expect(report.summary.reachable).toBe(3);
+    expect(report.summary.unreachable).toBe(0);
+    expect(report.summary.gaps).toBe(0);
+    for (const name of ['alpha', 'beta', 'gamma']) {
+      writeFileSync(join(skillsDir, name, 'SKILL.md'), `---\nname: ${name}\n---\n# ${name}\n`);
+    }
+  });
+
   it('with skills/RESOLVER.md (1 skill) + ../AGENTS.md (2 more) → all 3 reachable', () => {
     // Thin RESOLVER.md in skills dir (e.g. from skillpack)
     writeFileSync(join(skillsDir, 'RESOLVER.md'),

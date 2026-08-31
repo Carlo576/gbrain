@@ -1,0 +1,3 @@
+# Tests/fixtures and release history are not current operator documentation.
+test/**
+CHANGELOG.md

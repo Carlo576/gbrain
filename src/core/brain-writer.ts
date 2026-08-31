@@ -28,7 +28,7 @@ import {
   type ParseValidationCode,
   type ParseValidationError,
 } from './markdown.ts';
-import { isSyncable, pruneDir, slugifyPath } from './sync.ts';
+import { isSyncable, pruneDir, repoSyncableOptions, slugifyPath } from './sync.ts';
 
 export type { ParseValidationCode };
 
@@ -602,6 +602,7 @@ function scanOneSource(
   let total = 0;
   let ignoredMissingOpen = 0;
   let interrupted = false;
+  const syncableOptions = repoSyncableOptions(rootResolved, 'markdown');
 
   const visitFile = (absPath: string): boolean | void => {
     // Per-file deadline + abort gate. Deadline is the load-bearing
@@ -618,7 +619,7 @@ function scanOneSource(
     // visitDir is consulted from walkDir directly (passed below). The
     // per-file visit closure doesn't need it.
     const relPath = relative(rootResolved, absPath);
-    if (!isSyncable(relPath, { strategy: 'markdown' })) return true;
+    if (!isSyncable(relPath, syncableOptions)) return true;
     scanned++;
     let content: string;
     try {

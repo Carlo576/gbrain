@@ -37,12 +37,7 @@ tools:
   - add_timeline_entry
 mutating: true
 writes_pages: true
-# EIIRP files across the full canonical set — the actual destination
-# per page is decided by brain-taxonomist consulting the active schema
-# pack via `gbrain schema show --json`. List the gbrain-recommended set
-# of canonical directories here so the filing-audit gate passes; on
-# brains with custom packs, the routing surface is broader and routes
-# through loadActivePack at write time.
+filing_exempt: true
 writes_to:
   - people/
   - companies/
@@ -54,7 +49,6 @@ writes_to:
   - writing/
   - analysis/
   - guides/
-filing_exempt: true
 distinct_from:
   - name: brain-taxonomist
     reason: "brain-taxonomist classifies individual pages at write time (the filing GATE). EIIRP orchestrates the full post-work LIFECYCLE — inventory + taxonomy + schema + skillify + verify."
@@ -63,6 +57,10 @@ distinct_from:
   - name: skillify
     reason: "skillify is the meta-skill for turning a feature into a tested skill. EIIRP calls skillify when Phase 5 identifies a reusable pattern."
 ---
+
+<!-- EIIRP lists the canonical destination set for filing-audit coverage.
+The actual destination is chosen by brain-taxonomist from the active schema
+pack, so custom packs can route more broadly at write time. -->
 
 # EIIRP — Everything In Its Right Place
 

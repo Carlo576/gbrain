@@ -36,6 +36,8 @@ export interface ParsedFrontmatter {
   raw: string;
   /** Skill name; the `name:` field. */
   name?: string;
+  /** AgentSkills routing description (the standard trigger contract). */
+  description?: string;
   /** Does this skill write brain pages? */
   writes_pages?: boolean;
   /** Allowed brain-page filing directories. */
@@ -90,6 +92,16 @@ export function parseSkillFrontmatter(content: string): ParsedFrontmatter | null
   // --- name ---
   const nameMatch = raw.match(/^name:\s*["']?([^"'\n]+?)["']?\s*$/m);
   if (nameMatch) out.name = nameMatch[1].trim();
+
+  // --- description ---
+  // AgentSkills/OpenClaw use `description` as the model-visible trigger
+  // contract. GBrain's older private `triggers:` extension remains supported,
+  // but a non-empty standard description is sufficient for reachability.
+  const descriptionMatch = raw.match(/^description:\s*(?:"([^"\n]+)"|'([^'\n]+)'|([^\n]+))\s*$/m);
+  const description = descriptionMatch
+    ? (descriptionMatch[1] ?? descriptionMatch[2] ?? descriptionMatch[3]).trim()
+    : '';
+  if (description) out.description = description;
 
   // --- writes_pages / mutating (booleans) ---
   const wpMatch = raw.match(/^writes_pages:\s*(true|false)\s*$/m);

@@ -330,6 +330,23 @@ describe('scanBrainSources (PGLite)', () => {
     expect(report.per_source[0]!.total).toBe(0);
   });
 
+  test('respects repository .gbrainignore exclusions', async () => {
+    const ignoredDir = join(tmp, 'test', 'fixtures');
+    mkdirSync(ignoredDir, { recursive: true });
+    writeFileSync(join(tmp, '.gbrainignore'), 'test/**\n');
+    writeFileSync(
+      join(ignoredDir, 'bad.md'),
+      `${fence}\ntype: x\ntitle: ok\nslug: intentionally-fixtured\n${fence}\n\nbody`,
+    );
+    writeFileSync(join(tmp, 'good.md'), `${fence}\ntype: x\ntitle: ok\n${fence}\n\nbody`);
+    await registerSource('with-ignore', tmp);
+
+    const report = await scanBrainSources(engine, { sourceId: 'with-ignore' });
+    expect(report.ok).toBe(true);
+    expect(report.total).toBe(0);
+    expect(report.per_source[0]!.files_scanned).toBe(1);
+  });
+
   test('AbortSignal before scan: every source marked skipped (v0.38.2.0 partial-state contract)', async () => {
     const src = join(tmp, 'big');
     mkdirSync(src, { recursive: true });

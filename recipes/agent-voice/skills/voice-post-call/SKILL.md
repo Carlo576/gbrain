@@ -1,7 +1,11 @@
 ---
 name: voice-post-call
 version: 0.1.0
-description: Post-call handling for a voice session — turn the transcript into a brain page, post the summary to the operator's messaging surface, archive the audio. Belt-and-suspenders: fires both from a tool the voice persona can call mid-call AND from the automatic call-end handler in server.mjs.
+description: >-
+  Post-call handling for a voice session — turn the transcript into a brain
+  page, post the summary to the operator's messaging surface, and archive the
+  audio. Belt-and-suspenders: fires both from a tool the voice persona can call
+  mid-call and from the automatic call-end handler in server.mjs.
 triggers:
   - "after the call"
   - "call ended"
@@ -161,4 +165,3 @@ audio_url: "<file:// or signed URL>"
 ## Timeline
 
 - **<date> <time> <tz>** | voice call with <persona>, <duration>s — <topic>
-```
