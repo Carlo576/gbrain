@@ -143,6 +143,23 @@ describe('engine.updateSourceConfig', () => {
     expect(all.find(s => s.id === 'delta')!.config.last_full_cycle_at).toBe('2026-05-22T11:00:00.000Z');
   });
 
+  test('bad array config ignores non-object elements before merge', async () => {
+    await seedSource('epsilon');
+    await engine.executeRaw(
+      `UPDATE sources
+          SET config = '[{"keep":"me"},"bad-shape",["also-bad"]]'::jsonb
+        WHERE id = $1`,
+      ['epsilon'],
+    );
+    const updated = await engine.updateSourceConfig('epsilon', {
+      last_source_cycle_at: '2026-06-24T10:40:00.000Z',
+    });
+    expect(updated).toBe(true);
+    const all = await engine.listAllSources();
+    const epsilon = all.find(s => s.id === 'epsilon')!;
+    expect(epsilon.config.keep).toBe('me');
+    expect(epsilon.config.last_source_cycle_at).toBe('2026-06-24T10:40:00.000Z');
+  });
   test('IS-JSON guard: non-JSON string config normalizes to {} on merge', async () => {
     await seedSource('bad-string');
     await setRawConfig('bad-string', JSON.stringify('garbage text'));

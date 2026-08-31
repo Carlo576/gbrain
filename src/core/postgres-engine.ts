@@ -5511,7 +5511,7 @@ export class PostgresEngine implements BrainEngine {
         0 as stale_pages,
         0 as orphan_pages,
         (SELECT count(*) FROM links l
-         WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id)
+         WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id AND p.deleted_at IS NULL)
         ) as dead_links,
         -- missing_embeddings uses the same predicate as the thing that
         -- resolves it: buildStaleChunkWhere / countStaleChunks, i.e. what
