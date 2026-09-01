@@ -1048,6 +1048,10 @@ export function resolveSourceLocalFilePath(
       if (scope.length > 0 && scope.every((segment, index) => segment === sourceSegments[index])) {
         return join(absoluteLocalPath, ...sourceSegments.slice(scope.length));
       }
+      if (scope.length > 0) {
+        const repoRootCandidate = join(cursor, ...sourceSegments);
+        if (existsSync(repoRootCandidate)) return repoRootCandidate;
+      }
       break;
     }
     const parent = dirname(cursor);

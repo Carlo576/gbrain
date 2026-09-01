@@ -731,4 +731,18 @@ describe('resolveSourceLocalFilePath — POSIX backslash-in-filename (undeclared
     mkdirSync(join(repoRoot, '.git'));
     expect(resolveSourceLocalFilePath(repoRoot, '..\\..\\evil.md')).toBeNull();
   });
+
+  test('a repo-root-relative source path resolves outside a registered repo subdirectory', () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'gbrain-nested-source-root-'));
+    mkdirSync(join(repoRoot, '.git'));
+    const registeredSubdir = join(repoRoot, 'Zenom-wiki');
+    mkdirSync(registeredSubdir);
+    const filePath = join(repoRoot, 'research', 'reports', 'receipt.md');
+    mkdirSync(join(repoRoot, 'research', 'reports'), { recursive: true });
+    writeFileSync(filePath, '# receipt');
+
+    const resolved = resolveSourceLocalFilePath(registeredSubdir, 'research/reports/receipt.md');
+
+    expect(resolved).toBe(filePath);
+  });
 });
