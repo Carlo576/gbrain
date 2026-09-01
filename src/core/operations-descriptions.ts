@@ -66,6 +66,14 @@ export const LIST_PAGES_DESCRIPTION =
 
 export const QUERY_DESCRIPTION =
   "Hybrid search with vector + keyword + multi-query expansion. " +
+  "Prefer `query` for concept / synonym / landscape questions ('all the X that " +
+  "do Y', 'the landscape of Z') — expansion recovers synonym- and " +
+  "outcome-phrased matches a single embedding misses. Still top-K, and the " +
+  "default count when `limit` is omitted depends on the configured search " +
+  "mode (10 conservative / 25 balanced / 50 tokenmax — see the `limit` param " +
+  "description); pass `limit` explicitly for a stable count regardless of " +
+  "mode. For exhaustive enumeration use list_pages; for exact known tokens " +
+  "`search` is cheaper (no expansion LLM call). " +
   "For personal/emotional questions ('what's going on with me', 'anything notable', " +
   "'how am I feeling'), prefer get_recent_salience, find_anomalies, or " +
   "get_recent_transcripts. Semantic search returns polished pages and misses " +
@@ -73,12 +81,19 @@ export const QUERY_DESCRIPTION =
   "mean impressive — they often mean difficult or emotionally charged.";
 
 export const SEARCH_DESCRIPTION =
-  "Keyword search using full-text search. For personal/emotional questions, " +
+  "Cheap hybrid search (vector + keyword + RRF) with no LLM expansion. " +
+  "Best for exact known tokens, names, and structured-field lookups. A populated " +
+  "result set is NOT proof of coverage — for concept / synonym / landscape " +
+  "questions use `query` (adds multi-query expansion); for exhaustive " +
+  "enumeration use list_pages pagination. " +
+  "For personal/emotional questions, " +
   "prefer get_recent_salience or find_anomalies — they surface activity bursts " +
   "without needing a search term. " +
   "For code-symbol questions (callers, callees, definitions, blast radius), use " +
   "code_callers / code_callees / code_def / code_refs instead — those return " +
-  "structural graph data, not text chunks.";
+  "structural graph data, not text chunks. " +
+  "For agent memory reads (saved facts + budget-packed retrieval), prefer the " +
+  "`recall` verb.";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // v0.32.6 — contradiction probe MCP surface (M3)
@@ -226,3 +241,19 @@ export const SKILL_CLIENT_GUIDANCE = {
       "if the user hasn't clearly asked for a write.",
   ],
 } as const;
+
+/**
+ * CLI→MCP gap-closure wave — the capture op (D2A). Pinned here because it
+ * rewrites the routing guidance three docs used to carry as the
+ * "unknown tool: capture → use put_page" FAQ: agents must learn the split
+ * (capture = quick notes with auto-slug + dedupe; put_page = full control)
+ * from this description alone. Phrase-pinned by
+ * test/operations-descriptions.test.ts.
+ */
+export const CAPTURE_DESCRIPTION =
+  'Capture a quick note into the brain — the "just remember this" write. Auto-derives a ' +
+  'stable inbox/ slug from the content date + hash (recapturing identical text is ' +
+  'idempotent), merges frontmatter, refuses binary/empty payloads, then delegates to ' +
+  'put_page (inheriting its fences and provenance stamping). Prefer capture for quick ' +
+  'notes and put_page when you need to control the slug, type, or an existing page\'s ' +
+  'content. For structured facts about entities, prefer remember.';

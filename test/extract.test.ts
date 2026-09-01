@@ -8,11 +8,11 @@ import {
 
 describe('extractMarkdownLinks', () => {
   it('extracts relative markdown links', () => {
-    const content = 'Check [Pedro](../people/pedro-franceschi.md) and [Brex](../../companies/brex.md).';
+    const content = 'Check [Alice](../people/alice-example.md) and [Acme](../../companies/acme-example.md).';
     const links = extractMarkdownLinks(content);
     expect(links).toHaveLength(2);
-    expect(links[0].name).toBe('Pedro');
-    expect(links[0].relTarget).toBe('../people/pedro-franceschi.md');
+    expect(links[0].name).toBe('Alice');
+    expect(links[0].relTarget).toBe('../people/alice-example.md');
   });
 
   it('skips external URLs ending in .md', () => {
@@ -30,16 +30,29 @@ describe('extractMarkdownLinks', () => {
     const content = '[A](a.md) and [B](b.md)';
     expect(extractMarkdownLinks(content)).toHaveLength(2);
   });
+
+  it('percent-decodes targets from Obsidian useMarkdownLinks mode', () => {
+    const content = '[Alice](People/Alice%20Chen.md)';
+    const links = extractMarkdownLinks(content);
+    expect(links).toHaveLength(1);
+    expect(links[0].relTarget).toBe('People/Alice Chen.md');
+  });
+
+  it('keeps a malformed percent-escape raw instead of throwing', () => {
+    const content = '[Bad](People/Alice%ZZ.md)';
+    expect(() => extractMarkdownLinks(content)).not.toThrow();
+    expect(extractMarkdownLinks(content)[0].relTarget).toBe('People/Alice%ZZ.md');
+  });
 });
 
 describe('extractLinksFromFile', () => {
   it('resolves relative paths to slugs', async () => {
-    const content = '---\ntitle: Test\n---\nSee [Pedro](../people/pedro.md).';
-    const allSlugs = new Set(['people/pedro', 'deals/test-deal']);
+    const content = '---\ntitle: Test\n---\nSee [Alice](../people/alice.md).';
+    const allSlugs = new Set(['people/alice', 'deals/test-deal']);
     const links = await extractLinksFromFile(content, 'deals/test-deal.md', allSlugs);
     expect(links.length).toBeGreaterThanOrEqual(1);
     expect(links[0].from_slug).toBe('deals/test-deal');
-    expect(links[0].to_slug).toBe('people/pedro');
+    expect(links[0].to_slug).toBe('people/alice');
   });
 
   it('skips links to non-existent pages', async () => {
@@ -49,16 +62,30 @@ describe('extractLinksFromFile', () => {
     expect(links).toHaveLength(0);
   });
 
+  it('resolves a percent-encoded Obsidian markdown-link target to its slugified page', async () => {
+    const content = 'See [Alice](People/Alice%20Chen.md).';
+    const allSlugs = new Set(['deals/test', 'people/alice-chen']);
+    const links = await extractLinksFromFile(content, 'deals/test.md', allSlugs);
+    expect(links.length).toBeGreaterThanOrEqual(1);
+    expect(links[0].to_slug).toBe('people/alice-chen');
+  });
+
+  it('does not throw and produces no edge for a malformed percent-escape', async () => {
+    const content = 'See [Alice](People/Alice%ZZ.md).';
+    const allSlugs = new Set(['deals/test', 'people/alice-chen']);
+    await expect(extractLinksFromFile(content, 'deals/test.md', allSlugs)).resolves.toHaveLength(0);
+  });
+
   it('extracts frontmatter company links (v0.13, includeFrontmatter opt-in)', async () => {
-    const content = '---\ncompany: brex\ntype: person\n---\nContent.';
+    const content = '---\ncompany: acme-example\ntype: person\n---\nContent.';
     // v0.13 canonical: person page with company: X → person → company works_at (outgoing).
-    // Resolver needs companies/brex to exist in allSlugs to emit the edge.
-    const allSlugs = new Set(['people/test', 'companies/brex']);
+    // Resolver needs companies/acme-example to exist in allSlugs to emit the edge.
+    const allSlugs = new Set(['people/test', 'companies/acme-example']);
     const links = await extractLinksFromFile(content, 'people/test.md', allSlugs, { includeFrontmatter: true });
     const companyLinks = links.filter(l => l.link_type === 'works_at');
     expect(companyLinks.length).toBeGreaterThanOrEqual(1);
     expect(companyLinks[0].from_slug).toBe('people/test');
-    expect(companyLinks[0].to_slug).toBe('companies/brex');
+    expect(companyLinks[0].to_slug).toBe('companies/acme-example');
   });
 
   it('extracts frontmatter investors array (v0.13: incoming direction)', async () => {
@@ -91,8 +118,8 @@ describe('extractLinksFromFile', () => {
   it('frontmatter extraction is default OFF (back-compat)', async () => {
     // Without includeFrontmatter, fs-source no longer auto-extracts frontmatter.
     // Matches db-source behavior. User opts in with --include-frontmatter flag.
-    const content = '---\ncompany: brex\ntype: person\n---\nContent.';
-    const allSlugs = new Set(['people/test', 'companies/brex']);
+    const content = '---\ncompany: acme-example\ntype: person\n---\nContent.';
+    const allSlugs = new Set(['people/test', 'companies/acme-example']);
     const links = await extractLinksFromFile(content, 'people/test.md', allSlugs);
     expect(links).toEqual([]);
   });
@@ -118,8 +145,8 @@ describe('extractLinksFromFile', () => {
   });
 
   it('infers deal_for type for deals -> companies', async () => {
-    const content = 'See [Brex](../companies/brex.md).';
-    const allSlugs = new Set(['deals/seed', 'companies/brex']);
+    const content = 'See [Acme](../companies/acme-example.md).';
+    const allSlugs = new Set(['deals/seed', 'companies/acme-example']);
     const links = await extractLinksFromFile(content, 'deals/seed.md', allSlugs);
     expect(links[0].link_type).toBe('deal_for');
   });
@@ -161,6 +188,38 @@ describe('extractTimelineFromContent', () => {
     expect(entries).toHaveLength(1);
   });
 
+  it('does not split on hyphens inside markdown link targets', () => {
+    const content = `- **2025-03-18** | Referenced in [Alice](../people/alice-example.md)`;
+    const entries = extractTimelineFromContent(content, 'companies/acme-example');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].source).toBe('markdown');
+    expect(entries[0].summary).toBe('Referenced in [Alice](../people/alice-example.md)');
+  });
+
+  it('does not split on spaced dashes inside link labels', () => {
+    const content = `- **2025-03-18** | Referenced in [Deals — Q1 Review](../deals/q1-review.md)`;
+    const entries = extractTimelineFromContent(content, 'companies/acme-example');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].source).toBe('markdown');
+    expect(entries[0].summary).toBe('Referenced in [Deals — Q1 Review](../deals/q1-review.md)');
+  });
+
+  it('splits on the first spaced dash outside links', () => {
+    const content = `- **2025-03-18** | [Board notes](../meetings/2025-03-18-board.md) — Approved the hire`;
+    const entries = extractTimelineFromContent(content, 'test');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].source).toBe('[Board notes](../meetings/2025-03-18-board.md)');
+    expect(entries[0].summary).toBe('Approved the hire');
+  });
+
+  it('keeps delimiterless bullet lines whole instead of dropping them', () => {
+    const content = `- **2025-03-18** | Imported from legacy tracker`;
+    const entries = extractTimelineFromContent(content, 'test');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].source).toBe('markdown');
+    expect(entries[0].summary).toBe('Imported from legacy tracker');
+  });
+
   it('extracts inline citation format entries', () => {
     const content = `Closed the seed round with fund-a leading. [Source: board meeting notes, 2025-04-02]`;
     const entries = extractTimelineFromContent(content, 'deals/acme-seed');
@@ -178,6 +237,17 @@ describe('extractTimelineFromContent', () => {
     expect(entries[0].source).toBe('email from alice-example re: offer, signed');
   });
 
+  it('uses the full paragraph for a wrapped inline citation summary', () => {
+    const content = `The imported app showed product fit for commercial use
+after the prototype demo. [Source: user interview, 2026-07-30]`;
+    const entries = extractTimelineFromContent(content, 'projects/imported-app');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].date).toBe('2026-07-30');
+    expect(entries[0].summary).toBe(
+      'The imported app showed product fit for commercial use after the prototype demo.',
+    );
+  });
+
   it('extracts one entry per citation when a line carries several', () => {
     const content = `Both sides confirmed the partnership. [Source: call with widget-co, 2025-06-01] [Source: follow-up email, 2025-06-03]`;
     const entries = extractTimelineFromContent(content, 'companies/widget-co');
@@ -192,6 +262,31 @@ describe('extractTimelineFromContent', () => {
     const entries = extractTimelineFromContent(content, 'test');
     expect(entries).toHaveLength(1); // Format 1 only
     expect(entries[0].source).toBe('Meeting');
+  });
+
+  it('keeps a prose citation directly under a timeline bullet', () => {
+    const content = `- **2025-03-18** | Meeting notes
+Follow-up decision recorded. [Source: memo, 2025-03-20]`;
+    const entries = extractTimelineFromContent(content, 'test');
+    expect(entries).toHaveLength(2);
+    expect(entries[0].date).toBe('2025-03-18');
+    expect(entries[0].source).toBe('markdown');
+    expect(entries[0].summary).toBe('Meeting notes');
+    expect(entries[1].date).toBe('2025-03-20');
+    expect(entries[1].source).toBe('memo');
+    expect(entries[1].summary).toBe('Follow-up decision recorded.');
+  });
+
+  it('ignores dated citations inside fenced code blocks', () => {
+    const content = `\`\`\`
+Fake claim. [Source: generated fixture, 2025-01-01]
+\`\`\`
+Real claim. [Source: memo, 2025-01-02]`;
+    const entries = extractTimelineFromContent(content, 'test');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].date).toBe('2025-01-02');
+    expect(entries[0].source).toBe('memo');
+    expect(entries[0].summary).toBe('Real claim.');
   });
 
   it('skips a bare citation with no surrounding text', () => {

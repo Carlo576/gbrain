@@ -8,13 +8,14 @@
  * glue.
  */
 
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
-import { __testing as agentTesting } from '../src/commands/agent.ts';
+import { __testing as agentTesting, runAgentRun } from '../src/commands/agent.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { parseSince } from '../src/commands/agent-logs.ts';
 import { isProtectedJobName, PROTECTED_JOB_NAMES } from '../src/core/minions/protected-names.ts';
 
@@ -137,6 +138,17 @@ describe('parseRunFlags', () => {
     const { flags } = agentTesting.parseRunFlags(['--fanout-manifest', '/tmp/m.json']);
     expect(flags.fanoutManifest).toBe('/tmp/m.json');
   });
+
+  test('#2922: --source parsed as a leading value-flag', () => {
+    const { flags, rest } = agentTesting.parseRunFlags(['--source', 'corporate', 'do', 'x']);
+    expect(flags.source).toBe('corporate');
+    expect(rest).toEqual(['do', 'x']);
+  });
+
+  test('#2922: --source missing its value throws a usage error', () => {
+    expect(() => agentTesting.parseRunFlags(['--source'])).toThrow(/requires a value/);
+    expect(() => agentTesting.parseRunFlags(['--source', '--detach', 'x'])).toThrow(/requires a value/);
+  });
 });
 
 describe('parseSince', () => {
@@ -217,10 +229,11 @@ describe('queue.add trusted-submit gate for subagent', () => {
     expect(ok.name).toBe('subagent_aggregator');
   });
 
-  test('v0.38 S1.7: subagent with any tool-supporting provider passes the queue gate', async () => {
+  test('v0.38 S1.7: subagent with a loop-capable provider passes the queue gate', async () => {
     // v0.38 D6/D7 — the Anthropic pin is removed. The gateway tool loop
-    // routes any provider with native tool calling. Submit-time guard now
-    // refuses ONLY on unusable:no_tools or unknown verdicts.
+    // routes any provider whose recipe declares tool calling AND
+    // supports_subagent_loop: true. Submit-time guard refuses on the
+    // unusable:no_tools / unusable:no_subagent_loop / unknown verdicts.
     const openaiJob = await queue.add(
       'subagent',
       { prompt: 'hi', model: 'openai:gpt-5.2' },
@@ -263,6 +276,206 @@ describe('queue.add trusted-submit gate for subagent', () => {
     await expect(
       queue.add('subagent', { prompt: 'hi', model: 'voyage:voyage-3-large' }, {}, { allowProtectedSubmit: true }),
     ).rejects.toThrow(/unknown provider/i);
+  });
+
+  test('subagent with a loop-incapable provider (supports_subagent_loop: false) is rejected at submit time', async () => {
+    // moonshot supports tools but declares the loop unsupported.
+    // Non-Anthropic OpenRouter families stay refused; Anthropic-via-OR is allowed.
+    await expect(
+      queue.add('subagent', { prompt: 'hi', model: 'moonshot:kimi-k2.5' }, {}, { allowProtectedSubmit: true }),
+    ).rejects.toThrow(/supports_subagent_loop/);
+    await expect(
+      queue.add('subagent', { prompt: 'hi', model: 'openrouter:openai/gpt-5.2' }, {}, { allowProtectedSubmit: true }),
+    ).rejects.toThrow(/supports_subagent_loop/);
+    const job = await queue.add(
+      'subagent',
+      { prompt: 'hi', model: 'openrouter:anthropic/claude-haiku-4.5' },
+      {},
+      { allowProtectedSubmit: true },
+    );
+    expect(job.id).toBeGreaterThan(0);
+  });
+});
+
+describe('#2922: submit-time source resolution', () => {
+  beforeEach(async () => {
+    await engine.executeRaw(`DELETE FROM sources WHERE id != 'default'`);
+    await engine.unsetConfig('sources.default');
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('corporate', 'Corporate') ON CONFLICT (id) DO NOTHING`,
+    );
+  });
+
+  async function jobData(jobId: number): Promise<Record<string, unknown>> {
+    const rows = await engine.executeRaw<{ data: unknown }>(
+      `SELECT data FROM minion_jobs WHERE id = $1`, [jobId],
+    );
+    return typeof rows[0]!.data === 'string'
+      ? JSON.parse(rows[0]!.data as string)
+      : rows[0]!.data as Record<string, unknown>;
+  }
+
+  async function onlyJobData(): Promise<Record<string, unknown>> {
+    const rows = await engine.executeRaw<{ id: number }>(
+      `SELECT id FROM minion_jobs WHERE name = 'subagent' ORDER BY id`,
+    );
+    expect(rows.length).toBe(1);
+    return jobData(rows[0]!.id);
+  }
+
+  test('explicit --source lands on SubagentHandlerData.source_id', async () => {
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      await runAgentRun(engine, ['--detach', '--source', 'corporate', 'write', 'a', 'page']);
+      const data = await onlyJobData();
+      expect(data.source_id).toBe('corporate');
+      expect(data.prompt).toBe('write a page');
+    });
+  });
+
+  test('no --source: sources.default (tier 5) is honored instead of the seed default', async () => {
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      await engine.setConfig('sources.default', 'corporate');
+      await runAgentRun(engine, ['--detach', 'write', 'a', 'page']);
+      const data = await onlyJobData();
+      expect(data.source_id).toBe('corporate');
+    });
+  });
+
+  test('GBRAIN_SOURCE env (tier 2) is honored', async () => {
+    await withEnv({ GBRAIN_SOURCE: 'corporate' }, async () => {
+      await runAgentRun(engine, ['--detach', 'write', 'a', 'page']);
+      const data = await onlyJobData();
+      expect(data.source_id).toBe('corporate');
+    });
+  });
+
+  test('no signal at all: resolves to the seed default (legacy behavior preserved)', async () => {
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      await runAgentRun(engine, ['--detach', 'write', 'a', 'page']);
+      const data = await onlyJobData();
+      expect(data.source_id).toBe('default');
+    });
+  });
+
+  test('fan-out children all carry the resolved source_id', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fanout-source-'));
+    try {
+      await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+        const manifestPath = path.join(tmp, 'm.json');
+        fs.writeFileSync(manifestPath, JSON.stringify([
+          { prompt: 'chunk 1' }, { prompt: 'chunk 2' },
+        ]));
+        await runAgentRun(engine, [
+          '--source', 'corporate', '--fanout-manifest', manifestPath, '--detach',
+        ]);
+        const rows = await engine.executeRaw<{ id: number }>(
+          `SELECT id FROM minion_jobs WHERE name = 'subagent' ORDER BY id`,
+        );
+        expect(rows.length).toBe(2);
+        for (const r of rows) {
+          const data = await jobData(r.id);
+          expect(data.source_id).toBe('corporate');
+        }
+      });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('--source "" (empty explicit value) exits 2 without silently falling back', async () => {
+    const spy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+        try {
+          await runAgentRun(engine, ['--detach', '--source', '', 'write', 'a', 'page']);
+          throw new Error('expected runAgentRun to exit');
+        } catch (e: any) {
+          expect(e.message).toBe('EXIT');
+        }
+      });
+      expect(spy).toHaveBeenCalledWith(2);
+      const rows = await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM minion_jobs WHERE name = 'subagent'`,
+      );
+      expect(rows.length).toBe(0);
+    } finally {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('--source __all__ is rejected (subagent writes must target exactly one source)', async () => {
+    const spy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+        try {
+          await runAgentRun(engine, ['--detach', '--source', '__all__', 'write', 'a', 'page']);
+          throw new Error('expected runAgentRun to exit');
+        } catch (e: any) {
+          expect(e.message).toBe('EXIT');
+        }
+      });
+      expect(spy).toHaveBeenCalledWith(2);
+      const rows = await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM minion_jobs WHERE name = 'subagent'`,
+      );
+      expect(rows.length).toBe(0);
+    } finally {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('--source pointing at a nonexistent id surfaces a clean error, not a stack trace', async () => {
+    const spy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+        try {
+          await runAgentRun(engine, ['--detach', '--source', 'does-not-exist', 'write', 'a', 'page']);
+          throw new Error('expected runAgentRun to reject');
+        } catch (e: any) {
+          // New contract: the resolver throws the actionable error; the CLI's
+          // central catch prints it and sets verdict 1 (no in-handler exit).
+          expect(e.message).toMatch(/not found or is archived/);
+          expect(e.message).toMatch(/gbrain sources list/);
+        }
+      });
+      const rows = await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM minion_jobs WHERE name = 'subagent'`,
+      );
+      expect(rows.length).toBe(0);
+    } finally {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('--source pointing at an archived source is rejected with a restore hint', async () => {
+    const spy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = 'corporate'`);
+      await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+        try {
+          await runAgentRun(engine, ['--detach', '--source', 'corporate', 'write', 'a', 'page']);
+          throw new Error('expected runAgentRun to reject');
+        } catch (e: any) {
+          expect(e.message).toMatch(/not found or is archived/);
+          expect(e.message).toMatch(/restore|sources list/);
+        }
+      });
+      const rows = await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM minion_jobs WHERE name = 'subagent'`,
+      );
+      expect(rows.length).toBe(0);
+    } finally {
+      await engine.executeRaw(`UPDATE sources SET archived = false WHERE id = 'corporate'`);
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
   });
 });
 
@@ -324,5 +537,58 @@ describe('fan-out manifest shape (integration)', () => {
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe('dispatcher routes register (cathedral-6)', () => {
+  test('runAgent dispatches register and its --help never touches the engine', async () => {
+    const { runAgent } = await import('../src/commands/agent.ts');
+    // engine=null: the SELF_HELP_WITHOUT_ENGINE lane. Help must print and return.
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => { logs.push(a.join(' ')); };
+    try {
+      await runAgent(null, ['register', '--help']);
+    } finally {
+      console.log = orig;
+    }
+    const out = logs.join('\n');
+    expect(out).toContain('gbrain agent register');
+    expect(out).toContain('--preset daily-driver|coding-agent');
+  });
+
+  test('top-level help mentions register', async () => {
+    const { runAgent } = await import('../src/commands/agent.ts');
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => { logs.push(a.join(' ')); };
+    try {
+      await runAgent(null, ['--help']);
+    } finally {
+      console.log = orig;
+    }
+    expect(logs.join('\n')).toContain('agent register');
+  });
+
+  test('`agent run -- --help` is NOT a help request (-- terminator honored)', async () => {
+    const { runAgent } = await import('../src/commands/agent.ts');
+    // With a null engine and a post-`--` --help, the dispatcher must treat it
+    // as a REAL run (and refuse on the missing engine) — never print help.
+    const errs: string[] = [];
+    const origErr = console.error;
+    const origExit = process.exit;
+    let exitCode: number | undefined;
+    console.error = (...a: unknown[]) => { errs.push(a.join(' ')); };
+    (process as any).exit = (code?: number) => { exitCode = code; throw new Error('__exit__'); };
+    try {
+      await runAgent(null, ['run', '--', '--help']).catch((e) => {
+        if (!/__exit__/.test(String(e?.message))) throw e;
+      });
+    } finally {
+      console.error = origErr;
+      (process as any).exit = origExit;
+    }
+    expect(exitCode).toBe(1);
+    expect(errs.join('\n')).toContain('needs a configured brain');
   });
 });

@@ -28,9 +28,14 @@ import {
   type ParseValidationCode,
   type ParseValidationError,
 } from './markdown.ts';
-import { isSyncable, pruneDir, repoSyncableOptions, slugifyPath } from './sync.ts';
+import { isMarkdownFilePath, isSyncable, pruneDir, repoSyncableOptions, slugifyPath } from './sync.ts';
 
 export type { ParseValidationCode };
+
+/** Frontmatter validation is defined only for Markdown page files. */
+export function isFrontmatterScannablePath(path: string): boolean {
+  return isMarkdownFilePath(path) && isSyncable(path, { strategy: 'markdown' });
+}
 
 export interface AuditFix {
   code: ParseValidationCode;
@@ -312,7 +317,11 @@ export function autoFixFrontmatter(
     // the slug field is present and mismatched.
     const re = /^slug:\s*(.+?)\s*$/m;
     const m = working.match(re);
-    if (m && m[1].replace(/^["']|["']$/g, '') !== expectedSlug) {
+    // #3772: keep a normalization-equivalent slug (its slugified spelling IS
+    // the path-derived slug) — export stamps these to preserve legacy page
+    // identities, and stripping it here would re-key the page on next import.
+    const declaredSlug = m ? m[1].replace(/^["']|["']$/g, '') : '';
+    if (m && declaredSlug !== expectedSlug && slugifyPath(declaredSlug) !== expectedSlug) {
       working = working.replace(re, '').replace(/\n{3,}/g, '\n\n');
       fixes.push({
         code: 'SLUG_MISMATCH',
@@ -619,7 +628,9 @@ function scanOneSource(
     // visitDir is consulted from walkDir directly (passed below). The
     // per-file visit closure doesn't need it.
     const relPath = relative(rootResolved, absPath);
-    if (!isSyncable(relPath, syncableOptions)) return true;
+    // Apply both contracts: Markdown-only frontmatter scanning and
+    // repository-local .gbrainignore exclusions.
+    if (!isFrontmatterScannablePath(relPath) || !isSyncable(relPath, syncableOptions)) return true;
     scanned++;
     let content: string;
     try {
@@ -757,7 +768,16 @@ async function listSources(engine: BrainEngine, sourceId?: string): Promise<Sour
     );
     return rows;
   }
-  return engine.executeRaw<SourceRow>(
-    `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
-  );
+  // #3880: archived sources are excluded from automatic all-source scanning.
+  // The archived column is v34+ — fall back on older brains (house style per
+  // pickSoleNonDefaultSource).
+  try {
+    return await engine.executeRaw<SourceRow>(
+      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL AND archived IS NOT TRUE ORDER BY id`,
+    );
+  } catch {
+    return engine.executeRaw<SourceRow>(
+      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
+    );
+  }
 }

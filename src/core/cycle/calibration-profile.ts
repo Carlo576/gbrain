@@ -25,10 +25,9 @@
  * profiles per source for the same holder.
  */
 
-import { BaseCyclePhase, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
+import { BaseCyclePhase, effectivePhaseDeadlineMs, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
 import { resolveOwnerHolder } from '../owner-holder.ts';
-import { chat as gatewayChat } from '../ai/gateway.ts';
-import { TIER_DEFAULTS } from '../model-config.ts';
+import { chat as gatewayChat, getChatModel } from '../ai/gateway.ts';
 import { gateVoice, type VoiceGateGenerator, type VoiceGateJudge } from '../calibration/voice-gate.ts';
 import { patternStatementTemplate, type PatternStatementSlots } from '../calibration/templates.ts';
 // v0.41 T10 — domain widening. The aggregator module resolves the active
@@ -91,6 +90,8 @@ export type PatternStatementsGenerator = (input: {
   holder: string;
   attempt: number;
   feedback?: string;
+  /** Provider-prefixed model the phase resolved; drives the generator's chat call. */
+  modelHint?: string;
 }) => Promise<string[]>;
 
 /** Generator function for bias tags (test seam). */
@@ -233,7 +234,14 @@ class CalibrationProfilePhase extends BaseCyclePhase {
       configValue: await engine.getConfig('emotional_weight.user_holder'),
     });
     const promptVersion = opts.promptVersion ?? CALIBRATION_PROFILE_PROMPT_VERSION;
-    const modelId = opts.model ?? TIER_DEFAULTS.reasoning;
+    // Follow the gateway's configured chat model, matching propose_takes
+    // (v0.42.62) and grade_takes: previously the generator stayed pinned to
+    // the TIER_DEFAULTS.reasoning constant, ignoring a configured
+    // chat_model. getChatModel() is provider-prefixed, preserving the #2451
+    // contract (a bare id fed back into gateway.chat() throws), and its
+    // default IS 'anthropic:claude-sonnet-4-6' — identical to the old
+    // constant — so stock installs are unchanged.
+    const modelId = opts.model ?? getChatModel();
     const gradeCompletion = opts.gradeCompletion ?? 1.0;
     const patternsGenerator = opts.patternsGenerator ?? defaultPatternsGenerator;
     const biasTagsGenerator = opts.biasTagsGenerator ?? defaultBiasTagsGenerator;
@@ -248,6 +256,24 @@ class CalibrationProfilePhase extends BaseCyclePhase {
       brier: null,
       warnings: [],
     };
+
+    // gbrain#4168: this phase runs last in the calibration trio and makes
+    // 1-2 LLM calls with no interior loop to break out of — so the deadline
+    // check is a pre-flight gate: if the job budget is already inside the
+    // reserve, skip cleanly (the next cycle regenerates from fresher data
+    // anyway) instead of starting an LLM call the worker will kill mid-write.
+    const remainingMs = effectivePhaseDeadlineMs(
+      Number.MAX_SAFE_INTEGER,
+      opts.deadlineAtMs,
+      Date.now(),
+    );
+    if (remainingMs <= 0) {
+      return {
+        summary: 'calibration_profile: skipped — job deadline inside the reserve window',
+        details: { ...result, deadline_hit: true },
+        status: 'warn',
+      };
+    }
 
     // Load the holder's scorecard.
     const scorecard = await engine.getScorecard({ holder }, undefined);
@@ -269,6 +295,9 @@ class CalibrationProfilePhase extends BaseCyclePhase {
         scorecard,
         holder,
         attempt,
+        // The same resolved string that is persisted to model_id drives the
+        // generator's chat call — the phase can't record a model it didn't run.
+        modelHint: modelId,
         ...(feedback !== undefined ? { feedback } : {}),
       });
       return lines.join('\n');

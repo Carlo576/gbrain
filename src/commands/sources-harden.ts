@@ -17,8 +17,9 @@ import {
   hardenBrainRepo, unhardenBrainRepo, acceptPat,
   type DurabilityReport,
 } from '../core/brain-repo-durability.ts';
-import { divergenceSafePull, detectDefaultBranch } from '../core/git-remote.ts';
+import { divergenceSafePull, detectDefaultBranch, isInsideGitRepo } from '../core/git-remote.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { invalidateBackupStatus } from '../core/backup/status-file.ts';
 import { existsSync } from 'fs';
 import { join } from 'path';
 
@@ -42,7 +43,16 @@ function configHost(config: unknown): string | null {
 
 async function loadSourceRows(engine: BrainEngine, id: string | undefined, all: boolean): Promise<SourceRow[]> {
   if (all) {
-    return engine.executeRaw<SourceRow>(`SELECT id, local_path, config FROM sources WHERE local_path IS NOT NULL ORDER BY id`);
+    // #3880: `--all` skips archived sources (v34 legacy fallback, house
+    // style per pickSoleNonDefaultSource). Explicit <id> below stays
+    // deliberate (recovery ops may target archived rows).
+    try {
+      return await engine.executeRaw<SourceRow>(
+        `SELECT id, local_path, config FROM sources WHERE local_path IS NOT NULL AND archived IS NOT TRUE ORDER BY id`,
+      );
+    } catch {
+      return engine.executeRaw<SourceRow>(`SELECT id, local_path, config FROM sources WHERE local_path IS NOT NULL ORDER BY id`);
+    }
   }
   if (!id) throw new Error('Usage: gbrain sources harden <id|--all> [--pat-file <p>] [--branch <b>] [--no-cron] [--no-verify] [--dry-run] [--json]');
   return engine.executeRaw<SourceRow>(`SELECT id, local_path, config FROM sources WHERE id = $1`, [id]);
@@ -81,7 +91,10 @@ export async function runHarden(engine: BrainEngine, args: string[]): Promise<vo
 
   const reports: DurabilityReport[] = [];
   for (const row of rows) {
-    if (!row.local_path || !existsSync(join(row.local_path, '.git'))) {
+    // A source may be a SUBDIRECTORY of a git repo (the bootstrap workspace
+    // registers brain/); the durability core resolves the root itself, so the
+    // gate only needs "inside a repo", not ".git right here" [CX2-3].
+    if (!row.local_path || !isInsideGitRepo(row.local_path)) {
       console.error(`[${row.id}] skipped — no local git repo at ${row.local_path ?? '(none)'}`);
       continue;
     }
@@ -95,6 +108,10 @@ export async function runHarden(engine: BrainEngine, args: string[]): Promise<vo
   }
 
   if (json) console.log(JSON.stringify({ reports }, null, 2));
+
+  // Fix-path invalidation: hardening changes the backup-coverage answer for
+  // every touched repo — drop the cached verdict so the next check re-probes.
+  if (reports.length > 0) invalidateBackupStatus();
 
   // Non-zero exit if any source needs attention, so cron/automation notices.
   // Route through setCliExitVerdict — a raw process.exitCode write is zeroed by
@@ -138,7 +155,7 @@ export async function runPull(engine: BrainEngine | null, args: string[]): Promi
     repoPath = rows[0].local_path;
   }
 
-  if (!existsSync(join(repoPath, '.git'))) {
+  if (!isInsideGitRepo(repoPath)) {
     console.error(`[gbrain] not a git repo: ${repoPath}`);
     process.exit(1);
   }

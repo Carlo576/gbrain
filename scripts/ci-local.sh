@@ -11,12 +11,12 @@
 #   bash scripts/ci-local.sh --clean      # nuke named volumes for cold debug
 #   bash scripts/ci-local.sh --no-shard   # debug: run E2E sequentially against postgres-1 only
 #
-# 4-way E2E sharding: 4 pgvector services on host ports 5434-5437. The 36 E2E
-# files split N/4 per shard; shards run in parallel. Within a shard, files run
+# 4-way E2E sharding: 4 pgvector services on host ports 5434-5437. The test/e2e/ file set splits
+# roughly N/4 per shard; shards run in parallel. Within a shard, files run
 # sequentially (TRUNCATE CASCADE no-race property documented in run-e2e.sh).
 # Wall-time on a 16-core host: ~6 min sequential -> ~1.5-2 min sharded.
 #
-# Stronger than PR CI: PR CI runs only Tier 1's 2 files; this runs all 36.
+# Stronger than PR CI: PR CI runs a handful of named files across its tiers; this runs every test/e2e file.
 
 set -euo pipefail
 
@@ -124,7 +124,7 @@ fi
 gitleaks dir . --redact --no-banner
 gitleaks git . --redact --no-banner --log-opts="origin/master..HEAD"
 
-# Step 1: pull. Refreshes pgvector + oven/bun:1 (both are `image:` not `build:`).
+# Step 1: pull. Refreshes pgvector + the pinned oven/bun tag (both are `image:` not `build:`).
 if [ "$NO_PULL" = "0" ]; then
   echo "[ci-local] Pulling base images (use --no-pull to skip)..."
   docker compose -f "$COMPOSE_FILE" pull 2>&1 | tail -5
@@ -157,7 +157,11 @@ done
 # Step 3: smoke-test run-e2e.sh argv + shard handling.
 echo "[ci-local] Smoke: run-e2e.sh argv + shard..."
 SMOKE_NO_ARGS=$(bash scripts/run-e2e.sh --dry-run-list | wc -l | tr -d ' ')
-EXPECTED_ALL=$(ls test/e2e/*.test.ts | wc -l | tr -d ' ')
+# run-e2e.sh's no-arg list is the test/e2e glob PLUS phantom-redirect-engine-
+# parity (lives in test/; its Postgres arm is only reachable through this
+# DATABASE_URL-bearing lane — see the comment in run-e2e.sh). Mirror that +1
+# here or the smoke check fails on every tree where the counts drift.
+EXPECTED_ALL=$(( $(ls test/e2e/*.test.ts | wc -l | tr -d ' ') + 1 ))
 if [ "$SMOKE_NO_ARGS" != "$EXPECTED_ALL" ]; then
   echo "[ci-local] ERROR: --dry-run-list (no args) printed $SMOKE_NO_ARGS, expected $EXPECTED_ALL" >&2
   exit 1
@@ -227,7 +231,7 @@ else
   echo "$SELECTED" | tr " " "\n" | grep -v "^$" > /tmp/e2e-selected.txt
 fi'
   else
-    # Empty file -> run-e2e.sh uses default glob (all 36 E2E files).
+    # Empty file -> run-e2e.sh uses default glob (every test/e2e file).
     DIFF_E2E_PREP='> /tmp/e2e-selected.txt'
   fi
   RUN_PHASES_CMD="echo \"[runner] guards + typecheck (run once before sharding)\"
@@ -236,13 +240,17 @@ bash scripts/check-progress-to-stdout.sh
 bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
 bun run typecheck
-echo \"[runner] Tier 3: building PGLite snapshot fixture (cached across reruns)\"
-if [ ! -f test/fixtures/pglite-snapshot.tar ] || [ ! -f test/fixtures/pglite-snapshot.version ]; then
-  bun run build:pglite-snapshot
-else
-  echo \"[runner] snapshot fixture exists; engine will validate hash at load time\"
-fi
+echo \"[runner] Tier 3: PGLite snapshot fixture (idempotent; rebuilds on hash drift)\"
+# W0 fix-wave (Tier-1 #16): unconditional call — the build script self-
+# short-circuits on a fresh hash and rebuilds STALE snapshots (the old
+# if-missing guard left a stale-but-present snapshot permanently on the
+# warn+slow path). Concurrency-safe via the script's mkdir lock (D5.8).
+bun run build:pglite-snapshot
 export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
+# #4479: 4-way shard contention makes subprocess/PGLite tests ~6x slower per
+# file in the container than natively — timeout-class failures that pass on
+# the host. Scale the per-test ceiling for the container lane (overridable).
+export GBRAIN_TEST_TIMEOUT_MULTIPLIER=\${GBRAIN_TEST_TIMEOUT_MULTIPLIER:-6}
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
 mkdir -p /tmp/shard-logs
@@ -309,7 +317,7 @@ fi
 INNER_CMD=$(cat <<'EOF'
 set -euo pipefail
 echo "[runner] bun version: $(bun --version)"
-# oven/bun:1 omits git; many unit tests use mkdtemp + git init for fixtures.
+# The oven/bun image omits git; many unit tests use mkdtemp + git init for fixtures.
 if ! command -v git >/dev/null 2>&1; then
   echo "[runner] Installing git (debian apt)..."
   apt-get update -qq >/dev/null

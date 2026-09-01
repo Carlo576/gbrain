@@ -39,9 +39,12 @@ pass:
    `ctx.remote === true` (MCP callers). Independent of the env flag. Remote
    agents can never submit shell jobs. `MinionQueue.add('shell', ...)` has its
    own guard too, so an in-process handler can't programmatically bypass this.
-2. **Env flag.** The worker only registers the shell handler when
-   `GBRAIN_ALLOW_SHELL_JOBS=1` is set on the worker process. Default: off. Your
-   agent opts in per-host.
+2. **Env flag.** The shell handler is ALWAYS registered on the worker, but it
+   is guarded: unless `GBRAIN_ALLOW_SHELL_JOBS=1` is set on the worker process,
+   a claimed shell job throws `UnrecoverableError` and goes straight to `dead`
+   (no retries). Default: off. Your agent opts in per-host. (Always-registered
+   guarded mode — not "unregistered", so unflagged workers fail shell jobs
+   loudly instead of leaving them `waiting` forever.)
 
 **What the env allowlist does AND does not do.** Shell jobs run with a minimal
 env: `PATH, HOME, USER, LANG, TZ, NODE_ENV`. Your secrets like `OPENAI_API_KEY`
@@ -127,13 +130,14 @@ env as `GBRAIN_DATABASE_URL`. The job row in `minion_jobs.data` stores
 `inherit: ["database_url"]` — **names only, never values**. The shell-audit
 JSONL records the same. Pre-enqueue validation rejects the submission if the
 worker can't resolve the requested key, with a paste-ready
-`gbrain config set database_url <value>` hint.
+`gbrain config set database_url <value>` hint (that command is file-plane
+routed — it writes `~/.gbrain/config.json`, exactly where the worker's
+`loadConfig()` looks, and works even when the DB is unreachable).
 
-**Why not just write the URL into `env:` directly?** Pre-v0.36.5.0 callers
-wrote things like:
+**Why not just write the URL into `env:` directly?** You *can*:
 
 ```jsonc
-// ❌ Deprecated as of v0.36.5.0 — REJECTED at submit time.
+// ❌ Works, but plants the secret in the job row. Prefer inherit:.
 {
   "cmd": "gbrain stats",
   "cwd": "/data/gbrain",
@@ -141,14 +145,14 @@ wrote things like:
 }
 ```
 
-This planted plaintext secrets in `minion_jobs.data` (DB row) and in the
+This plants plaintext secrets in `minion_jobs.data` (DB row) and in the
 shell-audit JSONL. Anyone with read access to the brain DB (or a brain dump,
-or a shared brain via the mounts feature) saw the URL. v0.36.5.0 doesn't
-forbid that pattern — the validator trusts the agent — but **prefer
+or a shared brain via the mounts feature) sees the URL. The validator
+doesn't forbid the pattern — it trusts the agent — but **prefer
 `inherit:`** for any secret you want kept out of the row. Names land in the
 row; values resolve at child-spawn from the worker's config.
 
-**Scope:** v0.36.5.0 `inherit:` is **free-form**. Pass any snake_case
+**Scope:** `inherit:` is **free-form**. Pass any snake_case
 config-key name and the worker resolves the value from `loadConfig()` at
 child-spawn time:
 
@@ -245,9 +249,13 @@ gbrain jobs get 42
 # Submission audit log (operator trail, not forensic)
 cat ~/.gbrain/audit/shell-jobs-*.jsonl | jq '.'
 
-# First-time failure mode: submitted without env flag on the worker
-gbrain jobs list --status waiting --name shell
-# If rows pile up here, no worker with GBRAIN_ALLOW_SHELL_JOBS=1 is running.
+# First-time failure mode: submitted without env flag on the worker.
+# The handler is always registered but guarded: an unflagged worker that claims
+# a shell job dead-letters it immediately (UnrecoverableError, no retries).
+gbrain jobs list --status dead --name shell
+# → error_text: "shell handler disabled on this worker (set GBRAIN_ALLOW_SHELL_JOBS=1 ...)"
+# `waiting` pileups mean NO worker is running at all (flagged or not) — check
+# `gbrain jobs supervisor status` in that case.
 ```
 
 ---

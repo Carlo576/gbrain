@@ -15,6 +15,8 @@
 import type { SchemaPackManifest } from './manifest-v1.ts';
 import type { BrainEngine } from '../engine.ts';
 import { readRecentMutations } from './mutate-audit.ts';
+import { classifyStoredType, sanitizeTypeForDisplay, safeCliToken } from './type-usage.ts';
+import { NESTED_QUANTIFIER_RE } from './redos-guard.ts';
 
 export type LintSeverity = 'error' | 'warning';
 
@@ -37,6 +39,13 @@ export interface LintOpts {
   engine?: BrainEngine;
   /** Limit scan window for audit-aware rules. Default 7 days. */
   daysBack?: number;
+  /**
+   * Scope DB-aware STORED-TYPE rules to one source. On a multi-source brain
+   * each source may resolve its own pack — comparing another source's rows
+   * against THIS manifest produces false alias/undeclared warnings (codex
+   * re-review). Omitted = global scan (single-source brains, status quo).
+   */
+  sourceId?: string;
 }
 
 export type LintRule = (manifest: SchemaPackManifest, opts?: LintOpts) =>
@@ -320,15 +329,14 @@ export const mutationCountAnomaly: LintRule = (manifest, opts) => {
 // Aggregator
 // ────────────────────────────────────────────────────────────────────────
 
-// v0.41.37.0 #1569: advisory ReDoS pre-screen for pack inference regexes.
-// Flags the classic nested-quantifier shapes ((a+)+, (a*)*, (a+)*, (\w+)+)
-// that cause catastrophic backtracking. WARNING, not error: a hard reject
-// would disable the whole pack on upgrade (pages fall back to legacy typing).
-// The runtime input-length cap (MAX_REGEX_INPUT_CHARS in redos-guard.ts) is
-// the actual safety net; this rule tells the author to fix the pattern.
-// Heuristic: an inner group containing a +/* quantifier, wrapped by an outer
-// +/* quantifier. Catches the common ReDoS class, not every possible one.
-const NESTED_QUANTIFIER_RE = /\([^()]*[+*][^()]*\)\s*[+*]/;
+// v0.41.37.0 #1569: ReDoS pre-screen for pack inference regexes. Flags the
+// classic nested-quantifier shapes ((a+)+, (a*)*, (a+)*, (\w+)+) that cause
+// catastrophic backtracking. Lint severity stays WARNING (a hard lint reject
+// would disable the whole pack on upgrade; pages fall back to legacy typing)
+// — but since the megawave vm-watchdog removal, the SAME heuristic is
+// ENFORCED at runtime by runRegexBounded (the pattern is refused, never
+// executed, that verb degrades to mentions). The shared constant lives in
+// redos-guard.ts so lint and runtime cannot drift.
 export const linkRegexCatastrophicBacktrack: LintRule = (manifest) => {
   const issues: LintIssue[] = [];
   for (const lt of manifest.link_types) {
@@ -342,6 +350,70 @@ export const linkRegexCatastrophicBacktrack: LintRule = (manifest) => {
         pack: manifest.name,
         link: lt.name,
         hint: `rewrite without nested quantifiers (e.g. (a+)+ → a+). The runtime caps input length, but the pattern stays O(2^n) on adversarial input`,
+      });
+    }
+  }
+  return issues;
+};
+
+/**
+ * Data-plane corpus audit (alias-footgun incident class): pages whose STORED
+ * type is an alias of a canonical pack type. Explicit frontmatter types are
+ * stored literally and never re-normalized, so alias-typed pages silently
+ * diverge from the canonical filing. Warning severity — the import-time
+ * surface (schema.type_warnings) catches new writes; this catches the
+ * existing corpus.
+ */
+export const storedTypeIsAlias: LintRule = async (manifest, opts) => {
+  if (!opts?.engine) return [];
+  const issues: LintIssue[] = [];
+  const rows = await opts.engine.executeRaw<{ type: string; n: string }>(
+    `SELECT type, count(*)::text AS n FROM pages
+      WHERE deleted_at IS NULL AND ($1::text IS NULL OR source_id = $1)
+      GROUP BY type`,
+    [opts.sourceId ?? null],
+  );
+  for (const r of rows) {
+    const cls = classifyStoredType(r.type, manifest);
+    if (cls.kind === 'alias_of') {
+      const t = sanitizeTypeForDisplay(r.type);
+      issues.push({
+        rule: 'stored_type_is_alias',
+        severity: 'warning',
+        message: `${r.n} page(s) store type '${t}', an alias of '${cls.canonical}'${cls.directory ? ` (files under ${cls.directory})` : ''} — agents may route it inconsistently`,
+        pack: manifest.name,
+        type: r.type,
+        // Real retype surface is the PROTECTED unify-types job — there is no
+        // `schema unify` subcommand (dead-command class; red-team catch).
+        // Flags spelled dash-less: the flag-registry generator harvests bare
+        // dash-tokens from strings one import level deep.
+        hint: `retype via the unify-types job (gbrain jobs submit unify-types; supports dry-run) OR declare '${t}' as its own page type (gbrain schema add-type)`,
+      });
+    }
+  }
+  return issues;
+};
+
+/** Data-plane sibling: pages whose stored type is entirely undeclared in the pack. */
+export const storedTypeUndeclared: LintRule = async (manifest, opts) => {
+  if (!opts?.engine) return [];
+  const issues: LintIssue[] = [];
+  const rows = await opts.engine.executeRaw<{ type: string; n: string }>(
+    `SELECT type, count(*)::text AS n FROM pages
+      WHERE deleted_at IS NULL AND ($1::text IS NULL OR source_id = $1)
+      GROUP BY type`,
+    [opts.sourceId ?? null],
+  );
+  for (const r of rows) {
+    if (classifyStoredType(r.type, manifest).kind === 'undeclared') {
+      const t = sanitizeTypeForDisplay(r.type);
+      issues.push({
+        rule: 'stored_type_undeclared',
+        severity: 'warning',
+        message: `${r.n} page(s) store type '${t}' which is not declared in the active pack (not a page_type, not an alias)`,
+        pack: manifest.name,
+        type: r.type,
+        hint: `gbrain schema add-type '${safeCliToken(r.type) ?? '<type>'}' OR retype the pages to a canonical type`,
       });
     }
   }
@@ -362,6 +434,8 @@ export const ALL_LINT_RULES: ReadonlyArray<{ name: string; rule: LintRule; plane
   { name: 'link_regex_catastrophic_backtrack', rule: linkRegexCatastrophicBacktrack, planeAware: false },
   { name: 'extractable_empty_corpus', rule: extractableEmptyCorpus, planeAware: true },
   { name: 'mutation_count_anomaly', rule: mutationCountAnomaly, planeAware: true },
+  { name: 'stored_type_is_alias', rule: storedTypeIsAlias, planeAware: true },
+  { name: 'stored_type_undeclared', rule: storedTypeUndeclared, planeAware: true },
 ];
 
 /** File-plane subset: rules safe to run inside `withMutation`'s pre-write gate. */

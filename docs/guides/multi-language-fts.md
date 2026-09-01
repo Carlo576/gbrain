@@ -53,6 +53,11 @@ gbrain reindex-search-vector --dry-run    # preview: language + row counts
 gbrain reindex-search-vector --yes        # recreate triggers + backfill
 ```
 
+The stamp survives later schema work: `initSchema()` — including the replay
+behind `gbrain init --migrate-only` on every upgrade — applies the schema
+template under the configured language, so it re-creates the trigger
+functions as they already are instead of reverting them to `english`.
+
 The command recreates both trigger functions under the new language and
 backfills every existing `pages` and `content_chunks` row in batches,
 streaming progress to stderr. It is idempotent: re-running with the same
@@ -101,3 +106,15 @@ command runs, or Postgres will reject the trigger recreation with
 - Keep `GBRAIN_FTS_LANGUAGE` set consistently in every environment that
   writes to the brain (CLI shells, MCP server, cron jobs) — a writer without
   the env var tokenizes new rows in `english` until the next reindex.
+- **CJK (Chinese / Japanese / Korean):** none of the built-in snowball
+  configurations can tokenize CJK text, so the FTS arm would return nothing
+  for CJK queries. Both engines detect CJK queries and route them to a
+  term-by-term `ILIKE` fallback with term-frequency ranking instead
+  (PGLite since v0.32.7; Postgres since #3986 — shared SQL in
+  `src/core/search/cjk-keyword-sql.ts`). The fallback is correct but not
+  index-accelerated: it scans `content_chunks.chunk_text`, so latency grows
+  with corpus size. Note the routing is query-driven: any query containing
+  CJK characters takes the fallback today, even on a Postgres instance with
+  a CJK-aware extension (`pgroonga` / `zhparser`) installed. Wiring a
+  CJK-capable `GBRAIN_FTS_LANGUAGE` config past the fallback is a filed
+  follow-up.

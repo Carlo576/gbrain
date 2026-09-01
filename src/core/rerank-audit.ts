@@ -27,13 +27,19 @@
 
 import { createAuditWriter, computeIsoWeekFilename } from './audit/audit-writer.ts';
 
-/** Stable error-classification union; matches RerankError.reason. */
+/** Stable error-classification union for reranker fail-open audit rows.
+ * `sunset_short_circuit` (#3657) is written ONCE per process per model by the
+ * gateway itself (not per query by applyReranker): the reranker's hosted API
+ * passed its announced shutdown date, so calls are skipped without HTTP and
+ * results pass through unreranked. */
 export type RerankFailureReason =
   | 'auth'
   | 'rate_limit'
   | 'network'
   | 'timeout'
+  | 'budget'
   | 'payload_too_large'
+  | 'sunset_short_circuit'
   | 'unknown';
 
 export interface RerankFailureEvent {

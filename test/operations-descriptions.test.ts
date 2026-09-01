@@ -10,6 +10,7 @@ import {
   GET_SKILL_DESCRIPTION,
   SKILL_CATALOG_INSTRUCTIONS,
   SKILL_CLIENT_GUIDANCE,
+  CAPTURE_DESCRIPTION,
 } from '../src/core/operations-descriptions.ts';
 import { operations, operationsByName } from '../src/core/operations.ts';
 import { BRAIN_TOOL_ALLOWLIST } from '../src/core/minions/tools/brain-allowlist.ts';
@@ -109,6 +110,28 @@ describe('v0.29 — redirect hints on existing ops', () => {
   });
 });
 
+describe('#2416 — concept/landscape routing between search and query', () => {
+  test('search describes the cheap-hybrid default, not the keyword-era model', () => {
+    expect(SEARCH_DESCRIPTION).toContain("Cheap hybrid search");
+    expect(SEARCH_DESCRIPTION).toContain("no LLM expansion");
+    expect(SEARCH_DESCRIPTION).not.toContain("Keyword search using full-text search");
+  });
+
+  test('search declares the completeness boundary and both escape routes', () => {
+    expect(SEARCH_DESCRIPTION).toContain("NOT proof of coverage");
+    expect(SEARCH_DESCRIPTION).toContain("landscape");
+    expect(SEARCH_DESCRIPTION).toContain("list_pages");
+  });
+
+  test('query owns concept/landscape questions but does not oversell coverage', () => {
+    expect(QUERY_DESCRIPTION).toContain("landscape");
+    expect(QUERY_DESCRIPTION).toContain("expansion recovers synonym");
+    expect(QUERY_DESCRIPTION).toContain("Still top-K");
+    expect(QUERY_DESCRIPTION).toContain("list_pages");
+    expect(QUERY_DESCRIPTION).toContain("cheaper");
+  });
+});
+
 describe('v0.29 — subagent allow-list', () => {
   test('includes get_recent_salience and find_anomalies', () => {
     expect(BRAIN_TOOL_ALLOWLIST.has('get_recent_salience')).toBe(true);
@@ -143,6 +166,19 @@ describe('v0.29 — operations array carries the three new ops', () => {
     expect(names).toContain('get_recent_salience');
     expect(names).toContain('find_anomalies');
     expect(names).toContain('get_recent_transcripts');
+  });
+});
+
+describe('CLI→MCP gap-closure wave — capture description', () => {
+  test('matches the operation registration', () => {
+    expect(operationsByName['capture'].description).toBe(CAPTURE_DESCRIPTION);
+  });
+
+  test('teaches the capture/put_page/remember routing split', () => {
+    // capture = quick notes with auto-slug + dedupe; put_page = full control;
+    // structured entity facts route to remember.
+    expect(CAPTURE_DESCRIPTION).toContain('put_page');
+    expect(CAPTURE_DESCRIPTION).toContain('remember');
   });
 });
 

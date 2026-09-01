@@ -14,6 +14,16 @@
 
 set -euo pipefail
 
+# #3485: unit/slow tests need no database — strip ambient DB URLs at this
+# wrapper boundary so the bunfig preload guard passes and nothing can reach a
+# real brain. The e2e wrapper (run-e2e.sh) is the only lane that keeps them.
+unset DATABASE_URL GBRAIN_DATABASE_URL
+# An ambient GBRAIN_HOME (a dev shell configured for a real brain) must not
+# reach unit tests either: the gbrain-home-preload respects a pre-set value
+# (the e2e wrapper needs that), so strip it at this boundary and let the
+# preload allocate per-run scratch instead.
+unset GBRAIN_HOME
+
 cd "$(dirname "$0")/.."
 
 # --max-concurrency=N is forwarded to `bun test`. v0.26.4: invoked by
@@ -71,8 +81,19 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-echo "[unit-shard ${SHARD:-(unsharded)}] running ${#files[@]} files"
-if [ -n "$MAX_CONC" ]; then
-  exec bun test --max-concurrency="$MAX_CONC" --timeout=60000 "${files[@]}"
+# #4479: per-shard timeout multiplier. 4-way shard contention in the CI
+# container makes subprocess/PGLite tests ~6x slower per file than native,
+# producing timeout-class failures that pass natively. The 60s per-test
+# ceiling scales by GBRAIN_TEST_TIMEOUT_MULTIPLIER (integer, default 1;
+# ci-local's container lane sets it). Non-integer values fall back to 1.
+MULT="${GBRAIN_TEST_TIMEOUT_MULTIPLIER:-1}"
+if ! printf '%s' "$MULT" | grep -qE '^[0-9]+$' || [ "$MULT" -lt 1 ]; then
+  MULT=1
 fi
-exec bun test --timeout=60000 "${files[@]}"
+TEST_TIMEOUT_MS=$((60000 * MULT))
+
+echo "[unit-shard ${SHARD:-(unsharded)}] running ${#files[@]} files (timeout=${TEST_TIMEOUT_MS}ms)"
+if [ -n "$MAX_CONC" ]; then
+  exec bun test --max-concurrency="$MAX_CONC" --timeout="$TEST_TIMEOUT_MS" "${files[@]}"
+fi
+exec bun test --timeout="$TEST_TIMEOUT_MS" "${files[@]}"

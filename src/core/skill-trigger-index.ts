@@ -25,7 +25,7 @@
  * risk codex flagged in #1451 review was consistency, not throughput.
  */
 
-import { existsSync, readFileSync, readdirSync, type Dirent } from 'fs';
+import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from 'fs';
 import { join } from 'path';
 import { parseResolverEntries, type ResolverEntry } from './check-resolvable.ts';
 import { findAllResolverFiles } from './resolver-filenames.ts';
@@ -84,11 +84,21 @@ function loadFrontmatterEntries(skillsDir: string): SkillTriggerEntry[] {
   }
 
   for (const dirent of dirents) {
-    // OpenClaw commonly canonicalizes shared skills as directory symlinks.
-    // Treat a symlink as a candidate only when its direct SKILL.md exists;
-    // broken/non-skill links still fall through below.
-    if (!dirent.isDirectory() && !dirent.isSymbolicLink()) continue;
     const name = dirent.name;
+    // readdirSync's Dirent.isDirectory() reflects the dirent's own type
+    // (DT_LNK for symlinks on macOS/Linux) and does NOT follow symlinks,
+    // so skill dirs symlinked in from a shared skills store (e.g.
+    // ~/.agents/skills/<name>) are silently skipped without this check.
+    const isDir = dirent.isDirectory()
+      || (dirent.isSymbolicLink() && (() => {
+        try {
+          // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- `name` is a readdirSync(skillsDir) dirent name: a single separator-free component of the operator's own skills tree, never remote/user input (same pattern as the sibling SKILL.md join below)
+          return statSync(join(skillsDir, name)).isDirectory();
+        } catch {
+          return false;
+        }
+      })());
+    if (!isDir) continue;
     if (name.startsWith('_') || name.startsWith('.')) continue;
     if (FRONTMATTER_SKIP_DIRS.has(name)) continue;
 

@@ -54,3 +54,9 @@ reports/network-intelligence/
 media/x/
 media/articles/
 meetings/transcripts/
+
+graphify-out/
+
+# Coverage lane output (COVERAGE_DIR opt-in in test-shard.sh /
+# run-serial-tests.sh / run-e2e.sh; merged by scripts/merge-lcov.ts)
+.coverage/

@@ -15,8 +15,9 @@ import { SLUG_WORD_CHARS } from './cjk.ts';
 // v0.37.7.0 #1169 submodule-detection helpers. Bottom-of-file already
 // aliases existsSync as `_existsSync` for other purposes; the top-of-file
 // import keeps the pruneDir helper's deps near its callsite.
-import { existsSync, readFileSync, statSync } from 'fs';
-import { join as pathJoin } from 'path';
+import { existsSync, readFileSync, statSync, realpathSync } from 'fs';
+import { join as pathJoin, resolve as pathResolve } from 'path';
+import type { BrainEngine } from './engine.ts';
 
 export interface SyncManifest {
   added: string[];
@@ -37,6 +38,14 @@ export interface SyncableOptions {
   strategy?: SyncStrategy;
   include?: string[];
   exclude?: string[];
+  /**
+   * Repeatable `--include-hidden <glob>` patterns (same glob dialect as
+   * `include`/`exclude`, matched against the same path form `classifySync`
+   * receives). Waives the leading-dot prune heuristic in `isPathPruned` for
+   * paths that match — see that function's doc comment for exactly what is
+   * and isn't waivable.
+   */
+  includeHidden?: string[];
 }
 
 /**
@@ -111,6 +120,7 @@ const CODE_EXTENSIONS = new Set<string>([
   '.sh', '.bash',
   '.css',
   '.html', '.htm',
+  '.astro', '.svelte',
   '.vue',
   '.json',
   '.yaml', '.yml',
@@ -135,9 +145,80 @@ const CODE_EXTENSIONS = new Set<string>([
  * Input format (tab-separated):
  *   A       path/to/new-file.md
  *   M       path/to/modified-file.md
+ *   T       path/to/retyped-file.md      (file <-> symlink; content changed)
  *   D       path/to/deleted-file.md
  *   R100    old/path.md     new/path.md
+ *
+ * Status coverage, against the options gbrain actually passes (name-status with
+ * `-M` only, see `sync-delta.ts` — note NO `-C` copy detection):
+ *   A/M/D/R — the everyday statuses.
+ *   T       — TYPECHANGE. Reachable in normal operation: replacing a file with
+ *             a symlink (or vice versa) emits `T`, and it was silently dropped,
+ *             so the change never reached the index until something else
+ *             touched the path. Treated as `modified`: the path still exists and
+ *             its blob changed, which is exactly what re-import handles. (When a
+ *             file becomes a symlink, import-file SKIPS symlinks by design —
+ *             the exfil guard — so the old regular-file content stays indexed;
+ *             routing the typechange to delete-then-skip is a filed follow-up.)
+ *   C       — COPY. Unreachable without `-C`, handled defensively.
+ *   U       — UNMERGED. Only in a conflicted worktree, which sync does not run
+ *             against; handled defensively so a conflicted tree degrades to
+ *             "re-import this path" rather than silently skipping it.
+ *
+ * NOTE for future editors: git option names appear here WITHOUT the leading
+ * double-dash on purpose. The CLI flag-registry generator string-scans module
+ * source including comments, so a bare double-dash token in prose registers as
+ * a real, accepted CLI flag on every command that imports this file. Pinned by
+ * `test/cli-flag-validation.test.ts`.
  */
+/**
+ * Undo git's C-style path quoting.
+ *
+ * git quotes any path containing `"`, `\` or a control character, and it does
+ * so unconditionally: `core.quotepath=false` (buildGitInvocation in
+ * commands/sync.ts, #119) only suppresses octal-escaping of NON-ASCII bytes.
+ * A path like `people/Jason "Jay" Strand.md` therefore reaches
+ * buildSyncManifest as `"people/Jason \"Jay\" Strand.md"` — surrounding quotes
+ * included — so it ends `.md"`, fails isMarkdownFilePath(), and is dropped from
+ * the manifest with no error and no counter.
+ *
+ * Octal escapes are decoded as BYTES and utf-8 decoded once at the end: a
+ * single codepoint can span several \NNN escapes, so per-escape decoding
+ * produces mojibake.
+ *
+ * An unquoted path is returned unchanged, so this is a no-op for the common
+ * case.
+ */
+export function unquoteGitPath(raw: string): string {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const body = raw.slice(1, -1);
+  const simple: Record<string, number> = {
+    n: 10, t: 9, r: 13, '"': 34, '\\': 92, a: 7, b: 8, f: 12, v: 11,
+  };
+  const bytes: number[] = [];
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i];
+    if (c === '\\' && i + 1 < body.length) {
+      const nxt = body[i + 1];
+      if (nxt in simple) {
+        bytes.push(simple[nxt]);
+        i += 2;
+        continue;
+      }
+      const trio = body.slice(i + 1, i + 4);
+      if (trio.length === 3 && /^[0-7]{3}$/.test(trio)) {
+        bytes.push(parseInt(trio, 8));
+        i += 4;
+        continue;
+      }
+    }
+    for (const b of new TextEncoder().encode(c)) bytes.push(b);
+    i += 1;
+  }
+  return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+}
+
 export function buildSyncManifest(gitDiffOutput: string): SyncManifest {
   const manifest: SyncManifest = {
     added: [],
@@ -156,20 +237,30 @@ export function buildSyncManifest(gitDiffOutput: string): SyncManifest {
     if (parts.length < 2) continue;
 
     const action = parts[0];
-    const path = parts[parts.length === 3 ? 2 : 1]; // For renames, new path is 3rd column
 
+    // Unquote at the single point every path enters the manifest, so the
+    // extension filter and every downstream consumer (slug resolution, file
+    // reads) all see the real name. (#3897)
     if (action === 'A') {
-      manifest.added.push(path);
-    } else if (action === 'M') {
-      manifest.modified.push(path);
+      manifest.added.push(unquoteGitPath(parts[1]));
+    } else if (action === 'M' || action === 'T' || action === 'U') {
+      // T (typechange) and U (unmerged) both mean "this path exists and its
+      // content is not what we imported" — the same remedy as M.
+      manifest.modified.push(unquoteGitPath(parts[1]));
     } else if (action === 'D') {
-      manifest.deleted.push(parts[1]);
-    } else if (action.startsWith('R')) {
-      // Rename: R100\told-path\tnew-path
-      const oldPath = parts[1];
-      const newPath = parts[2];
+      manifest.deleted.push(unquoteGitPath(parts[1]));
+    } else if (action.startsWith('R') || action.startsWith('C')) {
+      // Rename/copy: R100\told-path\tnew-path. Copy is unreachable without -C,
+      // but if the flags ever change, the destination must still be imported.
+      const oldPath = unquoteGitPath(parts[1]);
+      const newPath = unquoteGitPath(parts[2]);
       if (oldPath && newPath) {
-        manifest.renamed.push({ from: oldPath, to: newPath });
+        if (action.startsWith('C')) {
+          // A copy leaves the source in place — only the destination is new.
+          manifest.added.push(newPath);
+        } else {
+          manifest.renamed.push({ from: oldPath, to: newPath });
+        }
       }
     }
   }
@@ -215,7 +306,14 @@ function isMultimodalEnabled(): boolean {
 }
 
 function isAllowedByStrategy(path: string, strategy: SyncStrategy): boolean {
-  if (strategy === 'markdown') return isMarkdownFilePath(path);
+  // #2683: mirror import.ts's isCollectibleForWalker — the full-sync walker
+  // admits images under the (default) 'markdown' strategy when multimodal is
+  // on, but this incremental gate used to be markdown-only, so a committed
+  // image NEVER imported incrementally (it only landed via `sync --full`).
+  // Full and incremental must agree on the admission set.
+  if (strategy === 'markdown') {
+    return isMarkdownFilePath(path) || (isMultimodalEnabled() && isImageFilePath(path));
+  }
   if (strategy === 'code') return isCodeFilePath(path);
   // 'auto' / default: markdown + code, plus images when multimodal is on.
   return (
@@ -341,6 +439,49 @@ export function pruneDir(name: string, parentDir?: string): boolean {
 }
 
 /**
+ * Path-string form of the exclusion `pruneDir` enforces during a live
+ * directory descent, evaluated per-segment against a full path — the
+ * canonical gate for the two PURE classifiers that never walk a real
+ * directory tree: `classifySync` (drives `sync`'s incremental + full-sync
+ * dry-run/reconcile paths) and `isCollectibleForWalker` in `commands/
+ * import.ts` (drives `import`'s git-ls-files fast path, which is what
+ * every git-tracked source — the common case — actually uses). Both used
+ * to reimplement this segment loop independently; funnelling them through
+ * one function is what keeps a future change from fixing one and leaving
+ * the other silently pruning differently, the way #923/#202 drifted before
+ * `PRUNE_DIR_NAMES` existed.
+ *
+ * `includeHidden`: repeatable `--include-hidden <glob>` patterns (same
+ * glob dialect as `include`/`exclude`, matched against the full `path`
+ * argument as given — callers are responsible for passing the same path
+ * form their other include/exclude matching already uses). When a path is
+ * pruned ONLY because a segment is dot-prefixed (`.dira/entries/x.md`) and
+ * the full path matches one of these globs, the dot-prune is waived. The
+ * `PRUNE_DIR_NAMES` / `*.raw` exclusions are NEVER waivable — this flag
+ * reaches past the leading-dot heuristic specifically (`.git`, `.dira`,
+ * `.obsidian`, …), not past generated/vendored-tree exclusions.
+ *
+ * SCOPE: this only reaches the two pure-string classifiers above. It does
+ * NOT reach `pruneDir`'s other, live-filesystem-walk callers — `import`'s
+ * fallback walker for non-git directories, and `storage.ts`'s
+ * `walkBrainRepo` — which decide per-directory during real recursive
+ * descent and would need prefix-of-a-glob reasoning to honor the same
+ * waiver safely (a directory named `.dira` must stay open for descent to
+ * reach `.dira/entries/*.md` even though `.dira` alone doesn't match that
+ * glob). Every `gbrain sources add`'d git repository — which is virtually
+ * all of them, including every hq-shaped brain — goes through the
+ * git-listing fast path this function guards, so the gap is scoped to
+ * importing a bare (non-git) directory.
+ */
+export function isPathPruned(path: string, includeHidden?: string[]): boolean {
+  const segments = path.split('/');
+  if (segments.some((seg) => PRUNE_DIR_NAMES.has(seg) || seg.endsWith('.raw'))) return true;
+  const dotPruned = segments.some((seg) => seg.startsWith('.'));
+  if (!dotPruned) return false;
+  return !(includeHidden && includeHidden.length > 0 && matchesAnyGlob(path, includeHidden));
+}
+
+/**
  * Discriminator for WHY a path is not syncable. Returned by `unsyncableReason`
  * so the sync cleanup loop in `commands/sync.ts` can distinguish "metafile we
  * intentionally exclude" from "user removed this file from the strategy".
@@ -357,7 +498,63 @@ export type SyncableReason =
   | 'strategy'
   | 'pruned-dir'
   | 'include-glob-miss'
-  | 'exclude-glob-hit';
+  | 'exclude-glob-hit'
+  | 'malformed-path';
+
+/**
+ * Path segments that can never be legitimate page filenames: square brackets
+ * (the signature of markdown-link syntax leaking into a literal filename —
+ * files named `[atoms/foo.md](https:/...)` were minted by misbehaving
+ * producers and polluted search because slugifySegment STRIPS brackets
+ * instead of rejecting them, yielding plausible-looking slugs) and ASCII
+ * control characters. Parentheses are deliberately allowed — `meeting (1).md`
+ * is a legitimate filename shape.
+ *
+ * Two-tier design (cross-model adversarial finding — both reviewers flagged
+ * blanket-bracket collateral):
+ *   - ADMISSION (hasMalformedPathSegment): control chars reject on ANY path;
+ *     brackets reject only on MARKDOWN paths (.md/.mdx). Code-strategy lanes
+ *     keep indexing framework paths like `app/[id]/page.tsx`, which are
+ *     ubiquitous and legitimate.
+ *   - DESTRUCTION (isPoisonedPath): sync's row-DELETING lanes (reconcile,
+ *     modified-lane cleanup) act only on the actual injection signature —
+ *     `](` or control chars. A bare-bracket markdown file (`notes [draft].md`)
+ *     imported by a pre-gate release keeps its indexed row (it just can't
+ *     re-import until renamed; doctor's malformed_path_pages carries the
+ *     hint). Hard-deleting it on a routine post-upgrade full sync while the
+ *     file still exists would be silent data loss.
+ *
+ * IMPORTANT: these are PATH checks only. `](` inside file BODIES is normal
+ * markdown and must never trip them.
+ */
+export const MALFORMED_PATH_SEGMENT_RE = /[\[\]\x00-\x1f]/;
+
+/** The injection signature that marks a path as sweepable junk. */
+export const POISONED_PATH_RE = /\]\(|[\x00-\x1f]/;
+
+/** Admission check: control chars anywhere; brackets on markdown paths. */
+export function hasMalformedPathSegment(path: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f]/.test(path)) return true;
+  return /[\[\]]/.test(path) && /\.(md|mdx)$/i.test(path);
+}
+
+/** Destruction gate: only paths matching the poison signature may have their DB rows swept. */
+export function isPoisonedPath(path: string): boolean {
+  return POISONED_PATH_RE.test(path);
+}
+
+/**
+ * Strip control characters (and cap length) before echoing a malformed path
+ * to a terminal — these paths contain control bytes BY DEFINITION, and a
+ * crafted filename must not be able to inject ANSI escapes into sync output.
+ * Brackets stay: they're printable and the informative part of the name.
+ */
+export function sanitizePathForDisplay(path: string): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = path.replace(/[\x00-\x1f\x7f]/g, '\ufffd');
+  return cleaned.length > 200 ? `${cleaned.slice(0, 197)}...` : cleaned;
+}
 
 /**
  * Canonical metafile basenames the markdown sync strategy intentionally
@@ -392,13 +589,20 @@ function classifySync(path: string, opts: SyncableOptions = {}): SyncableReason 
 
   if (!isAllowedByStrategy(path, strategy)) return 'strategy';
 
+  // Reject filenames that can't be legitimate pages (bracket/control chars —
+  // markdown-link syntax as a literal filename). Checked after `strategy` so
+  // only files that would otherwise be admitted change classification.
+  if (hasMalformedPathSegment(path)) return 'malformed-path';
+
   // Skip every path segment that pruneDir would block walkers from descending
   // into. Catches hidden dirs (`.git`, `.obsidian`), `.raw/` sidecars, and
   // vendor/generated trees (`node_modules/`, `vendor/`, …) at any depth.
-  const segments = path.split('/');
-  if (segments.some(p => !pruneDir(p))) return 'pruned-dir';
+  // `opts.includeHidden` can waive the leading-dot part of this — see
+  // `isPathPruned`'s doc comment for exactly what is and isn't waivable.
+  if (isPathPruned(path, opts.includeHidden)) return 'pruned-dir';
 
   // Skip meta files that aren't pages
+  const segments = path.split('/');
   const basename = segments[segments.length - 1] || '';
   if ((SYNC_SKIP_FILES as readonly string[]).includes(basename)) return 'metafile';
 
@@ -460,6 +664,14 @@ export function slugifySegment(segment: string): string {
   return segment
     .normalize('NFD')                     // Decompose accented chars
     .replace(/[\u0300-\u036f]/g, '')      // Strip accent marks
+    // #3700: Hebrew niqqud (vowel points) + cantillation are optional
+    // diacritics \u2014 the same word appears pointed and bare across filenames
+    // and must land on ONE slug (the Hebrew analog of caf\u00e9 \u2192 cafe). Scoped
+    // to U+0591\u2013U+05C7 only; \p{M} stays in SLUG_WORD_CHARS so Devanagari
+    // matras, Thai vowels, Arabic text etc. keep their #3417 behavior.
+    // Runs in NFD space so precomposed presentation forms (U+FB1D\u2013FB4F)
+    // are already decomposed and their points strip too.
+    .replace(/[\u0591-\u05c7]/g, '')      // Strip Hebrew niqqud + cantillation
     .normalize('NFC')                     // Recompose Hangul Jamo back to Syllables (v0.32.7)
     .toLowerCase()
     .replace(SLUGIFY_KEEP_RE, '')         // Keep alnum, dots, spaces, _-, and CJK (v0.32.7)
@@ -546,6 +758,7 @@ export {
   classifyErrorCode,
   summarizeFailuresByCode,
   formatCodeBreakdown,
+  formatFailedFileList,
   syncFailuresPath,
   loadSyncFailures,
   unacknowledgedSyncFailures,
@@ -553,16 +766,23 @@ export {
   acknowledgeSyncFailures,
   recordFailures,
   clearFailures,
+  restoreFailures,
   acknowledgeFailures,
   autoSkipFailures,
   withLedgerLock,
   resolveAutoSkipThreshold,
   isSkippablePath,
   decideGateAction,
+  EMBEDDING_INFRA_CODES,
+  isEmbeddingInfraCode,
   decideSyncFailureSeverity,
   applySyncFailureGate,
   DEFAULT_SOURCE_ID,
   SENTINEL_PREFIX,
+  RENAME_SENTINEL_PREFIX,
+  renameSentinelPath,
+  renameReconcileErrorMessage,
+  parseRenameReconcileFrom,
   DEFAULT_AUTOSKIP_AFTER,
 } from './sync-failure-ledger.ts';
 export type {
@@ -574,3 +794,82 @@ export type {
   SyncGateInput,
   SyncGateOutcome,
 } from './sync-failure-ledger.ts';
+
+/**
+ * #2114 — same-directory check for the global sync-anchor ownership guard.
+ * Best-effort realpath so symlinked spellings (macOS `/tmp` vs `/private/tmp`)
+ * and relative invocations compare as the same repo. `realpathSync.native`
+ * first: unlike the JS implementation it canonicalizes path CASE on
+ * case-insensitive filesystems (APFS `/users/x` vs `/Users/x`), so a
+ * case-variant spelling cannot false-refuse the user's own brain repo.
+ */
+export function sameRepoDir(a: string, b: string): boolean {
+  const norm = (p: string): string => {
+    const abs = pathResolve(p);
+    try {
+      return realpathSync.native(abs);
+    } catch {
+      // fall through
+    }
+    try {
+      return realpathSync(abs);
+    } catch {
+      return abs;
+    }
+  };
+  return norm(a) === norm(b);
+}
+
+export interface GlobalAnchorOwnership {
+  owns: boolean;
+  /** The path ownership was judged against (global key first, else the
+   * default source's local_path), or null on a truly fresh brain. */
+  configured: string | null;
+}
+
+/**
+ * #2114 — may an import/sync of `dir` move the GLOBAL sync anchors
+ * (`sync.repo_path` / `sync.last_commit`)?
+ *
+ * The globals describe THE brain repo — the default source's working tree
+ * (source-resolver.ts documents `sync.repo_path` as the legacy pre-v0.18
+ * default-source key; migration v16 seeds the `default` source row FROM it).
+ * Ownership therefore requires BOTH:
+ *   1. the operation resolves to the default source (or the legacy
+ *      no-sourceId path, which is default-by-definition), AND
+ *   2. `dir` matches the brain repo's configured identity — the global key
+ *      when set, else the default source row's `local_path` when set
+ *      (modern sync writes its anchor THERE, leaving the global unset, so
+ *      an unset global alone must not green-light a bootstrap).
+ * Only when neither identity exists is this a fresh brain, and bootstrap
+ * is allowed.
+ */
+export async function ownsGlobalSyncAnchor(
+  engine: BrainEngine,
+  sourceId: string | undefined,
+  dir: string,
+): Promise<GlobalAnchorOwnership> {
+  if (sourceId && sourceId !== 'default') {
+    return { owns: false, configured: null };
+  }
+  const globalPath = await engine.getConfig('sync.repo_path');
+  if (globalPath) {
+    return { owns: sameRepoDir(globalPath, dir), configured: globalPath };
+  }
+  // Global unset — the brain identity may still live on the default source
+  // row (modern sync writes anchors there). Best-effort: a query failure
+  // falls through to bootstrap, preserving pre-#2114 behavior on exotic
+  // engines rather than refusing writes.
+  try {
+    const rows = await engine.executeRaw<{ local_path: string | null }>(
+      `SELECT local_path FROM sources WHERE id = 'default'`,
+    );
+    const defaultLocal = rows[0]?.local_path ?? null;
+    if (defaultLocal) {
+      return { owns: sameRepoDir(defaultLocal, dir), configured: defaultLocal };
+    }
+  } catch {
+    // sources table unavailable (pre-v0.18 brain mid-upgrade) — treat as fresh.
+  }
+  return { owns: true, configured: null };
+}

@@ -48,6 +48,21 @@ mock.module('../../src/core/embedding.ts', () => ({
   estimateEmbeddingCostUsd: (tokens: number) => (tokens / 1000) * 0.00013,
   // v0.41.31: embed phase reads the current signature to stamp provenance.
   currentEmbeddingSignature: () => 'text-embedding-3-large:1536',
+  // The cycle sync phase reaches commands/sync.ts, whose static embedding.ts
+  // imports must all resolve against this mock (missing names are a load-time
+  // SyntaxError, not a runtime undefined).
+  currentEmbeddingPricePerMTok: () => 0.13,
+  willEmbedSynchronously: (opts: { v2Enabled: boolean; serialFlag: boolean; noEmbed: boolean }) => {
+    const effectiveNoEmbed = opts.v2Enabled && !opts.serialFlag && !opts.noEmbed ? true : opts.noEmbed;
+    return effectiveNoEmbed ? 'deferred' : 'inline';
+  },
+  // wave-G PGLite backfill-admission hardening added this worker-capability-
+  // aware sibling of willEmbedSynchronously; sync-embed-backfill.ts imports it
+  // statically, so the mock must carry it (mirror of the real pure fn).
+  resolveWorkerBackedSyncEmbedMode: (opts: { deferEligible: boolean; noEmbed: boolean }) =>
+    opts.deferEligible || opts.noEmbed ? 'deferred' : 'inline',
+  shouldBlockSync: (costUsd: number, floorUsd: number, mode: string, posture: 'gated' | 'tokenmax' = 'gated') =>
+    posture === 'tokenmax' ? false : mode === 'inline' && costUsd > floorUsd,
 }));
 
 const { runCycle, ALL_PHASES } = await import('../../src/core/cycle.ts');

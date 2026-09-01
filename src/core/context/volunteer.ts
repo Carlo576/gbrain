@@ -35,6 +35,7 @@ import {
   resolveEntitiesToPointers,
   ARM_CONFIDENCE,
   type ResolveArm,
+  type PointerBlock,
 } from './retrieval-reflex.ts';
 
 export const VOLUNTEER_DEFAULT_MAX_PAGES = 3;
@@ -68,6 +69,8 @@ export interface VolunteerOpts {
   excludeSlugs?: ReadonlySet<string>;
   maxPages?: number;
   minConfidence?: number;
+  /** v0.46.15: lexical-arms kill switch — see ResolvePointersOpts.lexicalArms. */
+  lexicalArms?: boolean;
 }
 
 /** Shared wire protocol for window turns — watch.ts imports this so the two
@@ -112,6 +115,8 @@ function rationaleFor(arm: ResolveArm, display: string, c: WindowEntityCandidate
   const armText =
     arm === 'alias' ? `alias match "${display}"`
     : arm === 'title' ? `exact title match "${display}"`
+    : arm === 'title-surname' ? `surname match "${display}"`
+    : arm === 'cjk-title' ? `exact CJK title/slug match "${display}"`
     : `slug match "${display}"`;
   if (!c) return armText;
   const parts = [armText];
@@ -121,40 +126,42 @@ function rationaleFor(arm: ResolveArm, display: string, c: WindowEntityCandidate
   return parts.join('; ');
 }
 
-/**
- * Volunteer confidence-gated pages for a conversation window. Pure read —
- * event logging is the CALLER's job (through the volunteer-events sink).
- * Non-relational, zero-LLM; returns [] when nothing clears the gate.
- */
-export async function volunteerContext(
-  engine: BrainEngine,
-  turns: WindowTurn[],
-  opts: VolunteerOpts,
-): Promise<VolunteeredPage[]> {
-  if (!turns.length || !opts.sourceIds?.length) return [];
-  const candidates = extractCandidatesFromWindow(turns);
-  if (!candidates.length) return [];
+/** Options for the pure confidence-gate step (see gateVolunteeredPointers). */
+export interface GateOpts {
+  maxPages?: number;
+  minConfidence?: number;
+  /** Skipped BEFORE gate + cap — see VolunteerOpts.excludeSlugs. */
+  excludeSlugs?: ReadonlySet<string>;
+  /** Turn count of the extraction window — feeds the rationale template. */
+  windowSize: number;
+}
+
+/** Build the norm→candidate provenance map the gate joins pointers against. */
+export function candidatesByNorm(candidates: WindowEntityCandidate[]): Map<string, WindowEntityCandidate> {
   const byNorm = new Map<string, WindowEntityCandidate>();
   for (const c of candidates) {
     const norm = normalizeAlias(c.query);
     if (norm && !byNorm.has(norm)) byNorm.set(norm, c);
   }
+  return byNorm;
+}
 
+/**
+ * The pure confidence-gate step: pointer pool in, gated VolunteeredPage[] out.
+ * Extracted from volunteerContext so the gate is deterministic, zero-I/O, and
+ * directly unit-testable (idempotency pinned in test/volunteer-context.test.ts:
+ * gating an already-gated set is a no-op).
+ */
+export function gateVolunteeredPointers(
+  block: PointerBlock,
+  byNorm: ReadonlyMap<string, WindowEntityCandidate>,
+  opts: GateOpts,
+): VolunteeredPage[] {
   const maxPages = clampMaxPages(opts.maxPages);
   const minConfidence =
     typeof opts.minConfidence === 'number' && opts.minConfidence >= 0 && opts.minConfidence <= 1
       ? opts.minConfidence
       : VOLUNTEER_DEFAULT_MIN_CONFIDENCE;
-
-  // Resolve up to the hard cap so the confidence gate sees the full pool —
-  // a gated-out alias hit must not shadow a passing title hit behind it.
-  const block = await resolveEntitiesToPointers(engine, opts.sourceIds[0], candidates, {
-    sourceIds: opts.sourceIds,
-    priorContextText: opts.priorContext,
-    suppression: 'slug-only',
-    maxPointers: VOLUNTEER_MAX_PAGES_CAP * 2,
-  });
-  if (!block) return [];
 
   const out: VolunteeredPage[] = [];
   for (const p of block.pointers) {
@@ -172,12 +179,45 @@ export async function volunteerContext(
       display: p.display,
       confidence,
       arm: p.arm,
-      rationale: rationaleFor(p.arm, p.display, cand, turns.length),
+      rationale: rationaleFor(p.arm, p.display, cand, opts.windowSize),
       synopsis: p.synopsis,
     });
     if (out.length >= maxPages) break;
   }
   return out;
+}
+
+/**
+ * Volunteer confidence-gated pages for a conversation window. Pure read —
+ * event logging is the CALLER's job (through the volunteer-events sink).
+ * Non-relational, zero-LLM; returns [] when nothing clears the gate.
+ */
+export async function volunteerContext(
+  engine: BrainEngine,
+  turns: WindowTurn[],
+  opts: VolunteerOpts,
+): Promise<VolunteeredPage[]> {
+  if (!turns.length || !opts.sourceIds?.length) return [];
+  const candidates = extractCandidatesFromWindow(turns);
+  if (!candidates.length) return [];
+
+  // Resolve up to the hard cap so the confidence gate sees the full pool —
+  // a gated-out alias hit must not shadow a passing title hit behind it.
+  const block = await resolveEntitiesToPointers(engine, opts.sourceIds[0], candidates, {
+    sourceIds: opts.sourceIds,
+    priorContextText: opts.priorContext,
+    suppression: 'slug-only',
+    maxPointers: VOLUNTEER_MAX_PAGES_CAP * 2,
+    lexicalArms: opts.lexicalArms,
+  });
+  if (!block) return [];
+
+  return gateVolunteeredPointers(block, candidatesByNorm(candidates), {
+    maxPages: opts.maxPages,
+    minConfidence: opts.minConfidence,
+    excludeSlugs: opts.excludeSlugs,
+    windowSize: turns.length,
+  });
 }
 
 /**

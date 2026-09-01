@@ -161,25 +161,33 @@ describeIfDB('Postgres parity — updateSourceConfig', () => {
     expect(rows[0]?.value).toBe('2026-05-22T12:00:00.000Z');
   });
 
-  test('bad array config ignores non-object elements before merge', async () => {
-    await seedSource('epsilon');
+  test('#2251: mixed-array config (non-object elements) merges instead of throwing, and self-heals to a flat object', async () => {
+    await seedSource('mixed');
+    // The historical bad shape that permanently blocked last_full_cycle_at
+    // writes: a JSONB array holding a non-object element. The bare
+    // jsonb_each(elem) threw 'cannot call jsonb_each on a non-object'
+    // DURING row production, failing every subsequent updateSourceConfig.
     await engine.executeRaw(
       `UPDATE sources
-          SET config = '[{"keep":"me"},"bad-shape",["also-bad"]]'::jsonb
-        WHERE id = 'epsilon'`,
+          SET config = '["stray-string", {"remote_url": "https://kept"}, 42]'::jsonb
+        WHERE id = 'mixed'`,
     );
-    await engine.updateSourceConfig('epsilon', {
-      last_source_cycle_at: '2026-06-24T10:40:00.000Z',
+
+    const ok = await engine.updateSourceConfig('mixed', {
+      last_full_cycle_at: '2026-07-09T00:00:00.000Z',
     });
-    const rows = await engine.executeRaw<{ keep: string | null; cycle: string | null; typeof: string }>(
-      `SELECT config->>'keep' AS keep,
-              config->>'last_source_cycle_at' AS cycle,
-              jsonb_typeof(config) AS typeof
-         FROM sources
-        WHERE id = 'epsilon'`,
+    expect(ok).toBe(true);
+
+    const rows = await engine.executeRaw<{ typeof: string; cycle: string | null; kept: string | null }>(
+      `SELECT jsonb_typeof(config) AS typeof,
+              config->>'last_full_cycle_at' AS cycle,
+              config->>'remote_url' AS kept
+         FROM sources WHERE id = 'mixed'`,
     );
+    // Self-healed: flat object, patch applied, object elements' keys recovered,
+    // non-object stragglers dropped.
     expect(rows[0]?.typeof).toBe('object');
-    expect(rows[0]?.keep).toBe('me');
-    expect(rows[0]?.cycle).toBe('2026-06-24T10:40:00.000Z');
+    expect(rows[0]?.cycle).toBe('2026-07-09T00:00:00.000Z');
+    expect(rows[0]?.kept).toBe('https://kept');
   });
 });

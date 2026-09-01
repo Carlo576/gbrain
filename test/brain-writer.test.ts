@@ -10,6 +10,7 @@ import {
 } from '../src/core/brain-writer.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const fence = '---';
 
@@ -234,7 +235,7 @@ describe('scanBrainSources (PGLite)', () => {
   let engine: PGLiteEngine;
 
   // One PGLite per file — beforeEach wipes data only. PGLite cold-start is
-  // ~20s on CI; sharing one engine across 6 tests in this block saves ~2 min.
+  // ~20s on CI; sharing one engine across 7 tests in this block saves ~2 min.
   beforeAll(async () => {
     engine = new PGLiteEngine();
     await engine.connect({});
@@ -345,6 +346,20 @@ describe('scanBrainSources (PGLite)', () => {
     expect(report.ok).toBe(true);
     expect(report.total).toBe(0);
     expect(report.per_source[0]!.files_scanned).toBe(1);
+  });
+
+  test('does not parse multimodal image assets as Markdown frontmatter', async () => {
+    writeFileSync(join(tmp, 'good.md'), `${fence}\ntype: concept\ntitle: ok\n${fence}\n\nbody`);
+    writeFileSync(join(tmp, 'photo.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x01, 0xd9]));
+    await registerSource('multimodal', tmp);
+
+    await withEnv({ GBRAIN_EMBEDDING_MULTIMODAL: 'true' }, async () => {
+      const report = await scanBrainSources(engine);
+      const source = report.per_source.find(s => s.source_id === 'multimodal')!;
+      expect(source.total).toBe(0);
+      expect(source.errors_by_code.NULL_BYTES).toBeUndefined();
+      expect(source.files_scanned).toBe(1);
+    });
   });
 
   test('AbortSignal before scan: every source marked skipped (v0.38.2.0 partial-state contract)', async () => {

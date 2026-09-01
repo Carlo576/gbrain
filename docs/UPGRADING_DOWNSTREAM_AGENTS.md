@@ -1,5 +1,13 @@
 # Upgrading Downstream Agents
 
+> **Currency note:** this file is an append-only historical log and stopped
+> receiving new sections after v0.36.5.0. **The canonical, maintained upgrade
+> channel is `skills/migrations/v*.md`** (the agent-executed migration files
+> that `gbrain upgrade` / `gbrain post-upgrade` route through), plus
+> `CHANGELOG.md` for what each release changed. Use this file only to catch a
+> long-diverged fork up through the versions it covers; for anything after
+> v0.36.5.0, walk the migration files and CHANGELOG instead. Time-critical example: the ZeroEntropy shutdown (2026-09-04) — every fork still embedding or reranking through `zeroentropyai:*` must run `skills/migrations/v0.46.3.0.md` before that date.
+
 GBrain ships skills in `skills/`. Downstream agents (custom OpenClaw deployments,
 agent forks of any kind) often **copy** these skill files into their own workspace and
 diverge over time — adding agent-specific phases, removing irrelevant ones, tightening
@@ -577,8 +585,12 @@ correlation token, or a secret you know is OK to persist), pass it via
 
 **Worker setup** (one-time, per host):
 
-- `gbrain config set database_url postgresql://...` (or any other key you
-  want available for inherit)
+- `gbrain config set database_url postgresql://...` — file-plane routed
+  (writes `~/.gbrain/config.json`, which is where inherit's `loadConfig()`
+  resolution looks; works even when the DB is unreachable). The vendor API
+  keys (`anthropic_api_key`, `voyage_api_key`, ...) route to the file plane
+  the same way; other config keys write the DB plane, which `loadConfig()`
+  does not read — put those in the file or env directly
 - OR put the key in `~/.gbrain/config.json` directly
 - OR set `GBRAIN_DATABASE_URL` / `DATABASE_URL` / per-provider env on the
   worker process

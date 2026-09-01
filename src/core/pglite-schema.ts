@@ -22,6 +22,7 @@
  */
 
 import { applyChunkEmbeddingIndexPolicy } from './vector-index.ts';
+import { applyFtsLanguagePolicy } from './fts-language.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 
 const PGLITE_SCHEMA_SQL_TEMPLATE = `
@@ -226,6 +227,9 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   model           TEXT    NOT NULL DEFAULT '__EMBEDDING_MODEL__',
   token_count     INTEGER,
   embedded_at     TIMESTAMPTZ,
+  -- #4246 (v133): md5(chunk_text) at embed time. NULL = no embedding or
+  -- pre-v133 row (grandfathered by invalidateContentDriftEmbeddings).
+  embedded_text_hash TEXT,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- v0.19.0: code chunk metadata (markdown chunks leave NULL).
   language        TEXT,
@@ -382,7 +386,8 @@ CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline_entries(date);
 -- Dedup constraint: same (page, date, summary) treated as same event
 -- v0.41.18.0 (codex finding #11): widened to include source so distinct
 -- meeting provenance survives. Legacy rows have source='' (schema default).
-CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup ON timeline_entries(page_id, date, summary, source);
+-- #3737: keyed on md5(summary) — raw long summaries overflowed the btree cap.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup ON timeline_entries(page_id, date, md5(summary), source);
 -- v0.42.x (Life Chronicle): event-projection lookup + dedup (partial).
 CREATE INDEX IF NOT EXISTS idx_timeline_event_page ON timeline_entries(event_page_id) WHERE event_page_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_event_dedup ON timeline_entries(event_page_id, date) WHERE event_page_id IS NOT NULL;
@@ -461,10 +466,14 @@ CREATE TABLE IF NOT EXISTS minion_jobs (
   depth            INTEGER     NOT NULL DEFAULT 0,
   max_children     INTEGER,
   timeout_ms       INTEGER,
+  lock_duration_ms INTEGER,
   timeout_at       TIMESTAMPTZ,
   remove_on_complete BOOLEAN   NOT NULL DEFAULT FALSE,
   remove_on_fail   BOOLEAN     NOT NULL DEFAULT FALSE,
   idempotency_key  TEXT,
+  private_queue_owner_job_id INTEGER REFERENCES minion_jobs(id) ON DELETE SET NULL,
+  private_queue_owner_token TEXT,
+  private_queue_lease_until TIMESTAMPTZ,
   result           JSONB,
   progress         JSONB,
   error_text       TEXT,
@@ -481,7 +490,8 @@ CREATE TABLE IF NOT EXISTS minion_jobs (
   CONSTRAINT chk_nonnegative CHECK (attempts_made >= 0 AND attempts_started >= 0 AND stalled_counter >= 0 AND max_attempts >= 1 AND max_stalled >= 0),
   CONSTRAINT chk_depth_nonnegative CHECK (depth >= 0),
   CONSTRAINT chk_max_children_positive CHECK (max_children IS NULL OR max_children > 0),
-  CONSTRAINT chk_timeout_positive CHECK (timeout_ms IS NULL OR timeout_ms > 0)
+  CONSTRAINT chk_timeout_positive CHECK (timeout_ms IS NULL OR timeout_ms > 0),
+  CONSTRAINT chk_lock_duration_positive CHECK (lock_duration_ms IS NULL OR (lock_duration_ms >= 5000 AND lock_duration_ms <= 3600000))
 );
 
 CREATE INDEX IF NOT EXISTS idx_minion_jobs_claim ON minion_jobs (queue, priority ASC, created_at ASC) WHERE status = 'waiting';
@@ -495,6 +505,16 @@ CREATE INDEX IF NOT EXISTS idx_minion_jobs_parent_status ON minion_jobs (parent_
   WHERE parent_job_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_minion_jobs_idempotency ON minion_jobs (idempotency_key)
   WHERE idempotency_key IS NOT NULL;
+-- WP4/WP5 (v127, ENG-10): wedge-signal index — covers the queue-health count
+-- FILTERs and max(updated_at) reads in queryWedgeSignals (supervisor.ts).
+CREATE INDEX IF NOT EXISTS idx_minion_jobs_queue_status_updated ON minion_jobs (queue, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_minion_jobs_private_queue_recovery
+  ON minion_jobs (queue, private_queue_lease_until)
+  WHERE queue LIKE 'dream-inline-%'
+    AND status IN ('waiting','active','delayed','waiting-children','paused');
+CREATE INDEX IF NOT EXISTS idx_minion_jobs_private_queue_owner
+  ON minion_jobs (private_queue_owner_job_id)
+  WHERE private_queue_owner_job_id IS NOT NULL;
 
 -- Inbox table for sidechannel messaging
 CREATE TABLE IF NOT EXISTS minion_inbox (
@@ -553,6 +573,11 @@ CREATE TABLE IF NOT EXISTS subagent_messages (
 CREATE INDEX IF NOT EXISTS idx_subagent_messages_job ON subagent_messages (job_id, message_idx);
 CREATE INDEX IF NOT EXISTS idx_subagent_messages_provider ON subagent_messages (job_id, provider_id);
 
+-- tool_use_id holds the RAW provider id and is deliberately NOT unique per
+-- job (#4155): replay-style providers reuse the same short id on every turn.
+-- Row identity is (job_id, message_idx, ordinal); readers key executions by
+-- (message_idx, tool_use_id), never by tool_use_id alone. The former job-wide
+-- unique constraint uniq_subagent_tools_use_id was dropped in migration v131.
 CREATE TABLE IF NOT EXISTS subagent_tool_executions (
   id                  BIGSERIAL PRIMARY KEY,
   job_id              BIGINT      NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
@@ -573,7 +598,6 @@ CREATE TABLE IF NOT EXISTS subagent_tool_executions (
   gbrain_tool_use_id  UUID,
   started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   ended_at            TIMESTAMPTZ,
-  CONSTRAINT uniq_subagent_tools_use_id UNIQUE (job_id, tool_use_id),
   CONSTRAINT subagent_tool_executions_stable_id UNIQUE (job_id, message_idx, ordinal),
   CONSTRAINT chk_subagent_tools_status CHECK (status IN ('pending','complete','failed'))
 );
@@ -898,6 +922,11 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   bound_brain_id          TEXT NULL,
   bound_slug_prefixes     TEXT[] NULL,
   bound_max_concurrent    INTEGER NOT NULL DEFAULT 1,
+  -- WP4 (v127): per-client MCP tool surface + who set it ('operator' |
+  -- 'self' | 'dcr_default'). Value space is OPEN (future client tiers write
+  -- tier names into surface); NULL = server/config surface resolution.
+  surface                 TEXT NULL,
+  surface_set_by          TEXT NULL,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- v0.34.1 (#861, D13 + #876): source_id is the OAuth client's write-source
@@ -990,6 +1019,81 @@ CREATE INDEX IF NOT EXISTS context_volunteer_events_src_time_idx
   ON context_volunteer_events (source_id, volunteered_at DESC);
 CREATE INDEX IF NOT EXISTS context_volunteer_events_src_slug_idx
   ON context_volunteer_events (source_id, slug);
+
+-- session_context_state (v0.45.7 / migration v126 — ambient recall issue #1).
+CREATE TABLE IF NOT EXISTS session_context_state (
+  source_id           TEXT NOT NULL,
+  client_id           TEXT NOT NULL DEFAULT 'local',
+  session_id          TEXT NOT NULL,
+  standing_entities   JSONB NOT NULL DEFAULT '[]'::jsonb,
+  surfaced_slugs      JSONB NOT NULL DEFAULT '[]'::jsonb,
+  checkpoint_manifest JSONB NOT NULL DEFAULT '[]'::jsonb,
+  last_wake_at        TIMESTAMPTZ,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_id, client_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS session_context_state_updated_idx
+  ON session_context_state (updated_at);
+
+-- chat_usage_log (#4218 / migration v140). See src/schema.sql for rationale.
+CREATE TABLE IF NOT EXISTS chat_usage_log (
+  id                 BIGSERIAL PRIMARY KEY,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  model              TEXT NOT NULL,
+  provider           TEXT,
+  phase              TEXT,
+  input_tokens       INTEGER NOT NULL DEFAULT 0,
+  output_tokens      INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd           DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS idx_chat_usage_log_created
+  ON chat_usage_log (created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_usage_log_model
+  ON chat_usage_log (model, created_at);
+
+-- open_loops + loop_suppressions (migration v144). See src/schema.sql for rationale.
+CREATE TABLE IF NOT EXISTS open_loops (
+  id                 BIGSERIAL PRIMARY KEY,
+  source_id          TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  dedup_key          TEXT NOT NULL,
+  loop_type          TEXT NOT NULL CHECK (loop_type IN (
+                       'commitment_owed_by_me','commitment_owed_to_me',
+                       'unanswered_inbound','unanswered_outbound','decision_pending')),
+  counterparty_slug  TEXT,
+  counterparty_email TEXT,
+  summary            TEXT NOT NULL,
+  evidence           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  thread_id          TEXT,
+  page_slug          TEXT,
+  due_at             TIMESTAMPTZ,
+  status             TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','dropped','stale')),
+  detector           TEXT NOT NULL CHECK (detector IN ('deterministic_thread','llm_extract','manual')),
+  confidence         REAL NOT NULL DEFAULT 1.0,
+  fact_id            BIGINT,
+  opened_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_activity_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at          TIMESTAMPTZ,
+  closed_by          TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT open_loops_dedup UNIQUE (source_id, dedup_key)
+);
+CREATE INDEX IF NOT EXISTS open_loops_status_idx
+  ON open_loops (source_id, status, last_activity_at DESC);
+CREATE INDEX IF NOT EXISTS open_loops_counterparty_idx
+  ON open_loops (source_id, counterparty_slug) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS open_loops_thread_idx
+  ON open_loops (source_id, thread_id) WHERE status = 'open';
+CREATE TABLE IF NOT EXISTS loop_suppressions (
+  id         BIGSERIAL PRIMARY KEY,
+  source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL CHECK (kind IN ('sender','thread')),
+  value      TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT loop_suppressions_uniq UNIQUE (source_id, kind, value)
+);
 
 -- ============================================================
 -- migration_impact_log (v0.41.18.0 — gbrain onboard wave)
@@ -1114,7 +1218,7 @@ export function getPGLiteSchema(
     throw new Error(`Invalid embedding dimensions: ${dims}`);
   }
   const sanitizedModel = String(model).replace(/'/g, "''");
-  return applyChunkEmbeddingIndexPolicy(PGLITE_SCHEMA_SQL_TEMPLATE, parsedDims)
+  return applyFtsLanguagePolicy(applyChunkEmbeddingIndexPolicy(PGLITE_SCHEMA_SQL_TEMPLATE, parsedDims))
     .replace(/__EMBEDDING_DIMS__/g, String(parsedDims))
     .replace(/__EMBEDDING_MODEL__/g, sanitizedModel);
 }

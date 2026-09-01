@@ -15,7 +15,7 @@ import { describe, test, expect, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateModelId, probeChatModel } from '../../src/core/ai/gateway.ts';
+import { validateModelId, probeChatModel, configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
 import { normalizeModelId } from '../../src/core/model-id.ts';
 import { withEnv } from '../helpers/with-env.ts';
 
@@ -60,8 +60,13 @@ describe('validateModelId (#1698 C1 core)', () => {
     if (!v.ok) expect(v.reason).toBe('unknown_provider');
   });
 
-  test('unknown_model for a typo native model', () => {
-    const v = validateModelId('anthropic:claude-bogus-9');
+  test('ok for an unlisted native model (no runtime allowlist — provider decides)', () => {
+    expect(validateModelId('anthropic:claude-bogus-9').ok).toBe(true);
+    expect(validateModelId('openai:gpt-5.6-sol').ok).toBe(true);
+  });
+
+  test('unknown_model when the provider lacks the touchpoint entirely', () => {
+    const v = validateModelId('voyage:voyage-3', 'chat');
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.reason).toBe('unknown_model');
   });
@@ -85,7 +90,10 @@ describe('probeChatModel (#1698 = validity + key, config-independent)', () => {
   test('unknown_provider / unknown_model classify regardless of key (validity runs first)', async () => {
     await withEnv(withKeyEnv(), async () => {
       expect(probeChatModel('bogusprovider:x')).toMatchObject({ ok: false, reason: 'unknown_provider' });
-      expect(probeChatModel('anthropic:claude-bogus-9')).toMatchObject({ ok: false, reason: 'unknown_model' });
+      // unknown_model now fires only for a missing touchpoint (voyage has no
+      // chat); unlisted ids on chat-capable providers pass local validation.
+      expect(probeChatModel('voyage:voyage-3')).toMatchObject({ ok: false, reason: 'unknown_model' });
+      expect(probeChatModel('anthropic:claude-bogus-9').ok).toBe(true);
     });
   });
 
@@ -101,5 +109,52 @@ describe('probeChatModel (#1698 = validity + key, config-independent)', () => {
     await withEnv(withKeyEnv(), async () => {
       expect(probeChatModel(normalizeModelId('anthropic/claude-sonnet-4-6')).ok).toBe(true);
     });
+  });
+});
+
+// #2119 read-side: a DB-plane anthropic_api_key reaches the gateway env via
+// loadConfigWithEngine → buildGatewayConfig → configureGateway, which stashes
+// it into the anthropic-key snapshot. probeChatModel (gateway-config-
+// independent by design) must see it — precedence env > snapshot > file.
+describe('probeChatModel gateway-env snapshot (#2119)', () => {
+  test('DB-plane-merged key in the gateway env satisfies the probe; reset clears it', async () => {
+    try {
+      await withEnv(noKeyEnv(), async () => {
+        // Simulates connectEngine's boot fold after the DB merge: the merged
+        // config carried anthropic_api_key, so the gateway env has it even
+        // though process.env and the config file do not.
+        configureGateway({ env: { ANTHROPIC_API_KEY: 'sk-db-plane' } });
+        expect(probeChatModel(REAL).ok).toBe(true);
+        // Reset returns to the preload baseline (fresh process.env capture,
+        // still scrubbed here) — the stash must not outlive the config that
+        // installed it.
+        resetGateway();
+        const p = probeChatModel(REAL);
+        expect(p.ok).toBe(false);
+        if (!p.ok) expect(p.reason).toBe('unavailable');
+      });
+    } finally {
+      resetGateway(); // re-capture the real process env into the baseline
+    }
+  });
+
+  test('env-verbatim keys are NOT stashed — a hermetic env scrub still wins', async () => {
+    try {
+      await withEnv({ ANTHROPIC_API_KEY: 'sk-proc', GBRAIN_HOME: emptyHome() }, async () => {
+        // Preload-shaped fold: env captured wholesale. The key came verbatim
+        // from process.env, so the snapshot must stay empty.
+        configureGateway({ env: { ...process.env } });
+      });
+      await withEnv(noKeyEnv(), async () => {
+        // Env scrubbed, file empty, snapshot deliberately not populated →
+        // the probe honestly reports no key despite the configured gateway
+        // env still carrying sk-proc.
+        const p = probeChatModel(REAL);
+        expect(p.ok).toBe(false);
+        if (!p.ok) expect(p.reason).toBe('unavailable');
+      });
+    } finally {
+      resetGateway();
+    }
   });
 });

@@ -147,6 +147,52 @@ describe('engine.getPage honors sourceIds[] (federated grant)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// #3931 — get_page returns a nondeterministic row when a slug is shadowed
+// across federated sources. `shared/dup` (seeded above) exists in BOTH
+// 'alpha' and 'beta' — the ambiguous case. Without an anchor-aware ORDER BY,
+// LIMIT 1 either returns planner-order-dependent rows (pre-fix) or always
+// prefers a hardcoded 'default' / lexical-first source regardless of which
+// source the caller actually resolved to (the gap left after #4219, which
+// fixed pure nondeterminism but hardcoded the anchor to 'default').
+// ---------------------------------------------------------------------------
+describe('#3931 engine.getPage same-slug shadowing across federated sources is deterministic', () => {
+  test('anchor source (sourceIds[0]) wins even when it is not lexically first', async () => {
+    // 'alpha' < 'beta' lexically, so a lexical-only tiebreak would always
+    // prefer alpha regardless of caller intent. Anchor-first must override
+    // that when the caller's own resolved source (position 0) is beta.
+    const page = await engine.getPage('shared/dup', { sourceIds: ['beta', 'alpha'] });
+    expect(page?.title).toBe('Dup beta');
+  });
+
+  test('re-anchoring the same slug flips the winner', async () => {
+    const asAlphaAnchor = await engine.getPage('shared/dup', { sourceIds: ['alpha', 'beta'] });
+    const asBetaAnchor = await engine.getPage('shared/dup', { sourceIds: ['beta', 'alpha'] });
+    expect(asAlphaAnchor?.title).toBe('Dup alpha');
+    expect(asBetaAnchor?.title).toBe('Dup beta');
+  });
+
+  test('anchor absent from the candidate rows falls back to lexical source_id order', async () => {
+    // 'gamma' is a real granted source but owns no 'shared/dup' page — the
+    // anchor itself has no matching row, so the tiebreak falls through to
+    // plain `source_id ASC` among the sources that DO have the page.
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path) VALUES ('gamma', 'gamma', '/tmp/gamma') ON CONFLICT (id) DO NOTHING`,
+    );
+    const page = await engine.getPage('shared/dup', { sourceIds: ['gamma', 'beta', 'alpha'] });
+    expect(page?.title).toBe('Dup alpha'); // 'alpha' < 'beta' lexically
+  });
+
+  test('repeated calls with the same scope are stable, not planner-order luck', async () => {
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => engine.getPage('shared/dup', { sourceIds: ['beta', 'alpha'] })),
+    );
+    for (const page of results) {
+      expect(page?.title).toBe('Dup beta');
+    }
+  });
+});
+
 describe('get_page handler closes the cross-source exact-read leak', () => {
   test('remote client granted only [alpha] CANNOT read a beta-only slug', async () => {
     const ctx = ctxOf({ remote: true, auth: { token: 't', clientId: 'c', scopes: [], allowedSources: ['alpha'] } as any });
@@ -371,5 +417,120 @@ describe('#2200 engine secondary-fetch methods honor sourceIds[]', () => {
     await engine.addTimelineEntry('secret/beta-doc', { date: '2026-06-01', source: 'test', summary: 'june event', detail: 'd' }, { sourceId: 'beta' });
     const windowed = await engine.getTimeline('secret/beta-doc', { sourceIds: ['beta'], after: '2026-03-01', before: '2026-12-31' });
     expect(windowed.map(e => e.summary)).toEqual(['june event']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2555 — get_chunks honors the federated source grant (same class as #1393/
+// #2200, chunk read path). Pre-fix the op used the pre-#2200 scalar pattern
+// and engine.getChunks had no sourceIds[] support: a federated client that
+// could read a page via get_page got [] from get_chunks.
+// ---------------------------------------------------------------------------
+describe('#2555 get_chunks federated scope', () => {
+  const get_chunks = operations.find(o => o.name === 'get_chunks')!;
+
+  beforeEach(async () => {
+    await engine.upsertChunks('secret/beta-doc', [
+      { chunk_index: 0, chunk_text: 'beta chunk zero', chunk_source: 'compiled_truth' },
+      { chunk_index: 1, chunk_text: 'beta chunk one', chunk_source: 'compiled_truth' },
+    ], { sourceId: 'beta' });
+    // Same-slug decoy chunks in 'default' — the cross-source bleed guard.
+    await engine.upsertChunks('secret/beta-doc', [
+      { chunk_index: 0, chunk_text: 'default decoy chunk', chunk_source: 'compiled_truth' },
+    ], { sourceId: 'default' });
+  });
+
+  test('op: federated grant including the page source returns its chunks (the #2555 repro)', async () => {
+    const ctx = ctxOf({ remote: true, sourceId: undefined, auth: { token: 't', clientId: 'c', scopes: [], allowedSources: ['alpha', 'beta'] } as any });
+    const chunks = await get_chunks.handler(ctx, { slug: 'secret/beta-doc' }) as Array<{ chunk_text: string }>;
+    expect(chunks.map(c => c.chunk_text)).toEqual(['beta chunk zero', 'beta chunk one']);
+  });
+
+  test('op: grant excluding the page source stays empty — never falls through to default', async () => {
+    const ctx = ctxOf({ remote: true, sourceId: undefined, auth: { token: 't', clientId: 'c', scopes: [], allowedSources: ['alpha'] } as any });
+    const chunks = await get_chunks.handler(ctx, { slug: 'secret/beta-doc' }) as Array<{ chunk_text: string }>;
+    expect(chunks).toEqual([]);
+  });
+
+  test('op: no grant + default floor sees only the default decoy, never beta chunks', async () => {
+    const ctx = ctxOf({ remote: true, sourceId: 'default', auth: undefined });
+    const chunks = await get_chunks.handler(ctx, { slug: 'secret/beta-doc' }) as Array<{ chunk_text: string }>;
+    expect(chunks.map(c => c.chunk_text)).toEqual(['default decoy chunk']);
+  });
+
+  test('engine: sourceIds[] precedence over scalar; trimmed SELECT keeps the Chunk shape', async () => {
+    // array beats scalar: scalar 'default' would return the decoy; array ['beta'] must win.
+    const prec = await engine.getChunks('secret/beta-doc', { sourceId: 'default', sourceIds: ['beta'] });
+    expect(prec.map(c => c.chunk_text)).toEqual(['beta chunk zero', 'beta chunk one']);
+    // #2544 trim: embedding is deliberately not selected (rowToChunk discards
+    // it here anyway) and the rest of the Chunk shape survives.
+    expect(prec[0].embedding).toBeNull();
+    expect(prec[0].chunk_index).toBe(0);
+    expect(prec[0].chunk_source).toBe('compiled_truth');
+    // Unset opts keep the historical 'default' floor (importCodeFile contract).
+    const def = await engine.getChunks('secret/beta-doc');
+    expect(def.map(c => c.chunk_text)).toEqual(['default decoy chunk']);
+  });
+
+  test('#2544 structural pin: getChunks never SELECTs cc.* and fetches cc.embedding only behind includeEmbedding', async () => {
+    // The behavioral assertion above is vacuous for the trim itself —
+    // rowToChunk hard-nulls embedding regardless of the SELECT. This pin
+    // exists because a master merge once silently restored `SELECT cc.*`
+    // while the doc comment kept claiming the trim: assert the SELECT shape
+    // at the source level for BOTH engines.
+    //
+    // The vector column is not forbidden outright anymore: importCodeFile's
+    // embedding-reuse cache CONSUMES it (embed-reuse.ts), opted in via
+    // `includeEmbedding`. The invariant is unchanged in spirit and stricter
+    // in letter: no unconditional vector fetch, and the opt-in path must
+    // exist — a half-revert that strands the flag fails too.
+    const { readFileSync } = await import('fs');
+    for (const enginePath of ['src/core/postgres-engine.ts', 'src/core/pglite-engine.ts']) {
+      const src = readFileSync(new URL(`../${enginePath}`, import.meta.url), 'utf-8');
+      const start = src.indexOf('async getChunks(slug');
+      expect(start).toBeGreaterThan(0);
+      // The method's own close (`\n  }` at 2-space indent) — an inline
+      // `async (tx) =>` callback must not truncate the body, and the NEXT
+      // method (e.g. buildStaleChunkWhere's `cc.embedding IS NULL` WHERE
+      // predicate) must not leak in. Strip line comments: the pin targets
+      // the SQL, not prose that may cite the anti-pattern.
+      const end = src.indexOf('\n  }\n', start + 10);
+      const body = src.slice(start, end).replace(/\/\/[^\n]*/g, '');
+      expect(body, `${enginePath} getChunks must not SELECT cc.*`).not.toContain('cc.*');
+      // Every non-vector field rowToChunk reads MUST be selected — omitting
+      // one silently degrades round-trips (embed.ts getChunks→upsertChunks
+      // rewrote image chunks as text when cc.modality was dropped).
+      for (const col of ['chunk_text', 'chunk_source', 'model', 'token_count', 'embedded_at',
+        'language', 'symbol_name', 'symbol_type', 'start_line', 'end_line',
+        'parent_symbol_path', 'doc_comment', 'symbol_name_qualified', 'modality']) {
+        expect(body, `${enginePath} getChunks must select cc.${col}`).toContain(`cc.${col}`);
+      }
+      // Two references to the vector column are legitimate; everything else is
+      // the #2544 egress regression coming back.
+      //   1. `(cc.<active column> IS NULL) AS embedding_is_null` — a cheap
+      //      boolean, no vector egress (a schema rebuild NULLs vectors without
+      //      touching embedded_at, and the per-slug embed filter needs that
+      //      truth). S2: the column is the registry-ACTIVE one (resolved via
+      //      activeEmbeddingColId), not the literal legacy `embedding` — a
+      //      registry-routed brain's truth lives in the active column.
+      //   2. the `includeEmbedding` opt-in — importCodeFile's reuse cache
+      //      CONSUMES the vectors (see embed-reuse.ts), and #2544 silently made
+      //      that cache a no-op by dropping the column unconditionally. It too
+      //      selects the ACTIVE column (aliased AS embedding) so a reused
+      //      vector matches the column upsertChunks writes.
+      // Strip (1), then keep forbidding any bare legacy `cc.embedding` use,
+      // require every surviving vector select to be gated by (2), and require
+      // the gate to still exist so a half-revert stranding the flag also fails.
+      const nullBooleanShape = /\(cc\..*? IS NULL\) AS embedding_is_null/g;
+      const withoutNullBoolean = body.replace(nullBooleanShape, '');
+      expect(withoutNullBoolean).not.toMatch(/cc\.embedding\b/);
+      expect(body).toMatch(/\(cc\..*? IS NULL\) AS embedding_is_null/);
+      expect(body, `${enginePath} getChunks embedding_is_null must key on the registry-active column`).toContain('activeEmbeddingColId');
+      const vectorLines = withoutNullBoolean.split('\n').filter((l) => / AS embedding\b/.test(l));
+      expect(vectorLines.length, `${enginePath} getChunks must keep the includeEmbedding opt-in`).toBeGreaterThan(0);
+      for (const line of vectorLines) {
+        expect(line, `${enginePath} getChunks must gate the vector select behind includeEmbedding`).toMatch(/includeEmbedding \?/);
+      }
+    }
   });
 });

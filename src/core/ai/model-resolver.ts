@@ -77,6 +77,17 @@ export function resolveRecipe(modelId: string): { parsed: ParsedModelId; recipe:
   return { parsed, recipe };
 }
 
+/**
+ * Resolve the declared chat context window for a provider-qualified model.
+ * Model-specific recipe metadata wins over the provider-wide default.
+ * Returns undefined when the provider has no chat context declaration.
+ */
+export function resolveChatContextTokens(modelId: string): number | undefined {
+  const { parsed, recipe } = resolveRecipe(modelId);
+  const chat = recipe.touchpoints.chat;
+  return chat?.model_context_tokens?.[parsed.modelId] ?? chat?.max_context_tokens;
+}
+
 type KnownTouchpointKey = 'embedding' | 'expansion' | 'chat' | 'reranker';
 
 function getTouchpoint(recipe: Recipe, touchpoint: TouchpointKind): EmbeddingTouchpoint | ExpansionTouchpoint | ChatTouchpoint | RerankerTouchpoint | undefined {
@@ -89,27 +100,19 @@ function getTouchpoint(recipe: Recipe, touchpoint: TouchpointKind): EmbeddingTou
 /**
  * Assert the resolved recipe actually offers the requested touchpoint.
  *
- * @param extendedModels Per-gateway-instance Set of additional models the
- *   user opted into via `cfg.chat_model` / `cfg.embedding_model` /
- *   `cfg.expansion_model` / `models.default` / `models.tier.*`. When the
- *   modelId is in this set, the native-recipe allowlist check is skipped
- *   (the user explicitly chose this model via config — provider rejection
- *   surfaces at HTTP call time, with a clear `model_not_found` from the
- *   provider).
- *
- *   Default code paths (hardcoded model strings in source code) MUST NOT
- *   pass this argument — typos in code still fail fast. Only config-derived
- *   model selection extends the allowlist.
- *
- *   v0.31.12 — replaces the earlier plan to soften the validator from throw
- *   to warn (which would have removed the fail-fast contract for chat/expand/
- *   embed all three; per Codex F4/F5 in plan review).
+ * This checks the PROVIDER's capability (anthropic has no embeddings; voyage
+ * has no chat), never the model id. Recipe `models:` arrays are informational
+ * — defaults for `--model <provider>` shorthand, guard-test fixtures for the
+ * repo's own hardcoded defaults, display in `gbrain providers list` — not a
+ * runtime allowlist. Frontier models ship weekly; any id the user names goes
+ * to the provider, and a nonexistent one surfaces as the provider's own
+ * `model_not_found` at call time (`gbrain models doctor` probes the configured
+ * models live for a pre-flight check).
  */
 export function assertTouchpoint(
   recipe: Recipe,
   touchpoint: TouchpointKind,
   modelId: string,
-  extendedModels?: ReadonlySet<string>,
 ): void {
   const tp = getTouchpoint(recipe, touchpoint);
   if (!tp) {
@@ -117,27 +120,10 @@ export function assertTouchpoint(
       `Provider "${recipe.id}" does not support touchpoint "${touchpoint}".`,
       touchpoint === 'embedding' && recipe.id === 'anthropic'
         ? 'Anthropic has no embedding model. Use openai or google for embeddings.'
-        : touchpoint === 'chat' && (recipe.id === 'voyage' || recipe.id === 'ollama')
+        : touchpoint === 'chat' && recipe.id === 'voyage'
           ? `${recipe.name} is configured here only for embeddings. Use openai/anthropic/google/deepseek/groq/together for chat.`
           : undefined,
     );
-  }
-  const supportedModels = tp.models ?? [];
-  if (supportedModels.length > 0 && !supportedModels.includes(modelId)) {
-    // Non-fatal: providers like ollama/litellm accept arbitrary model ids. We only warn for native providers.
-    if (recipe.tier === 'native') {
-      // v0.31.12 recipe-models merge: if the user opted into this model via
-      // config (cfg.chat_model, models.default, models.tier.*), skip the
-      // throw. The model goes to the provider; provider 404s surface as
-      // `model_not_found` via `gbrain models doctor`.
-      if (extendedModels && extendedModels.has(modelId)) {
-        return;
-      }
-      throw new AIConfigError(
-        `Model "${modelId}" is not listed for ${recipe.name} ${touchpoint}.`,
-        `Known models: ${supportedModels.join(', ')}. Use one of these or add it to the recipe (or add an alias).`,
-      );
-    }
   }
 }
 
@@ -172,7 +158,18 @@ export function embeddingDimsForModel(
   // (openrouter nested) are left intact — they're the model id.
   const colon = modelId.indexOf(':');
   const bare = colon === -1 ? modelId : modelId.slice(colon + 1);
-  const declared = tp.model_dims?.[bare];
+  // #4123: fold BOTH sides — configured ids arrive cased (`ollama:Qwen3-Embed-8B`)
+  // and user-editable recipe model_dims tables can carry cased keys too.
+  // Exact match first (zero behavior change for today's all-lowercase
+  // tables), then a case-insensitive scan. Without this, a cased id fell
+  // through to default_dims and `gbrain init` built a wrong-width column.
+  let declared = tp.model_dims?.[bare];
+  if (typeof declared !== 'number' && tp.model_dims) {
+    const bareFolded = bare.toLowerCase();
+    for (const [k, v] of Object.entries(tp.model_dims)) {
+      if (k.toLowerCase() === bareFolded) { declared = v; break; }
+    }
+  }
   if (typeof declared === 'number' && declared > 0) return declared;
   return tp.default_dims ?? 0;
 }

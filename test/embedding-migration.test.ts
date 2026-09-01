@@ -31,10 +31,14 @@ import {
   applyEmbeddingMigration,
   completeEmbeddingMigration,
   reconcilePageSignatures,
+  verifyMigrationComplete,
+  readMigrationStatus,
+  countFalseStampedChunks,
   migrationSignature,
   MIGRATION_STATE_KEY,
   MIGRATION_COMPLETED_KEY,
 } from '../src/core/embedding-migration.ts';
+import { invalidateStaleSignatureEmbeddingsGuarded } from '../src/core/embedding-invalidation.ts';
 import { estimateCostFromChars } from '../src/core/embedding-pricing.ts';
 import { operations } from '../src/core/operations.ts';
 
@@ -116,6 +120,17 @@ describe('resolveMigrationTarget', () => {
   test('recipe with default_dims=0 requires --dim', () => {
     expect(() => resolveMigrationTarget('litellm:my-custom-model')).toThrow(/--dim/);
     expect(resolveMigrationTarget('litellm:my-custom-model', 1024).toDims).toBe(1024);
+  });
+  test('v0.46.3: refuses a sunset target (paid re-embed onto a dying provider)', () => {
+    expect(() => resolveMigrationTarget('zeroentropyai:zembed-1')).toThrow(/Refusing to migrate ONTO/);
+    expect(() => resolveMigrationTarget('zeroentropyai:zembed-1')).toThrow(/--force-sunset-target/);
+  });
+  test('v0.46.3: allowSunsetTarget is the loud escape hatch (self-hosted endpoint)', () => {
+    // Self-hosters keep the brain's existing width explicitly (--dim 1280).
+    expect(resolveMigrationTarget('zeroentropyai:zembed-1', 1280, { allowSunsetTarget: true })).toEqual({
+      toModel: 'zeroentropyai:zembed-1',
+      toDims: 1280,
+    });
   });
 });
 
@@ -362,6 +377,21 @@ describe('applyEmbeddingMigration', () => {
       { chunk_index: 0, chunk_text: 'fghij', chunk_source: 'compiled_truth', token_count: 4 },
       { chunk_index: 1, chunk_text: 'not embedded', chunk_source: 'compiled_truth', token_count: 4 },
     ]);
+    // The drain stamps chunk.model with the model that actually embedded each
+    // chunk; reconcile only stamps pages whose chunks ALL carry the target
+    // model (a foreign-model chunk means the page is NOT in the new space).
+    // Mirror the post-drain state the batch-boundary shape actually leaves.
+    await engine.executeRaw(
+      `UPDATE content_chunks SET model = 'openai:text-embedding-3-small'
+        WHERE page_id IN (SELECT id FROM pages WHERE slug IN ('done','partial') AND source_id = 'default')`,
+    );
+    // 'foreign' — every chunk embedded, but by a DIFFERENT model (a non-locked
+    // writer raced the drain): must NOT get the new stamp.
+    await seedEmbedded('foreign', 'klmno', 'old:model:1');
+    await engine.executeRaw(
+      `UPDATE content_chunks SET model = 'other:writer-model'
+        WHERE page_id = (SELECT id FROM pages WHERE slug = 'foreign' AND source_id = 'default')`,
+    );
 
     const plan = await planEmbeddingMigration(engine, {
       to: 'openai:text-embedding-3-small', dim: colDim,
@@ -371,10 +401,11 @@ describe('applyEmbeddingMigration', () => {
 
     const sig = `openai:text-embedding-3-small:${colDim}`;
     const rows = await engine.executeRaw<{ slug: string; embedding_signature: string | null }>(
-      `SELECT slug, embedding_signature FROM pages WHERE slug IN ('done','partial') ORDER BY slug`,
+      `SELECT slug, embedding_signature FROM pages WHERE slug IN ('done','partial','foreign') ORDER BY slug`,
     );
     expect(rows.find(r => r.slug === 'done')?.embedding_signature).toBe(sig);
     expect(rows.find(r => r.slug === 'partial')?.embedding_signature).toBe('old:model:1');
+    expect(rows.find(r => r.slug === 'foreign')?.embedding_signature).toBe('old:model:1');
   });
 
   test('completeEmbeddingMigration clears the state marker and stamps completion', async () => {
@@ -384,6 +415,158 @@ describe('applyEmbeddingMigration', () => {
     expect(await engine.getConfig(MIGRATION_STATE_KEY)).toBeFalsy();
     const done = JSON.parse((await engine.getConfig(MIGRATION_COMPLETED_KEY))!);
     expect(done.to_model).toBe('openai:text-embedding-3-small');
+  });
+});
+
+describe('#4305 false target stamps + #4306 embed_skip-safe invalidation', () => {
+  const TARGET = 'openai:text-embedding-3-small';
+
+  /**
+   * Page with one chunk embedded at column width under an EXPLICIT chunk
+   * model, optional page signature + frontmatter (the embed_skip shapes).
+   */
+  async function seedModeled(
+    slug: string,
+    text: string,
+    opts: { model: string; signature?: string; frontmatter?: Record<string, unknown>; embedded?: boolean },
+  ): Promise<void> {
+    await engine.putPage(slug, {
+      type: 'note', title: slug, compiled_truth: `# ${slug}`,
+      ...(opts.frontmatter ? { frontmatter: opts.frontmatter } : {}),
+    });
+    await engine.upsertChunks(slug, [
+      { chunk_index: 0, chunk_text: text, chunk_source: 'compiled_truth', token_count: 4, model: opts.model },
+    ]);
+    if (opts.embedded !== false) {
+      await engine.executeRaw(
+        `UPDATE content_chunks
+            SET embedding = ('[' || array_to_string(array_fill(0.0::real, ARRAY[$1::int]), ',') || ']')::vector,
+                model = $3
+          WHERE page_id = (SELECT id FROM pages WHERE slug = $2 AND source_id = 'default')`,
+        [colDim, slug, opts.model],
+      );
+    }
+    if (opts.signature) await engine.setPageEmbeddingSignature(slug, { signature: opts.signature });
+  }
+
+  async function chunkState(slug: string): Promise<{ embedded: number; nulls: number }> {
+    const rows = await engine.executeRaw<{ embedded: number; nulls: number }>(
+      `SELECT count(*) FILTER (WHERE cc.embedding IS NOT NULL)::int AS embedded,
+              count(*) FILTER (WHERE cc.embedding IS NULL)::int AS nulls
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = $1 AND p.source_id = 'default'`,
+      [slug],
+    );
+    return { embedded: Number(rows[0]?.embedded ?? 0), nulls: Number(rows[0]?.nulls ?? 0) };
+  }
+
+  test('#4305: plan, verify and --status all see chunks hidden behind a false target stamp', async () => {
+    const sig = migrationSignature(TARGET, colDim);
+    // Page stamped WITH the target signature while its chunk still carries the
+    // old provider's model — pre-fix the whole toolchain reported converged.
+    await seedModeled('false-stamp', 'abcde', { model: 'voyage:voyage-3-large', signature: sig });
+
+    expect((await countFalseStampedChunks(engine, TARGET, colDim)).chunks).toBe(1);
+
+    const plan = await planEmbeddingMigration(engine, { to: TARGET, dim: colDim });
+    expect(plan.false_stamped_chunks).toBe(1);
+    expect(plan.chunks_to_embed).toBe(1); // pre-fix: 0 (the #4305 symptom)
+    expect(plan.total_chars).toBe(5);
+
+    const verify = await verifyMigrationComplete(engine, { toModel: TARGET, toDims: colDim }, {
+      filePlane: { model: TARGET, dims: colDim },
+    });
+    expect(verify.complete).toBe(false); // pre-fix: true
+    expect(verify.blockers.join(' ')).toMatch(/false stamp/);
+    expect(verify.details.false_stamped_chunks).toBe(1);
+
+    await engine.setConfig('embedding_model', TARGET);
+    await engine.setConfig('embedding_dimensions', String(colDim));
+    const status = await readMigrationStatus(engine);
+    expect(status.stale_vs_target.false_stamped).toBe(1);
+  });
+
+  test('#4305: bare-model-tail rows are NOT flagged (no surprise paid re-embed on pre-#3461 rows)', async () => {
+    const sig = migrationSignature(TARGET, colDim);
+    // Old rows stored the model without the provider prefix; the stamp is
+    // honest for them — flagging would trigger a surprise full re-embed.
+    await seedModeled('bare-tail', 'abcde', { model: 'text-embedding-3-small', signature: sig });
+    expect((await countFalseStampedChunks(engine, TARGET, colDim)).chunks).toBe(0);
+    const plan = await planEmbeddingMigration(engine, { to: TARGET, dim: colDim });
+    expect(plan.false_stamped_chunks).toBe(0);
+    expect(plan.chunks_to_embed).toBe(0);
+  });
+
+  test('#4305: apply clears the false stamp and re-invalidates the page', async () => {
+    const sig = migrationSignature(TARGET, colDim);
+    await seedModeled('false-stamp', 'abcde', { model: 'voyage:voyage-3-large', signature: sig });
+
+    const plan = await planEmbeddingMigration(engine, { to: TARGET, dim: colDim });
+    const res = await applyEmbeddingMigration(engine, plan);
+    expect(res.status).toBe('applied');
+    if (res.status !== 'applied') throw new Error('unreachable');
+    expect(res.invalidated).toBe(1); // pre-fix: 0 (page skipped by its stamp)
+
+    const rows = await engine.executeRaw<{ embedding_signature: string | null }>(
+      `SELECT embedding_signature FROM pages WHERE slug = 'false-stamp' AND source_id = 'default'`,
+    );
+    expect(rows[0]?.embedding_signature).toBeNull();
+    expect(await chunkState('false-stamp')).toEqual({ embedded: 0, nulls: 1 });
+    // The standard NULL-embedding cursor now owns the re-embed.
+    expect(await engine.countStaleChunks()).toBe(1);
+  });
+
+  test('#4306: invalidation preserves embed_skip pages\' retained vectors', async () => {
+    const sig = migrationSignature(TARGET, colDim);
+    // Embedded BEFORE the embed_skip marker appeared (the content-sanity
+    // oversize shape) — pre-fix apply NULLed it and no selector could ever
+    // re-embed it: permanent loss.
+    await seedModeled('skip', 'retained', {
+      model: 'voyage:voyage-3-large',
+      frontmatter: { embed_skip: { reason: 'oversized' } },
+    });
+    await seedModeled('plain', 'stale', { model: 'voyage:voyage-3-large' });
+
+    const plan = await planEmbeddingMigration(engine, { to: TARGET, dim: colDim });
+    const res = await applyEmbeddingMigration(engine, plan);
+    expect(res.status).toBe('applied');
+    if (res.status !== 'applied') throw new Error('unreachable');
+    expect(res.invalidated).toBe(1); // 'plain' only — pre-fix: 2
+
+    expect(await chunkState('skip')).toEqual({ embedded: 1, nulls: 0 });
+    expect(await chunkState('plain')).toEqual({ embedded: 0, nulls: 1 });
+    expect(await engine.countStaleChunks({ signature: sig, includeNullSignature: true })).toBe(1);
+  });
+
+  test('#4306: guarded helper skips embed_skip on the signature-drift path too', async () => {
+    await seedModeled('skip-drift', 'retained', {
+      model: 'voyage:voyage-3-large',
+      signature: 'old:model:1',
+      frontmatter: { embed_skip: { reason: 'oversized' } },
+    });
+    const n = await invalidateStaleSignatureEmbeddingsGuarded(engine, { signature: 'new:model:1' });
+    expect(n).toBe(0); // engine method pre-fix: 1 (the destroyed-vector shape)
+    expect(await chunkState('skip-drift')).toEqual({ embedded: 1, nulls: 0 });
+  });
+
+  test('#4306: verify reports embed_skip NULL chunks without blocking completion', async () => {
+    // The already-damaged shape: an embed_skip page whose chunks were NULLed
+    // by a pre-fix run. Nothing re-embeds it by design — completion must not
+    // wedge on it, but the verdict must SAY it.
+    await seedModeled('skip-null', 'lost', {
+      model: 'voyage:voyage-3-large',
+      frontmatter: { embed_skip: { reason: 'oversized' } },
+      embedded: false,
+    });
+    const verify = await verifyMigrationComplete(engine, { toModel: TARGET, toDims: colDim }, {
+      filePlane: { model: TARGET, dims: colDim },
+    });
+    expect(verify.details.embed_skip_null_chunks).toBe(1);
+    expect(verify.blockers.join(' ')).not.toMatch(/embed_skip/);
+    expect(verify.complete).toBe(true);
+
+    const status = await readMigrationStatus(engine);
+    expect(status.embed_skip_null_chunks).toBe(1);
   });
 });
 

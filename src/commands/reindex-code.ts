@@ -28,7 +28,7 @@ import { importCodeFile } from '../core/import-file.ts';
 import { estimateTokens } from '../core/chunkers/code.ts';
 import { getEmbeddingModelName, estimateEmbeddingCostUsd } from '../core/embedding.ts';
 import { errorFor, serializeError } from '../core/errors.ts';
-import { createInterface } from 'readline';
+import { promptYesNo } from '../core/confirm-prompt.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { BudgetTracker, BudgetExhausted } from '../core/budget/budget-tracker.ts';
@@ -120,6 +120,7 @@ function printCodeModelNudge(decision: Extract<NudgeDecision, { shouldNudge: tru
 
 interface CodePageRow {
   slug: string;
+  source_id: string;
   compiled_truth: string;
   frontmatter: Record<string, unknown> | null;
 }
@@ -133,8 +134,13 @@ async function fetchCodePages(
   // Direct SQL: listPages doesn't expose source_id filtering, and we need
   // compiled_truth + frontmatter anyway (not just the Page shape).
   const sourceClause = sourceId ? `AND p.source_id = '${sourceId.replace(/'/g, "''")}'` : '';
+  // source_id is SELECTed so the per-page re-import below targets each row's
+  // OWN source. Pre-fix this iterated all sources' code pages but imported
+  // with the CLI-level sourceId (undefined without --source), which — now
+  // that import reads/writes are default-scoped — would duplicate every
+  // non-default-source code page into 'default' and re-embed it.
   const rows = await engine.executeRaw<CodePageRow>(
-    `SELECT p.slug, p.compiled_truth, p.frontmatter
+    `SELECT p.slug, p.source_id, p.compiled_truth, p.frontmatter
      FROM pages p
      WHERE p.type = 'code' ${sourceClause}
      ORDER BY p.slug
@@ -178,18 +184,6 @@ async function estimateReindexCost(
     if (batch.length < batchSize) break;
   }
   return { totalTokens, totalPages };
-}
-
-async function promptYesNo(question: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(question, (answer) => {
-      rl.close();
-      const a = answer.trim().toLowerCase();
-      resolve(a === 'y' || a === 'yes');
-    });
-    rl.on('close', () => resolve(false));
-  });
 }
 
 export async function runReindexCode(
@@ -299,7 +293,10 @@ export async function runReindexCode(
               const result = await importCodeFile(engine, relPath, row.compiled_truth, {
                 noEmbed: opts.noEmbed,
                 force: opts.force,
-                sourceId: opts.sourceId,
+                // Each page re-imports into its OWN source (row-level), not
+                // the CLI-level default — reindex must be an in-place
+                // rebuild, never a cross-source copy.
+                sourceId: row.source_id,
               });
               if (result.status === 'imported') reindexed++;
               else if (result.status === 'skipped') skipped++;
@@ -413,6 +410,26 @@ export function buildCostRefusal(opts: {
       'Refusing to re-embed non-interactively without confirmation. ' +
       'Pass --yes to proceed, or --dry-run for the preview (exit 0).',
   };
+}
+
+/**
+ * issue #3970 — recovery hint for the "0 reindexed, N skipped" wall. Without
+ * --force, importCodeFile's content_hash short-circuit skips every unchanged
+ * page, so a user trying to backfill symbol metadata (or re-embed) sees an
+ * all-skipped pass with no pointer at the cure. Pure + exported for tests.
+ * Returns null when the hint doesn't apply (something reindexed, nothing
+ * skipped, or --force already passed).
+ */
+export function reindexForceHint(
+  result: Pick<ReindexCodeResult, 'reindexed' | 'skipped'>,
+  force: boolean | undefined,
+): string | null {
+  if (force || result.reindexed > 0 || result.skipped === 0) return null;
+  return (
+    `All ${result.skipped} page(s) were skipped by the content_hash short-circuit ` +
+    `(content unchanged since last index). To force a full re-chunk + re-embed pass ` +
+    `(e.g. to backfill symbol metadata), re-run with --force.`
+  );
 }
 
 /**
@@ -546,6 +563,10 @@ export async function runReindexCodeCli(engine: BrainEngine, args: string[]): Pr
         `(${result.codePages} total code pages, ~${result.totalTokens.toLocaleString()} tokens, ` +
         `est. $${result.costUsd.toFixed(2)}).`,
     );
+    // #3970: an all-skipped pass without --force is usually someone trying to
+    // heal missing chunk metadata — point at the flag that actually does it.
+    const hint = reindexForceHint(result, force);
+    if (hint) console.log(hint);
     if (result.failures && result.failures.length > 0) {
       console.log(`\n${result.failures.length} failure(s):`);
       for (const f of result.failures.slice(0, 10)) {

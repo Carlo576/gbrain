@@ -10,8 +10,10 @@ already drives for ZeroEntropy's hosted reranker. The
 
 Two flavors of "local" this recipe covers:
 
-- **Qwen3-Reranker** (0.6B / 4B / 8B) — open-weight cross-encoder; pull
-  the GGUF from HuggingFace and serve.
+- **Qwen3-Reranker** (0.6B / 4B / 8B) — open-weight cross-encoder. Qwen
+  publishes official GGUFs for its EMBEDDING models but not for the
+  rerankers, so pull a community GGUF conversion from HuggingFace (or
+  convert the official weights yourself) and serve.
 - **Self-hosted ZeroEntropy** (`zerank-2`, `zerank-1-small`) — the
   weights are on HuggingFace too. GGUF-convert them and serve them the
   same way. **Quality is not guaranteed to match ZE-hosted:** GGUF
@@ -22,9 +24,13 @@ Two flavors of "local" this recipe covers:
 
 This recipe is the path override + recipe shape. Any provider whose
 request/response wire matches ZE/llama.cpp can use it by just pointing
-at a different base URL. Providers whose wire shape differs (Voyage uses
-`top_k` not `top_n`, returns `data[]` not `results[]`) need a separate
-recipe with adapter hooks — that lands in a follow-up plan.
+at a different base URL. A provider whose request differs only in the
+top-N key declares it via the recipe's `top_param` — that's how the
+hosted Voyage reranker recipe (`voyage:rerank-2.5`, the new-install
+default, `top_k`) works. On the response side the gateway parser accepts
+both known array keys (`results[]` for ZE/llama.cpp, `data[]` for
+Voyage's REST — the shared item shape is `{index, relevance_score}`);
+a genuinely different item shape needs its own recipe with adapter hooks.
 
 ## Setup
 
@@ -44,14 +50,21 @@ across releases. The recipe sends to `/v1/rerank`.
 
 ### 2. Pull a reranker GGUF
 
-For Qwen3-Reranker-4B (quantized Q4_K_M is the sweet spot for CPU):
+For Qwen3-Reranker-4B (quantized Q4_K_M is the sweet spot for CPU),
+pull a community GGUF conversion. Qwen ships no official reranker GGUF
+repos (the official `Qwen/Qwen3-Reranker-4B` repo carries the raw
+weights only), so the conversion below is **community-maintained** —
+verify scores against your own eval before trusting it in production:
 
 ```bash
 # Pick a quant level — Q4_K_M is the usual CPU sweet spot.
 huggingface-cli download \
-  Qwen/Qwen3-Reranker-4B-GGUF qwen3-reranker-4b-q4_k_m.gguf \
+  mradermacher/Qwen3-Reranker-4B-GGUF Qwen3-Reranker-4B.Q4_K_M.gguf \
   --local-dir ./models
 ```
+
+Prefer official provenance? Convert the real `Qwen/Qwen3-Reranker-4B`
+weights yourself with llama.cpp's `convert_hf_to_gguf.py`, then quantize.
 
 For self-hosted ZeroEntropy weights, find a community GGUF conversion
 or convert from the HuggingFace weights yourself (out of scope of this
@@ -61,7 +74,7 @@ doc — see llama.cpp's `convert_hf_to_gguf.py`).
 
 ```bash
 ./build/bin/llama-server \
-  --model ./models/qwen3-reranker-4b-q4_k_m.gguf \
+  --model ./models/Qwen3-Reranker-4B.Q4_K_M.gguf \
   --alias qwen3-reranker-4b \
   --reranking \
   --port 8081

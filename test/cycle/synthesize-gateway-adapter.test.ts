@@ -32,8 +32,13 @@ afterEach(() => {
 
 // Canned "worth processing" LLM text used by the parsed-verdict parity tests.
 // Mirrors what a well-tuned Haiku would emit for a substantive transcript.
+// Triage-v1 (#4152): the judge emits a scored verdict; worth_processing is
+// derived from `score >= DEFAULT_TRIAGE_THRESHOLD`.
 const WORTH_PROCESSING_JSON = JSON.stringify({
-  worth_processing: true,
+  score: 0.85,
+  content_type: 'strategy',
+  segments: [],
+  entities: [],
   reasons: ['user reflects on portfolio framework', 'concrete strategic call'],
 });
 
@@ -87,18 +92,50 @@ describe('makeJudgeClient — construction-time provider probe', () => {
     });
   });
 
-  test('A8b (#1698): typo native model → null at construction (validateModelId unknown_model)', async () => {
-    // Pre-#1698 makeJudgeClient only checked the provider (resolveRecipe) and would
-    // have returned a client that failed at call time. Now the shared validateModelId
-    // core runs assertTouchpoint, so a typo'd native model is rejected up front.
+  test('A8b (#1698): chat-less-provider model → null at construction (validateModelId unknown_model)', async () => {
+    // validateModelId rejects a provider with no chat touchpoint (voyage).
+    // Unlisted ids on chat-capable providers pass local validation now (no
+    // runtime allowlist) and fail at the provider instead.
     await withEnv({ ANTHROPIC_API_KEY: 'sk-test-A8b' }, async () => {
-      const judge = makeJudgeClient('anthropic:claude-bogus-9');
+      const judge = makeJudgeClient('voyage:voyage-3');
       expect(judge).toBeNull();
     });
   });
 });
 
 describe('JudgeClient.create — gateway routing + shape adapter', () => {
+  test('A2b (#4077): forwards a caller AbortSignal to gateway.chat', async () => {
+    await withEnv({ ANTHROPIC_API_KEY: 'sk-test-A2b' }, async () => {
+      const judge = makeJudgeClient('claude-haiku-4-5-20251001');
+      expect(judge).not.toBeNull();
+      const abort = new AbortController();
+      let receivedSignal: AbortSignal | undefined;
+      __setChatTransportForTests(async (opts): Promise<ChatResult> => {
+        receivedSignal = opts.abortSignal;
+        return {
+          text: WORTH_PROCESSING_JSON,
+          blocks: [],
+          stopReason: 'end',
+          usage: { input_tokens: 10, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'test:stub',
+          providerId: 'test',
+        };
+      });
+
+      await judge!.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        system: 'judge system prompt',
+        messages: [{ role: 'user', content: 'judge this' }],
+      }, { signal: abort.signal });
+
+      // The exact caller signal must reach the transport — a cancelled cycle
+      // has to be able to tear down an in-flight judge call, not just skip
+      // the next one.
+      expect(receivedSignal).toBe(abort.signal);
+    });
+  });
+
   test('A3: routes through gateway.chat (verified via __setChatTransportForTests stub)', async () => {
     await withEnv({ ANTHROPIC_API_KEY: 'sk-test-A3' }, async () => {
       const judge = makeJudgeClient('claude-haiku-4-5-20251001');
@@ -107,10 +144,12 @@ describe('JudgeClient.create — gateway routing + shape adapter', () => {
       let transportCalled = false;
       let receivedSystem: string | undefined;
       let receivedModel: string | undefined;
+      let receivedProviderOptions: Record<string, Record<string, unknown>> | undefined;
       __setChatTransportForTests(async (opts): Promise<ChatResult> => {
         transportCalled = true;
         receivedSystem = opts.system;
         receivedModel = opts.model;
+        receivedProviderOptions = opts.providerOptions;
         return {
           text: WORTH_PROCESSING_JSON,
           blocks: [],
@@ -132,9 +171,47 @@ describe('JudgeClient.create — gateway routing + shape adapter', () => {
       expect(receivedSystem).toBe('judge system prompt');
       // Gateway model gets the anthropic: prefix normalized
       expect(receivedModel).toBe('anthropic:claude-haiku-4-5-20251001');
+      // The thinking-disable pin is DeepSeek-only; other providers must not
+      // receive call-scoped provider options from the judge.
+      expect(receivedProviderOptions).toBeUndefined();
       // Anthropic.Message shape returned
       expect(result.content?.[0]?.type).toBe('text');
       expect((result.content?.[0] as { type: string; text: string }).text).toBe(WORTH_PROCESSING_JSON);
+    });
+  });
+
+  test('A3b: DeepSeek verdict judge disables thinking for its own call only', async () => {
+    // DeepSeek v4 models think by default and bill reasoning as OUTPUT tokens
+    // against max_tokens (recipe thinking_by_default, gbrain#4172). The triage
+    // judge wants the plain JSON verdict, so it pins thinking off per-call via
+    // ChatOpts.providerOptions instead of burning budget on reasoning.
+    // No DEEPSEEK_API_KEY needed: non-anthropic construction skips the key
+    // probe (A9) and the transport is stubbed.
+    const judge = makeJudgeClient('deepseek:deepseek-v4-flash');
+    expect(judge).not.toBeNull();
+
+    let receivedProviderOptions: Record<string, Record<string, unknown>> | undefined;
+    __setChatTransportForTests(async (opts): Promise<ChatResult> => {
+      receivedProviderOptions = opts.providerOptions;
+      return {
+        text: WORTH_PROCESSING_JSON,
+        blocks: [],
+        stopReason: 'end',
+        usage: { input_tokens: 10, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'deepseek:deepseek-v4-flash',
+        providerId: 'deepseek',
+      };
+    });
+
+    await judge!.create({
+      model: 'deepseek:deepseek-v4-flash',
+      max_tokens: 1024,
+      system: 'judge system prompt',
+      messages: [{ role: 'user', content: 'judge this' }],
+    });
+
+    expect(receivedProviderOptions).toEqual({
+      deepseek: { thinking: { type: 'disabled' } },
     });
   });
 
@@ -233,6 +310,56 @@ describe('JudgeClient.create — gateway routing + shape adapter', () => {
         caught = e;
       }
       expect(caught).toBeInstanceOf(AIConfigError);
+    });
+  });
+
+  test('A10: ChatResult.stopReason propagates — length → max_tokens, end → end_turn', async () => {
+    await withEnv({ ANTHROPIC_API_KEY: 'sk-test-A10' }, async () => {
+      const judge = makeJudgeClient('claude-haiku-4-5-20251001');
+
+      let nextStopReason: ChatResult['stopReason'] = 'length';
+      __setChatTransportForTests(async (): Promise<ChatResult> => ({
+        text: '{"worth_processing"',
+        blocks: [],
+        stopReason: nextStopReason,
+        usage: { input_tokens: 5, output_tokens: 200, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'test:stub',
+        providerId: 'test',
+      }));
+
+      const params = {
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 100,
+        system: 's',
+        messages: [{ role: 'user' as const, content: 'u' }],
+      };
+
+      // Pre-fix the adapter pinned stop_reason to 'end_turn', hiding
+      // truncation from judgeSignificance. 'length' must surface as the
+      // Anthropic-shape 'max_tokens'.
+      const truncatedMsg = await judge!.create(params);
+      expect(truncatedMsg.stop_reason).toBe('max_tokens');
+
+      nextStopReason = 'end';
+      const cleanMsg = await judge!.create(params);
+      expect(cleanMsg.stop_reason).toBe('end_turn');
+
+      // String() widening: the pinned Anthropic SDK's stop_reason union
+      // predates 'refusal', but the adapter emits it for blocked responses.
+      nextStopReason = 'refusal';
+      const refusedMsg = await judge!.create(params);
+      expect(String(refusedMsg.stop_reason)).toBe('refusal');
+
+      nextStopReason = 'content_filter';
+      const filteredMsg = await judge!.create(params);
+      expect(String(filteredMsg.stop_reason)).toBe('refusal');
+
+      // 'other' is the gateway's catch-all for unknown provider finish
+      // reasons — some non-standard providers report successful stops that
+      // way, so it must stay a cacheable clean stop.
+      nextStopReason = 'other';
+      const otherMsg = await judge!.create(params);
+      expect(otherMsg.stop_reason).toBe('end_turn');
     });
   });
 });

@@ -1,4 +1,4 @@
-# gbrain eval suspected-contradictions (v0.32.6)
+# gbrain eval suspected-contradictions
 
 The contradiction probe samples retrieval results, asks an LLM judge whether
 any pair contradicts on a factual claim relevant to the user's query, and
@@ -106,15 +106,23 @@ Decision criteria for the bigger swing (chunk-level `revises` field):
 
 ## When to act on findings
 
-Each finding ships with a `resolution_command` field — paste-ready:
+Each finding ships with a `resolution_command` field — addressable and
+honest about what needs operator judgment:
 
-- `gbrain takes supersede <slug> --row N` — newer take should replace
-  the older chunk text on the same page (intra_page kind).
+- `gbrain takes supersede <slug> --row N --claim '<replacement>'` — newer
+  take should replace the older one (intra_page kind). `--row` is the
+  per-page row number and `--claim` is required; when the winning side has
+  an unambiguous claim (temporal supersession where the newer side is
+  itself a take) the command is fully paste-ready, otherwise it carries an
+  explicit `<replacement claim>` placeholder for you to fill from the
+  report — the classifier picks an action, not a winner, and will not
+  fabricate a take from arbitrary chunk prose.
 - `gbrain dream --phase synthesize --slug <slug>` — compiled_truth for
   the curated entity needs an update (cross_slug curated-vs-bulk).
-- `gbrain takes mark-debate <slug> --row N` — intentional disagreement
-  (e.g., two opinions you want to keep both of).
-- `# manual review: <a> vs <b>` — judge wasn't sure; operator decides.
+- `# manual review: ...` — intentional-disagreement (debate) findings and
+  judge-unsure findings render as a manual-review comment; a
+  mark-as-debate subcommand does not exist yet, so nothing is minted that
+  would fail when pasted.
 
 Run `gbrain eval suspected-contradictions review --severity high` to
 inspect findings without re-running the probe.
@@ -142,25 +150,27 @@ pay near-zero on re-runs (until you bump PROMPT_VERSION).
   gate makes accidental private-data commits hard, but the operator MUST
   inspect every redaction before commit.
 
+## Temporal axis
+
+The judge distinguishes real contradictions from legitimate change-over-time.
+The verdict enum has six members (`no_contradiction | contradiction |
+temporal_supersession | temporal_regression | temporal_evolution |
+negation_artifact`), and `pages.effective_date` is threaded into the judge
+prompt so the probe doesn't cry wolf on facts that simply changed.
+
+The trajectory substrate builds on the same signal:
+`gbrain eval trajectory <entity>` shows the chronological typed-claim
+history with regressions flagged inline; `gbrain founder scorecard
+<entity>` rolls up four signals (accuracy, consistency, growth
+direction, red flags) into a stable JSON contract. MCP op
+`find_trajectory` (read scope, visibility-filtered for remote callers)
+exposes the same data to agents. The probe's `temporal_supersession`
+verdict and the consolidate phase's `valid_until` writeback both
+preserve the `auto-supersession.ts` "NEVER auto-applies" invariant
+— the probe only emits paste-ready commands; only `consolidate`
+writes `valid_until` (a grep guard pins this).
+
 ## See also
 
-- Plan: `~/.claude/plans/system-instruction-you-are-working-hashed-dewdrop.md`
-- CHANGELOG: `## [0.32.6]` entry covers the whole release.
 - Cost discipline: `docs/eval-bench.md` for the recommended nightly cadence
   + trend-tracking workflow.
-- **Temporal axis follow-on (v0.35.3.1 + v0.35.7):** v0.35.3.1 added a
-  six-member verdict enum (`no_contradiction | contradiction |
-  temporal_supersession | temporal_regression | temporal_evolution |
-  negation_artifact`) and threaded `pages.effective_date` into the judge
-  prompt so the probe stops crying wolf on legitimate change-over-time.
-  v0.35.7 lands the trajectory substrate the probe pointed at:
-  `gbrain eval trajectory <entity>` shows the chronological typed-claim
-  history with regressions flagged inline; `gbrain founder scorecard
-  <entity>` rolls up four signals (accuracy, consistency, growth
-  direction, red flags) into a stable JSON contract. MCP op
-  `find_trajectory` (read scope, visibility-filtered for remote callers)
-  exposes the same data to agents. The probe's `temporal_supersession`
-  verdict and the consolidate phase's `valid_until` writeback both
-  preserve the `auto-supersession.ts:4` "NEVER auto-applies" invariant
-  — the probe still emits paste-ready commands, only `consolidate`
-  writes `valid_until` (R1+R8 grep guard pins this).

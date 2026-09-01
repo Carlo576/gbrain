@@ -241,7 +241,21 @@ export function parseTakesFence(body: string): ParseResult {
   const endIdx   = body.indexOf(TAKES_FENCE_END, beginIdx + TAKES_FENCE_BEGIN.length);
   const warnings: string[] = [];
 
-  if (beginIdx === -1 && endIdx === -1) return { takes: [], warnings };
+  if (beginIdx === -1 && endIdx === -1) {
+    // #3769: the canonical markers use the THREE-dash comment form
+    // (`<!--- gbrain:takes:begin -->`). A body that mentions the marker text
+    // without the exact form — most commonly the standard two-dash
+    // `<!-- gbrain:takes:begin -->` an author or agent writes from memory —
+    // is a fence the author MEANT to write. Flag it instead of silently
+    // parsing zero takes.
+    if (body.includes('gbrain:takes:begin')) {
+      warnings.push(
+        'TAKES_FENCE_NEAR_MISS: found "gbrain:takes:begin" but not the exact ' +
+        `marker "${TAKES_FENCE_BEGIN}" — use the three-dash comment form`,
+      );
+    }
+    return { takes: [], warnings };
+  }
   if (beginIdx === -1 || endIdx === -1) {
     warnings.push('TAKES_FENCE_UNBALANCED: missing begin or end marker');
     return { takes: [], warnings };
@@ -426,7 +440,12 @@ export function renderTakesFence(takes: ParsedTake[]): string {
     const resolved   = t.resolvedAt       ? safe(t.resolvedAt)              : '';
     const quality    = t.resolvedQuality  ?? '';
     const evidence   = t.resolvedEvidence ? safe(t.resolvedEvidence)        : '';
-    const value      = t.resolvedValue !== undefined ? formatWeight(t.resolvedValue) : '';
+    // F3: resolvedValue is an UNBOUNDED measured value (usd/count/pct), NOT a
+    // weight on the 0..1 grid. formatWeight's 2-decimal round would diverge md
+    // from the DB (12345.678 → 12345.68). Render it full-precision. Only the
+    // weight cell (`w` above) stays on formatWeight; `value` is the sole
+    // numeric resolution cell.
+    const value      = t.resolvedValue !== undefined ? String(t.resolvedValue) : '';
     const unit       = t.resolvedUnit     ? safe(t.resolvedUnit)            : '';
     const by         = t.resolvedBy       ? safe(t.resolvedBy)              : '';
     return `${baseCells} ${resolved} | ${quality} | ${evidence} | ${value} | ${unit} | ${by} |`;

@@ -108,7 +108,7 @@ describe('buildPlan — diff against completed + installed VERSION', () => {
     // autopilot cooperative, v0.16.0 = subagent runtime, v0.18.0 = multi-
     // source brains, v0.18.1 = RLS hardening, v0.21.0 = Cathedral II
     // (renumbered from v0.20.0 after master shipped v0.20.x in parallel).
-    expect(plan.skippedFuture.map(m => m.version)).toEqual(['0.12.0', '0.12.2', '0.13.0', '0.13.1', '0.14.0', '0.16.0', '0.18.0', '0.18.1', '0.21.0', '0.22.4', '0.28.0', '0.29.1', '0.31.0', '0.32.2']);
+    expect(plan.skippedFuture.map(m => m.version)).toEqual(['0.12.0', '0.12.2', '0.13.0', '0.13.1', '0.14.0', '0.16.0', '0.18.0', '0.18.1', '0.21.0', '0.22.4', '0.28.0', '0.29.1', '0.31.0', '0.32.2', '0.43.0', '0.46.3']);
   });
 
   test('already applied → v0.11.0 lands in `applied` bucket, not pending', () => {
@@ -148,7 +148,7 @@ describe('buildPlan — diff against completed + installed VERSION', () => {
     // v0.22.4, v0.28.0, v0.29.1, v0.31.0 were added later; installed=0.12.0
     // means they belong in skippedFuture, not pending. v0.11.0 and v0.12.0
     // stay pending despite being ≤ installed — that is the H9 invariant.
-    expect(plan.skippedFuture.map(m => m.version)).toEqual(['0.12.2', '0.13.0', '0.13.1', '0.14.0', '0.16.0', '0.18.0', '0.18.1', '0.21.0', '0.22.4', '0.28.0', '0.29.1', '0.31.0', '0.32.2']);
+    expect(plan.skippedFuture.map(m => m.version)).toEqual(['0.12.2', '0.13.0', '0.13.1', '0.14.0', '0.16.0', '0.18.0', '0.18.1', '0.21.0', '0.22.4', '0.28.0', '0.29.1', '0.31.0', '0.32.2', '0.43.0', '0.46.3']);
   });
 
   test('--migration filter narrows to one version', () => {
@@ -206,12 +206,15 @@ describe('force-retry escape hatch', () => {
 // date" paths must exit 0 so shell scripts gating on the exit code work.
 // Pre-fix, these `return` statements left the CLI dispatcher's implicit
 // non-zero exit code in place when callers checked $?.
+// #4364 amendment: list/dry-run exit via listExit, which is 0 EXCEPT under
+// the opt-in --require-db flag when the DB probe failed (then 1).
 describe('runApplyMigrations exit codes (v0.36.1.x #1062)', () => {
-  test('source contains process.exit(0) on list/dry-run/up-to-date branches', async () => {
+  test('source contains process.exit(listExit) on list/dry-run and exit(0) up-to-date', async () => {
     const { readFileSync } = await import('fs');
     const src = readFileSync('src/commands/apply-migrations.ts', 'utf8');
-    expect(src).toMatch(/cli\.list\s*\)\s*\{\s*printList\(plan,\s*installed\);\s*process\.exit\(0\);/);
-    expect(src).toMatch(/cli\.dryRun\s*\)\s*\{\s*printDryRun\(plan,\s*installed\);\s*process\.exit\(0\);/);
+    expect(src).toMatch(/const listExit = cli\.requireDb && dbProbe\.status === 'unreachable' \? 1 : 0;/);
+    expect(src).toMatch(/cli\.list\s*\)\s*\{\s*printList\(plan,\s*installed,\s*dbProbe\);\s*process\.exit\(listExit\);/);
+    expect(src).toMatch(/cli\.dryRun\s*\)\s*\{\s*printDryRun\(plan,\s*installed,\s*dbProbe\);\s*process\.exit\(listExit\);/);
     expect(src).toMatch(/All migrations up to date[\s\S]{0,80}process\.exit\(0\)/);
   });
 });

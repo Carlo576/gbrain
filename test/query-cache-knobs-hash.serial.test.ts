@@ -301,6 +301,41 @@ describe('hard-exclude cache isolation (#2825)', () => {
   });
 });
 
+describe('detail cache isolation (#3515)', () => {
+  // Hashes computed the way hybridSearchCached does: same resolved mode, ctx
+  // carrying the effective detail level. A row written by a `--detail low`
+  // call (compiled-truth-only result set) must not be served to a default
+  // `medium` lookup, and vice versa.
+  const lowHash = knobsHash(resolveSearchMode({ mode: 'balanced' }), { detail: 'low' });
+  const mediumHash = knobsHash(resolveSearchMode({ mode: 'balanced' }), { detail: 'medium' });
+  const unsetHash = knobsHash(resolveSearchMode({ mode: 'balanced' }));
+
+  test('detail=low write is NOT served to a default (medium) lookup', async () => {
+    const cache = new SemanticQueryCache(engine);
+    const emb = makeEmbedding(8);
+
+    // Simulate `query "X" --detail low` populating the cache with the
+    // narrow compiled-truth-only result set.
+    await cache.store('what is the deploy process', emb, makeResults('narrow', 2), {
+      vector_enabled: true, detail_resolved: 'low', expansion_applied: false,
+    }, { knobsHash: lowHash });
+
+    // Default-detail lookup inside the TTL → MISS (falls through to a
+    // fresh, full search) instead of the narrow set.
+    expect((await cache.lookup(emb, { knobsHash: mediumHash })).hit).toBe(false);
+
+    // The low-detail caller still hits its own row.
+    const original = await cache.lookup(emb, { knobsHash: lowHash });
+    expect(original.hit).toBe(true);
+    expect(original.results?.length).toBe(2);
+  });
+
+  test('undefined detail keys like the documented medium default', () => {
+    expect(unsetHash).toBe(mediumHash);
+    expect(unsetHash).not.toBe(lowHash);
+  });
+});
+
 describe('FTS language cache isolation', () => {
   // GBRAIN_FTS_LANGUAGE retokenizes BOTH sides of the keyword arm (the
   // trigger-built search_vector and the query-side websearch_to_tsquery), so
@@ -350,5 +385,58 @@ describe('FTS language cache isolation', () => {
 
     expect((await cache.lookup(emb, { knobsHash: englishHash })).hit).toBe(false);
     expect((await cache.lookup(emb, { knobsHash: portugueseHash })).hit).toBe(true);
+  });
+});
+
+describe('excludePrivate cache isolation (#4352 follow-up)', () => {
+  // Hashes computed the way hybridSearchCached does: same resolved mode, ctx
+  // carrying the private-visibility posture. Folding the posture (xp=, v=23)
+  // replaces #4352's wholesale cache skip — excludePrivate=true is the
+  // default for every remote MCP caller, so the skip disabled the semantic
+  // cache for exactly the highest-volume beneficiaries. A trusted
+  // (private-included) write must never serve a remote-default
+  // (private-excluding) lookup, and vice versa.
+  const trustedHash = knobsHash(resolveSearchMode({ mode: 'balanced' }), { excludePrivate: false });
+  const excludingHash = knobsHash(resolveSearchMode({ mode: 'balanced' }), { excludePrivate: true });
+
+  test('postures produce different hashes; undefined keys like the trusted (included) default', () => {
+    expect(trustedHash).not.toBe(excludingHash);
+    // Mirrors enforcement's strict `=== true` predicate: legacy callers that
+    // don't thread the posture share the trusted rows.
+    expect(knobsHash(resolveSearchMode({ mode: 'balanced' }))).toBe(trustedHash);
+  });
+
+  test('private-included (trusted) write is NOT served to a private-excluding lookup', async () => {
+    const cache = new SemanticQueryCache(engine);
+    const emb = makeEmbedding(10);
+
+    // Simulate a trusted local run whose stored rows contain a private page
+    // the remote caller must never see.
+    await cache.store('who is alice', emb, makeResults('with-private', 5), {
+      vector_enabled: true, detail_resolved: null, expansion_applied: false,
+    }, { knobsHash: trustedHash });
+
+    // Remote-default (excludePrivate=true) lookup → MISS (falls through to a
+    // fresh, visibility-filtered query).
+    expect((await cache.lookup(emb, { knobsHash: excludingHash })).hit).toBe(false);
+
+    // The trusted caller still hits its own row.
+    const original = await cache.lookup(emb, { knobsHash: trustedHash });
+    expect(original.hit).toBe(true);
+    expect(original.results?.length).toBe(5);
+  });
+
+  test('private-excluding write is NOT served back to a trusted lookup', async () => {
+    const cache = new SemanticQueryCache(engine);
+    const emb = makeEmbedding(11);
+
+    // A remote write is a FILTERED result set — serving it to a trusted
+    // lookup would hide private pages the trusted caller is entitled to.
+    await cache.store('who is alice', emb, makeResults('filtered', 3), {
+      vector_enabled: true, detail_resolved: null, expansion_applied: false,
+    }, { knobsHash: excludingHash });
+
+    expect((await cache.lookup(emb, { knobsHash: trustedHash })).hit).toBe(false);
+    expect((await cache.lookup(emb, { knobsHash: excludingHash })).hit).toBe(true);
   });
 });

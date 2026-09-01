@@ -38,7 +38,7 @@ mount, CEO-class with multiple team brains) and
 
 ## Architecture
 
-Contract-first: `src/core/operations.ts` defines ~90 shared operations (v0.29 adds `get_recent_salience`, `find_anomalies`, `get_recent_transcripts`; v0.42.43.0 adds `volunteer_context` — push-based context, see `docs/guides/push-context.md`). CLI and MCP
+Contract-first: `src/core/operations.ts` defines 100+ shared operations (including `volunteer_context` — push-based context, see `docs/guides/push-context.md` — and the seven frozen MEMORY_VERBS `recall`/`remember`/`entity`/`synthesize`/`forget`/`context_pack`/`delta` — the last two are v0.45.7 ambient-recall boundary verbs (budget-packed pack + "what changed since"), all seven stamp `protocol_version: 1`, servable alone via `gbrain serve --surface verbs`, see `docs/protocol/MEMORY_VERBS_v1.md` + `docs/guides/ambient-recall.md`). CLI and MCP
 server are both generated from this single source. Engine factory (`src/core/engine-factory.ts`)
 dynamically imports the configured engine (`'pglite'` or `'postgres'`). Skills are fat
 markdown files (tool-agnostic, work with both CLI and plugin contexts).
@@ -58,7 +58,12 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   sites; `ctx.remote !== false` for untrust-unless-explicit-false). Don't default it falsy.
 - **Source isolation.** Every read-side op routes through `sourceScopeOpts(ctx)`; precedence
   is federated array (`ctx.auth.allowedSources`) > scalar (`ctx.sourceId`) > nothing. Don't
-  hand-roll source filtering — a missed thread is a cross-source data leak.
+  hand-roll source filtering — a missed thread is a cross-source data leak. Corollary
+  (unscoped-check/scoped-write): `engine.getPage` with no opts matches ANY source while
+  `putPage` defaults to `'default'` — an existence check + write pair must scope the read
+  to the write's source (`getPage(slug, { sourceId: x ?? 'default' })`). Guarded by
+  `scripts/check-getpage-scoped-write.mjs` (opt-out marker
+  `gbrain-allow-unscoped-getpage` for read-only first-match sites).
 - **JSONB: never `JSON.stringify` into a `::jsonb` cast.** postgres.js double-encodes it (a jsonb
   string scalar); PGLite hides the bug. This bites BOTH spellings — the template form
   (`${JSON.stringify(x)}::jsonb`) AND the positional form (`executeRaw(\`…$N::jsonb\`, [JSON.stringify(x)])`,
@@ -70,7 +75,13 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
 - **Engine-live paths avoid runtime dynamic `import()` for helper dependencies.** In
   `src/core/pglite-engine.ts`, `src/core/postgres-engine.ts`, and
   `src/core/migrate.ts`, dependencies previously reached through runtime dynamic
-  imports use static top-level imports. The only current dynamic-`import()` exceptions
+  imports use static top-level imports. Besides the snapshot loader's lazy
+  `require()` cluster in `pglite-engine.ts:tryLoadSnapshot` (fs/crypto + one
+  gateway shape lookup — lazy so production builds without the test-fixture
+  path don't eager-load; the snapshot hash reads migrate.ts/pglite-schema.ts
+  FILE BYTES, never the loaded modules, so coverage instrumentation can't
+  skew it; the guard now matches `require()` calls too), the only
+  dynamic-`import()` exceptions
   are the four `ai/gateway.ts` lookups in both engines'
   `initSchema()` and `_upsertChunksOnce()` methods; each remains lazy inside a
   local `try/catch` because the gateway has a large provider/config closure and,
@@ -101,6 +112,27 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   (fail-closed vs warn-only vs null), not its own numbers. Pinned by `test/model-pricing.test.ts`
   (drift guard asserts each view equals canonical). Embeddings price separately in
   `embedding-pricing.ts` (different unit).
+- **Module-size ratchet.** `scripts/module-size-limits.tsv` pins per-file line ceilings
+  (`check:module-size` in verify): growth over a ceiling, >50 lines of stale slack after a
+  shrink, a row for a deleted file, and any UNLISTED src file over 1,500 lines all fail.
+  Raise a ceiling only via a reviewer-visible TSV edit in the same commit; lower it in the
+  same commit as any peel. migrate.ts is `region-exempt` (the MIGRATIONS array grows freely;
+  the runner logic around it is ratcheted).
+- **Peeled façades keep their surface.** operations.ts (`src/core/ops/*`), doctor.ts
+  (`src/commands/doctor/*`), sync.ts (`src/core/sync-*`), skillpack.ts
+  (`src/commands/skillpack/*`), and both engines
+  (`src/core/{postgres,pglite}-engine/*`) are façades re-exporting everything they always
+  exported — import sites and published package exports never chase the peel. New code goes
+  in the module dirs, not back into the façades. Engine modules take narrow explicit deps
+  (never an engine-shaped bag); doctor source-text guards read `test/helpers/doctor-source.ts`,
+  and the flag-registry generator's `facadeExpansion` keeps peeled flag text in each command's
+  scan surface.
+- **Coverage is measured, honestly.** CI merges per-lane lcov (`scripts/merge-lcov.ts`) into
+  a PR-corpus report on every run (advisory until the diff gate graduates via
+  `COVERAGE_GATE_ENFORCE`) and a nightly fullCorpus number incl. the full e2e glob. bun
+  facts: unique `--coverage-dir` per process (reuse overwrites lcov.info), line records only
+  (JSC omits function names), no subprocess coverage (cli.ts is exempt as a documented
+  undercount), never-loaded files are a count+list, never fake all-files math.
 
 
 ## Reference map (load on demand)
@@ -115,16 +147,25 @@ detail on demand.)
 | any file in `src/` (what it does + its invariants) | `docs/architecture/KEY_FILES.md` — find the file's entry |
 | search / ranking / hybrid / retrieval | `docs/architecture/RETRIEVAL.md` + the `search/*` entries in `KEY_FILES.md` |
 | search modes / cost knobs | `docs/guides/search-modes.md` |
+| engine detection / Postgres adoption / DB-access repair / degraded serve (`engine status`, `db-repair`, `init --prefer-postgres`, `GBRAIN_DB_ACCESS`) | `docs/ENGINES.md` ("Engine detection and access repair" + "Local Postgres") |
 | embedding spend gates / cost gate / `spend.posture` / off switches | `docs/operations/spend-controls.md` |
+| the monthly backup-coverage check (`gbrain backup`, render channels, nag budget) | `docs/operations/backup-check.md` + the `backup/*` entries in `KEY_FILES.md` |
 | push-based context (volunteer/watch/reflex window) | `docs/guides/push-context.md` |
+| checkpoint compaction / compiled context files (`gbrain compile-context`) | `docs/guides/checkpoint-compaction.md` + `docs/guides/ambient-recall.md` |
+| Memorable integration / session receipts / relay consent (`integrations.memorable.*`) | `docs/memorable-agents.md` + the hook-heartbeat/capture-spec/codex-hooks entries in `KEY_FILES.md` |
+| chat connectors (live ChatGPT/Claude history sync — `gbrain connectors`) | `docs/guides/chat-connectors.md` + the `src/core/connectors/*` entries in `KEY_FILES.md` |
 | schema packs / page types / extraction | `docs/architecture/schema-packs.md`, `type-taxonomy.md`, `lens-packs.md` |
 | thin-client / remote MCP / cross-modal | `docs/architecture/thin-client.md` |
+| memory verbs / MCP tool surface (`--surface`) / conformance | `docs/protocol/MEMORY_VERBS_v1.md` + the `verbs*`/`surface.ts`/`protocol.ts` entries in `KEY_FILES.md` |
 | the CLI surface (commands + flags) | `gbrain --help` / `gbrain --tools-json`, plus the relevant `KEY_FILES.md` entry |
 | running or writing tests | `docs/TESTING.md` |
 | bulk-command progress wiring | `docs/progress-events.md` |
 | eval methodology / metrics | `docs/eval/` |
 | brains vs sources / topology | `docs/architecture/brains-and-sources.md`, `topologies.md` |
+| google connector (Gmail/Calendar/Contacts, OAuth) / credential vault | `docs/guides/google-connect.md` + the `creds/*` + `google/*` entries in `KEY_FILES.md` |
+| open loops / `gbrain waiting` / commitment extraction | `docs/guides/open-loops.md` + the `loops*` entries in `KEY_FILES.md` |
 | skill routing | `skills/RESOLVER.md` |
+| agent bootstrap (paste-in install, hooks, `gbrain bootstrap`, sweep, keyless) | `docs/guides/bootstrap.md` + `docs/designs/AGENT_BOOTSTRAP_PLAN.md` + the KEY_FILES bootstrap cluster |
 | shipping a release / CHANGELOG / PR conventions | `docs/RELEASING.md` (ship IRON RULES stay inline below) |
 
 The per-file index (`## Key files`), the thin-client routing seam, and the testing
@@ -190,9 +231,10 @@ Mismatches (tokenmax+Haiku, conservative+Opus) waste capacity differently
 expensive one.
 
 tokenmax adds ~\$1.50 per 1K queries in Haiku expansion calls on top of
-the matrix (\$15/mo @ 10K). Cache hits cut all numbers ~50%. **The cost
-picker copy in `gbrain init` carries the same matrix verbatim** — update
-both when refreshing.
+the matrix (\$15/mo @ 10K). Cache hits cut all numbers ~50%. **The matrix
+has three verbatim homes: this section, the `gbrain init` picker copy
+(`src/commands/init-mode-picker.ts`), and `INSTALL_FOR_AGENTS.md` Step
+3.5** — update all three when refreshing.
 
 **Per-query math vs real-world spend.** The matrix above is what an
 isolated benchmark would measure. Real agent loops with disciplined
@@ -272,8 +314,9 @@ audit trail lives in the source repo's git history.
 
 ## Skills
 
-Read the skill files in `skills/` before doing brain operations. GBrain ships 30 skills
-organized by `skills/RESOLVER.md` (`AGENTS.md` is also accepted as of v0.19):
+Read the skill files in `skills/` before doing brain operations. GBrain ships 50+ skills
+(the current list lives in `skills/manifest.json`) organized by `skills/RESOLVER.md`
+(`AGENTS.md` is also accepted as of v0.19):
 
 **Original 8 (conformance-migrated):** ingest (thin router), query, maintain, enrich,
 briefing, migrate, setup, publish.
@@ -327,9 +370,10 @@ filed for held-out corpus growth, cross-vendor verification, hierarchical
 area-of-areas, embedding-based pre-router, and the run-1 vs run-2
 prompt-design ablation methodology.
 
-**Operational health (v0.19.1):** smoke-test (8 post-restart health checks with auto-fix
-for Bun, CLI, DB, worker, Zod CJS, gateway, API key, brain repo; user-extensible via
-`~/.gbrain/smoke-tests.d/*.sh`).
+**Operational health (v0.19.1):** smoke-test (8 post-restart health checks; bounded
+auto-fix for Bun, CLI, and Zod CJS; read-only worker topology via native supervisor
+status with duplicate detection; DB, gateway, API key, brain repo; user-extensible
+via `~/.gbrain/smoke-tests.d/*.sh`).
 
 **Conventions:** `skills/conventions/` has cross-cutting rules (quality, brain-first,
 model-routing, test-before-bulk, cross-modal). `skills/_brain-filing-rules.md` and
@@ -477,8 +521,8 @@ ms, max waiters) for `--json`; a one-line summary prints to stderr.
 
 ## Version locations (single source of truth: `VERSION` file)
 
-Every release advances the version in **five files at once**. Keep these in
-sync. `/ship` enforces this via Step 12's idempotency check (VERSION vs
+Every release advances the version in **every file in the table below at
+once**. Keep these in sync. `/ship` enforces this via Step 12's idempotency check (VERSION vs
 package.json drift), but the canonical list lives here so future runs and
 the auto-update agent know where to look.
 
@@ -493,7 +537,7 @@ four numeric segments are required first. Historical 3-segment versions
 (`0.31.3`, `0.22.1`) remain valid in `git log` and migration filenames
 (`skills/migrations/v0.21.0.md`); do NOT rewrite them. Going forward only.
 
-**Required (every release must update all five):**
+**Required (every release must update every row):**
 
 | File | What lives there | Format |
 |---|---|---|
@@ -502,9 +546,21 @@ four numeric segments are required first. Historical 3-segment versions
 | `CHANGELOG.md` | Top entry header `## [0.31.4.1] - YYYY-MM-DD` plus the "To take advantage of v0.31.4.1" block. | Standard Keep-a-Changelog header. |
 | `TODOS.md` | Any TODO entries that mention "follow-up from vX.Y.Z.W" use the version of the release that filed them. Update only when filing NEW follow-up TODOs. | Inline `vX.Y.Z.W` references in TODO bodies. |
 | `CLAUDE.md` | The Key Files section's per-file annotations carry `vX.Y.Z.W (#NNN)` tags noting which release introduced a behavior. Update whenever a wave's annotations get folded in. | Inline `vX.Y.Z.W (#NNN, contributed by @user)` references. |
+| `openclaw.plugin.json` | OpenClaw plugin manifest (v0.45.6.0, #4033). Hand-maintained; `test/openclaw-plugin-manifest.test.ts` fails the suite if it drifts from `package.json`. Merges from master auto-resolve it to master's version — re-bump it with the trio. | `"version": "0.45.12.0"` |
+| `.codex-plugin/plugin.json` + `.claude-plugin/plugin.json` | Codex + Claude Code plugin manifests. Hand-maintained; `test/codex-plugin-manifest.test.ts` fails the suite when either drifts from `package.json` (the bump is now a FIVE-file lockstep: VERSION, package.json, openclaw.plugin.json, and both plugin manifests). Merges from master auto-resolve them to master's version — re-bump with the version set. | `"version": "0.46.7.0"` |
+| `BOOTSTRAP_FOR_AGENTS.md` | Runbook stamp on line 1. `scripts/check-bootstrap-tag.sh` (in `bun run verify` + CI) fails when it drifts from `VERSION`; refresh it in the same commit as the bump. | `<!-- gbrain-runbook-stamp: X.Y.Z.W -->` |
+| `templates/bootstrap/template-repo/` | Vendored template tree with an embedded version stamp. Auto-derived, but NOT by `bun install`: run `bun run scripts/generate-template-repo.ts --out templates/bootstrap/template-repo` after the bump; `scripts/check-bootstrap-templates.sh` fails CI on drift. | `<!-- gbrain-template-stamp: X.Y.Z.W -->` in generated files. |
 
 **Auto-derived (no manual edit; refreshed by their own commands):**
 
+- `plugin/` + `plugin-variants/` — the committed codex/claude plugin skill
+  tree AND the persona variant trees (gbrain-coding, gbrain-daily) embed a
+  `gbrain-plugin-tree-stamp: X.Y.Z.W` (the variants' generated plugin
+  manifests carry the version too), so every version bump drifts them.
+  Regenerate after the bump: `bun run scripts/generate-plugin-tree.ts --out
+  plugin --variants-out plugin-variants` (guarded by
+  `scripts/check-plugin-tree.sh` in `bun run verify`; the release
+  `publish-codex-plugin` job also drift-gates it before publishing).
 - `bun.lock` — root-package version is auto-pinned from `package.json`. After
   bumping `package.json`, run `bun install` to refresh the lockfile.
 - `llms-full.txt` / `llms.txt` — auto-generated documentation bundles. **Any
@@ -667,7 +723,11 @@ Before any ship, read **[docs/RELEASING.md](docs/RELEASING.md)** in full. It car
 full release + contributor process: pre-ship test requirements (`bun run ci:local` / the
 E2E lifecycle), the CHANGELOG voice + release-summary template, the "To take advantage of
 vX" self-repair block, version migrations, the GitHub Actions SHA refresh, PR conventions,
-and the community-PR-wave process. **Use `/ship` — never hand-roll a release.**
+and the community-PR-wave process. **Use `/ship` — never hand-roll a release.** Every
+community wave runs `bun run wave-security-scan <base>..<head>` (RELEASING.md step 5) before
+ship — the repeatable mechanical sweep (obfuscation/eval, gitleaks with the test/skills
+allowlist stripped, committed `admin/dist` changes as alarms; new endpoints/spawns/env/deps
+as context).
 
 The ship-critical IRON RULES stay inline in this file (do NOT relocate them): the
 Version-locations table above (the 5-file sync + the 3-line VERSION/package.json/CHANGELOG
@@ -687,13 +747,60 @@ before considering the ship complete.
 
 Files that MUST be checked on every ship:
 - README.md — does it reflect new features, commands, or setup steps?
-- CLAUDE.md — does it reflect new files, test files, or architecture changes?
+- `docs/architecture/KEY_FILES.md` — new or changed files in `src/`, and their
+  invariants, are recorded HERE. This is the on-demand layer behind the Reference
+  map, and it is where per-file and per-version detail belongs.
+- CLAUDE.md — only if an always-loaded rule, the Reference map, or the dispatcher
+  changed. **CLAUDE.md is a map, not a log**: it is read in full at the start of every
+  session, so entries are condensed or deleted as they go stale, never appended to.
+  If an update adds a file inventory, a test inventory, or an "as of vX.Y.Z" note,
+  it belongs in the on-demand layer above instead.
 - CHANGELOG.md — does it cover every commit?
 - TODOS.md — are completed items marked done?
 - docs/ — do any guides need updating?
 
 A ship without updated docs is an incomplete ship. Period.
 
+
+## "Say to your agent" rule: every feature doc addresses the END USER (IRON RULE)
+
+GBrain is installed and operated by an AI agent. Most users never type a
+`gbrain` command — they talk to their harness (Claude Code, Codex, OpenClaw,
+Hermes, Cursor). Documentation that only shows CLI blocks serves the operator
+and abandons the end user.
+
+**The rule:** whenever a feature is added or explained in a public-facing doc
+(README, CHANGELOG, docs/guides, tutorials), include the common end-user block:
+
+    **Say to your agent:** *"<natural-language prompt>"* — *"<optional second phrasing>"*
+
+- 1-3 quoted phrases a user can literally type into ANY harness (a 4th is fine
+  when it hands off to an adjacent skill, e.g. a capture block that also points
+  at cold-start's "fill my brain"). Plain English, outcome-framed ("connect my
+  chatgpt account and pull my whole history into the brain"); don't dress a bare
+  command name as a sentence.
+- **When a skill backs the feature, the phrases MUST come from (or contain) the
+  skill's frontmatter `triggers:`** — those are what the harness actually
+  routes on (baseline routing is substring match), so the doc and the router can
+  never drift apart. Verify each phrase against the real trigger before shipping.
+  The skills section of README points at `skills/RESOLVER.md` as the full
+  phrasebook.
+- **When NO skill backs the feature (a CLI-only path), be honest:** the phrase
+  states the outcome and names the command the agent runs for it ("Run a search
+  benchmark against LongMemEval — your agent runs `gbrain eval longmemeval`"),
+  rather than implying a trigger that doesn't exist.
+- Grouping two phrases for the SAME skill with a `/` (e.g. *"Brain health"* /
+  *"check backlinks"*) is allowed; separate distinct destinations with an em-dash.
+- CLI blocks stay — they serve operators and the agents themselves. The say
+  block sits adjacent, not instead.
+- CHANGELOG: every feature entry's "To take advantage of vX" block carries a
+  say line alongside the commands.
+- Same privacy bar as everything else public: generic placeholders in the
+  phrases, never real names.
+
+Litmus test: a non-technical user reads the section and knows the exact
+sentence to type into their agent. If they'd have to translate a flag into
+English themselves, the section fails.
 
 ## Privacy rule: scrub real names from public docs
 

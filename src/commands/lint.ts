@@ -140,8 +140,16 @@ export function lintContent(content: string, filePath: string, opts: LintContent
     });
   }
 
-  // Rule: Placeholder dates
+  // Rule: Placeholder dates. #3958: skip lines inside fenced code blocks —
+  // a page DOCUMENTING date formats (```\ncreated: YYYY-MM-DD\n```) is not a
+  // page with an unfilled placeholder. Both ``` and ~~~ fences toggle.
+  let inFence = false;
   for (let i = 0; i < lines.length; i++) {
+    if (/^\s{0,3}(```|~~~)/.test(lines[i])) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
     if (lines[i].match(/\bYYYY-MM-DD\b/) || lines[i].match(/\bXX-XX\b/) || lines[i].match(/\b\d{4}-XX-XX\b/)) {
       issues.push({
         file: filePath, line: i + 1, rule: 'placeholder-date',
@@ -171,10 +179,16 @@ export function lintContent(content: string, filePath: string, opts: LintContent
         });
       }
       if (!fm.match(/^created:/m)) {
+        // #3958: when the page's own frontmatter carries a capture timestamp
+        // (captured_at / ingested_at), `--fix` can promote it to `created` —
+        // mark the finding fixable so the operator knows --fix will heal it.
+        const promotable = /^(?:captured_at|ingested_at):/m.test(fm);
         issues.push({
           file: filePath, line: 1, rule: 'missing-created',
-          message: 'Frontmatter missing required field: created',
-          fixable: false,
+          message: promotable
+            ? 'Frontmatter missing required field: created (promotable from captured_at/ingested_at)'
+            : 'Frontmatter missing required field: created',
+          fixable: promotable,
         });
       }
     }
@@ -286,6 +300,25 @@ export function lintContent(content: string, filePath: string, opts: LintContent
   return issues;
 }
 
+/**
+ * #3958: promote `captured_at:` (preferred) or `ingested_at:` to `created:`
+ * when the frontmatter has no `created:` of its own. The value is copied
+ * verbatim (quoting preserved) and inserted directly below the source line.
+ * No-op when there is no frontmatter, `created:` already exists, or neither
+ * capture field is present. Pure + exported for tests.
+ */
+export function promoteCreatedFromCapture(content: string): string {
+  if (!content.startsWith('---')) return content;
+  const fmEnd = content.indexOf('---', 3);
+  if (fmEnd <= 0) return content;
+  const fm = content.slice(3, fmEnd);
+  if (fm.match(/^created:/m)) return content;
+  const src = fm.match(/^captured_at:[ \t]*(\S.*)$/m) ?? fm.match(/^ingested_at:[ \t]*(\S.*)$/m);
+  if (!src || src.index === undefined) return content;
+  const insertAt = 3 + src.index + src[0].length;
+  return content.slice(0, insertAt) + `\ncreated: ${src[1].trim()}` + content.slice(insertAt);
+}
+
 /** Auto-fix fixable issues */
 export function fixContent(content: string): string {
   let fixed = content;
@@ -299,6 +332,11 @@ export function fixContent(content: string): string {
   // Fix wrapping code fences
   fixed = fixed.replace(/^```(?:markdown|md)\s*\n/, '');
   fixed = fixed.replace(/\n```\s*$/, '');
+
+  // #3958: missing-created is fixable when the page's own frontmatter
+  // carries a capture timestamp. Runs after the fence unwrap so a wrapped
+  // page's frontmatter is visible to the promotion.
+  fixed = promoteCreatedFromCapture(fixed);
 
   // Clean up excessive blank lines left by fixes
   fixed = fixed.replace(/\n{3,}/g, '\n\n');
@@ -441,12 +479,34 @@ export interface LintOpts {
    * single-file targets.
    */
   exclude?: string[];
+  /**
+   * W0 fix-wave (Tier-1 #14): per-page hook fired for every page WITH
+   * issues, after this run's fix attempt for that page — fixedCount is the
+   * number of fixes just applied (0 when --fix is off or nothing was
+   * fixable). The CLI passes a printer so human detail and the aggregate
+   * counts come from ONE scan — pre-fix, runLint ran its own full
+   * read+lint+fix loop and THEN called runLintCore for the summary, linting
+   * every page twice and reporting "0 auto-fixed" because the second pass
+   * saw already-fixed files.
+   */
+  onPageIssues?: (relPath: string, issues: LintIssue[], fixedCount: number) => void;
+  /** Companion to onPageIssues: per-page progress tick (CLI progress bar). */
+  onPageScanned?: () => void;
+  /**
+   * Fired once with the collected page count before scanning starts, so the
+   * CLI can size its progress bar without walking the tree a second time.
+   */
+  onPagesCollected?: (count: number) => void;
 }
 
 export interface LintResult {
   pages_scanned: number;
   pages_with_issues: number;
   total_issues: number;
+  /** #3958: how many of total_issues are fixable — the CLI's "Run with
+   *  --fix" hint only prints when this is non-zero, so an all-unfixable
+   *  report can't send the operator on a no-op --fix run. */
+  total_fixable: number;
   total_fixed: number;
   dryRun: boolean;
   applied_fix: boolean;
@@ -468,6 +528,7 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
 
   const isSingleFile = statSync(opts.target).isFile();
   const pages = isSingleFile ? [opts.target] : collectPages(opts.target, opts.exclude ?? []);
+  opts.onPagesCollected?.(pages.length);
 
   // Resolve content-sanity config once for this lint run (D1: lift DB
   // config when reachable). Caller can pre-pass via opts.contentSanity
@@ -476,6 +537,7 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
   const lintOpts: LintContentOpts = { contentSanity };
 
   let totalIssues = 0;
+  let totalFixable = 0;
   let totalFixed = 0;
   let pagesWithIssues = 0;
 
@@ -490,27 +552,33 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     const content = readFileSync(page, 'utf-8');
-    const issues = lintContent(content, isSingleFile ? page : relative(opts.target, page), lintOpts);
+    const relPath = isSingleFile ? page : relative(opts.target, page);
+    const issues = lintContent(content, relPath, lintOpts);
+    opts.onPageScanned?.();
     if (issues.length === 0) continue;
     pagesWithIssues++;
     totalIssues += issues.length;
+    totalFixable += issues.filter(i => i.fixable).length;
 
+    let fixCount = 0;
     if (opts.fix && issues.some(i => i.fixable)) {
       const fixed = fixContent(content);
       if (fixed !== content) {
-        const fixCount = issues.filter(i => i.fixable).length;
+        fixCount = issues.filter(i => i.fixable).length;
         totalFixed += fixCount;
         if (!opts.dryRun) {
           writeFileSync(page, fixed);
         }
       }
     }
+    opts.onPageIssues?.(relPath, issues, fixCount);
   }
 
   return {
     pages_scanned: pages.length,
     pages_with_issues: pagesWithIssues,
     total_issues: totalIssues,
+    total_fixable: totalFixable,
     total_fixed: totalFixed,
     dryRun: !!opts.dryRun,
     applied_fix: !!opts.fix,
@@ -547,61 +615,48 @@ export async function runLint(args: string[]) {
     process.exit(1);
   }
 
-  // Single file or directory — print human detail as we go, then rely on
-  // Core for the aggregate numbers at the end.
-  const isSingleFile = statSync(target).isFile();
-  const pages = isSingleFile ? [target] : collectPages(target, extraExcludes);
-
+  // W0 fix-wave (Tier-1 #14): ONE scan. Pre-fix this function ran its own
+  // full read+lint+fix loop for human output and THEN called runLintCore for
+  // the summary — every page linted twice, and with --fix the second pass
+  // saw already-fixed files so the summary reported "0 auto-fixed" after
+  // fixing N. Human detail now streams from runLintCore's per-page hooks
+  // and the counts come from the same single pass.
   // Progress on stderr. Stdout keeps the per-issue human output it always had.
+  // Ship-review perf catch: the tree is walked ONCE — runLintCore reports the
+  // collected count via onPagesCollected (pre-fix the CLI ran its own
+  // collectPages just to size the progress bar, a second full readdir/stat
+  // walk on every directory lint).
   const { createProgress } = await import('../core/progress.ts');
   const { getCliOptions, cliOptsToProgressOptions } = await import('../core/cli-options.ts');
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
-  progress.start('lint.pages', pages.length);
 
-  // v0.41 (D1): resolve content-sanity config once for this lint run.
-  // Mirrors runLintCore. The two paths must agree because runLint
-  // prints human details inline; runLintCore at end computes the
-  // aggregate. Sharing the resolved opts keeps both surfaces seeing
-  // the same rule firings.
-  const contentSanity = await resolveLintContentSanity();
-  const lintContentOpts: LintContentOpts = { contentSanity };
-
-  for (const page of pages) {
-    const content = readFileSync(page, 'utf-8');
-    const relPath = isSingleFile ? page : relative(target, page);
-    const issues = lintContent(content, relPath, lintContentOpts);
-    progress.tick(1);
-    if (issues.length === 0) continue;
-
-    console.log(`\n${relPath}:`);
-    for (const issue of issues) {
-      const fixLabel = issue.fixable ? ' [fixable]' : '';
-      console.log(`  L${issue.line} ${issue.rule}: ${issue.message}${fixLabel}`);
-    }
-
-    if (doFix && issues.some(i => i.fixable)) {
-      const fixed = fixContent(content);
-      if (fixed !== content) {
-        const fixCount = issues.filter(i => i.fixable).length;
-        if (!dryRun) {
-          writeFileSync(page, fixed);
-        }
-        console.log(`  ${dryRun ? '(dry run) ' : ''}Fixed ${fixCount} issue(s)`);
+  const result = await runLintCore({
+    target,
+    fix: doFix,
+    dryRun,
+    exclude: extraExcludes,
+    onPagesCollected: (count) => progress.start('lint.pages', count),
+    onPageScanned: () => progress.tick(1),
+    onPageIssues: (relPath, issues, fixedCount) => {
+      console.log(`\n${relPath}:`);
+      for (const issue of issues) {
+        const fixLabel = issue.fixable ? ' [fixable]' : '';
+        console.log(`  L${issue.line} ${issue.rule}: ${issue.message}${fixLabel}`);
       }
-    }
-  }
+      if (fixedCount > 0) {
+        console.log(`  ${dryRun ? '(dry run) ' : ''}Fixed ${fixedCount} issue(s)`);
+      }
+    },
+  });
 
   progress.finish();
-
-  // Re-run core for the aggregate counts (cheap; re-parses contents but
-  // produces canonical numbers for the summary line).
-  // Pass contentSanity through so runLintCore skips its own resolve
-  // (we already resolved once for the human-detail loop above).
-  const result = await runLintCore({ target, fix: doFix, dryRun, contentSanity, exclude: extraExcludes });
   console.log(`\n${result.pages_scanned} pages scanned. ${result.total_issues} issue(s) in ${result.pages_with_issues} page(s).`);
   if (doFix) {
     console.log(`${dryRun ? '(dry run) ' : ''}${result.total_fixed} auto-fixed.`);
-  } else if (result.total_issues > 0) {
-    console.log(`Run with --fix to auto-fix fixable issues.`);
+  } else if (result.total_fixable > 0) {
+    // #3958: only advertise --fix when at least one finding is actually
+    // fixable — an all-unfixable report used to send operators on a no-op
+    // `--fix` run that changed nothing.
+    console.log(`Run with --fix to auto-fix ${result.total_fixable} fixable issue(s).`);
   }
 }
