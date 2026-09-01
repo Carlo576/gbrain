@@ -748,6 +748,7 @@ export async function runPhaseExtractAtoms(
 
   // ── gbrain#4148 helpers ────────────────────────────────────────────
   let malformedOutputs = 0;
+  let sourceQuotesStripped = 0;
   const tombstonedForFailures: string[] = [];
   // #3044 adoption: shared halt policy — auth/billing halt on the first hit,
   // a rate_limit streak halts after 3 consecutive failures, a successful
@@ -857,7 +858,15 @@ export async function runPhaseExtractAtoms(
         }
         continue;
       }
-      const atoms = parseOutcome.atoms;
+      const atoms = parseOutcome.atoms.map((atom) => {
+        if (!atom.source_quote) return atom;
+        const sourceQuote = atom.source_quote.trim();
+        if (!sourceQuote || !item.content.includes(sourceQuote)) {
+          sourceQuotesStripped++;
+          return { ...atom, source_quote: undefined };
+        }
+        return sourceQuote === atom.source_quote ? atom : { ...atom, source_quote: sourceQuote };
+      });
       if (atoms.length === 0) {
         // #2144: tombstone zero-yield pages so they stop being rediscovered.
         // Idempotency is keyed on atom rows — a page that yields no atoms
@@ -1095,6 +1104,7 @@ export async function runPhaseExtractAtoms(
       failures,
       ...(abortedGlobalError ? { aborted_global_error: abortedGlobalError } : {}),
       malformed_outputs: malformedOutputs,
+      source_quotes_stripped: sourceQuotesStripped,
       tombstoned_for_failures: tombstonedForFailures,
       estimated_spend_usd: estimatedSpendUsd,
       budget_usd: budgetCap,

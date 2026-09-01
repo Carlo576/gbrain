@@ -135,6 +135,51 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
     expect(rows.length).toBe(2);
   });
 
+  test('strips a model-authored source_quote that is not verbatim in the source', async () => {
+    const chat = stubChat(`[
+      {"title":"Grounded claim","atom_type":"insight","body":"A useful atom.","source_quote":"A paraphrase falsely presented as a quote."}
+    ]`);
+    const result = await runPhaseExtractAtoms(engine, {
+      _transcripts: [{
+        filePath: '/grounding.txt',
+        content: 'The source contains a different exact sentence.',
+        contentHash: 'grounding-hash',
+      }],
+      _pages: [],
+      _chat: chat,
+    });
+
+    const rows = await engine.executeRaw<{ frontmatter: Record<string, unknown> }>(
+      `SELECT frontmatter FROM pages WHERE type = 'atom'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].frontmatter.source_quote).toBeUndefined();
+    expect(result.details?.source_quotes_stripped).toBe(1);
+  });
+
+  test('preserves a source_quote that is an exact source substring', async () => {
+    const quote = 'This sentence is verbatim.';
+    const chat = stubChat(`[
+      {"title":"Verified quote","atom_type":"quote","body":"A grounded atom.","source_quote":"${quote}"}
+    ]`);
+    const result = await runPhaseExtractAtoms(engine, {
+      _transcripts: [{
+        filePath: '/verified.txt',
+        content: `Before. ${quote} After.`,
+        contentHash: 'verified-hash',
+      }],
+      _pages: [],
+      _chat: chat,
+    });
+
+    const rows = await engine.executeRaw<{ frontmatter: Record<string, unknown> }>(
+      `SELECT frontmatter FROM pages WHERE type = 'atom'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].frontmatter.source_quote).toBe(quote);
+    expect(result.details?.source_quotes_stripped).toBe(0);
+  });
+
   test('dry-run counts but does NOT write', async () => {
     const chat = stubChat(`[{"title":"x","atom_type":"insight","body":"b"}]`);
     const result = await runPhaseExtractAtoms(engine, {
