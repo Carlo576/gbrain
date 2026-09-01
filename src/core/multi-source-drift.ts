@@ -44,7 +44,7 @@
 import { readdirSync, lstatSync, statSync } from 'fs';
 import { join, relative } from 'path';
 import type { BrainEngine } from './engine.ts';
-import { pathToSlug } from './sync.ts';
+import { pathToSlug, isSyncable, repoSyncableOptions } from './sync.ts';
 import { readSlugRootMode } from './sync-anchor.ts';
 
 export interface SourceWithPath {
@@ -232,8 +232,15 @@ export async function findMisroutedPages(
     if (truncated) walkTruncated = true;
     if (files.length === 0) continue;
 
+    // Drift must use the exact same repository admission boundary as sync.
+    // Otherwise .gbrainignore paths, metafiles, and pruned directories look
+    // "missing" forever even though sync intentionally excludes them.
+    const syncableOpts = repoSyncableOptions(src.local_path, 'markdown');
+    const admitted = files.filter((f) => isSyncable(f.relPath, syncableOpts));
+    if (admitted.length === 0) continue;
+
     // Convert FS paths to canonical slugs (lowercased, extension stripped).
-    const slugs = Array.from(new Set(files.map(f => pathToSlug(f.relPath))));
+    const slugs = Array.from(new Set(admitted.map(f => pathToSlug(f.relPath))));
     const existenceMap = await batchProbeExistence(engine, slugs, src.id);
 
     for (const slug of slugs) {

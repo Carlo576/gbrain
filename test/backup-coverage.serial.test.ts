@@ -121,13 +121,24 @@ function stubEngine(opts: {
   kind?: 'pglite' | 'postgres';
   sources?: unknown[];
   pages?: number;
+  pagesBySource?: Record<string, number>;
   onCall?: () => void;
 } = {}): BrainEngine {
   return {
     kind: opts.kind ?? 'pglite',
-    executeRaw: async (sql: string) => {
+    executeRaw: async (sql: string, params?: unknown[]) => {
       opts.onCall?.();
-      if (sql.includes('FROM pages')) return [{ n: opts.pages ?? 0 }];
+      if (sql.includes('FROM pages')) {
+        if (sql.includes('recoverable_sources')) {
+          const recoverable = new Set((params ?? []).map(String));
+          const n = Object.entries(opts.pagesBySource ?? {}).reduce(
+            (sum, [sourceId, count]) => sum + (recoverable.has(sourceId) ? 0 : count),
+            0,
+          );
+          return [{ n }];
+        }
+        return [{ n: opts.pages ?? Object.values(opts.pagesBySource ?? {}).reduce((a, b) => a + b, 0) }];
+      }
       if (sql.includes('FROM sources')) return opts.sources ?? [];
       return [];
     },
@@ -318,7 +329,13 @@ describe('computeBackupCoverage — source repos', () => {
     expect(asset).toBeDefined();
     expect(asset?.id).toBe('tiered-src');
     expect(asset?.state).toBe('info');
-    expect(asset?.fix_argv).toEqual(['gbrain', 'export', '--dir', '<backup-dir>']);
+    expect(asset?.fix_argv).toEqual([
+      'gbrain',
+      'export',
+      '--by-source',
+      '--dir',
+      '<backup-dir>',
+    ]);
   });
 });
 
@@ -337,7 +354,65 @@ describe('computeBackupCoverage — db_content and empty brain', () => {
     expect(s.overall).toBe('warn');
   });
 
-  test('postgres brain with pages but no sources/receipt → db_content info, overall ok', async () => {
+  test('loopback postgres brain with pages but no sources/receipt → db_content no_remote, pages at risk', async () => {
+    mkdirSync(home(), { recursive: true });
+    writeFileSync(
+      join(home(), 'config.json'),
+      JSON.stringify({ engine: 'postgres', database_url: 'postgresql://user:secret@localhost:5432/gbrain' }),
+    );
+    const engine = stubEngine({ kind: 'postgres', pages: 42 });
+    const s = await computeBackupCoverage(engine, { localGitProbes: true });
+
+    const asset = s.assets.find((a) => a.kind === 'db_content');
+    expect(asset?.state).toBe('no_remote');
+    expect(asset?.detail).toContain('local PostgreSQL');
+    expect(s.totals.pages_at_risk).toBe(42);
+    expect(s.overall).toBe('warn');
+  });
+
+  test('loopback postgres aliases remain in the current-host failure domain', async () => {
+    const localUrls = [
+      'postgresql://u:p@localhost.:5432/db',
+      'postgresql://u:p@127.1:5432/db',
+      'postgresql://u:p@2130706433:5432/db',
+      'postgresql://u:p@[::1]:5432/db',
+      'postgresql://u:p@[::ffff:127.0.0.1]:5432/db',
+      'postgresql:///db',
+    ];
+    for (const databaseUrl of localUrls) {
+      mkdirSync(home(), { recursive: true });
+      writeFileSync(
+        join(home(), 'config.json'),
+        JSON.stringify({ engine: { kind: 'postgres' }, database_url: databaseUrl }),
+      );
+      const status = await computeBackupCoverage(
+        stubEngine({ kind: 'postgres', pages: 2 }),
+        { localGitProbes: false },
+      );
+      expect(status.assets.find((a) => a.kind === 'db_content')?.state).toBe('no_remote');
+      expect(status.totals.pages_at_risk).toBe(2);
+    }
+  });
+
+  test('wildcard-bind postgres host is local and does not survive host loss', async () => {
+    mkdirSync(home(), { recursive: true });
+    writeFileSync(
+      join(home(), 'config.json'),
+      JSON.stringify({ engine: 'postgres', database_url: 'postgresql://user:***@0.0.0.0:5432/gbrain' }),
+    );
+    const engine = stubEngine({ kind: 'postgres', pages: 3 });
+    const s = await computeBackupCoverage(engine, { localGitProbes: true });
+
+    expect(s.totals.pages_at_risk).toBe(3);
+    expect(s.assets.find((a) => a.kind === 'db_content')?.state).toBe('no_remote');
+  });
+
+  test('remote postgres brain with pages but no sources/receipt → db_content info, overall ok', async () => {
+    mkdirSync(home(), { recursive: true });
+    writeFileSync(
+      join(home(), 'config.json'),
+      JSON.stringify({ engine: 'postgres', database_url: 'postgresql://user:secret@db.example.com:5432/gbrain' }),
+    );
     const engine = stubEngine({ kind: 'postgres', pages: 42 });
     const s = await computeBackupCoverage(engine, { localGitProbes: true });
 
@@ -345,6 +420,38 @@ describe('computeBackupCoverage — db_content and empty brain', () => {
     expect(asset?.state).toBe('info');
     expect(s.totals.pages_at_risk).toBe(0);
     expect(s.overall).toBe('ok');
+  });
+
+  test('loopback postgres counts default and no-remote source pages as at risk', async () => {
+    mkdirSync(home(), { recursive: true });
+    writeFileSync(
+      join(home(), 'config.json'),
+      JSON.stringify({ engine: 'postgres', database_url: 'postgresql://user:secret@127.0.0.1:5432/gbrain' }),
+    );
+
+    const localOnly = join(tmp, 'local-only-source');
+    initRepo(localOnly);
+    commitFile(localOnly, 'local.md', 'local', 'local source');
+
+    const bare = join(tmp, 'recoverable.git');
+    execFileSync('git', ['init', '--bare', '-b', 'main', bare], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const recoverable = join(tmp, 'recoverable-source');
+    initRepo(recoverable);
+    commitFile(recoverable, 'safe.md', 'safe', 'safe source');
+    g(recoverable, ['remote', 'add', 'origin', bare]);
+    g(recoverable, ['push', '-u', 'origin', 'main']);
+
+    const engine = stubEngine({
+      kind: 'postgres',
+      sources: [srcRow('local-only', localOnly), srcRow('safe-source', recoverable)],
+      pagesBySource: { default: 2, 'local-only': 4, 'safe-source': 7 },
+    });
+    const s = await computeBackupCoverage(engine, { localGitProbes: true });
+
+    expect(s.totals.pages_at_risk).toBe(6);
+    const dbAsset = s.assets.find((a) => a.kind === 'db_content');
+    expect(dbAsset?.state).toBe('no_remote');
+    expect(dbAsset?.detail).toContain('6 pages');
   });
 
   test('empty brain (0 pages, no sources, no receipt) → ok and never warn', async () => {
@@ -386,17 +493,25 @@ describe('computeBackupCoverage — bootstrap workspace', () => {
     expect(s.totals.no_remote).toBe(1);
   });
 
-  test('receipt with repo_url and no failing push statuses → bootstrap_workspace ok', async () => {
+  test('source pages inside a recoverable bootstrap workspace are not counted at risk', async () => {
     const ws = join(tmp, 'ws');
-    mkdirSync(ws, { recursive: true });
+    initRepo(ws);
+    commitFile(ws, 'page.md', 'body', 'init');
     writeReceipt(ws, { repo_url: 'https://example.com/acme-example/brain.git' });
 
-    const s = await computeBackupCoverage(stubEngine({}), { localGitProbes: true });
+    const s = await computeBackupCoverage(
+      stubEngine({
+        sources: [srcRow('workspace', ws)],
+        pagesBySource: { workspace: 3 },
+      }),
+      { localGitProbes: true },
+    );
 
-    const asset = s.assets.find((a) => a.kind === 'bootstrap_workspace');
-    expect(asset?.state).toBe('ok');
+    expect(s.assets.find((a) => a.kind === 'bootstrap_workspace')?.state).toBe('ok');
     expect(s.overall).toBe('ok');
     expect(s.totals.recoverable_repos).toBe(1);
+    expect(s.totals.pages_at_risk).toBe(0);
+    expect(s.assets.some((a) => a.kind === 'db_content' && a.state === 'no_remote')).toBe(false);
   });
 });
 

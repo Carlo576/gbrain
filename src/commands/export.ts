@@ -4,6 +4,8 @@ import type { BrainEngine } from '../core/engine.ts';
 import { serializeMarkdown } from '../core/markdown.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+import { assertValidSourceId } from '../core/source-id.ts';
+import { validateSlug } from '../core/utils.ts';
 import { loadStorageConfig, isDbOnly } from '../core/storage-config.ts';
 import { slugifyPath } from '../core/sync.ts';
 import { getDefaultSourcePath } from '../core/source-resolver.ts';
@@ -23,6 +25,7 @@ export async function runExport(engine: BrainEngine, args: string[]) {
   const slugPrefix = slugPrefixIdx !== -1 ? args[slugPrefixIdx + 1] : undefined;
 
   const restoreOnly = args.includes('--restore-only');
+  const bySource = args.includes('--by-source');
 
   // Resolution chain (D5): explicit --repo → typed sources.getDefault() →
   // hard-error for restore-only paths (never fall through to cwd).
@@ -134,7 +137,10 @@ export async function runExport(engine: BrainEngine, args: string[]) {
       { type: page.type, title: page.title, tags },
     );
 
-    const filePath = join(outDir, page.slug + '.md');
+    validateSlug(page.slug);
+    if (bySource) assertValidSourceId(page.source_id);
+    const pageOutDir = bySource ? join(outDir, page.source_id) : outDir;
+    const filePath = join(pageOutDir, page.slug + '.md');
     mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, md);
 
@@ -147,7 +153,7 @@ export async function runExport(engine: BrainEngine, args: string[]) {
     });
     if (rawData.length > 0) {
       const slugParts = page.slug.split('/');
-      const rawDir = join(outDir, ...slugParts.slice(0, -1), '.raw');
+      const rawDir = join(pageOutDir, ...slugParts.slice(0, -1), '.raw');
       mkdirSync(rawDir, { recursive: true });
       const rawPath = join(rawDir, slugParts[slugParts.length - 1] + '.json');
 

@@ -107,7 +107,10 @@ function makeEngine(sourcePaths: Array<{ id: string; local_path: string }>, page
           newest_content_at: null,
         }));
       }
-      if (/FROM pages/i.test(sql)) return [{ n: pageCount }];
+      if (/FROM pages/i.test(sql)) {
+        if (/recoverable_sources/i.test(sql)) return [{ n: 0 }];
+        return [{ n: pageCount }];
+      }
       throw new Error(`unexpected sql in stub: ${sql}`);
     },
   } as unknown as BrainEngine;
@@ -158,6 +161,23 @@ describe('checkBackupCoverage — localOnly (trusted, probes run)', () => {
     expect(details.computed_by).toBe('doctor');
     // Probed compute persists the verdict cache (getBackupStatus discipline).
     expect(existsSync(statusFile)).toBe(true);
+  });
+
+  test('shared git root is rendered as one grouped asset, not two comma-separated assets', async () => {
+    const repo = makeNoOriginRepo('shared');
+    const nested = join(repo, 'nested');
+    mkdirSync(nested);
+    const check = await checkBackupCoverage(
+      makeEngine([
+        { id: 'src-a', local_path: repo },
+        { id: 'src-b', local_path: nested },
+      ]),
+      { localOnly: true },
+    );
+
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('1 knowledge asset(s)');
+    expect(check.message).toContain('[src-a, src-b]');
   });
 
   test('healthy repo (origin, pushed, clean) → ok with recoverable count', async () => {

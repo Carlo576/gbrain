@@ -132,8 +132,9 @@ source id. Full per-asset detail (which repo, which fix) is local-only:
   `git remote add origin git@github.com:you/your-brain-repo.git && git push -u origin main`,
   then `gbrain sources harden <source-id>` for auto-push durability.
 - Unpushed workspace work: `gbrain sources push --path <workspace>`.
-- db_only pages: `gbrain export --dir <backup-dir>` (store the dump outside
-  the gitignored dirs — another disk, another repo, anywhere durable).
+- db_only pages: `gbrain export --by-source --dir <backup-dir>` (store the dump outside
+  the gitignored dirs — another disk, another repo, anywhere durable). Source
+  partitioning prevents same-slug pages from different sources overwriting each other.
 
 ## Recovery drill (prove the answer is real)
 

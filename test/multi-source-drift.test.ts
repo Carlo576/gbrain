@@ -220,4 +220,22 @@ describe('findMisroutedPages — heuristic correctness', () => {
     expect(result.sample[0]).toMatchObject({ slug: 'people/eve', intended_source: 'src-case9-sr' });
     expect(result.git_root_skipped).toEqual(['src-case9-gr']);
   });
+
+  test('case 10: repository .gbrainignore exclusions never surface as drift', async () => {
+    const root = makeTmpRoot('case10-ignore');
+    seedFile(root, '.gbrainignore', 'raw/\n');
+    seedFile(root, 'raw/ignored.md');
+    seedFile(root, 'kept.md');
+    await runSources(engine, ['add', 'src-case10', '--no-federated']);
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = $2`, [root, 'src-case10']);
+
+    // The excluded file has a legacy/default row, while the admitted file is
+    // correctly source-owned. Drift must use the same admission boundary as sync.
+    await engine.putPage('raw/ignored', { type: 'note', title: 'old', compiled_truth: '.' });
+    await engine.putPage('kept', { type: 'note', title: 'kept', compiled_truth: '.' }, { sourceId: 'src-case10' });
+
+    const result = await findMisroutedPages(engine, [{ id: 'src-case10', local_path: root }]);
+    expect(result.count).toBe(0);
+    expect(result.sample).toEqual([]);
+  });
 });

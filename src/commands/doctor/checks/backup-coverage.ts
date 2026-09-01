@@ -29,8 +29,8 @@ function toCheck(s: BackupStatus, note?: string): Check {
   if (s.overall === 'warn') {
     const ids = s.assets
       .filter((a) => a.state === 'no_remote')
-      .map((a) => a.id)
-      .join(', ');
+      .map((a) => (a.id.includes(',') ? `[${a.id}]` : a.id))
+      .join('; ');
     return {
       name: 'backup_coverage',
       status: 'warn',

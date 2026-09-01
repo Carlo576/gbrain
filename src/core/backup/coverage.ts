@@ -34,6 +34,8 @@ import { readManifest, readReceipt } from '../bootstrap/format.ts';
 import { resolveGbrainHome } from '../gbrain-home.ts';
 import { loadBridgeState } from '../skillpack/bridge-state.ts';
 import { loadStorageConfig } from '../storage-config.ts';
+import { loadConfig } from '../config.ts';
+import { hostnameToOctets } from '../url-safety.ts';
 import {
   BACKUP_INTERVAL_DAYS_DEFAULT,
   BACKUP_STATUS_SCHEMA_VERSION,
@@ -140,6 +142,85 @@ async function countLivePages(engine: BrainEngine): Promise<number | null> {
   }
 }
 
+/** Count live pages that cannot be rebuilt from a proven remote-backed source. */
+async function countPagesOutsideRecoverableSources(
+  engine: BrainEngine,
+  recoverableSourceIds: ReadonlySet<string>,
+  totalPages: number,
+): Promise<number | null> {
+  if (recoverableSourceIds.size === 0) return totalPages;
+  try {
+    const ids = [...recoverableSourceIds].sort();
+    const values = ids.map((_, i) => `($${i + 1}::text)`).join(', ');
+    const rows = await engine.executeRaw<{ n: number }>(
+      `WITH recoverable_sources(source_id) AS (VALUES ${values})
+       SELECT COUNT(*)::int AS n
+       FROM pages p
+       WHERE p.deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM recoverable_sources r WHERE r.source_id = p.source_id
+         )`,
+      ids,
+    );
+    const n = rows[0]?.n;
+    return typeof n === 'number' && Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function isCurrentHostPostgresHostname(rawHostname: string): boolean {
+  let host = rawHostname.toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  if (host.endsWith('.')) host = host.slice(0, -1);
+
+  // Empty host means the PostgreSQL client will use a local Unix socket.
+  if (!host || host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '::') return true;
+
+  if (host.startsWith('::ffff:')) {
+    const tail = host.slice(7);
+    const dotted = hostnameToOctets(tail);
+    if (dotted) return dotted[0] === 127 || dotted[0] === 0;
+    const hextets = tail.split(':');
+    if (hextets.length === 2 && hextets.every((h) => /^[0-9a-f]{1,4}$/.test(h))) {
+      const hi = parseInt(hextets[0], 16);
+      return ((hi >> 8) & 0xff) === 127 || ((hi >> 8) & 0xff) === 0;
+    }
+  }
+
+  const octets = hostnameToOctets(host);
+  if (octets) return octets[0] === 127 || octets[0] === 0;
+
+  // WHATWG URL preserves legacy shortened loopback forms such as 127.1.
+  const shorthand = host.split('.');
+  if (
+    shorthand.length >= 2 &&
+    shorthand.length <= 3 &&
+    shorthand.every((part) => /^\d+$/.test(part) && Number(part) <= 255)
+  ) {
+    return Number(shorthand[0]) === 127 || Number(shorthand[0]) === 0;
+  }
+  return false;
+}
+
+/**
+ * A PostgreSQL engine is not automatically off-machine. A loopback, wildcard,
+ * or local-socket URL means the database dies with this host and must be
+ * treated like local PGLite for disk-loss coverage. Missing or malformed
+ * connection provenance also fails closed: only an explicit non-local
+ * hostname proves host independence.
+ */
+function postgresSurvivesHostDiskLoss(): boolean {
+  const raw = loadConfig()?.database_url;
+  if (!raw) return false;
+  try {
+    return !isCurrentHostPostgresHostname(new URL(raw).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export async function computeBackupCoverage(
   engine: BrainEngine,
   opts: BackupCoverageOpts,
@@ -151,6 +232,7 @@ export async function computeBackupCoverage(
   // File plane only — no git subprocess needed here.
   let workspaceRoot: string | null = null;
   let receiptHasRepo = false;
+  let workspaceRecoverable = false;
   try {
     const home = resolveGbrainHome();
     const receipt = readReceipt(home);
@@ -189,6 +271,7 @@ export async function computeBackupCoverage(
             fix_argv: ['gbrain', 'sources', 'push', '--path', receipt.workspace_dir],
           });
         } else {
+          workspaceRecoverable = true;
           pushAsset(assets, { kind: 'bootstrap_workspace', id: receipt.workspace_dir, state: 'ok' });
         }
       }
@@ -200,6 +283,7 @@ export async function computeBackupCoverage(
   // ── Source repos (deduped by git root) ────────────────────────────────────
   let sourceRootCount = 0;
   let degraded = false;
+  const recoverableSourceIds = new Set<string>();
   try {
     const rows = await loadAllSources(engine);
     const byRoot = new Map<string, { ids: string[]; dbOnly: boolean }>();
@@ -258,7 +342,10 @@ export async function computeBackupCoverage(
           continue;
         }
       }
-      if (root === workspaceRoot) continue; // the workspace asset above owns it
+      if (root === workspaceRoot) {
+        if (workspaceRecoverable) recoverableSourceIds.add(row.id);
+        continue; // the workspace asset above owns it
+      }
       const entry = byRoot.get(root);
       let dbOnly = false;
       try {
@@ -282,7 +369,7 @@ export async function computeBackupCoverage(
             'db_only dirs configured: those pages are not in git and the DB file is deliberately not backed up. ' +
             'Dump them somewhere OUTSIDE the gitignored dirs (--restore-only is the wrong direction for a backup); ' +
             'run gbrain doctor (undeclared_db_only_pages) for the page-level audit.',
-          fix_argv: ['gbrain', 'export', '--dir', '<backup-dir>'],
+          fix_argv: ['gbrain', 'export', '--by-source', '--dir', '<backup-dir>'],
         });
       }
     }
@@ -362,12 +449,14 @@ export async function computeBackupCoverage(
           continue;
         }
         await yieldLoop();
-        let dirty = false;
-        try {
-          dirty = isWorkingTreeDirty(root);
-        } catch {
-          /* dirtiness probe failure is not worth degrading the asset */
-        }
+        const dirty = (() => {
+          try {
+            return isWorkingTreeDirty(root);
+          } catch {
+            return false;
+          }
+        })();
+        for (const sourceId of ids) recoverableSourceIds.add(sourceId);
         pushAsset(
           assets,
           dirty
@@ -405,38 +494,51 @@ export async function computeBackupCoverage(
     /* bridge state unreadable — cosmetic row only */
   }
 
-  // ── DB-only brain (the worst-case user) ───────────────────────────────────
-  // Pages exist but nothing is git-backed: on PGLite that is total loss on a
-  // disk failure; on managed Postgres the DB survives by construction, but it
-  // still isn't the git system of record.
+  // ── Pages not reconstructible after loss of this host ────────────────────
+  // PGLite and loopback PostgreSQL both live on the host. For those engines,
+  // only pages owned by a source with a proven usable remote are recoverable.
+  // `default` and every unproven/local-only source therefore remain at risk.
   const pageCountRaw = await countLivePages(engine);
   if (pageCountRaw === null) degraded = true;
   const pageCount = pageCountRaw ?? 0;
-  const hasGitBackedAsset = assets.some(
-    (a) => a.kind === 'source_repo' || (a.kind === 'bootstrap_workspace' && a.state !== 'no_remote'),
-  );
+  const databaseSurvives = engine.kind === 'postgres' && postgresSurvivesHostDiskLoss();
   let pagesAtRisk = 0;
-  if (!degraded && pageCount > 0 && sourceRootCount === 0 && !hasGitBackedAsset && workspaceRoot === null) {
-    if (engine.kind === 'postgres') {
-      pushAsset(assets, {
-        kind: 'db_content',
-        id: 'brain database',
-        state: 'info',
-        detail:
-          `your DB is remote (${pageCount} pages survive a disk loss), but it isn't the git system of record — ` +
-          'add a source repo (gbrain sources add) or dump with gbrain export',
-        fix_argv: ['gbrain', 'bootstrap', 'repo'],
-      });
-    } else {
-      pagesAtRisk = pageCount;
+  if (!degraded && pageCount > 0 && !databaseSurvives) {
+    const riskyCount = await countPagesOutsideRecoverableSources(engine, recoverableSourceIds, pageCount);
+    if (riskyCount === null) {
+      degraded = true;
+    } else if (riskyCount > 0) {
+      pagesAtRisk = riskyCount;
+      const location = engine.kind === 'postgres' ? 'local PostgreSQL' : 'the local DB';
+      const noSourceRepo = sourceRootCount === 0 && workspaceRoot === null;
       pushAsset(assets, {
         kind: 'db_content',
         id: 'brain database',
         state: 'no_remote',
-        detail: `${pageCount} pages live ONLY in the local DB — a disk loss loses all of them (gbrain sources add / gbrain bootstrap repo)`,
-        fix_argv: ['gbrain', 'bootstrap', 'repo'],
+        detail:
+          `${riskyCount} page${riskyCount === 1 ? '' : 's'} in ${location} cannot be rebuilt from a proven remote-backed source — ` +
+          'a disk loss loses them (back the source repos or export to durable storage)',
+        fix_argv: noSourceRepo
+          ? ['gbrain', 'bootstrap', 'repo']
+          : ['gbrain', 'export', '--by-source', '--dir', '<backup-dir>'],
       });
     }
+  } else if (
+    !degraded &&
+    pageCount > 0 &&
+    databaseSurvives &&
+    sourceRootCount === 0 &&
+    workspaceRoot === null
+  ) {
+    pushAsset(assets, {
+      kind: 'db_content',
+      id: 'brain database',
+      state: 'info',
+      detail:
+        `your DB is remote (${pageCount} pages survive a disk loss), but it isn't the git system of record — ` +
+        'add a source repo (gbrain sources add) or dump with gbrain export',
+      fix_argv: ['gbrain', 'bootstrap', 'repo'],
+    });
   }
 
   const totals = {

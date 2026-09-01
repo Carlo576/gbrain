@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -201,5 +201,41 @@ describe('export sidecar reads are scoped to the page owning source', () => {
     const raw = JSON.parse(readFileSync(join(outDir, 'notes', '.raw', 'shared.json'), 'utf-8'));
     expect(Object.keys(raw)).toEqual(['feed-other']);
     expect(raw['feed-other']).toEqual({ owner: 'other' });
+  });
+
+  test('export rejects an invalid DB-derived slug before it can escape the output root', async () => {
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+       VALUES ('default', '../escape', 'note', 'Escape', 'body')`,
+    );
+
+    await expect(runExport(engine, ['--dir', outDir])).rejects.toThrow(/slug/i);
+    expect(existsSync(join(tmp, 'escape.md'))).toBe(false);
+  });
+
+  test('--by-source rejects an invalid DB-derived source id before it can escape the output root', async () => {
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('../victim', 'Victim')`);
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+       VALUES ('../victim', 'notes/escape', 'note', 'Escape', 'body')`,
+    );
+
+    await expect(runExport(engine, ['--dir', outDir, '--by-source'])).rejects.toThrow(/source[_ ]id/i);
+    expect(existsSync(join(tmp, 'victim', 'notes', 'escape.md'))).toBe(false);
+  });
+
+  test('--by-source preserves both pages and sidecars for a same-slug collision', async () => {
+    await tryRunExport(['--dir', outDir, '--by-source']);
+    expect(exitCode).toBeNull();
+
+    for (const sourceId of ['default', 'other']) {
+      const md = readFileSync(join(outDir, sourceId, SLUG + '.md'), 'utf-8');
+      expect(md).toContain(`${sourceId} title`);
+      expect(md).toContain(`tag-${sourceId}`);
+      const raw = JSON.parse(
+        readFileSync(join(outDir, sourceId, 'notes', '.raw', 'shared.json'), 'utf-8'),
+      );
+      expect(raw).toEqual({ [`feed-${sourceId}`]: { owner: sourceId } });
+    }
   });
 });
