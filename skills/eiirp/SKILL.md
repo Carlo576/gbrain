@@ -43,7 +43,6 @@ tools:
   - add_timeline_entry
 mutating: true
 writes_pages: true
-filing_exempt: true
 writes_to:
   - people/
   - companies/
