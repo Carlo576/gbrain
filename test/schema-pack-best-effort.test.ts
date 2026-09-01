@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadActivePackBestEffort } from '../src/core/schema-pack/best-effort.ts';
+import { loadActivePackBestEffort, loadActivePackForLocalEngine } from '../src/core/schema-pack/best-effort.ts';
 import {
   __setPackLocatorForTests,
   _resetPackLocatorForTests,
@@ -78,6 +78,31 @@ describe('loadActivePackBestEffort', () => {
     await withEnv({ GBRAIN_HOME: tmpDir }, async () => {
       // resolves, doesn't throw.
       await expect(loadActivePackBestEffort(fakeCtx())).resolves.toBeNull();
+    });
+  });
+});
+
+describe('loadActivePackForLocalEngine', () => {
+  it('resolves the exact source override ahead of the brain-wide pack', async () => {
+    const values = new Map([
+      ['schema_pack', 'gbrain-base'],
+      ['schema_pack.source.team-b', 'gbrain-base-v2'],
+    ]);
+    const engine = { getConfig: async (key: string) => values.get(key) ?? null };
+    await withEnv({ GBRAIN_HOME: tmpDir, GBRAIN_SCHEMA_PACK: undefined }, async () => {
+      const result = await loadActivePackForLocalEngine(engine, 'team-b');
+      expect(result?.manifest.name).toBe('gbrain-base-v2');
+    });
+  });
+
+  it('uses canonical precedence when source override differs from home config', async () => {
+    writeFileSync(join(tmpDir, 'config.json'), JSON.stringify({ schema_pack: 'gbrain-base-v2' }));
+    const engine = {
+      getConfig: async (key: string) => key === 'schema_pack.source.team-b' ? 'gbrain-base' : null,
+    };
+    await withEnv({ GBRAIN_HOME: tmpDir, GBRAIN_SCHEMA_PACK: undefined }, async () => {
+      const result = await loadActivePackForLocalEngine(engine, 'team-b');
+      expect(result?.manifest.name).toBe('gbrain-base');
     });
   });
 });

@@ -27,6 +27,21 @@ const PACK: TypeUsagePack = {
   ],
 };
 
+const MAPPING_PACK = {
+  name: 'test-research-pack',
+  version: '1.0.0',
+  ...PACK,
+  mapping_rules: [
+    {
+      kind: 'retype',
+      from_type: 'happening',
+      to_type: 'event',
+      subtype: 'happening',
+      subtype_field: 'legacy_type',
+    },
+  ],
+};
+
 describe('classifyStoredType', () => {
   test('canonical page_type name → canonical', () => {
     expect(classifyStoredType('event', PACK)).toEqual({ kind: 'canonical' });
@@ -132,6 +147,176 @@ describe('importFromContent type_warning (advisory, type stored literally)', () 
     });
     const page = await engine.getPage('notes/alias-page');
     expect(page?.type).toBe('happening'); // stored literally — advisory only
+  }, 30_000);
+
+  test('an edited source file cannot undo a completed type-unification migration', async () => {
+    await engine.putPage('notes/migrated-page', {
+      type: 'event',
+      title: 'T',
+      compiled_truth: 'Old body.',
+      timeline: '',
+      frontmatter: {
+        legacy_type: 'happening',
+        type_projection_pack: 'test-research-pack@1.0.0',
+        type_projection_original_type: 'happening',
+      },
+    });
+
+    const r = await importWithType('notes/migrated-page', 'happening', MAPPING_PACK as never);
+    const page = await engine.getPage('notes/migrated-page');
+
+    expect(r.status).toBe('imported');
+    expect(page?.type).toBe('event');
+    expect(page?.frontmatter.legacy_type).toBe('happening');
+    expect(r.type_warning).toBeUndefined();
+  }, 30_000);
+
+  test('a completed type-unification subtype survives a later source edit', async () => {
+    await engine.putPage('notes/migrated-subtype-page', {
+      type: 'event',
+      title: 'T',
+      compiled_truth: 'Old body.',
+      timeline: '',
+      frontmatter: {
+        legacy_type: 'happening',
+        subtype: 'single',
+        type_projection_pack: 'test-research-pack@1.0.0',
+        type_projection_original_type: 'happening',
+      },
+    });
+
+    await importWithType('notes/migrated-subtype-page', 'happening', MAPPING_PACK as never);
+    const page = await engine.getPage('notes/migrated-subtype-page');
+
+    expect(page?.type).toBe('event');
+    expect(page?.frontmatter.legacy_type).toBe('happening');
+    expect(page?.frontmatter.subtype).toBe('single');
+  }, 30_000);
+
+  test('legacy_type alone is not accepted as a type-projection receipt', async () => {
+    await engine.putPage('notes/unmarked-legacy-page', {
+      type: 'event', title: 'T', compiled_truth: 'Old body.', timeline: '',
+      frontmatter: { legacy_type: 'happening' },
+    });
+
+    await importWithType('notes/unmarked-legacy-page', 'happening', PACK);
+    expect((await engine.getPage('notes/unmarked-legacy-page'))?.type).toBe('happening');
+  }, 30_000);
+
+  test('a mapping-proven legacy_type receipt upgrades to the structured receipt', async () => {
+    await engine.putPage('notes/base-unifier-page', {
+      type: 'event', title: 'T', compiled_truth: 'Old body.', timeline: '',
+      frontmatter: { legacy_type: 'happening' },
+    });
+
+    await importWithType('notes/base-unifier-page', 'happening', MAPPING_PACK as never);
+    const page = await engine.getPage('notes/base-unifier-page');
+    expect(page?.type).toBe('event');
+    expect(page?.frontmatter.type_projection_pack).toBe('test-research-pack@1.0.0');
+    expect(page?.frontmatter.type_projection_original_type).toBe('happening');
+  }, 30_000);
+
+  test('a forged receipt cannot preserve a type that contradicts the active mapping', async () => {
+    await engine.putPage('notes/forged-projection-page', {
+      type: 'company', title: 'T', compiled_truth: 'Old body.', timeline: '',
+      frontmatter: {
+        legacy_type: 'happening',
+        type_projection_pack: 'test-research-pack@1.0.0',
+        type_projection_original_type: 'happening',
+      },
+    });
+
+    await importWithType('notes/forged-projection-page', 'happening', MAPPING_PACK as never);
+    const page = await engine.getPage('notes/forged-projection-page');
+    expect(page?.type).toBe('event');
+    expect(page?.frontmatter.type_projection_pack).toBe('test-research-pack@1.0.0');
+  }, 30_000);
+
+  test('a migration committed after the initial read cannot be overwritten by import', async () => {
+    await engine.putPage('notes/racing-projection-page', {
+      type: 'happening', title: 'T', compiled_truth: 'Old body.', timeline: '', frontmatter: {},
+    });
+    const originalTransaction = engine.transaction.bind(engine);
+    let injected = false;
+    engine.transaction = (async (fn: Parameters<typeof engine.transaction>[0]) => {
+      if (!injected) {
+        injected = true;
+        await engine.putPage('notes/racing-projection-page', {
+          type: 'event', title: 'T', compiled_truth: 'Old body.', timeline: '',
+          frontmatter: {
+            legacy_type: 'happening',
+            type_projection_pack: 'test-research-pack@1.0.0',
+            type_projection_original_type: 'happening',
+          },
+        });
+      }
+      return originalTransaction(fn);
+    }) as typeof engine.transaction;
+    try {
+      await importWithType('notes/racing-projection-page', null, MAPPING_PACK as never);
+    } finally {
+      engine.transaction = originalTransaction as typeof engine.transaction;
+    }
+    expect((await engine.getPage('notes/racing-projection-page'))?.type).toBe('event');
+  }, 30_000);
+
+  test('a mapping-aware pack canonicalizes a new explicit legacy type', async () => {
+    const r = await importWithType('notes/new-mapped-page', 'happening', MAPPING_PACK as never);
+    const page = await engine.getPage('notes/new-mapped-page');
+
+    expect(page?.type).toBe('event');
+    expect(page?.frontmatter.legacy_type).toBe('happening');
+    expect(page?.frontmatter.type_projection_pack).toBe('test-research-pack@1.0.0');
+    expect(page?.frontmatter.type_projection_original_type).toBe('happening');
+    expect(r.type_warning).toBeUndefined();
+  }, 30_000);
+
+  test('implicit source type preserves a structured projection receipt', async () => {
+    await engine.putPage('notes/implicit-projected-page', {
+      type: 'event', title: 'T', compiled_truth: 'Old body.', timeline: '',
+      frontmatter: {
+        legacy_type: 'happening',
+        type_projection_pack: 'test-research-pack@1.0.0',
+        type_projection_original_type: 'happening',
+      },
+    });
+
+    await importWithType('notes/implicit-projected-page', null, MAPPING_PACK as never);
+    const page = await engine.getPage('notes/implicit-projected-page');
+    expect(page?.type).toBe('event');
+    expect(page?.frontmatter.legacy_type).toBe('happening');
+  }, 30_000);
+
+  test('explicit canonical source type preserves a structured projection receipt', async () => {
+    await engine.putPage('notes/canonical-projected-page', {
+      type: 'event', title: 'T', compiled_truth: 'Old body.', timeline: '',
+      frontmatter: {
+        legacy_type: 'happening',
+        type_projection_pack: 'test-research-pack@1.0.0',
+        type_projection_original_type: 'happening',
+      },
+    });
+
+    await importWithType('notes/canonical-projected-page', 'event', MAPPING_PACK as never);
+    const page = await engine.getPage('notes/canonical-projected-page');
+    expect(page?.type).toBe('event');
+    expect(page?.frontmatter.legacy_type).toBe('happening');
+  }, 30_000);
+
+  test('an intentional third explicit type supersedes a structured projection receipt', async () => {
+    await engine.putPage('notes/retyped-projected-page', {
+      type: 'event', title: 'T', compiled_truth: 'Old body.', timeline: '',
+      frontmatter: {
+        legacy_type: 'happening',
+        type_projection_pack: 'test-research-pack@1.0.0',
+        type_projection_original_type: 'happening',
+      },
+    });
+
+    await importWithType('notes/retyped-projected-page', 'mystery', MAPPING_PACK as never);
+    const page = await engine.getPage('notes/retyped-projected-page');
+    expect(page?.type).toBe('mystery');
+    expect(page?.frontmatter.type_projection_pack).toBeUndefined();
   }, 30_000);
 
   test('explicit undeclared type → undeclared warning', async () => {

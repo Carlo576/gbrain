@@ -146,6 +146,26 @@ describe('#4480 — shape-filter gating (type/types/excludeSlugs)', () => {
     expect(asNote.length).toBe(1);
   });
 
+  test('expanded legacy type gate honors canonical rows and legacy_type', async () => {
+    await engine.putPage('sources/primary-exact', {
+      type: 'source', title: 'Primary Exact', compiled_truth: 'Evidence.',
+      frontmatter: { legacy_type: 'primary-source-page' },
+    });
+    const filter = {
+      canonical: 'source', originalInput: 'primary-source-page', isAliasExpansion: true,
+      subtypeFilter: { canonical: 'source', subtypeField: 'legacy_type', subtypeValue: 'primary-source-page' },
+    };
+    const passed = await structuralExactLookup(engine, 'sources/primary-exact', {
+      sourceId: 'default', expandedTypes: [filter],
+    });
+    expect(passed).toHaveLength(1);
+    const rejected = await structuralExactLookup(engine, 'sources/primary-exact', {
+      sourceId: 'default',
+      expandedTypes: [{ ...filter, subtypeFilter: { ...filter.subtypeFilter, subtypeValue: 'raw-source' } }],
+    });
+    expect(rejected).toHaveLength(0);
+  });
+
   test('scalar type gate applies to title-arm hits too', async () => {
     const titleArm = [res('projects/mingtang', 0.4, { title: 'The Mingtang', type: 'note' })];
     const gated = await structuralExactLookup(engine, 'the mingtang', {

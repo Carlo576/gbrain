@@ -22,7 +22,9 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
-import type { SearchResult } from '../types.ts';
+import type { SearchResult, SearchOpts } from '../types.ts';
+import { appendSearchTypesClause } from './type-filter-sql.ts';
+import { buildVisibilityClause } from './sql-ranking.ts';
 
 const MAX_WALK_DEPTH = 2;
 const NEIGHBOR_CAP_PER_HOP = 50;
@@ -34,6 +36,7 @@ export interface TwoPassOpts {
   nearSymbol?: string;
   /** Filter expansion to one source. When unset, crosses sources. */
   sourceId?: string;
+  sourceIds?: string[];
 }
 
 interface ChunkWithScore {
@@ -83,7 +86,13 @@ export async function expandAnchors(
   // filter; undefined → cross-source (matches the documented contract).
   if (opts.nearSymbol) {
     try {
-      const rows = opts.sourceId
+      const rows = opts.sourceIds?.length
+        ? await engine.executeRaw<{ id: number }>(
+            `SELECT cc.id FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+             WHERE cc.symbol_name_qualified = $1 AND p.source_id = ANY($2::text[]) LIMIT 50`,
+            [opts.nearSymbol, opts.sourceIds],
+          )
+        : opts.sourceId
         ? await engine.executeRaw<{ id: number }>(
             `SELECT cc.id FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
@@ -146,7 +155,14 @@ export async function expandAnchors(
       // boundaries silently in multi-source brains.
       if (unresolvedTargets.length > 0) {
         try {
-          const resolved = opts.sourceId
+          const resolved = opts.sourceIds?.length
+            ? await engine.executeRaw<{ id: number }>(
+                `SELECT cc.id FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+                 WHERE cc.symbol_name_qualified = ANY($1::text[])
+                   AND p.source_id = ANY($2::text[]) LIMIT ${NEIGHBOR_CAP_PER_HOP}`,
+                [unresolvedTargets, opts.sourceIds],
+              )
+            : opts.sourceId
             ? await engine.executeRaw<{ id: number }>(
                 `SELECT cc.id FROM content_chunks cc
                  JOIN pages p ON p.id = cc.page_id
@@ -188,8 +204,28 @@ export async function expandAnchors(
 export async function hydrateChunks(
   engine: BrainEngine,
   chunkIds: number[],
+  opts?: Pick<SearchOpts, 'type' | 'types' | 'expandedTypes' | 'exclude_slugs' | 'sourceId' | 'sourceIds' | 'excludePrivate'>,
 ): Promise<SearchResult[]> {
   if (chunkIds.length === 0) return [];
+  const params: unknown[] = [chunkIds];
+  let filter = '';
+  if (opts?.type) {
+    params.push(opts.type);
+    filter += ` AND p.type = $${params.length}`;
+  }
+  const typesClause = appendSearchTypesClause(params, opts);
+  if (typesClause) filter += ` ${typesClause}`;
+  if (opts?.exclude_slugs?.length) {
+    params.push(opts.exclude_slugs);
+    filter += ` AND p.slug != ALL($${params.length}::text[])`;
+  }
+  if (opts?.sourceIds?.length) {
+    params.push(opts.sourceIds);
+    filter += ` AND p.source_id = ANY($${params.length}::text[])`;
+  } else if (opts?.sourceId && opts.sourceId !== '__all__') {
+    params.push(opts.sourceId);
+    filter += ` AND p.source_id = $${params.length}`;
+  }
   const rows = await engine.executeRaw<{
     slug: string; page_id: number; title: string; type: string; source_id: string;
     chunk_id: number; chunk_index: number; chunk_text: string; chunk_source: string;
@@ -198,8 +234,10 @@ export async function hydrateChunks(
             cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source
        FROM content_chunks cc
        JOIN pages p ON p.id = cc.page_id
-       WHERE cc.id = ANY($1::int[])`,
-    [chunkIds],
+       JOIN sources s ON s.id = p.source_id
+       WHERE cc.id = ANY($1::int[]) ${filter}
+         ${buildVisibilityClause('p', 's', { excludePrivate: opts?.excludePrivate })}`,
+    params,
   );
   return rows.map((r) => ({
     slug: r.slug,

@@ -430,7 +430,7 @@ const put_page: Operation = {
         remote: ctx.remote === false ? false : true,
         sourceId: ctx.sourceId,
       });
-      activePack = { page_types: resolved.manifest.page_types };
+      activePack = resolved.manifest;
     } catch {
       // Pack load failed; fall through to legacy inferType behavior.
       activePack = undefined;

@@ -23,6 +23,8 @@ import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { applySnippetCap, DEFAULT_AGENT_SNIPPET_CHARS } from '../search/snippet-cap.ts';
 import { resolveExcludePrivatePages } from '../search/private-visibility.ts';
 import { QUERY_DESCRIPTION, SEARCH_DESCRIPTION } from '../operations-descriptions.ts';
+import { loadActivePackForLocalEngine } from '../schema-pack/best-effort.ts';
+import { expandTypeFilter } from '../schema-pack/expand-type-filter.ts';
 import { OperationError } from './contract.ts';
 import type { Operation, OperationContext } from './contract.ts';
 import {
@@ -98,12 +100,54 @@ function normalizeTypesParam(raw: unknown): string[] | undefined {
       '`types` was provided but contained no usable page-type strings (CLI: --types person,company).',
     );
   }
+  if (types.length > 64) {
+    throw new OperationError('invalid_params', '`types` accepts at most 64 distinct page-type values.');
+  }
   return types;
+}
+
+async function allActiveSourceIds(ctx: OperationContext): Promise<string[]> {
+  try {
+    const rows = await ctx.engine.executeRaw<{ id: string }>(
+      `SELECT id FROM sources WHERE archived IS NOT TRUE ORDER BY id`,
+    );
+    return rows.map((row) => row.id);
+  } catch {
+    const rows = await ctx.engine.executeRaw<{ id: string }>(`SELECT id FROM sources ORDER BY id`);
+    return rows.map((row) => row.id);
+  }
+}
+
+async function expandPublicTypes(
+  ctx: OperationContext,
+  types: string[] | undefined,
+  scope: { sourceId?: string; sourceIds?: string[] },
+) {
+  if (!types) return undefined;
+  let pack;
+  if (scope.sourceIds && scope.sourceIds.length > 0) {
+    const packs = await Promise.all(
+      scope.sourceIds.map((id) => loadActivePackForLocalEngine(ctx.engine, id)),
+    );
+    if (packs.some((candidate) => candidate === null)) {
+      throw new OperationError('invalid_params', 'Could not resolve every source schema pack for `types`.');
+    }
+    if (new Set(packs.map((candidate) => candidate!.identity)).size > 1) {
+      throw new OperationError(
+        'invalid_params',
+        '`types` cannot span sources with divergent schema packs; pass one concrete `source_id`.',
+      );
+    }
+    pack = packs[0];
+  } else {
+    pack = await loadActivePackForLocalEngine(ctx.engine, scope.sourceId);
+  }
+  return types.map((type) => expandTypeFilter(type, pack?.manifest));
 }
 
 const TYPES_PARAM_DESCRIPTION =
   "Filter results to pages whose `type` is in this list (e.g. ['person','company']). " +
-  'CLI: --types person,company. Applied at SQL level on every retrieval leg — the same ' +
+  'CLI: --types person,company (max 64 distinct values). Applied at SQL level on every retrieval leg — the same ' +
   'filter `whoknows` uses. Stacks with all other filters.';
 
 const SNIPPET_CHARS_PARAM_DESCRIPTION =
@@ -188,6 +232,9 @@ const search: Operation = {
     // trusted-local federated span is unchanged.
     const sourceIdParam = parseSourceIdParam(p.source_id, 'search', { allowAll: true });
     const scope = federatedSearchScope(ctx, sourceIdParam);
+    const typeScope = sourceIdParam === '__all__' && ctx.remote === false
+      ? { sourceIds: await allActiveSourceIds(ctx) } : scope;
+    const expandedTypes = await expandPublicTypes(ctx, types, typeScope);
     // #4352 — untrusted callers never see `visibility: private` pages
     // (config-gated; trusted local CLI unchanged).
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
@@ -203,7 +250,7 @@ const search: Operation = {
     const keywordOnly = (await ctx.engine.getConfig('search.mcp_keyword_only')) === 'true';
 
     if (keywordOnly) {
-      const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, excludePrivate, ...(types ? { types } : {}), ...scope });
+      const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, excludePrivate, ...(expandedTypes ? { expandedTypes } : {}), ...scope });
       const results = dedupResults(raw);
       // #3783 — every row here IS a keyword hit (direct FTS path); mark
       // before stamping so evidence still reads keyword_exact.
@@ -233,7 +280,7 @@ const search: Operation = {
       offset,
       expansion: false,
       excludePrivate,
-      ...(types ? { types } : {}),
+      ...(expandedTypes ? { expandedTypes } : {}),
       ...scope,
       ...(perCallMode ? { mode: perCallMode } : {}),
       // #4415: agent-explicit recency + salience (same posture as `query`).
@@ -397,6 +444,9 @@ const query: Operation = {
     // #2561: unqualified trusted-local query spans federated sources (per-call
     // source_id / remote grants still resolve through resolveRequestedScope).
     const querySourceScope = federatedSearchScope(ctx, sourceIdParam);
+    const queryTypeScope = sourceIdParam === '__all__' && ctx.remote === false
+      ? { sourceIds: await allActiveSourceIds(ctx) } : querySourceScope;
+    const expandedTypes = await expandPublicTypes(ctx, types, queryTypeScope);
     // #4352 — same enforcement for the full-control query op (both the image
     // searchVector branch and the text hybrid path below).
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
@@ -418,7 +468,7 @@ const query: Operation = {
         offset: (p.offset as number) || 0,
         embeddingColumn: 'embedding_image',
         excludePrivate,
-        ...(types ? { types } : {}),
+        ...(expandedTypes ? { expandedTypes } : {}),
         ...querySourceScope,
       });
       return applySnippetCap(results, snippetCap);
@@ -465,8 +515,8 @@ const query: Operation = {
       // T4/D5 — per-call mode (local/trusted only; remote ignored).
       ...((): { mode?: string } => { const m = resolvePerCallMode(ctx, p.mode); return m ? { mode: m } : {}; })(),
       detail,
-      // #3985: multi-type filter — SearchOpts.types reaches every leg.
-      types,
+      // #3985 + type-unification back-compat: every leg gets pack-expanded filters.
+      expandedTypes,
       language: (p.lang as string) || undefined,
       symbolKind: (p.symbol_kind as string) || undefined,
       nearSymbol: (p.near_symbol as string) || undefined,
@@ -532,15 +582,8 @@ const query: Operation = {
             relationalRetrieval: true,
             autocut: false,
             detail,
-            // Preserve the caller's #3985 type filter on the re-run (raw
-            // pass-through; the base call already rejected malformed input).
-            ...(Array.isArray(p.types) || typeof p.types === 'string'
-              ? {
-                  types: (Array.isArray(p.types) ? (p.types as string[]) : (p.types as string).split(','))
-                    .map((t) => t.trim())
-                    .filter(Boolean),
-                }
-              : {}),
+            // Preserve the caller's already validated and pack-expanded type filter.
+            expandedTypes,
             language: (p.lang as string) || undefined,
             symbolKind: (p.symbol_kind as string) || undefined,
             // Preserve the caller's symbol-proximity constraints too — an

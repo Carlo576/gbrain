@@ -48,9 +48,10 @@ import {
   type QuerySuggestions,
 } from './query-intent.ts';
 import { isTitlePhraseMatch } from './title-match.ts';
-import { normalizeAlias } from './alias-normalize.ts';
 import { stampEvidence, markKeywordHits } from './evidence.ts';
 import { applyExactLookupTier } from './exact-lookup.ts';
+import { applyAliasHop } from './alias-hop.ts';
+export { applyAliasHop } from './alias-hop.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { enforceTokenBudget, searchSalvageEnabled, type TokenBudgetMeta } from './token-budget.ts';
 import { warnOncePerProcess } from '../utils.ts';
@@ -831,105 +832,6 @@ async function applyAliasResolvedBoost(
   }
 }
 
-// T3 — free-text alias hop tuning.
-const ALIAS_HOP_PRESENT_BOOST = 1.10; // bounded boost when canonical already in results
-const MAX_ALIAS_QUERY_TOKENS = 6;     // skip long queries (clearly not a chosen name)
-const MAX_ALIAS_INJECT = 3;           // cap injected pages per query (collision safety)
-
-/**
- * T3 — free-text alias hop (retrieval-maxpool incident, the named-thing fix).
- *
- * When the normalized query EXACTLY matches a page's declared alias
- * ("Hall of Light" / "明堂" -> the Mingtang page), make sure that page is in
- * the result set: boost it if already present, inject it at top-of-organic +
- * epsilon if absent. This is the only layer that bridges true synonyms with
- * zero surface overlap — neither max-pool nor title-boost can.
- *
- * Precision guards (Codex#7/#10):
- *   - FULL normalized-query exact match only (not substring / not n-grams) —
- *     "light" won't fire unless the whole query normalizes to a stored alias.
- *   - skip queries longer than MAX_ALIAS_QUERY_TOKENS (clearly prose, not a name).
- *   - bounded: present-boost is 1.10x; inject score is top-of-organic + ε,
- *     never an absolute 1.0 (D3 — aliases are not a ranking sledgehammer).
- *   - collisions (two pages claim one alias): deterministic alpha order, capped.
- *
- * Fail-open: pre-v110 brains (no page_aliases table) and any lookup error
- * degrade to the input unchanged (D9). Returns a NEW array; caller re-slices.
- */
-export async function applyAliasHop(
-  engine: import('../engine.ts').BrainEngine,
-  results: SearchResult[],
-  query: string,
-  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean },
-): Promise<SearchResult[]> {
-  if (!query) return results;
-  const qNorm = normalizeAlias(query);
-  if (!qNorm || qNorm.split(' ').length > MAX_ALIAS_QUERY_TOKENS) return results;
-
-  let aliasMap: Map<string, Array<{ slug: string; source_id: string }>>;
-  try {
-    aliasMap = await engine.resolveAliases([qNorm], { sourceId: opts.sourceId, sourceIds: opts.sourceIds });
-  } catch {
-    return results; // pre-v110 table-missing OR transient error -> fail-open
-  }
-  const refs = aliasMap.get(qNorm);
-  if (!refs || refs.length === 0) return results;
-
-  // Deterministic + capped. Source-scoped: each canonical is a (source_id, slug)
-  // pair so a federated caller boosts/injects the RIGHT source's page, never
-  // collapsing or cross-injecting (P0 source-isolation contract).
-  const ordered = [...refs]
-    .sort((a, b) => (a.source_id === b.source_id ? a.slug.localeCompare(b.slug) : a.source_id.localeCompare(b.source_id)))
-    .slice(0, MAX_ALIAS_INJECT);
-  const out = [...results];
-  const topScore = out.reduce((m, r) => (Number.isFinite(r.score) && r.score > m ? r.score : m), 0);
-  let injectScore = topScore > 0 ? topScore : 1.0;
-
-  for (const ref of ordered) {
-    const idx = out.findIndex(r => r.slug === ref.slug && (r.source_id ?? 'default') === ref.source_id);
-    if (idx >= 0) {
-      if (Number.isFinite(out[idx].score)) out[idx].score *= ALIAS_HOP_PRESENT_BOOST;
-      out[idx].alias_hit = true;
-      continue;
-    }
-    // Absent canonical: fetch (in its OWN source) + inject at top-of-organic + epsilon.
-    let page;
-    try {
-      page = await engine.getPage(ref.slug, { sourceId: ref.source_id });
-    } catch {
-      continue;
-    }
-    if (!page) continue;
-    // #4352 — the alias inject path bypasses the engines' SQL visibility
-    // clause (getPage, not search); re-apply the private predicate here so
-    // an untrusted caller can't hop into a `visibility: private` page.
-    if (
-      opts.excludePrivate &&
-      ((page.frontmatter as Record<string, unknown> | null | undefined)?.visibility === 'private')
-    ) continue;
-    injectScore += 1e-6;
-    out.push({
-      // #2339-sibling: include page_id. The `as SearchResult` cast hid its
-      // absence, so any consumer reading page_id off an alias-injected result got
-      // undefined — e.g. listActiveTakesForPages bound undefined/NaN into
-      // ANY($1::int[]) and crashed the contradiction probe on real Postgres.
-      page_id: page.id,
-      slug: page.slug,
-      title: page.title,
-      type: page.type,
-      source_id: page.source_id ?? ref.source_id,
-      chunk_text: (page.compiled_truth ?? '').slice(0, 200),
-      chunk_index: 0,
-      chunk_id: 0,
-      score: injectScore,
-      base_score: injectScore,
-      alias_hit: true,
-    } as SearchResult);
-  }
-  out.sort((a, b) => b.score - a.score);
-  return out;
-}
-
 export interface HybridSearchOpts extends SearchOpts {
   expansion?: boolean;
   /** v0.43 — observability sink for the relational recall arm (fired/no-op,
@@ -1233,7 +1135,7 @@ export async function hybridSearch(
     // v0.33: multi-type filter for whoknows ('person','company'). Pushes
     // type filter to SQL level so the limit budget goes to candidate-typed
     // pages instead of being eaten by note/transcript/article pages.
-    types: opts?.types,
+    types: opts?.types, expandedTypes: opts?.expandedTypes,
     // v0.29.1: since/until take precedence over deprecated afterDate/beforeDate.
     // The engine still consumes the legacy field names; this aliasing keeps
     // PR #618 callers compiling while the new names are the public surface.
@@ -1434,6 +1336,8 @@ export async function hybridSearch(
       sourceIds: opts?.sourceIds,
       depth: resolvedMode.relational_retrieval_depth,
       limit: opts?.limit ?? resolvedMode.searchLimit,
+      type: opts?.type, types: opts?.types, expandedTypes: opts?.expandedTypes,
+      exclude_slugs: opts?.exclude_slugs,
       // #4352 remediation: the arm hydrates titles + compiled_truth snippets
       // straight from pages — thread the caller's private-page gate or a
       // remote relational query bypasses the keyword/vector visibility clause.
@@ -1501,6 +1405,8 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
       excludePrivate: opts?.excludePrivate,
+      type: opts?.type, types: opts?.types, expandedTypes: opts?.expandedTypes,
+      excludeSlugs: opts?.exclude_slugs,
     });
     // #1663 — structural exact-lookup tier (slug / exact-title identity).
     const noEmbedHopped = await applyExactLookupTier(engine, noEmbedPreExact, query, {
@@ -1509,7 +1415,7 @@ export async function hybridSearch(
       titleCandidates: titleResults,
       // #4480: gate tier injections on the caller's shape filters.
       type: opts?.type,
-      types: opts?.types,
+      types: opts?.types, expandedTypes: opts?.expandedTypes,
       excludeSlugs: opts?.exclude_slugs,
     });
     stampEvidence(noEmbedHopped, { cosineFloor: resolvedMode.evidence_cosine_floor });
@@ -1892,6 +1798,8 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
       excludePrivate: opts?.excludePrivate,
+      type: opts?.type, types: opts?.types, expandedTypes: opts?.expandedTypes,
+      excludeSlugs: opts?.exclude_slugs,
     });
     // #1663 — structural exact-lookup tier (slug / exact-title identity).
     const kwHopped = await applyExactLookupTier(engine, kwPreExact, query, {
@@ -1900,7 +1808,7 @@ export async function hybridSearch(
       titleCandidates: titleResults,
       // #4480: gate tier injections on the caller's shape filters.
       type: opts?.type,
-      types: opts?.types,
+      types: opts?.types, expandedTypes: opts?.expandedTypes,
       excludeSlugs: opts?.exclude_slugs,
     });
     stampEvidence(kwHopped, { cosineFloor: resolvedMode.evidence_cosine_floor });
@@ -2032,7 +1940,7 @@ export async function hybridSearch(
       const expanded = await expandAnchors(engine, anchorSet, {
         walkDepth,
         nearSymbol: opts?.nearSymbol,
-        sourceId: opts?.sourceId,
+        sourceId: opts?.sourceId, sourceIds: opts?.sourceIds,
       });
       // Resolve new chunk IDs (not already in fused) into full rows.
       const existingIds = new Set(fused.map(r => r.chunk_id));
@@ -2040,7 +1948,7 @@ export async function hybridSearch(
         .filter(e => !existingIds.has(e.chunk_id))
         .map(e => e.chunk_id);
       if (newIds.length > 0) {
-        const hydrated = await hydrateChunks(engine, newIds);
+        const hydrated = await hydrateChunks(engine, newIds, opts);
         const scoreById = new Map(expanded.map(e => [e.chunk_id, e.score]));
         for (const r of hydrated) {
           r.score = scoreById.get(r.chunk_id) ?? 0.01;
@@ -2098,6 +2006,8 @@ export async function hybridSearch(
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
     excludePrivate: opts?.excludePrivate,
+    type: opts?.type, types: opts?.types, expandedTypes: opts?.expandedTypes,
+    excludeSlugs: opts?.exclude_slugs,
   });
 
   // #1663 — structural exact-lookup tier: a query that IS a page identity
@@ -2112,7 +2022,7 @@ export async function hybridSearch(
     titleCandidates: titleResults,
     // #4480: gate tier injections on the caller's shape filters.
     type: opts?.type,
-    types: opts?.types,
+    types: opts?.types, expandedTypes: opts?.expandedTypes,
     excludeSlugs: opts?.exclude_slugs,
   });
 
@@ -2436,7 +2346,7 @@ export async function hybridSearchCached(
   // #3985: type-filtered requests skip the cache — `types` is not part of
   // knobsHash, so a filtered result set could be served to an unfiltered
   // lookup (and vice versa). Mirrors the #3442 date-filter bypass.
-  const typeFiltered = (opts?.types?.length ?? 0) > 0;
+  const typeFiltered = (opts?.types?.length ?? 0) > 0 || (opts?.expandedTypes?.length ?? 0) > 0;
   // Offset pages are cache-hostile until the pre-slice POOL itself is what's
   // stored: the cache holds the already offset/limit-sliced page (bare
   // hybridSearch slices before returning), so a hit for any other offset

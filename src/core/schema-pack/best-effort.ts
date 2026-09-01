@@ -88,13 +88,19 @@ export async function loadActivePackBestEffort(
  */
 export async function loadActivePackForLocalEngine(
   engine: Pick<BrainEngine, 'getConfig'>,
+  sourceId?: string,
 ): Promise<ResolvedPack | null> {
   try {
     let dbConfig: string | undefined;
+    let perSourceDb: ReadonlyMap<string, string> | undefined;
     try {
       dbConfig = (await engine.getConfig('schema_pack')) ?? undefined;
+      if (sourceId) {
+        const sourcePack = await engine.getConfig(`schema_pack.source.${sourceId}`);
+        if (sourcePack) perSourceDb = new Map([[sourceId, sourcePack]]);
+      }
     } catch { /* engine.config may not exist on very old brains */ }
-    return await loadActivePack({ cfg: loadConfigFileOnly(), remote: false, dbConfig })
+    return await loadActivePack({ cfg: loadConfigFileOnly(), remote: false, dbConfig, sourceId, perSourceDb })
       .catch(() => null);
   } catch {
     return null;

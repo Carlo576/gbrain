@@ -25,14 +25,15 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
-import type { SearchResult, PageType, RelationalFanoutRow } from '../types.ts';
+import type { SearchResult, SearchOpts, PageType, RelationalFanoutRow } from '../types.ts';
 import { createAuditWriter } from '../audit/audit-writer.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
 import { buildVisibilityClause } from './sql-ranking.ts';
 import { parseRelationalQuery, type RelationalQuery, type RelationVocab } from './relational-intent.ts';
 import { stampEvidence, type EvidenceOpts } from './evidence.ts';
+import { appendSearchTypesClause } from './type-filter-sql.ts';
 
-export interface RelationalArmOpts {
+export interface RelationalArmOpts extends Pick<SearchOpts, 'type' | 'types' | 'expandedTypes' | 'exclude_slugs'> {
   sourceId?: string;
   sourceIds?: string[];
   depth?: number;
@@ -116,10 +117,22 @@ async function hydrate(
   engine: BrainEngine,
   rows: RelationalFanoutRow[],
   seedSlug: string,
-  excludePrivate: boolean,
+  opts: RelationalArmOpts,
 ): Promise<SearchResult[]> {
   if (rows.length === 0) return [];
   const slugs = Array.from(new Set(rows.map(r => r.slug)));
+  const params: unknown[] = [slugs];
+  let typeClause = '';
+  if (opts.type) {
+    params.push(opts.type);
+    typeClause += ` AND p.type = $${params.length}`;
+  }
+  const typesClause = appendSearchTypesClause(params, opts);
+  if (typesClause) typeClause += ` ${typesClause}`;
+  if (opts.exclude_slugs?.length) {
+    params.push(opts.exclude_slugs);
+    typeClause += ` AND p.slug != ALL($${params.length}::text[])`;
+  }
   const pageRows = await engine.executeRaw<{
     page_id: number; slug: string; source_id: string; title: string; type: string; synopsis: string | null;
   }>(
@@ -127,8 +140,8 @@ async function hydrate(
             LEFT(p.compiled_truth, 240) AS synopsis
      FROM pages p
      JOIN sources s ON s.id = p.source_id
-     WHERE p.slug = ANY($1::text[]) ${buildVisibilityClause('p', 's', { excludePrivate })}`,
-    [slugs],
+     WHERE p.slug = ANY($1::text[]) ${typeClause} ${buildVisibilityClause('p', 's', { excludePrivate: opts.excludePrivate })}`,
+    params,
   );
   const byKey = new Map<string, typeof pageRows[number]>();
   for (const pr of pageRows) byKey.set(`${pr.source_id}:${pr.slug}`, pr);
@@ -304,7 +317,7 @@ export async function buildRelationalArm(
         .map(r => ({ row: r, combined: r.hop + bByKey.get(`${r.source_id}:${r.slug}`)!.hop }))
         .sort((x, y) => x.combined - y.combined || x.row.slug.localeCompare(y.row.slug))
         .map(x => x.row);
-      const list = await hydrate(engine, shared, parsed.seeds.join(' ↔ '), opts.excludePrivate === true);
+      const list = await hydrate(engine, shared, parsed.seeds.join(' ↔ '), opts);
       meta.fired = list.length > 0;
       return finish(list);
     }
@@ -320,7 +333,7 @@ export async function buildRelationalArm(
       sourceId: srcIds.length === 1 ? srcIds[0] : undefined,
       sourceIds: srcIds.length > 1 ? srcIds : undefined,
     });
-    const list = await hydrate(engine, rows, resolved[0].slug, opts.excludePrivate === true);
+    const list = await hydrate(engine, rows, resolved[0].slug, opts);
     meta.fired = list.length > 0;
     return finish(list);
   } catch (err) {

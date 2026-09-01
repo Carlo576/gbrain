@@ -163,6 +163,38 @@ describe('Layer 7 (A2) — expandAnchors', () => {
     expect(slugs).toContain('src-c-ts');
   });
 
+  test('hydrateChunks applies expanded type filters before two-pass injection', async () => {
+    const none = await hydrateChunks(engine, [chunkB, chunkC], {
+      expandedTypes: [{ canonical: 'analysis', originalInput: 'analysis', isAliasExpansion: false, subtypeFilter: null }],
+    });
+    expect(none).toEqual([]);
+    const code = await hydrateChunks(engine, [chunkB, chunkC], { types: ['code'] });
+    expect(code).toHaveLength(2);
+  });
+
+  test('hydrateChunks enforces federated source and private visibility scope', async () => {
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('team-b', 'team-b') ON CONFLICT (id) DO NOTHING`);
+    await engine.putPage('team-b-code', {
+      type: 'code', page_kind: 'code', title: 'Team B', compiled_truth: 'foreign', timeline: '',
+    }, { sourceId: 'team-b' });
+    await engine.upsertChunks('team-b-code', [{
+      chunk_index: 0, chunk_text: 'foreign', chunk_source: 'compiled_truth',
+    }], { sourceId: 'team-b' });
+    await engine.putPage('private-code', {
+      type: 'code', page_kind: 'code', title: 'Private', compiled_truth: 'private', timeline: '',
+      frontmatter: { visibility: 'private' },
+    });
+    await engine.upsertChunks('private-code', [{
+      chunk_index: 0, chunk_text: 'private', chunk_source: 'compiled_truth',
+    }]);
+    const foreignId = (await engine.getChunks('team-b-code', { sourceId: 'team-b' }))[0]!.id;
+    const privateId = (await engine.getChunks('private-code'))[0]!.id;
+    const rows = await hydrateChunks(engine, [chunkB, foreignId, privateId], {
+      sourceIds: ['default'], excludePrivate: true,
+    });
+    expect(rows.map((row) => row.slug)).toEqual(['src-b-ts']);
+  });
+
   test('hydrateChunks with empty array returns []', async () => {
     const rows = await hydrateChunks(engine, []);
     expect(rows).toEqual([]);

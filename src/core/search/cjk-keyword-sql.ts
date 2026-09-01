@@ -23,6 +23,7 @@
 import type { SearchOpts } from '../types.ts';
 import { buildBestPerPagePoolCte } from './sql-ranking.ts';
 import { escapeLikePattern, splitCJKQueryTerms } from '../cjk.ts';
+import { appendSearchTypesClause } from './type-filter-sql.ts';
 
 /** Query-shape context shared by both engines' CJK fallback call sites. */
 export interface CjkKeywordCtx {
@@ -100,10 +101,8 @@ export function buildCJKKeywordSql(query: string, ctx: CjkKeywordCtx): CjkKeywor
     params.push(opts.type);
     extraFilter += ` AND p.type = $${params.length}`;
   }
-  if (opts?.types && opts.types.length > 0) {
-    params.push(opts.types);
-    extraFilter += ` AND p.type = ANY($${params.length}::text[])`;
-  }
+  const typesClause = appendSearchTypesClause(params, opts);
+  if (typesClause) extraFilter += ` ${typesClause}`;
   if (opts?.exclude_slugs?.length) {
     params.push(opts.exclude_slugs);
     extraFilter += ` AND p.slug != ALL($${params.length}::text[])`;

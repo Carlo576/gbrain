@@ -266,7 +266,7 @@ export async function runImport(
       remote: false, // CLI import is trusted
       sourceId: opts.sourceId,
     });
-    importActivePack = { page_types: resolved.manifest.page_types };
+    importActivePack = resolved.manifest;
   } catch {
     importActivePack = undefined;
   }

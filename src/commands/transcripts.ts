@@ -392,7 +392,7 @@ async function runIngest(engine: BrainEngine, args: string[]): Promise<void> {
     const { loadActivePack } = await import('../core/schema-pack/load-active.ts');
     const { loadConfig } = await import('../core/config.ts');
     const resolved = await loadActivePack({ cfg: loadConfig(), remote: false, sourceId });
-    activePack = { page_types: resolved.manifest.page_types };
+    activePack = resolved.manifest;
   } catch {
     activePack = undefined;
   }

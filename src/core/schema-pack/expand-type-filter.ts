@@ -97,13 +97,15 @@ export function expandTypeFilter(
         const r = rule as { kind?: unknown; from_type?: unknown; subtype?: unknown; subtype_field?: unknown };
         if (r.kind !== 'retype') continue;
         if (r.from_type !== type) continue;
-        if (typeof r.subtype !== 'string') continue;
+        const hasSubtype = typeof r.subtype === 'string';
         return {
           canonical: pt.name,
           subtypeFilter: {
             canonical: pt.name,
-            subtypeField: typeof r.subtype_field === 'string' ? r.subtype_field : 'subtype',
-            subtypeValue: r.subtype,
+            subtypeField: hasSubtype
+              ? typeof r.subtype_field === 'string' ? r.subtype_field : 'subtype'
+              : 'legacy_type',
+            subtypeValue: hasSubtype ? r.subtype as string : type,
           },
           isAliasExpansion: true,
           originalInput: type,
@@ -145,8 +147,30 @@ export function expandTypeFilter(
       originalInput: type,
     };
   }
-  // 4. Not in page_types AND not in any aliases list. Pass through unchanged
-  // (legacy/unknown type — let the SQL match-or-not naturally).
+  // 4. A declared catch-all maps any remaining legacy value to its canonical
+  // target while preserving the original label in the configured metadata field.
+  const catchAll = (pack as { mapping_rules?: unknown[] }).mapping_rules?.find((rule) => {
+    if (typeof rule !== 'object' || rule === null) return false;
+    const r = rule as { kind?: unknown; from_type?: unknown };
+    return r.kind === 'retype' && r.from_type === '*unknown*';
+  }) as { to_type?: unknown; subtype?: unknown; subtype_field?: unknown } | undefined;
+  if (
+    catchAll && typeof catchAll.to_type === 'string' &&
+    pack.page_types.some((pt) => pt.name === catchAll.to_type)
+  ) {
+    return {
+      canonical: catchAll.to_type,
+      subtypeFilter: {
+        canonical: catchAll.to_type,
+        subtypeField: typeof catchAll.subtype_field === 'string' ? catchAll.subtype_field : 'legacy_type',
+        subtypeValue: catchAll.subtype === '*original_type*' || typeof catchAll.subtype !== 'string'
+          ? type : catchAll.subtype,
+      },
+      isAliasExpansion: true,
+      originalInput: type,
+    };
+  }
+  // 5. No rule owns the value: preserve exact-match semantics.
   return {
     canonical: type,
     subtypeFilter: null,
@@ -183,4 +207,35 @@ export function buildTypeFilterSql(
       expanded.subtypeFilter.subtypeValue,
     ],
   };
+}
+
+/** Build one OR-group for a public multi-type filter. */
+export function buildExpandedTypesSql(
+  expanded: ExpandedTypeFilter[],
+  startParamIndex: number = 1,
+  pageAlias: string = 'p',
+): { sql: string; params: string[] } {
+  const clauses: string[] = [];
+  const params: string[] = [];
+  let index = startParamIndex;
+  for (const item of expanded) {
+    if (item.isAliasExpansion && item.subtypeFilter) {
+      clauses.push(
+        `(${pageAlias}.type = $${index} OR (` +
+        `${pageAlias}.type = $${index + 1} AND ${pageAlias}.frontmatter ->> $${index + 2} = $${index + 3}))`,
+      );
+      params.push(
+        item.originalInput,
+        item.subtypeFilter.canonical,
+        item.subtypeFilter.subtypeField,
+        item.subtypeFilter.subtypeValue,
+      );
+      index += 4;
+    } else {
+      clauses.push(`${pageAlias}.type = $${index}`);
+      params.push(item.originalInput);
+      index += 1;
+    }
+  }
+  return { sql: `(${clauses.join(' OR ')})`, params };
 }

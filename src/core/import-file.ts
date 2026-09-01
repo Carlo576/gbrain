@@ -4,6 +4,8 @@ import { createHash } from 'crypto';
 import type { BrainEngine, FileSpec } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { classifyStoredType } from './schema-pack/type-usage.ts';
+import { resolveUnifiedImportType, type ProjectionAwareTypePack } from './schema-pack/unified-import-type.ts';
+import { reconcileUnifiedImportRace } from './schema-pack/unified-import-race.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { resolveMaxChunkTokens } from './embedding-input-limit.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
@@ -332,7 +334,7 @@ export async function importFromContent(
      * Callers thread this from `loadActivePack(ctx)` once per command —
      * NEVER per file inside sync (codex perf finding #7).
      */
-    activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string> }> };
+    activePack?: ProjectionAwareTypePack;
     /**
      * v0.39.3.0 provenance write-through (WARN-8). When set, threaded to
      * `tx.putPage` so the page's `source_kind`, `source_uri`,
@@ -659,23 +661,19 @@ export async function importFromContent(
     parsed.timeline = mergeHiddenFactRowsIntoBody(slug, parsed.timeline, existing.timeline);
   }
 
-  // #1035: absence of an explicit frontmatter `type:` on an EXISTING page
-  // means "preserve the stored type", not "re-infer". Pre-fix, a round-trip
-  // put (get_page → edit body → put_page without `type:`) silently regressed
-  // a curated type to the path-inferred default ('concept' for bare slugs).
-  // Explicit frontmatter type stays an override; new pages still infer.
-  if (parsed.typeExplicit !== true && existing) {
-    parsed.type = existing.type;
-  }
+  // Preserve curated types (#1035) and completed unification receipts.
+  const unifiedType = resolveUnifiedImportType({
+    parsedType: parsed.type, typeExplicit: parsed.typeExplicit === true,
+    parsedFrontmatter: parsed.frontmatter, activePack: opts.activePack, existing,
+  });
+  [parsed.type, parsed.frontmatter] = [unifiedType.type, unifiedType.frontmatter];
+  const { preservedUnifiedType } = unifiedType;
 
-  // Alias-footgun visibility: an explicit frontmatter `type:` that is an
-  // ALIAS of a canonical pack type (or entirely undeclared) is stored
-  // literally and never re-normalized — different agents can silently file
-  // the same concept under different types/directories. Classify it here
-  // (once per file, aggregated once per type per run by sync/import) so the
-  // misroute class is loud. Purely advisory: the type is still stored as-is.
+  // Warn when a NEW explicit type is a pack alias or undeclared. A page
+  // carrying an exact unification receipt stays quiet: its canonical type is
+  // preserved and the old label remains visible in legacy_type.
   let typeWarning: ImportResult['type_warning'];
-  if (parsed.typeExplicit === true && opts.activePack) {
+  if (parsed.typeExplicit === true && opts.activePack && !preservedUnifiedType) {
     const cls = classifyStoredType(parsed.type, opts.activePack);
     if (cls.kind === 'alias_of') {
       typeWarning = { kind: 'alias_of', type: parsed.type, canonical: cls.canonical, directory: cls.directory };
@@ -694,7 +692,7 @@ export async function importFromContent(
   // Sort tags in place first to preserve the pre-#3694 downstream behavior
   // (parsedPage.tags was sorted by the old inline `.sort()` mutation).
   parsed.tags.sort();
-  const hash = contentHash({
+  let hash = contentHash({
     title: parsed.title,
     type: parsed.type,
     compiled_truth: parsed.compiled_truth,
@@ -933,12 +931,13 @@ export async function importFromContent(
           // the service layer.
         });
 
-  // Transaction wraps all DB writes. Every per-page tx call carries the
-  // caller's sourceId so writes target (sourceId, slug) rather than the
-  // schema DEFAULT — required for multi-source brains; harmless ('default')
-  // for single-source callers.
   const txOpts = { sourceId: sourceId ?? 'default' };
   await engine.transaction(async (tx) => {
+    const current = existing && await reconcileUnifiedImportRace({
+      tx, sourceId: txOpts.sourceId, slug, initial: existing,
+      parsed: { type: parsed.type, typeExplicit: parsed.typeExplicit === true, frontmatter: parsed.frontmatter },
+      page: { ...parsedPage, tags: parsed.tags }, activePack: opts.activePack });
+    if (current) { [parsed.type, parsed.frontmatter, hash] = [current.type, current.frontmatter, current.content_hash]; [parsedPage.type, parsedPage.frontmatter] = [current.type, current.frontmatter]; }
     if (existing) await tx.createVersion(slug, txOpts);
 
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
@@ -1222,7 +1221,7 @@ export async function importFromFile(
      * `parseMarkdown` uses pack-driven type inference. Load ONCE per command;
      * never per file (codex perf finding #7).
      */
-    activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string> }> };
+    activePack?: ProjectionAwareTypePack;
   } = {},
 ): Promise<ImportResult> {
   // Defense-in-depth: reject symlinks before reading content.

@@ -891,7 +891,7 @@ export async function runGoogleSync(
       const { loadActivePack } = await import('../schema-pack/load-active.ts');
       const { loadConfig } = await import('../config.ts');
       const resolved = await loadActivePack({ cfg: loadConfig(), remote: false, sourceId });
-      activePack = { page_types: resolved.manifest.page_types };
+      activePack = resolved.manifest;
     } catch { /* legacy prefix typing */ }
   }
 

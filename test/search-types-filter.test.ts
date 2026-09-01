@@ -12,6 +12,15 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { ChunkInput } from '../src/core/types.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { expandTypeFilter } from '../src/core/schema-pack/expand-type-filter.ts';
+
+const LEGACY_PACK = {
+  page_types: [{ name: 'source', path_prefixes: ['sources/'], aliases: ['primary-source-page', 'raw-source'] }],
+  mapping_rules: [
+    { kind: 'retype', from_type: 'primary-source-page', to_type: 'source', subtype: 'primary-source-page', subtype_field: 'legacy_type' },
+    { kind: 'retype', from_type: 'raw-source', to_type: 'source', subtype: 'raw-source', subtype_field: 'legacy_type' },
+  ],
+} as never;
 
 let engine: PGLiteEngine;
 
@@ -83,6 +92,26 @@ beforeAll(async () => {
       token_count: 10,
     },
   ]);
+
+  await engine.putPage('sources/primary-1', {
+    type: 'source', title: 'Primary Source',
+    compiled_truth: 'Primary evidence with legacy-keyword-xyz.',
+    frontmatter: { legacy_type: 'primary-source-page' },
+  });
+  await engine.upsertChunks('sources/primary-1', [{
+    chunk_index: 0, chunk_text: 'Primary evidence with legacy-keyword-xyz.',
+    chunk_source: 'compiled_truth', embedding: basisEmbedding(13), token_count: 10,
+  }]);
+
+  await engine.putPage('sources/raw-1', {
+    type: 'source', title: 'Raw Source',
+    compiled_truth: 'Raw evidence with legacy-keyword-xyz.',
+    frontmatter: { legacy_type: 'raw-source' },
+  });
+  await engine.upsertChunks('sources/raw-1', [{
+    chunk_index: 0, chunk_text: 'Raw evidence with legacy-keyword-xyz.',
+    chunk_source: 'compiled_truth', embedding: basisEmbedding(14), token_count: 10,
+  }]);
 }, 60_000);
 
 afterAll(async () => {
@@ -142,6 +171,14 @@ describe('searchKeyword — types filter', () => {
     expect(results.length).toBe(1);
     expect(results[0].type).toBe('person');
   });
+
+  test('expanded legacy type matches residual rows plus canonical legacy_type rows', async () => {
+    const results = await engine.searchKeyword('legacy-keyword-xyz', {
+      expandedTypes: [expandTypeFilter('primary-source-page', LEGACY_PACK)],
+      limit: 10,
+    } as never);
+    expect(results.map((r) => r.slug)).toEqual(['sources/primary-1']);
+  });
 });
 
 describe('searchVector — types filter', () => {
@@ -171,6 +208,14 @@ describe('searchVector — types filter', () => {
     for (const r of results) {
       expect(r.type).toBe('concept');
     }
+  });
+
+  test('expanded legacy type filters the vector candidate pool', async () => {
+    const results = await engine.searchVector(basisEmbedding(13), {
+      expandedTypes: [expandTypeFilter('primary-source-page', LEGACY_PACK)],
+      limit: 10,
+    } as never);
+    expect(results.map((r) => r.slug)).toEqual(['sources/primary-1']);
   });
 });
 

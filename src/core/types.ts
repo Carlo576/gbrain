@@ -1077,7 +1077,7 @@ export interface SearchOpts {
    * is `gbrain whoknows` (filters to ['person','company']); future
    * entity-only search reuses the parameter.
    */
-  types?: PageType[];
+  types?: PageType[]; expandedTypes?: import('./schema-pack/expand-type-filter.ts').ExpandedTypeFilter[];
   exclude_slugs?: string[];
   /**
    * Slug-prefix excludes — additive over DEFAULT_HARD_EXCLUDES (test/,

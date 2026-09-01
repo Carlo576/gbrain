@@ -1280,7 +1280,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       remote: false, // sync is always a trusted CLI / autopilot caller
       sourceId: opts.sourceId,
     });
-    syncActivePack = { page_types: resolved.manifest.page_types };
+    syncActivePack = resolved.manifest;
   } catch {
     syncActivePack = undefined;
   }

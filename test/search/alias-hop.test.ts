@@ -81,6 +81,18 @@ describe('applyAliasHop', () => {
     expect(out.map(r => r.slug)).toEqual(['a', 'b']);
   });
 
+  test('type filters block an out-of-contract alias injection', async () => {
+    await engine.putPage('companies/hidden-by-filter', {
+      type: 'company', title: 'Hidden', compiled_truth: 'x',
+    });
+    await engine.setPageAliases('companies/hidden-by-filter', 'default', ['hidden alias']);
+    const out = await applyAliasHop(engine, [], 'hidden alias', {
+      sourceId: 'default',
+      expandedTypes: [{ canonical: 'note', originalInput: 'note', isAliasExpansion: false, subtypeFilter: null }],
+    });
+    expect(out).toHaveLength(0);
+  });
+
   test('long query is skipped (clearly prose, not a chosen name)', async () => {
     await engine.putPage('p/x', { type: 'note', title: 'X', compiled_truth: 'x' });
     await engine.setPageAliases('p/x', 'default', ['one two three four five six seven']);

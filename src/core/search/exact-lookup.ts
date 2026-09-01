@@ -33,6 +33,8 @@
 
 import type { BrainEngine } from '../engine.ts';
 import type { SearchResult } from '../types.ts';
+import type { ExpandedTypeFilter } from '../schema-pack/expand-type-filter.ts';
+import { matchesSearchTypeFilters } from './type-filter-match.ts';
 import { normalizeAlias } from './alias-normalize.ts';
 import { isLookupShapedQuery } from './query-intent.ts';
 import { applySupersedeDownrank } from './hybrid.ts';
@@ -67,6 +69,7 @@ export interface ExactLookupOpts {
    */
   type?: string;
   types?: string[];
+  expandedTypes?: ExpandedTypeFilter[];
   excludeSlugs?: string[];
 }
 
@@ -91,14 +94,20 @@ export async function structuralExactLookup(
   // #4480 — mirror the scored arms' shape filters so the tier can never
   // inject a page the caller explicitly filtered out.
   const excluded = new Set(opts.excludeSlugs ?? []);
-  const typeGate = (t: string | undefined | null): boolean => {
-    if (opts.type && t !== opts.type) return false;
-    if (opts.types && opts.types.length > 0 && (t == null || !opts.types.includes(t))) return false;
-    return true;
+  const typeGate = (
+    t: string | undefined | null,
+    frontmatter?: Record<string, unknown>,
+    prefiltered: boolean = false,
+  ): boolean => {
+    return matchesSearchTypeFilters(t, frontmatter, {
+      type: opts.type as never,
+      types: opts.types as never,
+      expandedTypes: prefiltered ? undefined : opts.expandedTypes,
+    });
   };
-  const push = (r: SearchResult) => {
+  const push = (r: SearchResult, frontmatter?: Record<string, unknown>, prefiltered: boolean = false) => {
     if (excluded.has(r.slug)) return;
-    if (!typeGate(r.type)) return;
+    if (!typeGate(r.type, frontmatter, prefiltered)) return;
     const key = `${r.source_id ?? 'default'}::${r.slug}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -131,7 +140,7 @@ export async function structuralExactLookup(
           score: 0, // caller assigns the injection score
           alias_hit: true, // identity match — evidence alias_hit → 'exists'
           exact_lookup: 'slug',
-        } as SearchResult);
+        } as SearchResult, page.frontmatter);
       } catch {
         // fail-open: slug probe error → no tier hit from this scope
       }
@@ -148,7 +157,7 @@ export async function structuralExactLookup(
         ...cand,
         title_match_boost: Math.max(cand.title_match_boost ?? 1.0, EXACT_TITLE_STAMP),
         exact_lookup: cand.exact_lookup ?? 'title',
-      });
+      }, undefined, true);
     }
   }
 

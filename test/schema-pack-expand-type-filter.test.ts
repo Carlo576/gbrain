@@ -67,6 +67,21 @@ describe('expandTypeFilter', () => {
     });
   });
 
+  it('alias mapping_rule without subtype expands through legacy_type', () => {
+    const pack = {
+      page_types: [{
+        name: 'analysis', primitive: 'media', path_prefixes: [], aliases: ['research'],
+        extractable: false, expert_routing: false,
+      }],
+      mapping_rules: [{ kind: 'retype', from_type: 'research', to_type: 'analysis', subtype_field: 'subtype' }],
+    };
+    expect(expandTypeFilter('research', pack as never)).toMatchObject({
+      canonical: 'analysis',
+      subtypeFilter: { canonical: 'analysis', subtypeField: 'legacy_type', subtypeValue: 'research' },
+      isAliasExpansion: true,
+    });
+  });
+
   it('alias without mapping_rule, with matching subtype name → uses subtype rule', () => {
     // Edge case for hand-written packs: subtype rule whose name === alias.
     const pack = packOf([{
@@ -111,6 +126,24 @@ describe('expandTypeFilter', () => {
     expect(result.canonical).toBe('unknown-type');
     expect(result.isAliasExpansion).toBe(false);
     expect(result.subtypeFilter).toBeNull();
+  });
+
+  it('unknown type uses a declared catch-all legacy_type mapping', () => {
+    const pack = {
+      page_types: [{
+        name: 'note', primitive: 'concept', path_prefixes: [], aliases: [],
+        extractable: false, expert_routing: false,
+      }],
+      mapping_rules: [{
+        kind: 'retype', from_type: '*unknown*', to_type: 'note',
+        subtype: '*original_type*', subtype_field: 'legacy_type',
+      }],
+    };
+    expect(expandTypeFilter('custom-old-type', pack as never)).toMatchObject({
+      canonical: 'note',
+      subtypeFilter: { canonical: 'note', subtypeField: 'legacy_type', subtypeValue: 'custom-old-type' },
+      isAliasExpansion: true,
+    });
   });
 });
 

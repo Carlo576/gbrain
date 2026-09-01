@@ -58,6 +58,15 @@ describe('buildRelationalArm', () => {
     expect(alice!.chunk_id).toBeGreaterThan(0);
   });
 
+  test('type filters gate relationally injected pages', async () => {
+    const filtered = await buildRelationalArm(eng, 'who invested in widget-co', {
+      expandedTypes: [{ canonical: 'note', originalInput: 'note', isAliasExpansion: false, subtypeFilter: null }],
+    });
+    expect(filtered).toEqual([]);
+    const people = await buildRelationalArm(eng, 'who invested in widget-co', { types: ['person'] });
+    expect(people.map((r) => r.slug)).toContain('people/alice-example');
+  });
+
   test('non-relational query is a pure no-op', async () => {
     const meta: { fired?: boolean } = {};
     const list = await buildRelationalArm(eng, 'summary of the payments roadmap', { onMeta: m => { meta.fired = m.fired; } });
