@@ -11,26 +11,28 @@ right now, could I recreate my agent?"**
 |---|---|---|
 | Source repos (every non-archived source with a `local_path`) | local git probes: `git remote get-url origin`, `rev-list --count`, `status --porcelain` — deduped by git root, capped at 500 roots/run | no `origin` remote, OR origin configured but never pushed (`origin/<branch>` unresolvable — the half-completed `git remote add` state). Both report `no_remote`. |
 | Bootstrap workspace (skills/, memory/, brain/, identity) | file plane: the install receipt's `repo_url` + the per-root push-status files | receipt without `repo_url` → warn; a failing background push → flagged row only (the push-failure banner owns that alarm) |
-| DB-only brain (pages exist, nothing git-backed) | page count + absence of any git-backed asset | warn on PGLite (total loss on disk failure); info on managed Postgres (DB survives, but isn't the git system of record) |
-| `db_only` storage-tier pages | `gbrain.yml` per source | info row — dump with `gbrain export --dir <backup-dir>` to somewhere OUTSIDE the gitignored dirs (`--restore-only` is the wrong direction for a backup) |
+| Database content | live pages counted per source against proven reconstruction paths | local PGLite, loopback/wildcard/socket PostgreSQL, and dirty or unbacked sources warn for pages that cannot be rebuilt after host loss; explicitly remote PostgreSQL survives the current host |
+| `db_only` storage-tier pages | `gbrain.yml` per source | info row — dump with `gbrain export --by-source --dir <backup-dir>` somewhere OUTSIDE the gitignored dirs (`--restore-only` is the wrong direction for a backup) |
 | Harness-native skill dirs (e.g. the agent's installed skills) | skillpack bridge state | info only — these are installed COPIES; the originals live in repos |
 
 Only `no_remote` flips the overall verdict to **warn**. Push *staleness* of an
 existing remote stays with the existing channels (`bootstrap_push_health`, the
 push-failure banner).
 
-**Not covered (v1, by design):** the DB file itself (`~/.gbrain` is
-deliberately gitignored — the repo is the system of record and the DB rebuilds
-via `gbrain sync`); mounted brains (the verdict cache is host-brain-scoped —
-computes against a mounted brain are never persisted); pure-HTTP thin-client
-installs (no local CLI on the brain host — nothing there can probe git);
-network reachability of the remote (`--probe` is a filed follow-up; "has
-origin" doesn't prove "can push"); DB pages that belong to no source on an
-install that HAS a workspace repo (whether the workspace write-through covers
-them is not verified — the `undeclared_db_only_pages` doctor check is the
-page-level audit). The OpenClaw context line is bounded per process (once per
-24h); an install that restarts its serve constantly and never fires any
-recording channel can see it more often than the recorded-notice cap.
+**Not covered (v1, by design):** provider/database loss for an explicitly remote
+PostgreSQL service (the modeled failure is loss of the current host); mounted
+brains (the verdict cache is host-brain-scoped — computes against a mounted
+brain are never persisted); pure-HTTP thin-client installs (no local CLI on the
+brain host — nothing there can probe git); and network reachability of a remote
+(`--probe` is a filed follow-up; a configured, pushed tracking ref does not prove
+the provider is currently reachable). On PGLite or local PostgreSQL, dirty
+source repositories are treated conservatively: their current source-owned
+pages remain at risk because neither the host-local database nor the remote Git
+history can reproduce the working-tree delta. An explicitly remote PostgreSQL
+database still survives loss of the current host. The OpenClaw context line is
+bounded per process (once per 24h); an install that restarts its serve constantly
+and never fires any recording channel can see it more often than the recorded-
+notice cap.
 
 ## Where the warning reaches you
 

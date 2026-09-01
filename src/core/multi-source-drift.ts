@@ -78,9 +78,8 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const SAMPLE_LIMIT = 5;
 
 /**
- * Walk a directory tree for `.md` + `.mdx` files. Skips dotfiles (`.git`),
- * `_*.md` files (the existing extract.ts convention), and silently swallows
- * read errors on individual entries. Returns relative paths from `root`.
+ * Walk a directory tree for `.md` + `.mdx` files. Skips dotfiles (`.git`)
+ * and symbolic links, then applies the shared syncability policy downstream.
  *
  * Bounded by `limit` (max files) and `deadlineMs` (epoch ms). Returns early
  * with `truncated=true` if either bound is hit. The root-not-readable case
@@ -113,7 +112,9 @@ function walkMarkdownAndMdxFiles(
       const full = join(d, entry);
       let isDir = false;
       try {
-        isDir = lstatSync(full).isDirectory();
+        const entryStat = lstatSync(full);
+        if (entryStat.isSymbolicLink()) continue;
+        isDir = entryStat.isDirectory();
       } catch {
         continue;
       }
@@ -126,7 +127,6 @@ function walkMarkdownAndMdxFiles(
       }
       const isMd = entry.endsWith('.md') || entry.endsWith('.mdx');
       if (!isMd) continue;
-      if (entry.startsWith('_')) continue; // matches extract.ts convention
       files.push({ relPath: relative(root, full) });
       if (files.length >= limit) {
         truncated = true;

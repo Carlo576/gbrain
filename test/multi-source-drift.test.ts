@@ -17,7 +17,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -237,5 +237,24 @@ describe('findMisroutedPages — heuristic correctness', () => {
     const result = await findMisroutedPages(engine, [{ id: 'src-case10', local_path: root }]);
     expect(result.count).toBe(0);
     expect(result.sample).toEqual([]);
+  });
+
+  test('case 11: drift walker includes syncable underscore files and skips symlink files', async () => {
+    const root = makeTmpRoot('case11-walker');
+    const outside = makeTmpRoot('case11-target');
+    seedFile(root, '_syncable.md');
+    seedFile(outside, 'target.md');
+    symlinkSync(join(outside, 'target.md'), join(root, 'ghost.md'));
+    await runSources(engine, ['add', 'src-case11', '--no-federated']);
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = $2`, [root, 'src-case11']);
+
+    await engine.putPage('_syncable', { type: 'note', title: 'real drift', compiled_truth: '.' });
+    await engine.putPage('ghost', { type: 'note', title: 'symlink false positive', compiled_truth: '.' });
+
+    const result = await findMisroutedPages(engine, [{ id: 'src-case11', local_path: root }]);
+    expect(result.count).toBe(1);
+    expect(result.sample).toEqual([
+      expect.objectContaining({ slug: '_syncable', intended_source: 'src-case11' }),
+    ]);
   });
 });

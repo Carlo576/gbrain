@@ -456,7 +456,9 @@ export async function computeBackupCoverage(
             return false;
           }
         })();
-        for (const sourceId of ids) recoverableSourceIds.add(sourceId);
+        if (!dirty) {
+          for (const sourceId of ids) recoverableSourceIds.add(sourceId);
+        }
         pushAsset(
           assets,
           dirty

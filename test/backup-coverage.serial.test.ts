@@ -377,6 +377,7 @@ describe('computeBackupCoverage — db_content and empty brain', () => {
       'postgresql://u:p@2130706433:5432/db',
       'postgresql://u:p@[::1]:5432/db',
       'postgresql://u:p@[::ffff:127.0.0.1]:5432/db',
+      'postgresql://u:p@[::]:5432/db',
       'postgresql:///db',
     ];
     for (const databaseUrl of localUrls) {
@@ -405,6 +406,28 @@ describe('computeBackupCoverage — db_content and empty brain', () => {
 
     expect(s.totals.pages_at_risk).toBe(3);
     expect(s.assets.find((a) => a.kind === 'db_content')?.state).toBe('no_remote');
+  });
+
+  test('private-LAN postgres hosts remain off-host for current-host loss', async () => {
+    const remoteUrls = [
+      'postgresql://u:p@10.0.0.8:5432/db',
+      'postgresql://u:p@172.16.4.2:5432/db',
+      'postgresql://u:p@192.168.1.9:5432/db',
+      'postgresql://u:p@[::ffff:192.168.1.9]:5432/db',
+    ];
+    for (const databaseUrl of remoteUrls) {
+      mkdirSync(home(), { recursive: true });
+      writeFileSync(
+        join(home(), 'config.json'),
+        JSON.stringify({ engine: { kind: 'postgres' }, database_url: databaseUrl }),
+      );
+      const status = await computeBackupCoverage(
+        stubEngine({ kind: 'postgres', pages: 2 }),
+        { localGitProbes: false },
+      );
+      expect(status.assets.find((a) => a.kind === 'db_content')?.state).toBe('info');
+      expect(status.totals.pages_at_risk).toBe(0);
+    }
   });
 
   test('remote postgres brain with pages but no sources/receipt → db_content info, overall ok', async () => {
@@ -724,7 +747,7 @@ describe('maybeRefreshBackupStatusInProcess', () => {
 // ── Dirty working tree, shared roots, non-repo paths ─────────────────────────
 
 describe('computeBackupCoverage — dirty tree, shared git roots, non-repo paths', () => {
-  test('origin-backed pushed repo with a modified tracked file → dirty, overall stays ok', async () => {
+  test('origin-backed dirty repo keeps current source pages at risk', async () => {
     const bare = join(tmp, 'dirty-bare.git');
     execFileSync('git', ['init', '--bare', '-b', 'main', bare], { stdio: ['ignore', 'pipe', 'pipe'] });
     const work = join(tmp, 'dirty-work');
@@ -734,7 +757,10 @@ describe('computeBackupCoverage — dirty tree, shared git roots, non-repo paths
     g(work, ['push', '-u', 'origin', 'main']);
     writeFileSync(join(work, 'a.md'), 'modified but not committed'); // dirty, NOT ahead
 
-    const engine = stubEngine({ sources: [srcRow('src-dirty', work)] });
+    const engine = stubEngine({
+      sources: [srcRow('src-dirty', work)],
+      pagesBySource: { 'src-dirty': 3 },
+    });
     const s = await computeBackupCoverage(engine, { localGitProbes: true });
 
     const asset = s.assets.find((a) => a.kind === 'source_repo');
@@ -742,11 +768,11 @@ describe('computeBackupCoverage — dirty tree, shared git roots, non-repo paths
     expect(asset?.state).toBe('dirty');
     expect(asset?.detail).toBe('uncommitted changes');
     expect(asset?.fix_argv).toBeNull();
-    expect(s.overall).toBe('ok'); // dirty does NOT flip warn — only no_remote does
-    expect(s.totals.no_remote).toBe(0);
+    expect(s.overall).toBe('warn');
+    expect(s.totals.no_remote).toBe(1); // db_content: dirty source pages are not reconstructible
     expect(s.totals.unpushed).toBe(0);
-    // dirty is still recoverable_repos (origin exists; only the delta is at risk)
-    expect(s.totals.recoverable_repos).toBe(1);
+    expect(s.totals.recoverable_repos).toBe(1); // the repo history survives; the dirty page state does not
+    expect(s.totals.pages_at_risk).toBe(3);
   });
 
   test('two sources in the SAME git repo (root + subdir) dedupe to ONE probed asset with joined ids', async () => {
