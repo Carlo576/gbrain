@@ -60,3 +60,6 @@ graphify-out/
 # Coverage lane output (COVERAGE_DIR opt-in in test-shard.sh /
 # run-serial-tests.sh / run-e2e.sh; merged by scripts/merge-lcov.ts)
 .coverage/
+
+# Auto-managed by gbrain (db_only directories)
+indexes/
