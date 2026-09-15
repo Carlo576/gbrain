@@ -16,3 +16,4 @@ storage:
     - media/x/
     - media/articles/
     - meetings/transcripts/
+    - indexes/
