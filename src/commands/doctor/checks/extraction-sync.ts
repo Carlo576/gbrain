@@ -229,16 +229,37 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
         WHERE deleted_at IS NULL AND content_hash IS NOT NULL AND content_hash <> ''
         GROUP BY source_id, content_hash
        HAVING count(*) > 1
-        LIMIT 50`,
+        LIMIT 500`,
     );
-    if (rows.length === 0) {
-      return { name, status: 'ok', message: 'No same-source content-hash duplicate groups' };
+    // `health.duplicates.allowed` (JSON array of "source_id|content_hash",
+    // DB config plane) records duplicate groups reviewed as intentional —
+    // evidence-packet mirrors, archived lanes, stamped template artifacts.
+    // A group absent from the list still warns, so new accidents surface.
+    let allowed = new Set<string>();
+    try {
+      const raw = await engine.getConfig('health.duplicates.allowed');
+      if (raw) {
+        const arr = JSON.parse(raw) as string[];
+        if (Array.isArray(arr)) allowed = new Set(arr);
+      }
+    } catch { /* absent/invalid — nothing acknowledged */ }
+    const open = rows.filter(r => !allowed.has(`${r.source_id}|${r.content_hash}`));
+    const ackedCount = rows.length - open.length;
+    if (open.length === 0) {
+      return {
+        name,
+        status: 'ok',
+        message: ackedCount > 0
+          ? `No unacknowledged same-source content-hash duplicate groups (${ackedCount} acknowledged via health.duplicates.allowed)`
+          : 'No same-source content-hash duplicate groups',
+      };
     }
+    const visible = open.slice(0, 50);
     let pairCount = 0;
     const samples: string[] = [];
     let otherGroupCount = 0;
     const otherSamples: string[] = [];
-    for (const r of rows) {
+    for (const r of visible) {
       const slugs = String(r.slugs).split('|');
       const bare = slugs.filter(s => !s.includes('/'));
       const prefixed = slugs.filter(s => s.includes('/'));
@@ -271,13 +292,16 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
     return {
       name,
       status: 'warn',
-      message: parts.join(' '),
+      message:
+        parts.join(' ') +
+        (ackedCount > 0 ? ` (${ackedCount} group(s) acknowledged via health.duplicates.allowed)` : ''),
       details: {
         pair_count: pairCount,
-        hash_groups: rows.length,
+        hash_groups: open.length,
         sample_pairs: samples,
         distinct_slug_group_count: otherGroupCount,
         sample_distinct_slug_groups: otherSamples,
+        acknowledged_group_count: ackedCount,
       },
     };
   } catch (e) {

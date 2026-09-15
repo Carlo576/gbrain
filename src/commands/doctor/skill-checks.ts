@@ -281,15 +281,36 @@ export async function skillPreconditionsCheck(
     },
   };
 
+  // `health.skill_preconditions.ack` (JSON array of "skill:req" tokens, DB
+  // config plane) records requirements reviewed as intentionally unmet —
+  // e.g. an optional skill waiting on a data lane that isn't configured yet.
+  let ackedReqs = new Set<string>();
+  try {
+    const raw = await engine.getConfig('health.skill_preconditions.ack');
+    if (raw) {
+      const arr = JSON.parse(raw) as string[];
+      if (Array.isArray(arr)) ackedReqs = new Set(arr);
+    }
+  } catch { /* absent/invalid — nothing acknowledged */ }
+
   const unmet: string[] = [];
+  let ackedCount = 0;
   for (const skill of installed) {
     const results = await checkPreconditions(skill.requires, ctx);
     for (const r of results) {
-      if (!r.met) unmet.push(`${skill.slug}: ${r.req.raw} — ${r.hint}`);
+      if (r.met) continue;
+      if (ackedReqs.has(`${skill.slug}:${r.req.raw}`)) { ackedCount++; continue; }
+      unmet.push(`${skill.slug}: ${r.req.raw} — ${r.hint}`);
     }
   }
   if (unmet.length === 0) {
-    return { name, status: 'ok', message: `${installed.length} skill(s) with preconditions, all met` };
+    return {
+      name,
+      status: 'ok',
+      message:
+        `${installed.length} skill(s) with preconditions, all met` +
+        (ackedCount > 0 ? ` (${ackedCount} acknowledged unmet via health.skill_preconditions.ack)` : ''),
+    };
   }
   return {
     name,
@@ -297,8 +318,9 @@ export async function skillPreconditionsCheck(
     message:
       `${unmet.length} unmet skill precondition(s):\n  ` +
       unmet.slice(0, 8).join('\n  ') +
-      (unmet.length > 8 ? `\n  … +${unmet.length - 8} more` : ''),
-    details: { unmet },
+      (unmet.length > 8 ? `\n  … +${unmet.length - 8} more` : '') +
+      (ackedCount > 0 ? `\n  (${ackedCount} acknowledged unmet via health.skill_preconditions.ack)` : ''),
+    details: { unmet, acknowledged_count: ackedCount },
   };
 }
 

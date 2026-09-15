@@ -1004,7 +1004,29 @@ export async function buildChecks(
     // Don't assert "not running" on a check we know is inconclusive here.
     const dbLockCheckSkippedUnderFast = fastMode && !pidfileRunning && !engine;
 
-    const events = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
+    const rawSupervisorEvents = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
+    // `health.supervisor.ack_crashes` (JSON array of exact worker_exited
+    // timestamps, DB config plane) records crashes the operator reviewed and
+    // explained — e.g. an upgrade protocol-boundary exit where the stale
+    // worker self-terminated and the respawned worker stayed healthy. Acked
+    // exits drop out of the crash count but stay in the audit log and are
+    // reported in the message; a crash at any other ts still warns. Same
+    // contract as the other health.* acknowledgments.
+    let ackCrashTs = new Set<string>();
+    try {
+      const rawAck = engine ? await engine.getConfig('health.supervisor.ack_crashes') : null;
+      if (rawAck) {
+        const parsed: unknown = JSON.parse(rawAck);
+        if (Array.isArray(parsed)) {
+          ackCrashTs = new Set(parsed.filter((t): t is string => typeof t === 'string'));
+        }
+      }
+    } catch { /* malformed ack config → treat as empty, never hide events */ }
+    let ackedCrashes = 0;
+    const events = rawSupervisorEvents.filter(e => {
+      if (e.event === 'worker_exited' && ackCrashTs.has(e.ts)) { ackedCrashes++; return false; }
+      return true;
+    });
     const lastStart = events.filter(e => e.event === 'started').pop()?.ts ?? null;
     // Shared classifier — same code path runs in `gbrain jobs supervisor
     // status` (src/commands/jobs.ts). Counts only events whose `likely_cause`
@@ -1055,13 +1077,13 @@ export async function buildChecks(
         checks.push({
           name: 'supervisor',
           status: 'warn',
-          message: `Worker crashed ${crashes24h}x in last 24h (${causeStr}). Check ~/.gbrain/audit/supervisor-*.jsonl for context.`,
+          message: `Worker crashed ${crashes24h}x in last 24h (${causeStr}). Check ~/.gbrain/audit/supervisor-*.jsonl for context.${ackedCrashes > 0 ? ` (${ackedCrashes} additional crash(es) acknowledged via health.supervisor.ack_crashes)` : ''}`,
         });
       } else {
         checks.push({
           name: 'supervisor',
           status: 'ok',
-          message: `running=true${detectedViaDbLock ? ' (detected via DB lock; pidfile not at the HOME-derived path)' : ` pid=${supervisorPid}`} last_start=${lastStart ?? 'unknown'} crashes_24h=${crashes24h} clean_exits_24h=${summary.clean_exits}`,
+          message: `running=true${detectedViaDbLock ? ' (detected via DB lock; pidfile not at the HOME-derived path)' : ` pid=${supervisorPid}`} last_start=${lastStart ?? 'unknown'} crashes_24h=${crashes24h} clean_exits_24h=${summary.clean_exits}${ackedCrashes > 0 ? ` acked_crashes=${ackedCrashes}` : ''}`,
         });
       }
     }
@@ -1681,7 +1703,9 @@ export async function buildChecks(
   if (engine !== null) try {
     const { findMisroutedPages } = await import('../core/multi-source-drift.ts');
     const sources = await engine!.executeRaw<{ id: string; local_path: string | null }>(
-      `SELECT id, local_path FROM sources`,
+      // Archived sources no longer sync — drift against them can never be
+      // re-imported, so comparing is a permanent unactionable warn.
+      `SELECT id, local_path FROM sources WHERE COALESCE(archived, false) = false`,
     );
     const nonDefaultWithPath = sources.filter(s => s.id !== 'default' && s.local_path);
     if (sources.length > 1 && nonDefaultWithPath.length > 0) {
@@ -3150,14 +3174,63 @@ export async function buildChecks(
       // searchable, agent warned on retrieval), so it joins `soft_block`.
       const hardBlocked =
         summary.by_type.hard_block + summary.by_type.reject + summary.by_type.quarantine;
-      const softBlocked = summary.by_type.soft_block + summary.by_type.flag;
+      // Soft dispositions are re-resolved against CURRENT page state: the
+      // audit log is a 7-day event window, so a page that was fixed
+      // (re-ingested under threshold) or tombstoned after its event still
+      // holds the warn long after the condition is gone. A soft event is only
+      // actionable while the page is alive and still content-flagged.
+      // `health.content_sanity.ack_slugs` (JSON array of "slug@source" keys,
+      // DB config plane) acknowledges intentionally-large docs whose soft
+      // events are expected forever — same contract as the other health.* acks.
+      let ackSlugs = new Set<string>();
+      try {
+        const rawAck = await engine.getConfig('health.content_sanity.ack_slugs');
+        if (rawAck) {
+          const parsed: unknown = JSON.parse(rawAck);
+          if (Array.isArray(parsed)) {
+            ackSlugs = new Set(parsed.filter((k): k is string => typeof k === 'string'));
+          }
+        }
+      } catch { /* malformed ack config → treat as empty, never hide events */ }
+      const softEvents = events.filter(e =>
+        e.event_type === 'soft_block' || e.event_type === 'flag');
+      const ackedEvents = softEvents.filter(e => ackSlugs.has(`${e.slug}@${e.source_id}`));
+      const openEvents = softEvents.filter(e => !ackSlugs.has(`${e.slug}@${e.source_id}`));
+      let softBlocked = 0;
+      let resolved = 0;
+      if (openEvents.length > 0) {
+        const esc = (s: string) => s.replace(/'/g, "''");
+        const tuples = [...new Set(openEvents.map(e => `('${esc(e.slug)}','${esc(e.source_id)}')`))];
+        const stillFlagged = new Set(
+          (await engine.executeRaw<{ slug: string; source_id: string }>(
+            `SELECT slug, source_id FROM pages
+               WHERE deleted_at IS NULL AND frontmatter ? 'content_flag'
+                 AND (slug, source_id) IN (${tuples.join(',')})`,
+          )).map(r => `${r.slug}@${r.source_id}`),
+        );
+        for (const e of openEvents) {
+          if (stillFlagged.has(`${e.slug}@${e.source_id}`)) softBlocked++;
+          else resolved++;
+        }
+      }
+      // Volume arm: pure oversize WARNs (PAGE_OVERSIZE_WARN) are a size
+      // advisory, not junk evidence — a deliberately large corpus (book
+      // chapters, transcripts) emits them on every ingest forever, which
+      // would pin this check at warn permanently and hide real signal. They
+      // stay counted in the message but only non-oversize warns trip volume.
+      const oversizeWarn = events.filter(e =>
+        e.event_type === 'warn' &&
+        Array.isArray(e.reason_messages) &&
+        e.reason_messages.every((r: unknown) => typeof r === 'string' && r.startsWith('PAGE_OVERSIZE_WARN')),
+      ).length;
+      const actionableWarns = summary.by_type.warn - oversizeWarn;
       const status: 'ok' | 'warn' | 'fail' =
         hardBlocked > 0 ? 'fail' :
-          (softBlocked > 0 || events.length >= 10) ? 'warn' : 'ok';
+          (softBlocked > 0 || actionableWarns >= 10) ? 'warn' : 'ok';
       checks.push({
         name: 'content_sanity_audit_recent',
         status,
-        message: `${events.length} events (hard=${hardBlocked} [hard_block=${summary.by_type.hard_block} reject=${summary.by_type.reject} quarantine=${summary.by_type.quarantine}] soft=${softBlocked} [soft_block=${summary.by_type.soft_block} flag=${summary.by_type.flag}] warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
+        message: `${events.length} events (hard=${hardBlocked} [hard_block=${summary.by_type.hard_block} reject=${summary.by_type.reject} quarantine=${summary.by_type.quarantine}] soft=${softBlocked} open of ${summary.by_type.soft_block + summary.by_type.flag} [soft_block=${summary.by_type.soft_block} flag=${summary.by_type.flag}]${resolved > 0 ? ` resolved=${resolved}` : ''}${ackedEvents.length > 0 ? ` acknowledged=${ackedEvents.length} via health.content_sanity.ack_slugs` : ''} warn=${summary.by_type.warn} of which oversize-advisory=${oversizeWarn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
       });
     }
   } catch (err) {
@@ -3177,16 +3250,32 @@ export async function buildChecks(
     // engine.executeRaw (NOT db.getConnection() — that's the postgres singleton,
     // dead on the default PGLite engine). The JSONB `?` existence operator is
     // literal SQL through executeRaw on both engines.
-    const rows = await engine.executeRaw<{ n: string | number }>(
-      `SELECT COUNT(*)::int AS n FROM pages p WHERE p.deleted_at IS NULL AND p.frontmatter ? 'quarantine'`,
+    const rows = await engine.executeRaw<{ reason: string | null; n: string | number }>(
+      `SELECT p.frontmatter->'quarantine'->>'reason' AS reason, COUNT(*)::int AS n
+         FROM pages p WHERE p.deleted_at IS NULL AND p.frontmatter ? 'quarantine'
+        GROUP BY 1`,
     );
-    const n = Number(rows[0]?.n ?? 0);
+    // `health.quarantine.ack_reasons` (JSON array, DB config plane) records
+    // quarantine reasons an operator has reviewed as intentional — e.g.
+    // `retired_route` tombstones are the designed retirement surface, not
+    // junk to clear. Unacknowledged reasons still warn.
+    let ackReasons: string[] = [];
+    try {
+      const raw = await engine.getConfig('health.quarantine.ack_reasons');
+      if (raw) ackReasons = JSON.parse(raw) as string[];
+    } catch { /* absent/invalid — nothing acknowledged */ }
+    const ackSet = new Set(Array.isArray(ackReasons) ? ackReasons : []);
+    const total = rows.reduce((s, r) => s + Number(r.n), 0);
+    const acked = rows.filter(r => r.reason !== null && ackSet.has(r.reason)).reduce((s, r) => s + Number(r.n), 0);
+    const n = total - acked;
     checks.push({
       name: 'quarantined_pages',
       status: n > 0 ? 'warn' : 'ok',
-      message: n > 0
-        ? `${n} page(s) quarantined as junk (hidden from search). Review with 'gbrain quarantine list'; clear a false positive with 'gbrain quarantine clear <slug>'.`
-        : 'No quarantined pages',
+      message:
+        (n > 0
+          ? `${n} page(s) quarantined as junk (hidden from search). Review with 'gbrain quarantine list'; clear a false positive with 'gbrain quarantine clear <slug>'.`
+          : 'No unacknowledged quarantined pages') +
+        (acked > 0 ? ` (${acked} acknowledged via health.quarantine.ack_reasons)` : ''),
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -3195,18 +3284,30 @@ export async function buildChecks(
 
   progress.heartbeat('flagged_pages');
   try {
-    const rows = await engine.executeRaw<{ n: string | number }>(
-      `SELECT COUNT(*)::int AS n FROM pages p WHERE p.deleted_at IS NULL AND p.frontmatter ? 'content_flag'`,
+    const rows = await engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages p WHERE p.deleted_at IS NULL AND p.frontmatter ? 'content_flag'`,
     );
-    const n = Number(rows[0]?.n ?? 0);
+    // `health.flagged.ack_slugs` (JSON array, DB config plane) — flagged is an
+    // advisory ("still searchable, agent warned"), so a reviewed oversize page
+    // can be recorded as accepted rather than permanently warned on.
+    let ackSlugs: string[] = [];
+    try {
+      const raw = await engine.getConfig('health.flagged.ack_slugs');
+      if (raw) ackSlugs = JSON.parse(raw) as string[];
+    } catch { /* absent/invalid — nothing acknowledged */ }
+    const ackSet = new Set(Array.isArray(ackSlugs) ? ackSlugs : []);
+    const acked = rows.filter(r => ackSet.has(r.slug)).length;
+    const n = rows.length - acked;
     // Flagged pages are "examine me", not "broken" — warn so they're visible
     // but the message is non-alarming.
     checks.push({
       name: 'flagged_pages',
       status: n > 0 ? 'warn' : 'ok',
-      message: n > 0
-        ? `${n} page(s) flagged (markup-heavy or oversize) — still searchable, agent warned on retrieval. Review with 'gbrain quarantine list --include-flagged'.`
-        : 'No flagged pages',
+      message:
+        (n > 0
+          ? `${n} page(s) flagged (markup-heavy or oversize) — still searchable, agent warned on retrieval. Review with 'gbrain quarantine list --include-flagged'.`
+          : 'No unacknowledged flagged pages') +
+        (acked > 0 ? ` (${acked} acknowledged via health.flagged.ack_slugs)` : ''),
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

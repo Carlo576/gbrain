@@ -18,7 +18,8 @@
  * a failed compute never clobbers an existing cache (getBackupStatus).
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { VERSION } from '../../version.ts';
@@ -139,6 +140,42 @@ async function countLivePages(engine: BrainEngine): Promise<number | null> {
     return typeof n === 'number' && Number.isFinite(n) ? n : null;
   } catch {
     return null;
+  }
+}
+
+/** Freshness window for the configured export lane — a stale receipt does not cover the risk. */
+export const BACKUP_EXPORT_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Read the configured export lane (`backup.export_dir`, DB config plane —
+ * set via `gbrain config set backup.export_dir <dir> --force`). Returns ok
+ * only when the dir holds an EXPORT_RECEIPT.json written within the freshness
+ * window — the receipt is written by the export runner, not by `gbrain export`
+ * itself, so its presence+age attests a complete scheduled dump, not a
+ * partial dir.
+ */
+async function readExportCoverage(
+  engine: BrainEngine,
+  now: Date,
+): Promise<{ state: 'ok' | 'none'; dir?: string; ts?: string; detail?: string }> {
+  let dir: unknown;
+  try {
+    dir = await engine.getConfig('backup.export_dir');
+  } catch {
+    return { state: 'none' };
+  }
+  if (typeof dir !== 'string' || dir.length === 0) return { state: 'none' };
+  const receiptPath = join(dir, 'EXPORT_RECEIPT.json');
+  try {
+    const raw = readFileSync(receiptPath, 'utf8');
+    const ts = (JSON.parse(raw) as { ts?: string }).ts;
+    const age = ts ? now.getTime() - new Date(ts).getTime() : Number.POSITIVE_INFINITY;
+    if (!ts || !Number.isFinite(age) || age > BACKUP_EXPORT_MAX_AGE_MS || age < -60_000) {
+      return { state: 'none', dir, detail: `(export at ${dir} has no fresh receipt — re-run the export job)` };
+    }
+    return { state: 'ok', dir, ts };
+  } catch {
+    return { state: 'none', dir, detail: `(export dir ${dir} configured but unreadable/missing receipt)` };
   }
 }
 
@@ -513,17 +550,35 @@ export async function computeBackupCoverage(
       pagesAtRisk = riskyCount;
       const location = engine.kind === 'postgres' ? 'local PostgreSQL' : 'the local DB';
       const noSourceRepo = sourceRootCount === 0 && workspaceRoot === null;
-      pushAsset(assets, {
-        kind: 'db_content',
-        id: 'brain database',
-        state: 'no_remote',
-        detail:
-          `${riskyCount} page${riskyCount === 1 ? '' : 's'} in ${location} cannot be rebuilt from a proven remote-backed source — ` +
-          'a disk loss loses them (back the source repos or export to durable storage)',
-        fix_argv: noSourceRepo
-          ? ['gbrain', 'bootstrap', 'repo']
-          : ['gbrain', 'export', '--by-source', '--dir', '<backup-dir>'],
-      });
+      // A configured `backup.export_dir` with a fresh EXPORT_RECEIPT.json
+      // covers the risk the git-remote model misses: DB-only pages (default
+      // source, db_only dirs) can never be repo-backed, but a scheduled
+      // `gbrain export --by-source` into a pushed git repo rebuilds them.
+      const exportVerdict = await readExportCoverage(engine, now);
+      if (exportVerdict.state === 'ok') {
+        pushAsset(assets, {
+          kind: 'db_content',
+          id: 'brain database',
+          state: 'ok',
+          detail:
+            `${riskyCount} page${riskyCount === 1 ? '' : 's'} outside git-backed sources are covered by export at ` +
+            `${exportVerdict.dir} (receipt ${exportVerdict.ts})`,
+          fix_argv: null,
+        });
+      } else {
+        pushAsset(assets, {
+          kind: 'db_content',
+          id: 'brain database',
+          state: 'no_remote',
+          detail:
+            `${riskyCount} page${riskyCount === 1 ? '' : 's'} in ${location} cannot be rebuilt from a proven remote-backed source — ` +
+            'a disk loss loses them (back the source repos or export to durable storage)' +
+            (exportVerdict.detail ? ` ${exportVerdict.detail}` : ''),
+          fix_argv: noSourceRepo
+            ? ['gbrain', 'bootstrap', 'repo']
+            : ['gbrain', 'export', '--by-source', '--dir', '<backup-dir>'],
+        });
+      }
     }
   } else if (
     !degraded &&

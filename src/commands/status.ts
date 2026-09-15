@@ -140,6 +140,10 @@ export interface WorkerSummary {
   clean_exits_24h: number;
   by_cause: Record<string, number>;
   last_event_ts: string | null;
+  /** Crashes the operator reviewed and acknowledged via
+   *  `health.supervisor.ack_crashes` — counted separately so the raw
+   *  event volume stays visible while gates read the open count. */
+  acknowledged_crashes_24h?: number;
 }
 
 export interface AutopilotStatus {
@@ -403,9 +407,10 @@ export async function buildWorkersSnapshot(
   };
 }
 
-function buildWorkerSummary(): WorkerSummary {
+function buildWorkerSummary(ackCrashTs: ReadonlySet<string> = new Set()): WorkerSummary {
   let crashes_24h = 0;
   let clean_exits_24h = 0;
+  let acknowledged_crashes_24h = 0;
   const by_cause: Record<string, number> = {};
   let last_event_ts: string | null = null;
   try {
@@ -414,15 +419,17 @@ function buildWorkerSummary(): WorkerSummary {
     if (events.length > 0) {
       last_event_ts = events[events.length - 1].ts;
     }
-    const exitEvents = events.filter((e) => e.event === 'worker_exited');
-    const summary = summarizeCrashes(exitEvents);
+    const allExitEvents = events.filter((e) => e.event === 'worker_exited');
+    const openExitEvents = allExitEvents.filter((e) => !ackCrashTs.has(e.ts));
+    acknowledged_crashes_24h = allExitEvents.length - openExitEvents.length;
+    const summary = summarizeCrashes(openExitEvents);
     crashes_24h = summary.total;
     clean_exits_24h = summary.clean_exits;
     Object.assign(by_cause, summary.by_cause);
   } catch {
     /* audit dir missing or unreadable — return zeros */
   }
-  return { crashes_24h, clean_exits_24h, by_cause, last_event_ts };
+  return { crashes_24h, clean_exits_24h, by_cause, last_event_ts, acknowledged_crashes_24h };
 }
 
 export function buildAutopilotStatus(
@@ -523,7 +530,22 @@ async function buildLocalReport(
     report.locks = await withSectionDeadline(buildLocks(engine), remaining(), () => markStale('locks'));
   }
   if (want('workers')) {
-    report.workers = buildWorkerSummary();
+    // `health.supervisor.ack_crashes` (same DB config key the doctor
+    // supervisor check reads) marks reviewed/explained crashes — e.g. an
+    // upgrade protocol-boundary exit that respawned healthy. crashes_24h
+    // reports the open count; the acknowledged volume stays visible in
+    // acknowledged_crashes_24h so nothing is hidden.
+    let ackCrashTs = new Set<string>();
+    try {
+      const rawAck = await engine.getConfig('health.supervisor.ack_crashes');
+      if (rawAck) {
+        const parsed: unknown = JSON.parse(rawAck);
+        if (Array.isArray(parsed)) {
+          ackCrashTs = new Set(parsed.filter((t): t is string => typeof t === 'string'));
+        }
+      }
+    } catch { /* malformed ack config → treat as empty */ }
+    report.workers = buildWorkerSummary(ackCrashTs);
   }
   if (want('queue')) {
     report.queue = await withSectionDeadline(buildQueueCounts(engine), remaining(), () => markStale('queue'));
