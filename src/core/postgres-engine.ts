@@ -3707,8 +3707,10 @@ export class PostgresEngine implements BrainEngine {
             SELECT 1
             FROM links l
             JOIN pages tgt ON tgt.id = l.to_page_id
+            JOIN sources ts ON ts.id = tgt.source_id
             WHERE l.from_page_id = p.id
-              AND tgt.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('tgt')} AND ${privateLinkOriginFilterFragment('l')}`) : sql``}
+              AND tgt.deleted_at IS NULL
+              AND ts.archived IS NOT TRUE ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('tgt')} AND ${privateLinkOriginFilterFragment('l')}`) : sql``}
           )`
         : sql``;
     const rows = await sql`
@@ -3720,13 +3722,19 @@ export class PostgresEngine implements BrainEngine {
         (NOT ${sql.unsafe(QUARANTINE_FILTER_FRAGMENT)}) AS quarantined
       FROM pages p
       WHERE p.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('p')}`) : sql``}
+        -- KB-02 archive parity (fork): pages in archived sources are
+        -- tombstoned knowledge that fails closed in reads, so they are not
+        -- orphan candidates and their links do not confer graph membership.
+        AND EXISTS (SELECT 1 FROM sources ps WHERE ps.id = p.source_id AND ps.archived IS NOT TRUE)
         ${sourceFilter}
         AND NOT EXISTS (
           SELECT 1
           FROM links l
           JOIN pages src ON src.id = l.from_page_id
+          JOIN sources ss ON ss.id = src.source_id
           WHERE l.to_page_id = p.id
-            AND src.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('src')} AND ${privateLinkOriginFilterFragment('l')}`) : sql``}
+            AND src.deleted_at IS NULL
+            AND ss.archived IS NOT TRUE ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('src')} AND ${privateLinkOriginFilterFragment('l')}`) : sql``}
         )
         ${outboundFilter}
       ORDER BY p.slug
@@ -4799,7 +4807,11 @@ export class PostgresEngine implements BrainEngine {
     const colId = await this.activeEmbeddingColId({ fallbackToLegacy: true });
     const [h] = await sql`
       WITH scoped_pages AS (
-        SELECT id, slug, frontmatter, deleted_at, source_id FROM pages p
+        SELECT p.id, p.slug, p.frontmatter, p.deleted_at, p.source_id FROM pages p
+        -- KB-02 archive parity (fork): archived-source pages are tombstoned
+        -- knowledge outside the curated graph; health denominators and
+        -- orphan/dead-link predicates scope them out.
+        JOIN sources ps ON ps.id = p.source_id AND ps.archived IS NOT TRUE
         WHERE (${scope}::text[] IS NULL OR p.source_id = ANY(${scope}))
       ),
       entity_pages AS (
@@ -4830,7 +4842,13 @@ export class PostgresEngine implements BrainEngine {
         0 as stale_pages,
         0 as orphan_pages,
         (SELECT count(*) FROM links l
-         WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id)
+         WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id AND p.deleted_at IS NULL)
+           -- dead edges only dock health when they originate in the live
+           -- curated graph; tombstoned pages keep their internal references.
+           AND EXISTS (SELECT 1 FROM pages fp
+                       JOIN sources fs ON fs.id = fp.source_id
+                       WHERE fp.id = l.from_page_id AND fp.deleted_at IS NULL
+                         AND fs.archived IS NOT TRUE)
            AND (${scope}::text[] IS NULL
                 OR EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.from_page_id))
         ) as dead_links,
@@ -4891,6 +4909,7 @@ export class PostgresEngine implements BrainEngine {
       FROM pages p
       WHERE p.type IN ('entity', 'person', 'company') AND p.deleted_at IS NULL
         AND ${sql.unsafe(QUARANTINE_FILTER_FRAGMENT)}
+        AND EXISTS (SELECT 1 FROM sources ps WHERE ps.id = p.source_id AND ps.archived IS NOT TRUE)
         AND (${scope}::text[] IS NULL OR p.source_id = ANY(${scope}))
       ORDER BY link_count DESC
       LIMIT 5
@@ -4919,16 +4938,24 @@ export class PostgresEngine implements BrainEngine {
       SELECT p.slug, p.type,
              (NOT EXISTS (SELECT 1 FROM links l
                           JOIN pages src ON src.id = l.from_page_id
+                          JOIN sources ss ON ss.id = src.source_id
                           WHERE l.to_page_id = p.id AND src.deleted_at IS NULL
+                            AND ss.archived IS NOT TRUE
                             AND (${scope}::text[] IS NULL OR src.source_id = ANY(${scope})))
               AND NOT EXISTS (SELECT 1 FROM links l
                           JOIN pages tgt ON tgt.id = l.to_page_id
+                          JOIN sources ts ON ts.id = tgt.source_id
                           WHERE l.from_page_id = p.id AND tgt.deleted_at IS NULL
+                            AND ts.archived IS NOT TRUE
                             AND (${scope}::text[] IS NULL OR tgt.source_id = ANY(${scope})))) as islanded,
              EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = p.id) as has_timeline
       FROM pages p
       WHERE p.deleted_at IS NULL
         AND ${sql.unsafe(QUARANTINE_FILTER_FRAGMENT)}
+        -- KB-02 archive parity (fork): archived-source pages are tombstoned
+        -- and fail closed in reads, so they are outside the curated graph
+        -- the orphan/timeline components measure.
+        AND EXISTS (SELECT 1 FROM sources ps WHERE ps.id = p.source_id AND ps.archived IS NOT TRUE)
         AND (${scope}::text[] IS NULL OR p.source_id = ANY(${scope}))
     `;
 
