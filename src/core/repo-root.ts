@@ -63,6 +63,30 @@ function hasFrontmatterTriggerSkill(dir: string): boolean {
 }
 
 /**
+ * Cheap structural probe: does `dir` contain at least one `<name>/SKILL.md`
+ * entry? Unlike hasFrontmatterTriggerSkill this does not parse frontmatter —
+ * it answers "does this directory look like a skills catalog" for layout
+ * disambiguation during walk-up detection.
+ */
+function hasSkillMdEntry(dir: string): boolean {
+  let dirents: Dirent[];
+  try {
+    dirents = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const dirent of dirents) {
+    if (!dirent.isDirectory()) continue;
+    const name = dirent.name;
+    if (name.startsWith('_') || name.startsWith('.')) continue;
+    if (name.includes('/') || name.includes('\\')) continue;
+    const skillPath = join(dir, name, 'SKILL.md'); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+    if (existsSync(skillPath)) return true;
+  }
+  return false;
+}
+
+/**
  * Where auto-detect found the skills directory.
  *   - `env_explicit`                 — $GBRAIN_SKILLS_DIR (operator override; v0.31.7)
  *   - `openclaw_workspace_env`       — $OPENCLAW_WORKSPACE/skills
@@ -202,6 +226,21 @@ export function autoDetectSkillsDir(
       // (#419). An escaping symlink is skipped, and the walk continues upward
       // rather than trusting a dir that resolves outside the boundary.
       if (existsSync(candidate) && isPathContained(candidate, dir)) {
+        // A repo root that is itself named `skills/` is not automatically the
+        // catalog: the canonical-skills repo layout keeps RESOLVER.md at repo
+        // root and skills one level deeper in `skills/skills/`. When the
+        // candidate holds no SKILL.md entries but its own `skills/` child
+        // does, descend once — same shape resolveWorkspaceSkillsDir treats as
+        // the root variant.
+        const nested = join(candidate, 'skills');
+        if (
+          !hasSkillMdEntry(candidate) &&
+          existsSync(nested) &&
+          isPathContained(nested, candidate) &&
+          hasSkillMdEntry(nested)
+        ) {
+          return { dir: nested, source: 'cwd_walk_up' };
+        }
         return { dir: candidate, source: 'cwd_walk_up' };
       }
       const parent = join(dir, '..');
