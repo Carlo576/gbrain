@@ -56,7 +56,7 @@ import {
 import { dirname, join } from 'path';
 import { createHash, randomBytes } from 'crypto';
 import { execFileSync } from 'child_process';
-import { GIT_ENV, GIT_ENV_AUTH, GIT_SSRF_SUBCOMMAND_FLAGS, detectDefaultBranch, divergenceSafePull } from './git-remote.ts';
+import { GIT_ENV, GIT_ENV_AUTH, GIT_SSRF_SUBCOMMAND_FLAGS, detectDefaultBranch, divergenceSafePull, fileTransportAllowed } from './git-remote.ts';
 import { loadConfigFileOnly } from './config.ts';
 import { ensureGbrainHome } from './gbrain-home.ts';
 import { invalidateBackupStatus, loadBackupStatus } from './backup/status-file.ts';
@@ -282,7 +282,7 @@ function gitBuffer(root: string, args: string[], timeoutMs = 60_000): Buffer {
  * test suite use. Default stays `never`.
  */
 function pushSsrfFlags(): string[] {
-  const fileAllow = process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT === '1' ? 'always' : 'never';
+  const fileAllow = fileTransportAllowed() ? 'always' : 'never';
   return [
     '-c', 'http.followRedirects=false',
     '-c', `protocol.file.allow=${fileAllow}`,

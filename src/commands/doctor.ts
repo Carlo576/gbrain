@@ -3424,10 +3424,29 @@ export async function buildChecks(
           resolution_command: string;
         }>;
       }> | undefined) ?? [];
-      let high = 0, medium = 0, low = 0;
+      // Pair-level adjudication allowlist: config
+      // 'health.contradictions.allowed_pairs' holds a JSON array of
+      // "slugA|slugB" strings (order-insensitive). Pairs a human reviewed and
+      // ruled non-contradictory are suppressed from the open count so the
+      // check reflects unadjudicated findings only; the stored run row is
+      // never mutated.
+      const allowedPairs = new Set<string>();
+      try {
+        const raw = await engine.getConfig('health.contradictions.allowed_pairs');
+        const arr = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(arr)) {
+          for (const p of arr) {
+            if (typeof p !== 'string') continue;
+            const parts = p.split('|').map((s) => s.trim());
+            if (parts.length === 2 && parts.every(Boolean)) allowedPairs.add([...parts].sort().join('|'));
+          }
+        }
+      } catch { /* malformed allowlist — treat as empty */ }
+      let high = 0, medium = 0, low = 0, suppressed = 0;
       const highFindings: Array<{ a: string; b: string; axis: string; cmd: string }> = [];
       for (const q of perQuery) {
         for (const c of q.contradictions) {
+          if (allowedPairs.has([c.a.slug, c.b.slug].sort().join('|'))) { suppressed++; continue; }
           if (c.severity === 'high') {
             high++;
             highFindings.push({ a: c.a.slug, b: c.b.slug, axis: c.axis, cmd: c.resolution_command });
@@ -3437,15 +3456,26 @@ export async function buildChecks(
       }
       const total = high + medium + low;
       if (total === 0) {
-        // #3889: warn (not ok) when the latest run judged zero pairs but
-        // errored — "0 contradictions" from an all-error run is a lie.
-        checks.push({ name: 'contradictions', ...zeroTotalContradictionsCheck(latest) });
+        if (suppressed > 0) {
+          checks.push({
+            name: 'contradictions',
+            status: 'ok',
+            message: `0 open suspected contradictions — ${suppressed} pair(s) adjudicated via health.contradictions.allowed_pairs (stored probe run unchanged).`,
+          });
+        } else {
+          // #3889: warn (not ok) when the latest run judged zero pairs but
+          // errored — "0 contradictions" from an all-error run is a lie.
+          checks.push({ name: 'contradictions', ...zeroTotalContradictionsCheck(latest) });
+        }
       } else {
         const ciLow = (latest.wilson_ci_lower * 100).toFixed(0);
         const ciHigh = (latest.wilson_ci_upper * 100).toFixed(0);
         const lines = [
           `${total} suspected contradictions (high=${high} medium=${medium} low=${low}) detected by latest probe — Wilson CI 95%: ${ciLow}-${ciHigh}%.`,
         ];
+        if (suppressed > 0) {
+          lines.push(`  ${suppressed} adjudicated pair(s) suppressed via health.contradictions.allowed_pairs`);
+        }
         for (const f of highFindings.slice(0, 3)) {
           lines.push(`  HIGH: ${f.a} vs ${f.b}${f.axis ? ' — ' + f.axis : ''}`);
           lines.push(`    → ${f.cmd}`);

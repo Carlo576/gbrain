@@ -464,12 +464,32 @@ export function hasTrackedContent(path: string): boolean {
  * (set + checked at clone time); `http.followRedirects=false` is the live guard.
  */
 export function durableSsrfFlags(): string[] {
-  const fileAllow = process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT === '1' ? 'always' : 'never';
+  const fileAllow = fileTransportAllowed() ? 'always' : 'never';
   return [
     '-c', 'http.followRedirects=false',
     '-c', `protocol.file.allow=${fileAllow}`,
     '-c', 'protocol.ext.allow=never',
   ];
+}
+
+/**
+ * file:// transport is allowed when either escape hatch is set: the env var
+ * (test suite / one-off shells) or the persisted `push.allow_unverified_remote`
+ * config — the operator's explicit trust signal for self-hosted remotes, which
+ * local bare-repo backup remotes require end to end (fetch AND push). A bad
+ * config read keeps the `never` default.
+ */
+export function fileTransportAllowed(): boolean {
+  if (process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT === '1') return true;
+  try {
+    const { loadConfigFileOnly } = require('./config.ts') as typeof import('./config.ts');
+    const cfg = loadConfigFileOnly() as Record<string, unknown> | null;
+    const flat = cfg?.['push.allow_unverified_remote'];
+    const nested = (cfg?.['push'] as Record<string, unknown> | undefined)?.['allow_unverified_remote'];
+    return flat === true || flat === 'true' || nested === true || nested === 'true';
+  } catch {
+    return false;
+  }
 }
 
 /** Run a git subcommand, returning trimmed stdout. Throws GitOperationError. */
