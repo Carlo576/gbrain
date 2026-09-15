@@ -573,7 +573,11 @@ export function sanitizePathForDisplay(path: string): string {
  * It was the lone structural sibling missing from this list, so it leaked
  * into the index as a content page (slug `resolver`).
  */
-export const SYNC_SKIP_FILES = ['schema.md', 'index.md', 'log.md', 'README.md', 'RESOLVER.md'] as const;
+// Fork divergence: upstream also skips 'index.md', but our canonical repos
+// (zenom-control-plane Zenom-wiki, knowledge corpora) use index.md as authored
+// hub pages — wiki map, entities/index, motherea/index — that agents are meant
+// to retrieve. schema.md/log.md/README.md/RESOLVER.md remain structural-only.
+export const SYNC_SKIP_FILES = ['schema.md', 'log.md', 'README.md', 'RESOLVER.md'] as const;
 
 /**
  * Internal classifier. Returns null when the path IS syncable, or a tagged
