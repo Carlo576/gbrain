@@ -1,7 +1,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { currentEmbeddingSignature } from '../core/embedding.ts';
 import type { ChunkInput } from '../core/types.ts';
-import { carryChunkMetadata, probeEmbedder } from '../core/embed-stale.ts';
+import { carryChunkMetadata, probeEmbedder, resolveProvenanceStamp, stampIfPageProvenanceComplete } from '../core/embed-stale.ts';
 import { chunkText } from '../core/chunkers/recursive.ts';
 import { resolveMaxChunkTokens } from '../core/embedding-input-limit.ts';
 import { healOversizedPageChunks, healedChunksToStaleRows } from '../core/embed-oversize-heal.ts';
@@ -968,58 +968,6 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
   }
 }
 
-const DEFAULT_EMBED_RECHUNK_MAX_CHARS = 1500;
-
-function embedRechunkMaxChars(): number {
-  const raw = process.env.GBRAIN_EMBED_RECHUNK_MAX_CHARS;
-  if (!raw) return DEFAULT_EMBED_RECHUNK_MAX_CHARS;
-  const parsed = parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_EMBED_RECHUNK_MAX_CHARS;
-}
-
-type EmbedCandidateChunk = {
-  chunk_index: number;
-  chunk_text: string;
-  chunk_source: ChunkInput['chunk_source'];
-  embedded_at?: string | Date | null;
-};
-
-function hasOversizedStaleChunk(chunks: EmbedCandidateChunk[]): boolean {
-  const maxChars = embedRechunkMaxChars();
-  return chunks.some(c => !c.embedded_at && c.chunk_text.length > maxChars);
-}
-
-function buildChunkInputsForPage(page: { compiled_truth?: string | null; timeline?: string | null }, maxChars: number): ChunkInput[] {
-  const inputs: ChunkInput[] = [];
-  const compiledTruth = page.compiled_truth ?? '';
-  const timeline = page.timeline ?? '';
-  if (compiledTruth.trim()) {
-    for (const c of chunkText(compiledTruth, { maxChars })) {
-      inputs.push({ chunk_index: inputs.length, chunk_text: c.text, chunk_source: 'compiled_truth' });
-    }
-  }
-  if (timeline.trim()) {
-    for (const c of chunkText(timeline, { maxChars })) {
-      inputs.push({ chunk_index: inputs.length, chunk_text: c.text, chunk_source: 'timeline' });
-    }
-  }
-  return inputs;
-}
-
-async function rechunkPageForEmbedding(
-  engine: BrainEngine,
-  slug: string,
-  sourceId?: string,
-): Promise<Awaited<ReturnType<BrainEngine['getChunks']>> | null> {
-  const opts = sourceId ? { sourceId } : undefined;
-  const page = await engine.getPage(slug, opts);
-  if (!page) return null;
-  const inputs = buildChunkInputsForPage(page, embedRechunkMaxChars());
-  if (inputs.length === 0) return null;
-  await engine.upsertChunks(slug, inputs, opts);
-  return await engine.getChunks(slug, opts);
-}
-
 async function embedPage(
   engine: BrainEngine,
   slug: string,
@@ -1074,12 +1022,6 @@ async function embedPage(
       onSplit: (n) => serr(`  ${slug}: split ${n} oversized chunk(s) to fit embedding input limit`),
     });
     if (healed.changed) chunks = healed.chunks;
-  }
-  if (!dryRun && hasOversizedStaleChunk(chunks)) {
-    const rechunked = await rechunkPageForEmbedding(engine, slug, sourceId);
-    if (rechunked && rechunked.length > 0) {
-      chunks = rechunked;
-    }
   }
 
   // Embed chunks without embeddings. embedding_is_null is the stored-vector
@@ -1907,6 +1849,7 @@ async function embedAllStale(
     return true;
   };
 
+  const stamp = await resolveProvenanceStamp(engine, signature); // column resolved once per drain, not per page
   try {
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -1974,7 +1917,6 @@ async function embedAllStale(
 
       async function embedOneKey(key: string) {
         let stale = byKey.get(key)!;
-        let staleForEmbed: EmbedCandidateChunk[] = stale;
         const keySourceId = stale[0]?.source_id ?? 'default';
         const slug = stale[0].slug;
         try {
@@ -1993,27 +1935,10 @@ async function embedAllStale(
           );
           if (healed.changed) {
             stale = healedChunksToStaleRows(healed.chunks, slug, keySourceId);
-            staleForEmbed = stale;
             if (stale.length === 0) {
               totalProcessedPages++;
               result.pages_processed++;
               return;
-            }
-          }
-
-          // Preserve the older configurable character cap as a second safety
-          // net after upstream's model-token-aware healing.
-          if (hasOversizedStaleChunk(staleForEmbed)) {
-            const rechunked = await observed(pacer, () =>
-              rechunkPageForEmbedding(engine, slug, keySourceId),
-            );
-            if (rechunked && rechunked.length > 0) {
-              staleForEmbed = rechunked.filter(c => !c.embedded_at);
-              if (staleForEmbed.length === 0) {
-                totalProcessedPages++;
-                result.pages_processed++;
-                return;
-              }
             }
           }
 
@@ -2027,15 +1952,15 @@ async function embedAllStale(
           // chunk, not the whole page's siblings. The wrapped texts feed the
           // fan-out too, so an isolation retry never strips the prefixes.
           const { embeddings, failed, firstError } = await embedPageTexts(
-            wrapChunkTextsForStoredMode(pageRow, staleForEmbed),
+            wrapChunkTextsForStoredMode(pageRow, stale),
             { abortSignal: effectiveSignal },
           );
           // Re-fetch existing chunks and merge to avoid deleting non-stale chunks.
           const existing = await observed(pacer, () => engine.getChunks(slug, { sourceId: keySourceId }));
           const staleIdxToEmbedding = new Map<number, Float32Array>();
-          for (let j = 0; j < staleForEmbed.length; j++) {
+          for (let j = 0; j < stale.length; j++) {
             const emb = embeddings[j];
-            if (emb) staleIdxToEmbedding.set(staleForEmbed[j].chunk_index, emb);
+            if (emb) staleIdxToEmbedding.set(stale[j].chunk_index, emb);
           }
           // preserveCodeMetadata threads code-chunk metadata (#769) so the
           // autopilot --stale path doesn't clobber language/symbol_name/etc
@@ -2048,16 +1973,13 @@ async function embedAllStale(
             token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
           }));
           await observed(pacer, () => engine.upsertChunks(slug, merged, { sourceId: keySourceId }));
-          // v0.41.31: stamp provenance after the page's chunks are embedded —
-          // but only when EVERY chunk was stale (fully re-embedded this pass).
-          // A partially-stale page keeps preserved chunks of unknown/old
-          // provenance, so don't claim it's current. (After invalidate, a
-          // signature-drifted page IS fully stale → this stamps it.)
-          // #3037: not on partial failure — failed chunks stay NULL.
-          if (signature && failed === 0 && staleForEmbed.length === existing.length) {
-            await observed(pacer, () =>
-              engine.setPageEmbeddingSignature(slug, { sourceId: keySourceId, signature }),
-            );
+          // Stamp provenance from DB state, not this batch (#4825): the keyset
+          // drain has no page alignment, so a page straddling a batch boundary
+          // is never wholly in one batch — the batch that lands its last chunk
+          // stamps it. Preserved chunks of other provenance keep the page
+          // unstamped; #3037: failed chunks stay NULL, so skip the round trip.
+          if (stamp && failed === 0) {
+            await observed(pacer, () => stampIfPageProvenanceComplete(engine, slug, keySourceId, stamp));
           }
           // #3507: a FULLY re-embedded per_chunk_synopsis page landed at the
           // title tier — keep the stamped mode honest. Partially-stale pages
@@ -2065,15 +1987,15 @@ async function embedAllStale(
           // #3037: `failed === 0` is part of "fully re-embedded" — if the
           // per-chunk isolation left some chunks NULL, restamping would make
           // contextual_retrieval_mode lie again (the exact #3461 bug).
-          if (failed === 0 && staleForEmbed.length === existing.length) {
+          if (failed === 0 && stale.length === existing.length) {
             await observed(pacer, () =>
               restampIfDemotedToTitleTier(engine, pageRow, slug, keySourceId),
             );
           }
-          result.embedded += staleForEmbed.length - failed;
+          result.embedded += stale.length - failed;
           if (failed > 0) {
             recordFailure(result, failed, slug, firstError);
-            serr(`\n  ${slug}: ${failed} chunk(s) failed to embed; embedded the other ${staleForEmbed.length - failed}`);
+            serr(`\n  ${slug}: ${failed} chunk(s) failed to embed; embedded the other ${stale.length - failed}`);
           }
           // #3622: reaching here means at least one chunk persisted (a total
           // embed failure throws) — progress, so the quarantine counter resets.
@@ -2082,7 +2004,7 @@ async function embedAllStale(
           // Budget/abort-fired cancellations are expected on the way out; don't
           // spam per-page "Error embedding" lines when we're shutting down.
           if (effectiveSignal.aborted) return;
-          recordFailure(result, staleForEmbed.length, slug, e);
+          recordFailure(result, stale.length, slug, e);
           serr(`\n  Error embedding ${slug}: ${e instanceof Error ? e.message : e}`);
           noteEmbedQuarantineFailure(key, slug);
         }

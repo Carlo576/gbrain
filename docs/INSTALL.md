@@ -1,12 +1,16 @@
 # Install
 
-**Recommended door: the agent bootstrap.** Open your agent (Codex, Claude Code,
-or any harness) in the folder that will become its home and paste the block
-from the [README's install section](../README.md) — the agent fetches
-`BOOTSTRAP_FOR_AGENTS.md` from the `latest-stable` tag, installs the CLI,
-initializes a local PGLite brain, wires MCP, and isn't done until
-`gbrain bootstrap verify` exits 0. Full contract, security posture, and
-uninstall: [docs/guides/bootstrap.md](guides/bootstrap.md).
+Start by choosing the setup you need:
+
+- **Add memory to the agent you already use (recommended):** [Grok Bot](guides/grok-bot.md), [Muse](guides/muse.md), or [Codex / Claude Code](tutorials/connect-coding-agent.md). Keep the existing identity; start keyless, without a personal-agent repository.
+- **Connect to your existing hosted brain:** [private handoff and harness access](guides/hosted-harness-access.md). Provision on the host, install in the client environment.
+
+
+**Optional: create a new persistent personal agent.** If you want identity
+files and a private repository, use the separate
+[bootstrap guide](guides/bootstrap.md) in a supported harness. The recommended
+memory-only setup above preserves your existing agent's identity and needs
+neither a bootstrap interview nor a private repository.
 
 The paths below are the manual equivalents and deep-dive detail. Pick one.
 Mix later if needed.
@@ -24,7 +28,7 @@ gbrain doctor                         # green checks all the way down
 
 Your agent now reads `skills/RESOLVER.md` once per request, routes intent to the right skill, executes. New entity mentions create new pages. Daily cron runs enrichment overnight.
 
-Scaffolded skills are first-class files in your agent repo — edit freely. To pull upstream gbrain improvements later, `gbrain skillpack reference <name>` diffs your local copy vs the bundle. The legacy `skillpack install` managed-block model was retired in v0.36.0.0; if you're upgrading from an older release, run `gbrain skillpack migrate-fence` once to strip the legacy fence and keep your existing skill rows.
+Scaffolded skills are first-class files in your agent repo — edit freely. To pull upstream gbrain improvements later, `gbrain skillpack reference <name>` diffs your local copy vs the bundle. If your `RESOLVER.md` / `AGENTS.md` still carries the managed `skillpack install` fence, `gbrain skillpack migrate-fence` strips it once and keeps the routing rows inside it.
 
 To upgrade later: `gbrain upgrade` runs schema migrations + post-upgrade prompts (chunker bumps, provider-sunset notices). Always TTY-only; non-TTY upgrades skip prompts with informational stderr lines.
 

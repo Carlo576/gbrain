@@ -7,7 +7,7 @@
  * no fs, no engine.
  */
 
-import matter from 'gray-matter';
+import { dataFrontmatter as matter } from './data-frontmatter.ts';
 import { computeContentHash } from './ingestion/types.ts';
 
 /** The subset of capture options the frontmatter/slug helpers consume. */
@@ -197,6 +197,29 @@ export function buildEventBlock(opts: CaptureFrontmatterOpts): Record<string, un
 }
 
 /**
+ * #4655 — surface the EXPLICIT page type a capture carries, if any: the
+ * `--type` flag / `type` param wins, else a non-empty string `type:` in
+ * the body's existing frontmatter. Returns undefined when neither is
+ * present (the default-'note' path — deliberately NOT a vocabulary-check
+ * target, so bare `gbrain capture` can never start failing under a pack
+ * that omits 'note') and when the frontmatter is malformed
+ * (`mergeCaptureFrontmatter` surfaces that error downstream unchanged).
+ */
+export function explicitCaptureType(rawBody: string, explicit?: string): string | undefined {
+  if (typeof explicit === 'string' && explicit.length > 0) return explicit;
+  const trimmedStart = rawBody.replace(/^﻿/, '');
+  if (!/^---\r?\n/.test(trimmedStart)) return undefined;
+  let parsed: ReturnType<typeof matter>;
+  try {
+    parsed = matter(rawBody);
+  } catch {
+    return undefined;
+  }
+  const t = ((parsed.data ?? {}) as Record<string, unknown>).type;
+  return typeof t === 'string' && t.length > 0 ? t : undefined;
+}
+
+/**
  * v0.39.3.0 (BUG-1): merge capture's auto-stamped fields with any existing
  * frontmatter in `rawBody`, rather than always prepending a second
  * frontmatter block. The pre-fix code stamped its own `---` block on top
@@ -225,8 +248,15 @@ export function mergeCaptureFrontmatter(rawBody: string, opts: CaptureFrontmatte
   // Detect frontmatter: leading `---\n` or `---\r\n`, tolerating leading BOM/whitespace.
   // We do NOT use the more permissive `startsWith('---')` because a body that opens
   // with a horizontal-rule like `--- separator ---` would false-positive.
-  const trimmedStart = rawBody.replace(/^﻿/, '');
-  const hasFrontmatter = /^---\r?\n/.test(trimmedStart);
+  // Parse before wrapping: an unsupported language must not be hidden inside
+  // a generated heading. Serialization always treats the remaining body opaquely.
+  let parsed: ReturnType<typeof matter>;
+  try {
+    parsed = matter(rawBody);
+  } catch (e) {
+    throw new Error(`malformed frontmatter in capture input: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const hasFrontmatter = parsed.hasFrontmatter;
 
   if (!hasFrontmatter) {
     // No existing frontmatter: stamp a fresh block and (if body lacks markdown
@@ -246,14 +276,6 @@ export function mergeCaptureFrontmatter(rawBody: string, opts: CaptureFrontmatte
   }
 
   // Existing frontmatter: parse, merge user-wins, re-emit as a SINGLE block.
-  let parsed: matter.GrayMatterFile<string>;
-  try {
-    parsed = matter(rawBody);
-  } catch (e) {
-    throw new Error(
-      `malformed frontmatter in capture input: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
   const userFm = (parsed.data ?? {}) as Record<string, unknown>;
   const merged: Record<string, unknown> = {
     // Spread user's declared keys first so 'description', 'tags', etc. pass through.

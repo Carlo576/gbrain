@@ -1,3 +1,4 @@
+import { readHolders } from './context.ts';
 /**
  * Search operation cluster (search + query) — pure move from operations.ts
  * (v0.46.x tranche 1). search_by_image stays in operations.ts (v0.36 Phase 2
@@ -7,6 +8,7 @@
  */
 
 import { hybridSearchCached, stampContentFlags, stampUnverifiedExtractions } from '../search/hybrid.ts';
+import { loadSearchModeConfig, resolveSearchMode } from '../search/mode.ts';
 import { looksConceptShaped, classifyQueryShape } from '../search/query-intent.ts';
 import {
   gradeRetrievalConfidence,
@@ -23,11 +25,10 @@ import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { applySnippetCap, DEFAULT_AGENT_SNIPPET_CHARS } from '../search/snippet-cap.ts';
 import { resolveExcludePrivatePages } from '../search/private-visibility.ts';
 import { QUERY_DESCRIPTION, SEARCH_DESCRIPTION } from '../operations-descriptions.ts';
-import { loadActivePackForLocalEngine } from '../schema-pack/best-effort.ts';
-import { expandTypeFilter } from '../schema-pack/expand-type-filter.ts';
 import { OperationError } from './contract.ts';
 import type { Operation, OperationContext } from './contract.ts';
 import {
+  assertExplicitSourceLive,
   federatedSearchScope,
   parseSourceIdParam,
   resolvePerCallMode,
@@ -36,6 +37,22 @@ import {
   maybeCaptureSearch,
   thinkSourceScopeOpts,
 } from './context.ts';
+
+/**
+ * The caller's effective row contract for the `query` op's non-hybrid legs
+ * (#4356 image branch, #4610 CRAG escalation slice): an explicit `limit` wins;
+ * omitted/0 resolves the mode-derived searchLimit (10/25/50 or the configured
+ * `search.searchLimit` override) through the SAME trust-gated chain
+ * hybridSearch applies — `resolvePerCallMode` ignores a remote caller's
+ * `mode`, so a remote client can't select the tokenmax row count. Resolved
+ * lazily by the callers (the config reads only run on the paths that need it).
+ */
+async function resolveEffectiveLimit(ctx: OperationContext, p: Record<string, unknown>): Promise<number> {
+  const perCallMode = resolvePerCallMode(ctx, p.mode);
+  const modeInput = await loadSearchModeConfig(ctx.engine);
+  const resolved = resolveSearchMode({ mode: perCallMode ?? modeInput.mode, overrides: modeInput.overrides });
+  return (p.limit as number) || resolved.searchLimit;
+}
 
 // --- Search ---
 
@@ -100,54 +117,12 @@ function normalizeTypesParam(raw: unknown): string[] | undefined {
       '`types` was provided but contained no usable page-type strings (CLI: --types person,company).',
     );
   }
-  if (types.length > 64) {
-    throw new OperationError('invalid_params', '`types` accepts at most 64 distinct page-type values.');
-  }
   return types;
-}
-
-async function allActiveSourceIds(ctx: OperationContext): Promise<string[]> {
-  try {
-    const rows = await ctx.engine.executeRaw<{ id: string }>(
-      `SELECT id FROM sources WHERE archived IS NOT TRUE ORDER BY id`,
-    );
-    return rows.map((row) => row.id);
-  } catch {
-    const rows = await ctx.engine.executeRaw<{ id: string }>(`SELECT id FROM sources ORDER BY id`);
-    return rows.map((row) => row.id);
-  }
-}
-
-async function expandPublicTypes(
-  ctx: OperationContext,
-  types: string[] | undefined,
-  scope: { sourceId?: string; sourceIds?: string[] },
-) {
-  if (!types) return undefined;
-  let pack;
-  if (scope.sourceIds && scope.sourceIds.length > 0) {
-    const packs = await Promise.all(
-      scope.sourceIds.map((id) => loadActivePackForLocalEngine(ctx.engine, id)),
-    );
-    if (packs.some((candidate) => candidate === null)) {
-      throw new OperationError('invalid_params', 'Could not resolve every source schema pack for `types`.');
-    }
-    if (new Set(packs.map((candidate) => candidate!.identity)).size > 1) {
-      throw new OperationError(
-        'invalid_params',
-        '`types` cannot span sources with divergent schema packs; pass one concrete `source_id`.',
-      );
-    }
-    pack = packs[0];
-  } else {
-    pack = await loadActivePackForLocalEngine(ctx.engine, scope.sourceId);
-  }
-  return types.map((type) => expandTypeFilter(type, pack?.manifest));
 }
 
 const TYPES_PARAM_DESCRIPTION =
   "Filter results to pages whose `type` is in this list (e.g. ['person','company']). " +
-  'CLI: --types person,company (max 64 distinct values). Applied at SQL level on every retrieval leg — the same ' +
+  'CLI: --types person,company. Applied at SQL level on every retrieval leg — the same ' +
   'filter `whoknows` uses. Stacks with all other filters.';
 
 const SNIPPET_CHARS_PARAM_DESCRIPTION =
@@ -232,9 +207,8 @@ const search: Operation = {
     // trusted-local federated span is unchanged.
     const sourceIdParam = parseSourceIdParam(p.source_id, 'search', { allowAll: true });
     const scope = federatedSearchScope(ctx, sourceIdParam);
-    const typeScope = sourceIdParam === '__all__' && ctx.remote === false
-      ? { sourceIds: await allActiveSourceIds(ctx) } : scope;
-    const expandedTypes = await expandPublicTypes(ctx, types, typeScope);
+    // #4620: an explicit source_id must name a live source (after the grant check).
+    await assertExplicitSourceLive(ctx, sourceIdParam);
     // #4352 — untrusted callers never see `visibility: private` pages
     // (config-gated; trusted local CLI unchanged).
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
@@ -250,7 +224,7 @@ const search: Operation = {
     const keywordOnly = (await ctx.engine.getConfig('search.mcp_keyword_only')) === 'true';
 
     if (keywordOnly) {
-      const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, excludePrivate, ...(expandedTypes ? { expandedTypes } : {}), ...scope });
+      const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, excludePrivate, requireSafeChunks: ctx.remote !== false, ...(types ? { types } : {}), ...scope });
       const results = dedupResults(raw);
       // #3783 — every row here IS a keyword hit (direct FTS path); mark
       // before stamping so evidence still reads keyword_exact.
@@ -260,11 +234,11 @@ const search: Operation = {
       // #1699: the keyword-only opt-out must STILL surface the content_flag
       // agent-warning channel (hybridSearch stamps it; this branch bypasses
       // hybridSearch, so stamp explicitly). Fail-open inside the helper.
-      await stampContentFlags(ctx.engine, results);
+      await stampContentFlags(ctx.engine, results, { ...scope, excludePrivate });
       // #160: same for the unverified auto-extracted stub marker (no boost
       // to cancel on this path — keyword-only never applies the compiled-
       // truth boost — but the provenance marker must still surface).
-      await stampUnverifiedExtractions(ctx.engine, results);
+      await stampUnverifiedExtractions(ctx.engine, results, { ...scope, excludePrivate });
       bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
       maybeCaptureSearch(ctx, queryText, results, Date.now() - startedAt, false);
       ctx.emitResponseMeta?.('retrieval', buildRetrievalResponseMeta(queryText, results, null, { conceptHint: true }));
@@ -280,7 +254,9 @@ const search: Operation = {
       offset,
       expansion: false,
       excludePrivate,
-      ...(expandedTypes ? { expandedTypes } : {}),
+      requireSafeChunks: ctx.remote !== false,
+      takesHoldersAllowList: readHolders(ctx),
+      ...(types ? { types } : {}),
       ...scope,
       ...(perCallMode ? { mode: perCallMode } : {}),
       // #4415: agent-explicit recency + salience (same posture as `query`).
@@ -325,12 +301,13 @@ const query: Operation = {
     // similarity branch below it) — none of which support a literal
     // empty-result request today; introducing that only here would be a
     // new, undocumented asymmetry rather than a limit-consistency fix.
-    // (`search_by_image`, a separate op in src/core/ops/image.ts, has the
-    // same convention but isn't "in this file".) The image-similarity path
-    // (`image` param) is unaffected by this change and still hard-defaults
-    // to 20 regardless of mode — out of scope here, tracked separately
-    // (#4356 Problem 2).
-    limit: { type: 'number', description: 'Max results. For text queries, omitted or 0 resolves from the active search mode (10 conservative / 25 balanced / 50 tokenmax by default, or the configured `search.searchLimit` override). For image-similarity queries (`image` param), always defaults to 20 regardless of mode.' },
+    // (`search_by_image`, a separate op in src/core/ops/image.ts, keeps its
+    // own independent flat-20 default — different public contract, out of
+    // scope here.) #4356 Problem 2: the image-similarity path (`image`
+    // param) below now resolves the SAME mode-derived searchLimit as the
+    // text path (was a hard `|| 20` regardless of mode, the last search arm
+    // in this op that didn't honor conservative/balanced/tokenmax).
+    limit: { type: 'number', description: 'Max results. Omitted or 0 resolves from the active search mode (10 conservative / 25 balanced / 50 tokenmax by default, or the configured `search.searchLimit` override) — for both text queries and image-similarity queries (`image` param).' },
     offset: { type: 'number', description: 'Skip first N results (for pagination)' },
     // #3985: multi-type filter (plumbing shipped v0.33; exposed here).
     types: { type: 'array', items: { type: 'string' }, description: TYPES_PARAM_DESCRIPTION },
@@ -444,9 +421,8 @@ const query: Operation = {
     // #2561: unqualified trusted-local query spans federated sources (per-call
     // source_id / remote grants still resolve through resolveRequestedScope).
     const querySourceScope = federatedSearchScope(ctx, sourceIdParam);
-    const queryTypeScope = sourceIdParam === '__all__' && ctx.remote === false
-      ? { sourceIds: await allActiveSourceIds(ctx) } : querySourceScope;
-    const expandedTypes = await expandPublicTypes(ctx, types, queryTypeScope);
+    // #4620: an explicit source_id must name a live source (after the grant check).
+    await assertExplicitSourceLive(ctx, sourceIdParam);
     // #4352 — same enforcement for the full-control query op (both the image
     // searchVector branch and the text hybrid path below).
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
@@ -463,12 +439,18 @@ const query: Operation = {
       // hybridSearch and calls searchVector directly, so it needs its
       // own thread of the source scope. Pre-fix, this branch leaked
       // image pages across sources independent of the text path's fix.
+      // #4356 Problem 2: the image path also bypasses hybridSearch's mode
+      // resolution, so its default limit didn't honor the active search
+      // mode. resolveEffectiveLimit applies the same chain (and the same
+      // remote trust gate) hybridSearch does.
       const results = await ctx.engine.searchVector(vec, {
-        limit: (p.limit as number) || 20,
+        limit: await resolveEffectiveLimit(ctx, p),
         offset: (p.offset as number) || 0,
         embeddingColumn: 'embedding_image',
         excludePrivate,
-        ...(expandedTypes ? { expandedTypes } : {}),
+        requireSafeChunks: ctx.remote !== false,
+        takesHoldersAllowList: readHolders(ctx),
+        ...(types ? { types } : {}),
         ...querySourceScope,
       });
       return applySnippetCap(results, snippetCap);
@@ -495,8 +477,8 @@ const query: Operation = {
     // cross-source mode (matches SearchOpts.sourceId contract).
     let capturedMeta: HybridSearchMeta | null = null;
     // v0.32.x search-lite: route the query op through hybridSearchCached so
-    // semantic cache + token budget + intent weighting fire automatically.
-    // Plain hybridSearch remains the bare API for callers that opt out.
+    // token budget and intent weighting apply at the operation boundary.
+    // Semantic cache reuse is suspended in the wrapper.
     // (#1663: `let` — the CRAG gate below may swap in an escalated run.)
     let results = await hybridSearchCached(ctx.engine, queryText, {
       // #4356 — was a hard `|| 20`, independent of the mode-resolution
@@ -510,13 +492,15 @@ const query: Operation = {
       limit: (p.limit as number) || undefined,
       offset: (p.offset as number) || 0,
       excludePrivate,
+      requireSafeChunks: ctx.remote !== false,
+      takesHoldersAllowList: readHolders(ctx),
       expansion: expand,
       expandFn: expand ? expandQuery : undefined,
       // T4/D5 — per-call mode (local/trusted only; remote ignored).
       ...((): { mode?: string } => { const m = resolvePerCallMode(ctx, p.mode); return m ? { mode: m } : {}; })(),
       detail,
-      // #3985 + type-unification back-compat: every leg gets pack-expanded filters.
-      expandedTypes,
+      // #3985: multi-type filter — SearchOpts.types reaches every leg.
+      types,
       language: (p.lang as string) || undefined,
       symbolKind: (p.symbol_kind as string) || undefined,
       nearSymbol: (p.near_symbol as string) || undefined,
@@ -541,7 +525,8 @@ const query: Operation = {
       // (master's #1182 cleanup of the duplicate sourceScopeOpts spread).
       embeddingColumn: embeddingColumnParam,
       // v0.41.33 — agent-explicit adaptive return-sizing. Omitted = off
-      // (config default applies). hybridSearchCached skips the cache when on.
+      // (config default applies). The wrapper still applies adaptive sizing
+      // while semantic cache reuse is suspended.
       adaptiveReturn: typeof p.adaptive_return === 'boolean' ? (p.adaptive_return as boolean) : undefined,
       // v0.42.3.0 — autocut ceiling override. Omitted = smart default (ON in
       // reranked modes). `false` forces the full top-K.
@@ -571,19 +556,44 @@ const query: Operation = {
         ctx.engine.getConfig('search.crag_escalation').catch(() => null),
         ctx.engine.getConfig('search.crag_think').catch(() => null),
       ]);
-      if (shouldEscalateRetrieval(grade, { enabled: escalationCfg === 'true' })) {
+      // #4610: pass the documented guard inputs. `callerExpanded: expand`
+      // implements the long-documented high-ceiling skip — a first pass that
+      // already ran with expansion (the default) doesn't pay for a second
+      // expansion LLM call + rerank over a near-identical query. Escalation
+      // now fires for callers that explicitly opted out of expansion (the
+      // shape where the forced-expansion re-run has something new to find).
+      if (shouldEscalateRetrieval(grade, {
+        enabled: escalationCfg === 'true',
+        alreadyEscalated: false,
+        callerExpanded: expand,
+      })) {
         try {
+          // The caller's effective row contract (shared with the image
+          // branch — NOT a hardcoded 20, which over-delivered on conservative
+          // and under-delivered on tokenmax). Resolved here, not earlier, so
+          // the config reads only run on the rare escalation path.
+          const effectiveLimit = await resolveEffectiveLimit(ctx, p);
           let escalatedMeta: HybridSearchMeta | null = null;
           const escalated = await hybridSearchCached(ctx.engine, queryText, {
-            limit: Math.max((p.limit as number) || 20, 50),
+            excludePrivate,
+            requireSafeChunks: ctx.remote !== false,
+            takesHoldersAllowList: readHolders(ctx),
+            limit: Math.max(effectiveLimit, 50),
             offset: (p.offset as number) || 0,
             expansion: true,
             expandFn: expandQuery,
             relationalRetrieval: true,
             autocut: false,
             detail,
-            // Preserve the caller's already validated and pack-expanded type filter.
-            expandedTypes,
+            // Preserve the caller's #3985 type filter on the re-run (raw
+            // pass-through; the base call already rejected malformed input).
+            ...(Array.isArray(p.types) || typeof p.types === 'string'
+              ? {
+                  types: (Array.isArray(p.types) ? (p.types as string[]) : (p.types as string).split(','))
+                    .map((t) => t.trim())
+                    .filter(Boolean),
+                }
+              : {}),
             language: (p.lang as string) || undefined,
             symbolKind: (p.symbol_kind as string) || undefined,
             // Preserve the caller's symbol-proximity constraints too — an
@@ -598,11 +608,17 @@ const query: Operation = {
             embeddingColumn: embeddingColumnParam,
             onMeta: (m) => { escalatedMeta = m; },
           });
+          // Grade the FULL escalated sweep (rank-1 is what the grader reads),
+          // then adopt only the caller-visible window. #4610: the re-run is
+          // deliberately wide (limit >= 50, autocut off), but `limit` is the
+          // caller's row contract — pre-fix, an adopted escalation handed the
+          // whole uncut sweep back (14-18 rows for a limit:10 request), and
+          // bumpLastRetrievedAt + eval capture recorded the oversized set.
           const regraded = gradeRetrievalConfidence(escalated);
           crag.escalated = true;
           crag.escalated_confidence = regraded.level;
           if (confidenceRank(regraded.level) > confidenceRank(grade.level)) {
-            results = escalated;
+            results = escalated.slice(0, effectiveLimit);
             capturedMeta = escalatedMeta;
             grade = regraded;
             crag.confidence = regraded.level;
@@ -620,6 +636,7 @@ const query: Operation = {
         if (thinkCfg === 'true' && ctx.remote === false) {
           try {
             const { runThink } = await import('../think/index.ts');
+            const { embedQuery } = await import('../embedding.ts');
             const thinkScope = thinkSourceScopeOpts(ctx);
             const t = await runThink(ctx.engine, {
               question: queryText,
@@ -627,6 +644,8 @@ const query: Operation = {
               until: typeof p.until === 'string' ? p.until : undefined,
               ...thinkScope,
               remote: false,
+              // #3734: activate takes' vector retrieval arm for CRAG think escalation.
+              embedQuestion: (q) => embedQuery(q),
             });
             crag.think = {
               answer: t.answer,
@@ -741,15 +760,22 @@ const search_stats: Operation = {
 const search_modes: Operation = {
   name: 'search_modes',
   description:
-    'Read-only search-mode dashboard: active mode, per-knob resolved value with attribution ' +
-    '(mode default vs config override), and the three frozen bundles. Never mutates; to ' +
-    'change modes, tell the user to set the search.mode config key on the brain host.',
+    'Read-only search-mode dashboard: active mode, EVERY mode-bundle knob resolved with ' +
+    'attribution (mode default vs config override), the three frozen bundles, and a ' +
+    'reranker_readiness verdict (whether the resolved reranker will actually run; remote ' +
+    'callers get the verdict without the host key inventory). Brain-level planes only — ' +
+    'per-call SearchOpts overrides on individual searches are not shown (per_call_note in ' +
+    'the payload spells this out). Never mutates; to change modes, tell the user to set the ' +
+    'search.mode config key on the brain host.',
   params: {},
   scope: 'read',
   area: 'search',
   handler: async (ctx) => {
-    const { buildModesReport } = await import('../search/modes-report.ts');
-    return buildModesReport(ctx.engine);
+    const { buildModesReport, redactReadinessForRemote } = await import('../search/modes-report.ts');
+    // Untrusted (remote) callers get the readiness verdict without the host's
+    // provider-key inventory (env var names + presence + paste-ready fix).
+    const modesReport = await buildModesReport(ctx.engine);
+    return ctx.remote === false ? modesReport : redactReadinessForRemote(modesReport);
   },
 };
 
@@ -782,13 +808,13 @@ const cache_stats: Operation = {
   handler: async (ctx) => {
     const { withRelationGuard } = await import('./contract.ts');
     return withRelationGuard(async () => {
-      const { SemanticQueryCache, loadCacheConfig } = await import('../search/query-cache.ts');
+      const { SemanticQueryCache, loadCacheConfig, semanticResultCacheAvailable } = await import('../search/query-cache.ts');
       const config = await loadCacheConfig(ctx.engine);
       const cache = new SemanticQueryCache(ctx.engine, config);
       const stats = await cache.stats();
       return {
         schema_version: 1,
-        enabled: config.enabled ?? true,
+        enabled: semanticResultCacheAvailable() && (config.enabled ?? true),
         similarity_threshold: config.similarityThreshold,
         ttl_seconds: config.ttlSeconds,
         ...stats,

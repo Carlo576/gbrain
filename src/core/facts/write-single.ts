@@ -28,6 +28,26 @@ import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
 const DEDUP_THRESHOLD = 0.95;
 const DEDUP_CANDIDATE_LIMIT = 5;
 
+/**
+ * #4755: null-like entity tokens LLM extractors emit for subjectless
+ * statements. A caller passing the STRING "null" means what JSON `null`
+ * means — no entity. Without this filter the token sails past the
+ * non-empty check, fails resolution, falls back to itself as the slug,
+ * and the facts land unreachable under entity_slug='null' (the stub
+ * guard rightly refuses to create the page, so no page renders them and
+ * no entity lookup can reach them).
+ */
+const NULL_LIKE_ENTITY_TOKENS: ReadonlySet<string> = new Set([
+  'null', 'undefined', 'none', 'n/a', 'nil', '-',
+]);
+
+/** True when an entity ref is absent or a null-like placeholder token. */
+export function isNullLikeEntity(entity: string | null | undefined): boolean {
+  if (entity == null) return true;
+  const t = entity.trim().toLowerCase();
+  return t === '' || NULL_LIKE_ENTITY_TOKENS.has(t);
+}
+
 export interface SingleFactInput {
   fact: string;
   /** Free-text attribution, stored verbatim as the fact's `source`. */
@@ -65,11 +85,23 @@ export async function writeSingleFact(
   const kind = input.kind ?? 'fact';
   const visibility = input.visibility ?? 'private';
   const validUntil = input.validUntil ?? null;
+  const { isFactWithdrawn } = await import('./withdrawal.ts');
+  if (await isFactWithdrawn(engine, sourceId, visibility, factText)) {
+    const { verbError } = await import('../ops/contract.ts');
+    throw verbError('invalid_params', 'fact_withdrawn: this exact claim was explicitly forgotten in this source and visibility.',
+      'Remember a corrected claim. Repeating the old claim does not restore withdrawn memory.');
+  }
 
-  const resolved = input.entity
-    ? await resolveEntitySlugWithSource(engine, sourceId, input.entity)
+  // #4755: normalize null-like entity refs to ABSENT before resolution so
+  // the `resolved?.slug ?? entityRef` fallback can never adopt "null" as a
+  // slug. Applied here (not only at the verb boundary) so every
+  // writeSingleFact caller (google/loops-extract, future verbs) gets the
+  // same guard.
+  const entityRef = isNullLikeEntity(input.entity) ? null : input.entity!.trim();
+  const resolved = entityRef
+    ? await resolveEntitySlugWithSource(engine, sourceId, entityRef)
     : null;
-  const resolvedSlug = input.entity ? (resolved?.slug ?? input.entity) : null;
+  const resolvedSlug = entityRef ? (resolved?.slug ?? entityRef) : null;
   // #4108: provenance for the fence writer's stub guard. Null when the
   // resolver returned nothing (fail-closed — no live page was verified).
   const resolutionSource = resolved?.source ?? null;
