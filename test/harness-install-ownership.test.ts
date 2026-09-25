@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installHarnessConnection } from '../src/core/harness/install.ts';
@@ -9,7 +9,7 @@ import { parseMcpGrant } from '../src/commands/mcp.ts';
 import { validateHarnessArguments } from '../src/core/harness/arguments.ts';
 
 const roots: string[] = [];
-const temp = () => { const root = mkdtempSync(join(tmpdir(), 'gbrain-owned-client-')); roots.push(root); return root; };
+const temp = () => { const root = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-owned-client-')); roots.push(root); return root; };
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const credentials: HarnessCredentials = { version: 1, mcp_url: 'https://brain.example.com/mcp', issuer_url: 'https://brain.example.com', client_id: 'gbrain_cl_owned_fixture', client_secret: 'fixture-secret-not-real', access_token: 'fixture-token-not-real', profile: 'memory-writer' };
 

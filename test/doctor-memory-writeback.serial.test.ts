@@ -65,7 +65,11 @@ function writeReceipt(home: string, targetPath: string, url = 'http://127.0.0.1:
 
 describe('memory_writeback doctor check', () => {
   test('off (default) → quiet ok naming the enable command; audience and postures still reported', async () => {
-    await withEnv({ GBRAIN_HOME: tmp }, async () => {
+    await withEnv({
+      GBRAIN_HOME: tmp,
+      CODEX_HOME: join(tmp, 'codex-home'),
+      CLAUDE_CONFIG_DIR: join(tmp, 'claude-cfg'),
+    }, async () => {
       const c = await buildMemoryWritebackCheck(engine);
       expect(c.status).toBe('ok');
       expect(c.message).toContain('off (default)');

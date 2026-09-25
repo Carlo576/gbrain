@@ -36,6 +36,8 @@ import { hasReadPolicy } from './read-policy-sql.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { SearchResult, PageReadPolicy } from '../types.ts';
 import { normalizeAlias } from './alias-normalize.ts';
+import { matchesSearchTypeFilters } from './type-filter-match.ts';
+import type { SearchOpts } from '../types.ts';
 import { isLookupShapedQuery } from './query-intent.ts';
 import { applySupersedeDownrank } from './hybrid.ts';
 
@@ -50,7 +52,7 @@ export function isSlugShapedQuery(query: string): boolean {
   return q.length > 0 && !/\s/.test(q) && q.includes('/') && !q.startsWith('/') && !q.endsWith('/');
 }
 
-export interface ExactLookupOpts extends PageReadPolicy {
+export interface ExactLookupOpts extends PageReadPolicy, Pick<SearchOpts, 'expandedTypes'> {
   sourceId?: string;
   sourceIds?: string[];
   /**
@@ -95,12 +97,15 @@ export async function structuralExactLookup(
   const excluded = new Set(opts.excludeSlugs ?? []);
   const typeGate = (t: string | undefined | null): boolean => {
     if (opts.type && t !== opts.type) return false;
-    if (opts.types && opts.types.length > 0 && (t == null || !opts.types.includes(t))) return false;
+    if (!opts.expandedTypes?.length && opts.types && opts.types.length > 0 &&
+        (t == null || !opts.types.includes(t))) return false;
     return true;
   };
-  const push = (r: SearchResult) => {
+  const push = (r: SearchResult, frontmatter?: Record<string, unknown> | null) => {
     if (excluded.has(r.slug)) return;
     if (!typeGate(r.type)) return;
+    if (opts.expandedTypes?.length && frontmatter !== undefined &&
+        !matchesSearchTypeFilters(r.type, frontmatter, opts)) return;
     const key = `${r.source_id ?? 'default'}::${r.slug}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -133,7 +138,7 @@ export async function structuralExactLookup(
           score: 0, // caller assigns the injection score
           alias_hit: true, // identity match — evidence alias_hit → 'exists'
           exact_lookup: 'slug',
-        } as SearchResult);
+        } as SearchResult, page.frontmatter);
       } catch {
         // fail-open: slug probe error → no tier hit from this scope
       }
@@ -146,11 +151,26 @@ export async function structuralExactLookup(
     for (const cand of opts.titleCandidates) {
       if (!cand.title) continue;
       if (normalizeAlias(cand.title) !== qNorm) continue;
+      // The title arm is prefiltered in hybridSearch, but direct callers can
+      // supply candidates too. Resolve metadata only when legacy type aliases
+      // need a frontmatter predicate; never infer it from the candidate's type.
+      let frontmatter: Record<string, unknown> | null | undefined;
+      if (opts.expandedTypes?.length) {
+        if (opts.sourceIds?.length && !opts.sourceIds.includes(cand.source_id ?? 'default')) continue;
+        try {
+          const page = await engine.getPage(cand.slug, {
+            sourceId: cand.source_id ?? opts.sourceId ?? 'default',
+            excludePrivate: opts.excludePrivate,
+          });
+          if (!page) continue;
+          frontmatter = page.frontmatter;
+        } catch { continue; }
+      }
       push({
         ...cand,
         title_match_boost: Math.max(cand.title_match_boost ?? 1.0, EXACT_TITLE_STAMP),
         exact_lookup: cand.exact_lookup ?? 'title',
-      });
+      }, frontmatter);
     }
   }
 

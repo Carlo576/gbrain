@@ -108,6 +108,14 @@ describe('buildRelationalArm', () => {
     expect(localLike.map(r => r.slug)).toContain('people/mallory-secret');
   });
 
+  test('hybridSearch applies the caller type gate before relational evidence injection', async () => {
+    const out = await hybridSearch(eng, 'who invested in widget-co', {
+      relationalRetrieval: true, types: ['company'], limit: 20,
+    });
+    expect(out.map(r => r.slug)).not.toContain('people/alice-example');
+    expect(out.map(r => r.slug)).not.toContain('people/mallory-secret');
+  });
+
   test('#4352: hydrate hides pages in archived sources (all callers)', async () => {
     await eng.executeRaw(`UPDATE sources SET archived = true WHERE id = 'default'`, []);
     try {

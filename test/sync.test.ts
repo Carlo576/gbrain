@@ -113,9 +113,9 @@ describe('isSyncable', () => {
     expect(isSyncable('dir/.raw/notes.md')).toBe(false);
   });
 
-  test('rejects skip-list basenames', () => {
+  test('rejects structural basenames while accepting authored index pages', () => {
     expect(isSyncable('schema.md')).toBe(false);
-    expect(isSyncable('index.md')).toBe(false);
+    expect(isSyncable('index.md')).toBe(true);
     expect(isSyncable('log.md')).toBe(false);
     expect(isSyncable('README.md')).toBe(false);
     expect(isSyncable('people/README.md')).toBe(false);

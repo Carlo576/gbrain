@@ -73,6 +73,16 @@ function mockEngine(overrides: Partial<Record<string, any>> = {}): BrainEngine {
           return Promise.resolve(undefined);
         };
       }
+      if (prop === 'executeRaw') {
+        return async (sql: string, params: unknown[]) => {
+          calls.push({ method: 'executeRaw', args: [sql, params] });
+          if (sql.includes('FOR UPDATE') && sql.includes('SELECT type, frontmatter, content_hash FROM pages')) {
+            const page = await engine.getPage(params[1] as string, { sourceId: params[0] as string });
+            return page ? [page] : [];
+          }
+          return overrides.executeRaw ? overrides.executeRaw(sql, params) : [];
+        };
+      }
       // transaction: just call the fn with the same engine (no real DB transaction in tests)
       if (prop === 'transaction') return async (fn: (tx: BrainEngine) => Promise<any>) => fn(engine);
       return track(prop);

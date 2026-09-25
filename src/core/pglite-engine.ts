@@ -1,4 +1,5 @@
 import { GRANT_COLUMNS_SQL } from './grants/schema.ts';
+import { appendSearchTypesClause } from './search/type-filter-sql.ts';
 import type { PageReadScope } from './types.ts';
 import type { PageReadPolicy } from './types.ts';
 import { readRelationalFanout, readAliases, readBacklinkCounts, readAdjacencyBoosts, readContentFlags, readExtractionStates, readEffectiveDates, readSalienceScores } from './search/read-enrichment.ts';
@@ -2463,10 +2464,7 @@ export class PGLiteEngine implements BrainEngine {
       extraFilter += ` AND cc.symbol_type = $${params.length}`;
     }
     // v0.33: multi-type filter for whoknows.
-    if (opts?.types && opts.types.length > 0) {
-      params.push(opts.types);
-      extraFilter += ` AND p.type = ANY($${params.length}::text[])`;
-    }
+    extraFilter += ` ${appendSearchTypesClause(params, opts)}`;
     // v0.29.1 — since/until date filter (Postgres parity, codex pass-1 #10).
     // Reads against COALESCE(effective_date, updated_at) so date filtering
     // matches user intent (a meeting was on its event_date, not when it
@@ -2589,10 +2587,7 @@ export class PGLiteEngine implements BrainEngine {
       params.push(opts.type);
       extraFilter += ` AND p.type = $${params.length}`;
     }
-    if (opts?.types && opts.types.length > 0) {
-      params.push(opts.types);
-      extraFilter += ` AND p.type = ANY($${params.length}::text[])`;
-    }
+    extraFilter += ` ${appendSearchTypesClause(params, opts)}`;
     if (opts?.exclude_slugs?.length) {
       params.push(opts.exclude_slugs);
       extraFilter += ` AND p.slug != ALL($${params.length}::text[])`;
@@ -2868,10 +2863,7 @@ export class PGLiteEngine implements BrainEngine {
     // v0.33: multi-type filter for whoknows. Applied inside HNSW candidate
     // CTE so the candidate pool consists only of typed pages — limit budget
     // goes to person/company pages instead of being eaten by other types.
-    if (opts?.types && opts.types.length > 0) {
-      params.push(opts.types);
-      extraFilter += ` AND p.type = ANY($${params.length}::text[])`;
-    }
+    extraFilter += ` ${appendSearchTypesClause(params, opts)}`;
     // v0.29.1 since/until parity (codex pass-1 #10). Filter applied INSIDE
     // the inner CTE so HNSW's candidate pool already excludes out-of-range
     // pages — preserves pagination contract.

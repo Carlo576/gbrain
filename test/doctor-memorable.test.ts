@@ -66,7 +66,7 @@ describe('memorable_relay_health rung ladder', () => {
     const home = tempHome();
     try {
       seedGbrainConfig(home, null);
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: undefined }, async () => {
         const c = await buildMemorableRelayCheck();
         expect(c.status).toBe('ok');
         expect(c.message).toContain('off');
@@ -79,7 +79,7 @@ describe('memorable_relay_health rung ladder', () => {
     const home = tempHome();
     try {
       seedGbrainConfig(home, true);
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: '0' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: '0' }, async () => {
         const c = await buildMemorableRelayCheck();
         expect(c.status).toBe('ok');
         expect(c.message).toContain('kill switch');
@@ -91,7 +91,7 @@ describe('memorable_relay_health rung ladder', () => {
     const home = tempHome();
     try {
       seedGbrainConfig(home, true);
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: undefined }, async () => {
         const c = await buildMemorableRelayCheck();
         expect(c.status).toBe('fail');
         expect(c.message).toContain('gbrain config set integrations.memorable.enabled true');
@@ -104,7 +104,7 @@ describe('memorable_relay_health rung ladder', () => {
     const home = tempHome();
     try {
       seedGbrainConfig(home, true);
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: join(home, 'absent') }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: join(home, 'absent') }, async () => {
         await writeMemorableConsent();
         const c = await buildMemorableRelayCheck();
         expect(c.status).toBe('warn');
@@ -118,7 +118,7 @@ describe('memorable_relay_health rung ladder', () => {
     try {
       seedGbrainConfig(home, true);
       const ev = seedEvidence(home, { backend: 'local', consent: 'read-write' });
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: home, MEMORABLE_BIN: '' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: home, MEMORABLE_BIN: '' }, async () => {
         await writeMemorableConsent();
         const c = await buildMemorableRelayCheck();
         expect(c.status).toBe('fail');
@@ -132,7 +132,7 @@ describe('memorable_relay_health rung ladder', () => {
     try {
       seedGbrainConfig(home, true);
       const ev = seedEvidence(home, { backend: 'gbrain' });
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
         await writeMemorableConsent();
         await appendSessionReceipt(RECEIPT);
         const c = await buildMemorableRelayCheck();
@@ -148,7 +148,7 @@ describe('memorable_relay_health rung ladder', () => {
     try {
       seedGbrainConfig(home, true);
       const ev = seedEvidence(home, { backend: 'local', consent: 'read-write' });
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
         await writeMemorableConsent();
         const p = await relayResultsPath();
         mkdirSync(dirname(p), { recursive: true });
@@ -171,7 +171,7 @@ describe('memorable_relay_health rung ladder', () => {
     try {
       seedGbrainConfig(home, true);
       const ev = seedEvidence(home, { backend: 'local', consent: 'read-write' });
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
         await writeMemorableConsent();
         const p = await relayResultsPath();
         mkdirSync(dirname(p), { recursive: true });
@@ -191,7 +191,7 @@ describe('memorable_relay_health rung ladder', () => {
     try {
       seedGbrainConfig(home, true);
       const ev = seedEvidence(home, { backend: 'local', consent: 'read-write' });
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, 'codex-home'), GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
         await writeMemorableConsent();
         await appendSessionReceipt(RECEIPT);
         const p = await relayResultsPath();

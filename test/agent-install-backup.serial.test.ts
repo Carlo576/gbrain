@@ -1,7 +1,7 @@
 /** Real setup + finite CLI + complete PGLite recovery, entirely within temporary roots. */
 import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setupInAgent } from '../src/core/agent-install/setup.ts';
@@ -41,7 +41,7 @@ async function launched(args: string[], at = root): Promise<string> {
 }
 
 beforeAll(async () => {
-  temporary = mkdtempSync(join(tmpdir(), 'gbrain-agent-recovery-'));
+  temporary = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-agent-recovery-'));
   root = join(temporary, 'brain'); bundle = join(temporary, 'bundle'); archive = join(temporary, 'brain.gbrain-backup');
   const pkg = join(bundle, 'app', 'node_modules', 'gbrain');
   mkdirSync(join(pkg, 'src', 'core', 'agent-install'), { recursive: true });

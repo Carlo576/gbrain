@@ -25,7 +25,8 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
-import type { SearchResult, PageType, RelationalFanoutRow, PageReadPolicy } from '../types.ts';
+import type { SearchResult, PageType, RelationalFanoutRow, PageReadPolicy, SearchOpts } from '../types.ts';
+import { appendSearchTypesClause } from './type-filter-sql.ts';
 import { createAuditWriter } from '../audit/audit-writer.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
 import { buildVisibilityClause } from './sql-ranking.ts';
@@ -34,7 +35,7 @@ import { sanitizeRemoteBody } from '../remote-body.ts';
 import { parseRelationalQuery, type RelationalQuery, type RelationVocab } from './relational-intent.ts';
 import { stampEvidence, type EvidenceOpts } from './evidence.ts';
 
-export interface RelationalArmOpts extends PageReadPolicy {
+export interface RelationalArmOpts extends PageReadPolicy, Pick<SearchOpts, 'type' | 'types' | 'expandedTypes' | 'exclude_slugs'> {
   sourceId?: string;
   sourceIds?: string[];
   depth?: number;
@@ -128,11 +129,16 @@ async function hydrate(
   engine: BrainEngine,
   rows: RelationalFanoutRow[],
   seedSlug: string,
-  policy: PageReadPolicy,
+  policy: RelationalArmOpts,
 ): Promise<SearchResult[]> {
   if (rows.length === 0) return [];
   const params: unknown[] = [rows.map(r => r.source_id), rows.map(r => r.slug)];
   const filter = pageReadFilter('p', policy, params);
+  const typesClause = appendSearchTypesClause(params, policy);
+  const scalarClause = policy.type ? (params.push(policy.type), `AND p.type = $${params.length}`) : '';
+  const excludedClause = policy.exclude_slugs?.length
+    ? (params.push(policy.exclude_slugs), `AND p.slug <> ALL($${params.length}::text[])`)
+    : '';
   const pageRows = await engine.executeRaw<{
     page_id: number; slug: string; source_id: string; title: string; type: string; synopsis: string | null;
   }>(
@@ -142,7 +148,8 @@ async function hydrate(
      JOIN sources s ON s.id = p.source_id
      JOIN unnest($1::text[], $2::text[]) AS refs(source_id, slug)
        ON p.source_id = refs.source_id AND p.slug = refs.slug
-     WHERE ${filter} ${buildVisibilityClause('p', 's', { excludePrivate: policy.excludePrivate, requireSafeChunks: false })}`,
+     WHERE ${filter} ${buildVisibilityClause('p', 's', { excludePrivate: policy.excludePrivate, requireSafeChunks: false })}
+       ${typesClause} ${scalarClause} ${excludedClause}`,
     params,
   );
   const byKey = new Map<string, typeof pageRows[number]>();

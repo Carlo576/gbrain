@@ -198,6 +198,21 @@ describe('#4480 — shape-filter gating (type/types/excludeSlugs)', () => {
     });
     expect(passed.length).toBe(1);
   });
+
+  test('legacy subtype gate rejects a supplied title candidate with the wrong subtype', async () => {
+    await engine.putPage('sources/raw-title', {
+      type: 'source', title: 'Raw Title', compiled_truth: 'Evidence',
+      frontmatter: { legacy_type: 'raw-source' },
+    });
+    const filter = {
+      canonical: 'source', originalInput: 'primary-source-page', isAliasExpansion: true,
+      subtypeFilter: { canonical: 'source', subtypeField: 'legacy_type', subtypeValue: 'primary-source-page' },
+    };
+    const titleCandidates = [res('sources/raw-title', 0.4, { title: 'Raw Title', type: 'source' })];
+    expect(await structuralExactLookup(engine, 'raw title', {
+      sourceId: 'default', expandedTypes: [filter], titleCandidates,
+    })).toEqual([]);
+  });
 });
 
 describe('applyExactLookupTier (#1663)', () => {

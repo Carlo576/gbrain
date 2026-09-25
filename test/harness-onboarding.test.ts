@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { harnessAdapter, HARNESS_ADAPTERS, renderHarnessReference } from '../src/core/harness/registry.ts';
@@ -9,7 +9,7 @@ import { verifyHarnessConnection, type VerificationPeer } from '../src/core/harn
 import { parseMcpGrant } from '../src/commands/mcp.ts';
 
 const roots: string[] = [];
-const temp = () => { const p = mkdtempSync(join(tmpdir(), 'gbrain-harness-')); roots.push(p); return p; };
+const temp = () => { const p = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-harness-')); roots.push(p); return p; };
 afterEach(() => { for (const p of roots.splice(0)) rmSync(p, { recursive: true, force: true }); });
 const creds = (): HarnessCredentials => ({ version: 1, mcp_url: 'https://brain.example.com/mcp', issuer_url: 'https://brain.example.com', client_id: 'gbrain_cl_fixture', access_token: 'fixture-access-private-value', client_secret: 'fixture-client-private-value', profile: 'memory-writer', harness: 'codex', source_id: 'default', expires_at: Date.now() / 1000 + 3600 });
 

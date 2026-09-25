@@ -53,7 +53,7 @@ beforeAll(() => {
   mkdirSync(join(repo, 'people/pedro.raw'), { recursive: true });
   writeFileSync(join(repo, 'people/pedro.raw/source.md'), 'raw sidecar\n');
 
-  // Metafiles — excluded on both routes (pre-existing #345 behavior).
+  // Structural README is excluded; authored index pages are admitted.
   writeFileSync(join(repo, 'README.md'), '# repo\n');
   writeFileSync(join(repo, 'notes/index.md'), '# index\n');
 
@@ -77,9 +77,9 @@ describe('#2607 — git fast path excludes what incremental sync excludes', () =
     expect(files).not.toContain(join('vendor', 'pkg', 'notes.md'));
     expect(files).not.toContain(join('node_modules', 'dep', 'CHANGELOG.md'));
     expect(files).not.toContain(join('people', 'pedro.raw', 'source.md'));
-    // Metafiles stay excluded too.
+    // Structural files stay excluded; authored index pages remain content.
     expect(files).not.toContain('README.md');
-    expect(files).not.toContain(join('notes', 'index.md'));
+    expect(files).toContain(join('notes', 'index.md'));
   });
 
   test('full-sync enumeration agrees with incremental isSyncable for every collected file', () => {

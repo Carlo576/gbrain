@@ -17,6 +17,7 @@ import { hybridSearch } from '../src/core/search/hybrid.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
+import { SAFE_FENCE_CHUNKER_VERSION } from '../src/core/search/safe-chunks.ts';
 
 describe('Layer 7 (A2) — expandAnchors', () => {
   let engine: PGLiteEngine;
@@ -195,6 +196,11 @@ describe('Layer 7 (A2) — expandAnchors', () => {
     }]);
     const foreignId = (await engine.getChunks('team-b-code', { sourceId: 'team-b' }))[0]!.id;
     const privateId = (await engine.getChunks('private-code'))[0]!.id;
+    // excludePrivate also requires sealed chunks; mark these fixtures as
+    // already indexed by the protected-body sanitizer before testing scope.
+    await engine.executeRaw('UPDATE pages SET chunker_version = $1 WHERE slug IN ($2, $3, $4)', [
+      SAFE_FENCE_CHUNKER_VERSION, 'src-b-ts', 'team-b-code', 'private-code',
+    ]);
     const rows = await hydrateChunks(engine, [chunkB, foreignId, privateId], {
       sourceIds: ['default'], excludePrivate: true,
     });

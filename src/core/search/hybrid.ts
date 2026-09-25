@@ -26,6 +26,7 @@ import type {
 } from '../types.ts';
 import { affectsRecall } from '../types.ts';
 import { hasReadPolicy, pageReadFilter } from './read-policy-sql.ts';
+import { matchesSearchTypeFilters } from './type-filter-match.ts';
 import { requiresSafeChunks } from './safe-chunks.ts';
 import { embed, embedQuery } from '../embedding.ts';
 import { registerBackgroundWorkDrainer } from '../background-work.ts';
@@ -925,7 +926,7 @@ export async function applyAliasHop(
   engine: import('../engine.ts').BrainEngine,
   results: SearchResult[],
   query: string,
-  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; requireSafeChunks?: boolean },
+  opts: Pick<SearchOpts, 'type' | 'types' | 'expandedTypes' | 'exclude_slugs'> & { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; requireSafeChunks?: boolean },
 ): Promise<SearchResult[]> {
   if (!query) return results;
   const qNorm = normalizeAlias(query);
@@ -965,6 +966,8 @@ export async function applyAliasHop(
       continue;
     }
     if (!page) continue;
+    if (opts.exclude_slugs?.includes(page.slug)) continue;
+    if (!matchesSearchTypeFilters(page.type, page.frontmatter, opts)) continue;
     // #4352 — the alias inject path bypasses the engines' SQL visibility
     // clause (getPage, not search); re-apply the private predicate here so
     // an untrusted caller can't hop into a `visibility: private` page.
@@ -1367,6 +1370,7 @@ export async function hybridSearch(
     // type filter to SQL level so the limit budget goes to candidate-typed
     // pages instead of being eaten by note/transcript/article pages.
     types: opts?.types,
+    expandedTypes: opts?.expandedTypes,
     // v0.29.1: since/until take precedence over deprecated afterDate/beforeDate.
     // The engine still consumes the legacy field names; this aliasing keeps
     // PR #618 callers compiling while the new names are the public surface.
@@ -1571,6 +1575,10 @@ export async function hybridSearch(
     relationalList = await buildRelationalArm(engine, query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
+      type: opts?.type,
+      types: opts?.types,
+      expandedTypes: opts?.expandedTypes,
+      exclude_slugs: opts?.exclude_slugs,
       depth: resolvedMode.relational_retrieval_depth,
       limit: opts?.limit ?? resolvedMode.searchLimit,
       // #4352 remediation: the arm hydrates titles + compiled_truth snippets
@@ -1641,6 +1649,7 @@ export async function hybridSearch(
     const noEmbedPreExact = await applyAliasHop(engine, dedupResults(noEmbedResults), query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
+      type: opts?.type, types: opts?.types, expandedTypes: opts?.expandedTypes, exclude_slugs: opts?.exclude_slugs,
       excludePrivate: opts?.excludePrivate,
       requireSafeChunks: opts?.requireSafeChunks,
     });
@@ -1655,6 +1664,7 @@ export async function hybridSearch(
       // #4480: gate tier injections on the caller's shape filters.
       type: opts?.type,
       types: opts?.types,
+      expandedTypes: opts?.expandedTypes,
       excludeSlugs: opts?.exclude_slugs,
     });
     stampEvidence(noEmbedHopped, { cosineFloor: resolvedMode.evidence_cosine_floor });
@@ -2057,6 +2067,7 @@ export async function hybridSearch(
     const kwPreExact = await applyAliasHop(engine, dedupResults(fallbackResults), query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
+      type: opts?.type, types: opts?.types, expandedTypes: opts?.expandedTypes, exclude_slugs: opts?.exclude_slugs,
       excludePrivate: opts?.excludePrivate,
       requireSafeChunks: opts?.requireSafeChunks,
     });
@@ -2071,6 +2082,7 @@ export async function hybridSearch(
       // #4480: gate tier injections on the caller's shape filters.
       type: opts?.type,
       types: opts?.types,
+      expandedTypes: opts?.expandedTypes,
       excludeSlugs: opts?.exclude_slugs,
     });
     stampEvidence(kwHopped, { cosineFloor: resolvedMode.evidence_cosine_floor });
@@ -2352,6 +2364,7 @@ export async function hybridSearch(
   const preExact = await applyAliasHop(engine, rerankPinned, query, {
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
+    type: opts?.type, types: opts?.types, expandedTypes: opts?.expandedTypes, exclude_slugs: opts?.exclude_slugs,
     excludePrivate: opts?.excludePrivate,
     requireSafeChunks: opts?.requireSafeChunks,
   });
@@ -2372,6 +2385,7 @@ export async function hybridSearch(
     // #4480: gate tier injections on the caller's shape filters.
     type: opts?.type,
     types: opts?.types,
+    expandedTypes: opts?.expandedTypes,
     excludeSlugs: opts?.exclude_slugs,
   });
 

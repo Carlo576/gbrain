@@ -1,4 +1,8 @@
 import { readHolders } from './context.ts';
+import { loadConfig } from '../config.ts';
+import { loadActivePack } from '../schema-pack/load-active.ts';
+import { readDbSchemaPack } from '../schema-pack/best-effort.ts';
+import { expandTypeFilter, type ExpandedTypeFilter } from '../schema-pack/expand-type-filter.ts';
 /**
  * Search operation cluster (search + query) — pure move from operations.ts
  * (v0.46.x tranche 1). search_by_image stays in operations.ts (v0.36 Phase 2
@@ -168,7 +172,41 @@ function normalizeTypesParam(raw: unknown): string[] | undefined {
       '`types` was provided but contained no usable page-type strings (CLI: --types person,company).',
     );
   }
+  if (types.length > 64) {
+    throw new OperationError('invalid_params', '`types` accepts at most 64 page types.');
+  }
   return types;
+}
+
+/** Resolve public type aliases against the pack that owns the read scope. */
+async function expandRequestedTypes(
+  ctx: OperationContext,
+  scope: { sourceId?: string; sourceIds?: string[] },
+  types: string[] | undefined,
+): Promise<ExpandedTypeFilter[] | undefined> {
+  if (!types) return undefined;
+  const sourceIds = scope.sourceIds?.length
+    ? scope.sourceIds
+    : scope.sourceId ? [scope.sourceId] : (await ctx.engine.listAllSources()).map(source => source.id);
+  const ids = sourceIds.length ? sourceIds : ['default'];
+  const cfg = loadConfig();
+  const dbConfig = await readDbSchemaPack(ctx.engine);
+  let activePack: Awaited<ReturnType<typeof loadActivePack>> | undefined;
+  for (const sourceId of ids) {
+    const sourcePack = await ctx.engine.getConfig(`schema_pack.source.${sourceId}`);
+    const pack = await loadActivePack({
+      cfg, remote: ctx.remote !== false, sourceId, dbConfig,
+      perSourceDb: sourcePack ? new Map([[sourceId, sourcePack]]) : undefined,
+    });
+    if (activePack && activePack.identity !== pack.identity) {
+      throw new OperationError(
+        'permission_denied',
+        `Cannot apply one type filter across divergent schema packs in sources ${ids.join(', ')}.`,
+      );
+    }
+    activePack = pack;
+  }
+  return types.map(type => expandTypeFilter(type, activePack!.manifest));
 }
 
 const TYPES_PARAM_DESCRIPTION =
@@ -260,6 +298,7 @@ const search: Operation = {
     const scope = federatedSearchScope(ctx, sourceIdParam);
     // #4620: an explicit source_id must name a live source (after the grant check).
     await assertExplicitSourceLive(ctx, sourceIdParam);
+    const expandedTypes = await expandRequestedTypes(ctx, scope, types);
     // #4352 — untrusted callers never see `visibility: private` pages
     // (config-gated; trusted local CLI unchanged).
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
@@ -275,7 +314,7 @@ const search: Operation = {
     const keywordOnly = (await ctx.engine.getConfig('search.mcp_keyword_only')) === 'true';
 
     if (keywordOnly) {
-      const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, excludePrivate, requireSafeChunks: ctx.remote !== false, ...(types ? { types } : {}), ...scope });
+      const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, excludePrivate, requireSafeChunks: ctx.remote !== false, types, expandedTypes, ...scope });
       const results = dedupResults(raw);
       // #3783 — every row here IS a keyword hit (direct FTS path); mark
       // before stamping so evidence still reads keyword_exact.
@@ -308,6 +347,7 @@ const search: Operation = {
       requireSafeChunks: ctx.remote !== false,
       takesHoldersAllowList: readHolders(ctx),
       ...(types ? { types } : {}),
+      expandedTypes,
       ...scope,
       ...(perCallMode ? { mode: perCallMode } : {}),
       // #4415: agent-explicit recency + salience (same posture as `query`).
@@ -474,6 +514,7 @@ const query: Operation = {
     const querySourceScope = federatedSearchScope(ctx, sourceIdParam);
     // #4620: an explicit source_id must name a live source (after the grant check).
     await assertExplicitSourceLive(ctx, sourceIdParam);
+    const expandedTypes = await expandRequestedTypes(ctx, querySourceScope, types);
     // #4352 — same enforcement for the full-control query op (both the image
     // searchVector branch and the text hybrid path below).
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
@@ -502,6 +543,7 @@ const query: Operation = {
         requireSafeChunks: ctx.remote !== false,
         takesHoldersAllowList: readHolders(ctx),
         ...(types ? { types } : {}),
+        expandedTypes,
         ...querySourceScope,
       });
       return applySnippetCap(results, snippetCap);
@@ -552,6 +594,7 @@ const query: Operation = {
       detail,
       // #3985: multi-type filter — SearchOpts.types reaches every leg.
       types,
+      expandedTypes,
       language: (p.lang as string) || undefined,
       symbolKind: (p.symbol_kind as string) || undefined,
       nearSymbol: (p.near_symbol as string) || undefined,
@@ -645,6 +688,7 @@ const query: Operation = {
                     .filter(Boolean),
                 }
               : {}),
+            expandedTypes,
             language: (p.lang as string) || undefined,
             symbolKind: (p.symbol_kind as string) || undefined,
             // Preserve the caller's symbol-proximity constraints too — an

@@ -7,7 +7,8 @@ export function matchesSearchTypeFilters(
   opts: Pick<SearchOpts, 'type' | 'types' | 'expandedTypes'>,
 ): boolean {
   if (opts.type && type !== opts.type) return false;
-  if (opts.types && opts.types.length > 0 && (type == null || !opts.types.includes(type as never))) return false;
+  if (!opts.expandedTypes?.length && opts.types && opts.types.length > 0 &&
+      (type == null || !opts.types.includes(type as never))) return false;
   if (opts.expandedTypes && opts.expandedTypes.length > 0) {
     if (type == null) return false;
     return opts.expandedTypes.some((filter) => {

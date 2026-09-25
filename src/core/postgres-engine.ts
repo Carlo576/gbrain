@@ -36,6 +36,7 @@ import {
 } from './chronicle/ontology.ts';
 import { logDbDisconnect } from './audit/db-disconnect-audit.ts';
 import { logPoolRecovery } from './audit/pool-recovery-audit.ts';
+import { appendSearchTypesClause } from './search/type-filter-sql.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import type {
   DomainBankSampleOpts, CorpusSampleOpts, DomainBankRow,
@@ -1477,11 +1478,7 @@ export class PostgresEngine implements BrainEngine {
     }
     // v0.33: multi-type filter for whoknows. AND-applied alongside the
     // single-value `type` filter (callers can use either or both).
-    let typesClause = '';
-    if (opts?.types && opts.types.length > 0) {
-      params.push(opts.types);
-      typesClause = `AND p.type = ANY($${params.length}::text[])`;
-    }
+    const typesClause = appendSearchTypesClause(params, opts);
     let excludeSlugsClause = '';
     if (excludeSlugs?.length) {
       params.push(excludeSlugs);
@@ -1660,11 +1657,7 @@ export class PostgresEngine implements BrainEngine {
       params.push(opts.type);
       typeClause = `AND p.type = $${params.length}`;
     }
-    let typesClause = '';
-    if (opts?.types && opts.types.length > 0) {
-      params.push(opts.types);
-      typesClause = `AND p.type = ANY($${params.length}::text[])`;
-    }
+    const typesClause = appendSearchTypesClause(params, opts);
     let excludeSlugsClause = '';
     if (opts?.exclude_slugs?.length) {
       params.push(opts.exclude_slugs);
@@ -1817,11 +1810,7 @@ export class PostgresEngine implements BrainEngine {
     }
     // v0.33: multi-type filter for whoknows. AND-applied alongside the
     // single-value `type` filter (callers can use either or both).
-    let typesClause = '';
-    if (opts?.types && opts.types.length > 0) {
-      params.push(opts.types);
-      typesClause = `AND p.type = ANY($${params.length}::text[])`;
-    }
+    const typesClause = appendSearchTypesClause(params, opts);
     let excludeSlugsClause = '';
     if (excludeSlugs?.length) {
       params.push(excludeSlugs);
@@ -1991,11 +1980,7 @@ export class PostgresEngine implements BrainEngine {
     }
     // v0.33: multi-type filter for whoknows. AND-applied alongside the
     // single-value `type` filter (callers can use either or both).
-    let typesClause = '';
-    if (opts?.types && opts.types.length > 0) {
-      params.push(opts.types);
-      typesClause = `AND p.type = ANY($${params.length}::text[])`;
-    }
+    const typesClause = appendSearchTypesClause(params, opts);
     let excludeSlugsClause = '';
     if (excludeSlugs?.length) {
       params.push(excludeSlugs);
