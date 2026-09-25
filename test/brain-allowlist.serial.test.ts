@@ -307,14 +307,14 @@ describe('brain_put_page pins undeclared model-authored types (#4852)', () => {
     expect(page.frontmatter.legacy_type).toBeUndefined();
   });
 
-  test('declared alias is stored literally (alias_of stays a sync warning, not a rewrite)', async () => {
+  test('declared alias passes the tool guard and the import pack records its canonical type', async () => {
     const page = await putUnderPack(
       'wiki/personal/patterns/aliased',
       '---\ntype: insight\ntitle: Aliased\n---\n\nBody',
       PREFIXES,
     );
-    expect(page.type).toBe('insight');
-    expect(page.frontmatter.legacy_type).toBeUndefined();
+    expect(page.type).toBe('note');
+    expect(page.frontmatter.legacy_type).toBe('insight');
   });
 
   test('no explicit type → pack inference untouched', async () => {
@@ -327,12 +327,12 @@ describe('brain_put_page pins undeclared model-authored types (#4852)', () => {
     expect(page.frontmatter.legacy_type).toBeUndefined();
   });
 
-  test('same write WITHOUT a slug allow-list (legacy agents namespace) stores the literal type', async () => {
+  test('without a slug allow-list, the import pack still canonicalizes an undeclared type', async () => {
     const page = await putUnderPack(
       'wiki/agents/42/pattern-literal',
       '---\ntype: pattern\ntitle: Literal\n---\n\nBody',
     );
-    expect(page.type).toBe('pattern');
-    expect(page.frontmatter.legacy_type).toBeUndefined();
+    expect(page.type).toBe('note');
+    expect(page.frontmatter.legacy_type).toBe('pattern');
   });
 });

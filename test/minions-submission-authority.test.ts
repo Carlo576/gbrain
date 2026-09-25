@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -15,7 +15,7 @@ import { APPLICATION_AUTHORITY, assertNoUnreviewedJobs, assertRemoteJobControl, 
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { withEnv } from './helpers/with-env.ts';
 
-const sandbox = mkdtempSync(join(tmpdir(), 'gbrain-job-authority-'));
+const sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-job-authority-')));
 const root = join(sandbox, 'repo');
 const brainHome = join(sandbox, 'home');
 const legacyId = '11111111-1111-4111-8111-111111111111';

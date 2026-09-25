@@ -222,9 +222,35 @@ describe('cli preflight ordering: cwd quarantine → ~/.gbrain/.env → guardrai
 // plus a `sh` PRESENCE probe: `GIT_SSL_NO_VERIFY=` (empty) still disables TLS
 // verification in git, so a dropped key must be ABSENT, not ''.
 const GIT_BIN = Bun.which('git');
-// util-linux `script` gives the wrapper a real pty so process.stdin.isTTY is
-// true — the only way to exercise the tty (ignore-only) SIGINT branch faithfully.
+// `script` gives the wrapper a real pty for the tty (ignore-only) SIGINT branch.
 const SCRIPT_BIN = Bun.which('script');
+// BSD script calls tcgetattr on stdin. Bun's pipe is a socket on macOS, so a
+// Python child supplies an OS pipe and sends Ctrl-C only after READY exists.
+const BSD_SCRIPT_BRIDGE = `
+import os, subprocess, sys, time
+script, command, ready = sys.argv[1:]
+p = subprocess.Popen([script, '-qe', '/dev/null', 'sh', '-c', command], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+deadline = time.monotonic() + 15
+while not os.path.exists(ready):
+    if p.poll() is not None or time.monotonic() >= deadline:
+        p.kill() if p.poll() is None else None
+        out, err = p.communicate()
+        sys.stdout.buffer.write(out); sys.stderr.buffer.write(err)
+        sys.exit(124)
+    time.sleep(.025)
+p.stdin.write(b'\\x03'); p.stdin.flush()
+try:
+    out, err = p.communicate(timeout=10)
+except subprocess.TimeoutExpired:
+    p.kill(); out, err = p.communicate(); sys.stderr.write('script did not exit after Ctrl-C\\n'); sys.exit(124)
+sys.stdout.buffer.write(out); sys.stderr.buffer.write(err)
+sys.exit(p.returncode)
+`;
+function runBsdPtyCtrlC(command: string, ready: string, cwd: string, env: Record<string, string>): number {
+  const r = Bun.spawnSync(['python3', '-c', BSD_SCRIPT_BRIDGE, SCRIPT_BIN!, command, ready], { cwd, env });
+  if (r.exitCode !== 42) throw new Error(`BSD script exit ${r.exitCode}: ${r.stdout.toString()} ${r.stderr.toString()}`);
+  return r.exitCode;
+}
 /**
  * The command line handed to `script -c`. `script` runs it through `$SHELL`
  * (falling back to /bin/sh — hermeticEnv sets no SHELL), and the pty delivers
@@ -445,6 +471,10 @@ describe('a cwd .env cannot reach the programs gbrain spawns (sanitized re-run)'
       ].join('\n'),
     });
     const cmd = ptyCommand(`${process.execPath} ${entry} --preflight`); // exec'd: see ptyCommand
+    if (process.platform === 'darwin') {
+      expect(runBsdPtyCtrlC(cmd, ready, dir, hermeticEnv(dir))).toBe(42);
+      return;
+    }
     const proc = Bun.spawn([SCRIPT_BIN!, '-qec', cmd, '/dev/null'], {
       cwd: dir, env: hermeticEnv(dir), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
     });
@@ -512,6 +542,11 @@ describe('a cwd .env cannot reach the programs gbrain spawns (sanitized re-run)'
     const out = join(dir, 'wrapper.out');
     const err = join(dir, 'wrapper.err');
     const cmd = ptyCommand(`${process.execPath} ${entry} --preflight`, ` </dev/null >${out} 2>${err}`); // exec'd: see ptyCommand
+    if (process.platform === 'darwin') {
+      expect(runBsdPtyCtrlC(cmd, ready, dir, hermeticEnv(dir))).toBe(42);
+      expect(readFileSync(err, 'utf8')).toContain('[env] Ignoring');
+      return;
+    }
     const proc = Bun.spawn([SCRIPT_BIN!, '-qec', cmd, '/dev/null'], {
       cwd: dir, env: hermeticEnv(dir), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
     });

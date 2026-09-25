@@ -1140,10 +1140,6 @@ export async function runPhaseExtractAtoms(
       const atoms = parseOutcome.atoms.map((atom) => {
         if (!atom.source_quote) return atom;
         const sourceQuote = atom.source_quote.trim();
-        if (!sourceQuote || !item.content.includes(sourceQuote)) {
-          sourceQuotesStripped++;
-          return { ...atom, source_quote: undefined };
-        }
         return sourceQuote === atom.source_quote ? atom : { ...atom, source_quote: sourceQuote };
       });
       if (atoms.length === 0) {
@@ -1218,6 +1214,7 @@ export async function runPhaseExtractAtoms(
           // a hallucinated quote that happens to appear beyond the input cap
           // be stamped as verified provenance.
           const loc = locateQuote(promptContent, atom.source_quote ?? '');
+          if (atom.source_quote && !loc) sourceQuotesStripped++;
           const quoteFields = atom.source_quote
             ? (loc
                 ? {

@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
-import { workspacePush, acquirePushLock } from '../src/core/workspace-push.ts';
+import { workspacePush, acquirePushLock, resolveWorkspaceRoot } from '../src/core/workspace-push.ts';
 import { runHarden } from '../src/commands/sources-harden.ts';
 import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -242,7 +242,7 @@ describe('workspace-push finish() choke point', () => {
 
   test('a clean lock-skip never touches the cache (skip returns before finish)', async () => {
     seedWarnCache();
-    const lock = acquirePushLock(work);
+    const lock = acquirePushLock(resolveWorkspaceRoot(work)!);
     expect(lock.acquired).toBe(true);
     try {
       writeFileSync(join(work, 'note.md'), 'racing\n');

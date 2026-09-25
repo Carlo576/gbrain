@@ -39,6 +39,7 @@ let tmpParent: string; // GBRAIN_HOME parent (configDir appends .gbrain)
 let home: string;
 let ws: string;
 let prevHome: string | undefined;
+let prevCodexHome: string | undefined;
 
 const REQUIRED_ANSWERS: Record<string, string> = {
   AGENT_NAME: 'Dispatch',
@@ -87,7 +88,9 @@ beforeAll(async () => {
   mkdirSync(home, { recursive: true });
   ws = mkdtempSync(join(tmpdir(), 'gb-dispatch-ws-'));
   prevHome = process.env.GBRAIN_HOME;
+  prevCodexHome = process.env.CODEX_HOME;
   process.env.GBRAIN_HOME = tmpParent;
+  process.env.CODEX_HOME = join(tmpParent, 'codex-home');
 
   // Interview: all required answers, MCP_SCOPE set, HOOKS_CONSENT SKIPPED.
   expect(initState(ws).ok).toBe(true);
@@ -105,6 +108,8 @@ beforeAll(async () => {
 afterAll(() => {
   if (prevHome === undefined) delete process.env.GBRAIN_HOME;
   else process.env.GBRAIN_HOME = prevHome;
+  if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = prevCodexHome;
   rmSync(tmpParent, { recursive: true, force: true });
   rmSync(ws, { recursive: true, force: true });
 });
