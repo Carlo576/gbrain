@@ -11,8 +11,7 @@
  *   R4: search/list_pages/get_page work identically through new source_id paths
  *   R5: existing search modes (conservative/balanced/tokenmax) unaffected
  *
- * Some regressions are covered structurally elsewhere; this file is the
- * INDEX so future contributors see all five enumerated in one place.
+ * R4 and R5 are covered by the source-isolation and search-mode suites.
  */
 
 import { describe, test, expect } from 'bun:test';
@@ -107,50 +106,11 @@ describe('R3: takes resolution works regardless of grade_takes phase state', () 
 });
 
 // R4: search/list_pages/get_page work identically through new source_id paths.
-// Already covered by the existing v0.34.1 source-isolation test suite
-// (test/source-isolation-pglite.test.ts and the matching e2e tests). The
+// Covered by test/operations-source-isolation-matrix.test.ts and
+// test/e2e/source-isolation-pglite.test.ts. The
 // v0.36.1.0 wave does NOT add new source-scoped paths to these ops —
 // calibration is a NEW op surface, not a modification to existing ones.
-
-describe('R4: existing read-side ops unchanged (covered structurally)', () => {
-  test('this regression is covered by existing v0.34.1 source-isolation suite', () => {
-    // Marker test. The actual coverage is at:
-    //   - test/source-isolation-pglite.test.ts
-    //   - test/e2e/source-isolation-pglite.test.ts
-    // v0.36.1.0 does NOT modify those code paths. If the calibration wave
-    // accidentally couples to listPages/getPage/search, the existing tests
-    // catch it. This marker test exists for the IRON RULE inventory.
-    expect(true).toBe(true);
-  });
-});
 
 // R5: existing search modes (conservative/balanced/tokenmax) unaffected.
 // Same shape as R4 — the wave does NOT modify the search-mode resolution
 // layer. Existing test/search-mode.test.ts coverage stays intact.
-
-describe('R5: search modes unaffected by calibration wave', () => {
-  test('this regression is covered by existing search-mode test suite', () => {
-    // Marker test. v0.36.1.0 calibration code DOES NOT IMPORT from
-    // src/core/search/mode.ts or modify the search-mode bundle resolution.
-    // If a future refactor changes that, the existing search-mode tests
-    // (test/search-mode.test.ts) catch the behavioral regression. This
-    // marker exists for the IRON RULE inventory.
-    expect(true).toBe(true);
-  });
-});
-
-// Inventory check: confirm the 5 regressions are addressed somewhere.
-describe('IRON RULE inventory', () => {
-  test('all 5 regressions have an addressed status', () => {
-    const inventory = {
-      R1: 'covered (test/think-with-calibration.test.ts + this file)',
-      R2: 'covered (test/eval-contradictions-calibration-join.test.ts + this file)',
-      R3: 'covered (this file — import-surface coupling test)',
-      R4: 'covered (existing v0.34.1 source-isolation suite — v0.36 does not modify those paths)',
-      R5: 'covered (existing search-mode suite — v0.36 does not modify those paths)',
-    };
-    for (const key of ['R1', 'R2', 'R3', 'R4', 'R5'] as const) {
-      expect(inventory[key]).toContain('covered');
-    }
-  });
-});
