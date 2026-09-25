@@ -158,6 +158,7 @@ export function recordedPathFromFileUri(sourceUri: string | null | undefined, pa
     }
   }
   if (abs.includes('\0') || !abs.toLowerCase().endsWith('.md')) return null;
+  if (process.platform === 'win32' && /^\/[A-Za-z]:[\\/]/.test(abs)) abs = abs.slice(1);
   const rel = relative(resolve(pageRoot), resolve(abs));
   if (!rel || isAbsolute(rel) || rel.split(/[\\/]/).some((segment) => segment === '..')) return null;
   return rel;
@@ -233,7 +234,7 @@ export type PageWriteTarget =
  * form, so a local_path-relative bind for a subdirectory-scoped source would
  * read as stale and sweep the page while its file is still on disk.
  */
-function scannerSourcePath(scanRoot: string, filePath: string): string {
+export function scannerSourcePath(scanRoot: string, filePath: string): string {
   // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- scanRoot is the operator-written sources.local_path / sync.repo_path config root; canonicalizing it here mints no fs read/write path
   const absRoot = resolve(scanRoot);
   let cursor = absRoot;

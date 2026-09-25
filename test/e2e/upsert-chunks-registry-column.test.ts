@@ -14,6 +14,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { installFixtureChunks } from '../helpers/page-projection.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import {
@@ -30,7 +31,7 @@ import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 
 const REGISTRY_JSON = JSON.stringify({
   embedding_test8: { provider: 'voyage:voyage-3-large', dimensions: 8, type: 'vector' },
-  embedding_hv8: { provider: 'zeroentropyai:zembed-1', dimensions: 8, type: 'halfvec' },
+  embedding_hv8: { provider: 'fixture-provider:embedding-v1', dimensions: 8, type: 'halfvec' },
 });
 
 const VEC8 = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -74,7 +75,8 @@ function registryWriteScenario(name: string, getEngine: () => BrainEngine) {
               ? await invalidateStaleSignatureEmbeddingsGuarded(engine, opts)
               : await engine.invalidateStaleSignatureEmbeddings(opts);
             expect(invalidated).toBe(1);
-            const chunks = await engine.getChunks(slug);
+            // Inspect the raw write-side state before a retrieval projection is sealed.
+            const chunks = await engine.getChunks(slug, { includeUnsealed: true });
             expect(chunks.map((chunk) => chunk.embedding_is_null)).toEqual([false, true]);
             await engine.deletePage(slug);
           }
@@ -158,7 +160,7 @@ function registryWriteScenario(name: string, getEngine: () => BrainEngine) {
         chunk_text: 'halfvec chunk',
         chunk_source: 'compiled_truth',
         embedding: VEC8,
-        model: 'zeroentropyai:zembed-1',
+        model: 'fixture-provider:embedding-v1',
       },
     ]);
     const rows = await engine.executeRaw<{ hv_null: boolean }>(
@@ -272,7 +274,7 @@ function registryStaleScenario(name: string, getEngine: () => BrainEngine) {
 
     // getChunks' embedding_is_null reports the ACTIVE column's truth (the
     // per-page `gbrain embed <slug>` filter keys on it).
-    const chunks = await engine.getChunks(SLUG);
+    const chunks = await engine.getChunks(SLUG, { includeUnsealed: true });
     expect(chunks.length).toBe(1);
     expect(chunks[0].embedding_is_null).toBe(false);
 
@@ -287,7 +289,7 @@ function registryStaleScenario(name: string, getEngine: () => BrainEngine) {
     expect(mine.length).toBe(1);
     expect(mine[0].chunk_text).toBe('stale probe v2');
     expect(await engine.sumStaleChunkChars()).toBeGreaterThanOrEqual('stale probe v2'.length);
-    expect((await engine.getChunks(SLUG))[0].embedding_is_null).toBe(true);
+    expect((await engine.getChunks(SLUG, { includeUnsealed: true }))[0].embedding_is_null).toBe(true);
   });
 
   test(`${name}: getStats/getHealth coverage keys on the registry column`, async () => {
@@ -367,8 +369,9 @@ function registryStaleScenario(name: string, getEngine: () => BrainEngine) {
 
   test(`${name}: embedStalePages targets the registry column (no re-embed loop)`, async () => {
     const engine = getEngine();
-    // Chunk is currently stale (drift invalidation above) → one embed lands
-    // in the ACTIVE column.
+    // Complete the explicitly authored text projection after the raw drift
+    // test, then prove the deferred embedder targets the ACTIVE column.
+    await installFixtureChunks(engine, SLUG, [{ chunk_index: 0, chunk_text: 'drifted text', chunk_source: 'compiled_truth' }]);
     let calls = 0;
     const embedFn = async (texts: string[]) => {
       calls += texts.length;
@@ -484,7 +487,7 @@ describe('#1262 resolveWriteColumnFromConfigRows / vectorCastSuffix', () => {
   test('registry override of the embedding builtin wins', () => {
     const r = resolveWriteColumnFromConfigRows({
       embeddingColumnsJson: JSON.stringify({
-        embedding: { provider: 'zeroentropyai:zembed-1', dimensions: 2560, type: 'halfvec' },
+        embedding: { provider: 'fixture-provider:embedding-v1', dimensions: 2560, type: 'halfvec' },
       }),
     });
     expect(r.name).toBe('embedding');

@@ -49,13 +49,14 @@ export const google: Recipe = {
       default_dims: 768,
       dims_options: [768, 1536, 3072],
       cost_per_1m_tokens_usd: 0.15,
+      price_last_verified: '2026-04-20',
       // gemini-embedding-001 documents a 2,048-token input limit. Keep the
       // gateway pre-split conservative so dense Markdown/code chunks do not
       // rely on recursive retry as the first safety net.
       max_batch_tokens: 2048,
+      max_batch_items: 100,
       chars_per_token: 2,
       safety_factor: 0.8,
-      price_last_verified: '2026-04-20',
     },
     expansion: {
       models: ['gemini-2.5-flash', 'gemini-2.5-flash-lite'],

@@ -1,3 +1,5 @@
+import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
+import { randomUUID } from 'node:crypto';
 import { readHolders } from './context.ts';
 /**
  * Hot-memory (facts) operation cluster — pure move from operations.ts
@@ -39,6 +41,7 @@ const extract_facts: Operation = {
   description:
     'v0.31: extract personal-knowledge facts (events, preferences, commitments, beliefs, ideas, and plain facts) from a conversation turn into the per-source hot memory. Sanitizes turn_text via INJECTION_PATTERNS, calls the configured extraction model (key-aware: any servable provider — OpenAI or Anthropic key both work), runs the cosine fast-path + classifier dedup pipeline, INSERTs into facts. Returns counts by status. With NO servable chat model, returns skipped: extraction_unavailable + an agent_action telling YOU to extract and write via `remember` (visibility: "private"). Skips extraction when the turn is dream-generated content (anti-loop). For agent memory writes of a SINGLE already-formed fact, prefer the `remember` verb (zero LLM, mandatory provenance).',
   params: {
+    request_id: { ...WRITE_REQUEST_PARAM, description: `${WRITE_REQUEST_PARAM.description} Managed extraction returns durable receipts; when omitted, each call gets a new UUID. Unmanaged extraction retains its legacy non-journaled behavior.` },
     turn_text: { type: 'string', required: true, description: 'The user message or page body to extract facts from. Sanitized via INJECTION_PATTERNS before the LLM call.' },
     session_id: { type: 'string', description: 'Opaque session id (e.g. topic-id from MCP _meta.session_id, or CLI --session). Stored on each fact for the recall --session filter. Not an auth surface. NOTE (#4206): the session survives on the DB row at insert time, but the `## Facts` fence has no session column — a fence rebuild/reconcile re-derives rows session-less. Treat fence-backed facts as session-less across rebuilds.' },
     entity_hints: { type: 'array', items: { type: 'string' }, description: `Existing canonical entity slugs the agent has already resolved. Helps the extractor pick the right slug. Only the first ${ENTITY_HINTS_CAP} are forwarded to the extractor (#4209) — the response reports entity_hints_used / entity_hints_dropped; pass the most load-bearing slugs first.` },
@@ -107,6 +110,9 @@ const extract_facts: Operation = {
 
     const r = await runFactsPipeline(p.turn_text as string, {
       engine: ctx.engine,
+      operationContext: ctx,
+      requestId: typeof p.request_id === 'string' ? p.request_id : randomUUID(),
+      requestIntent: { ...p, request_id: undefined },
       sourceId,
       sessionId: typeof p.session_id === 'string' ? p.session_id : null,
       entityHints,
@@ -164,6 +170,7 @@ const extract_facts: Operation = {
       duplicate: r.duplicate,
       superseded: r.superseded,
       fact_ids: r.fact_ids,
+      ...(r.write_requests ? { write_requests: r.write_requests } : {}),
       ...hintAccounting,
     };
   },
@@ -835,6 +842,7 @@ const forget_fact: Operation = {
   name: 'forget_fact',
   description: 'Forget a fact by recording a durable withdrawal in its source and visibility. Strikes the Markdown facts fence when writable; otherwise keeps the withdrawal in the database. Stale imports cannot reactivate the same normalized claim. This retracts memory; original prose, files and backups may retain the text. Idempotent on already-expired or unknown ids.',
   params: {
+    request_id: WRITE_REQUEST_PARAM,
     id: { type: 'number', required: true, description: 'Fact id to forget.' },
     reason: { type: 'string', required: false, description: 'Optional reason; written to the fence row\'s context cell as "forgotten: <reason>". Default: "forgotten".' },
   },
@@ -842,21 +850,8 @@ const forget_fact: Operation = {
   scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'forget_fact', id: p.id };
-    const id = p.id as number;
-    const reason = typeof p.reason === 'string' ? p.reason : undefined;
-    const { forgetFactInFence } = await import('../facts/forget.ts');
-    const result = await forgetFactInFence(ctx.engine, id, {
-      reason,
-      sourceId: ctx.sourceId ?? 'default',
-      worldOnly: ctx.remote !== false,
-    });
-    if (!result.ok && result.path === 'not_found') {
-      throw new OperationError('fact_not_found', `Fact id ${id} not found.`);
-    }
-    if (!result.ok && result.path === 'already_expired') {
-      throw new OperationError('fact_already_expired', `Fact id ${id} already expired.`);
-    }
-    return { id, expired: true, path: result.path, reason: result.reason };
+    const { submitForgetMutation } = await import('../persistence/memory-mutations.ts');
+    return submitForgetMutation(ctx, 'forget_fact', p);
   },
 };
 

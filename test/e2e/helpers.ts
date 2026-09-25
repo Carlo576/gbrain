@@ -99,6 +99,9 @@ export async function setupDB(): Promise<PostgresEngine> {
   // Some tables (e.g. v0.28 takes/synthesis_evidence) only exist after
   // migrations run via engine.connect() below, so skip non-existent tables.
   const conn = db.getConnection();
+  const embeddingIdentity = await conn.unsafe<Array<{ key: string; value: string }>>(
+    `SELECT key, value FROM config WHERE key IN ('embedding_model', 'embedding_dimensions')`,
+  );
   for (const table of ALL_TABLES) {
     try {
       await conn.unsafe(`TRUNCATE ${table} CASCADE`);
@@ -113,6 +116,9 @@ export async function setupDB(): Promise<PostgresEngine> {
     INSERT INTO config (key, value) VALUES ('schema_version', '1')
     ON CONFLICT (key) DO NOTHING
   `);
+  for (const row of embeddingIdentity) {
+    await conn.unsafe('INSERT INTO config (key, value) VALUES ($1, $2)', [row.key, row.value]);
+  }
 
   // Reset leaked brain identity: `sources` is not in ALL_TABLES (the default
   // row must survive), but rows/columns written by earlier files or runs
@@ -206,10 +212,10 @@ export function getConn() {
 
 /**
  * Import all fixture files from test/e2e/fixtures/ into the brain.
+ * An explicit engine lets a fixture own its database without shared resets.
  * Returns the list of import results.
  */
-export async function importFixtures() {
-  const e = getEngine();
+export async function importFixtures(e: PostgresEngine = getEngine()) {
   const results: Array<{ slug: string; status: string; chunks: number }> = [];
 
   const files = findMarkdownFiles(FIXTURES_DIR);
