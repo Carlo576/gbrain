@@ -22,6 +22,9 @@ function run(args: string[]): { exitCode: number; stdout: string; stderr: string
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: REPO,
+      // --recent can enumerate a large active checkout; the default 1 MiB
+      // execFileSync buffer truncates otherwise valid JSON.
+      maxBuffer: 32 * 1024 * 1024,
     });
     return { exitCode: 0, stdout, stderr: '' };
   } catch (err: any) {

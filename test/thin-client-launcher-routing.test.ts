@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderAgentLauncher } from '../src/core/agent-install/launcher.ts';
@@ -7,7 +7,7 @@ import { installHarnessConnection } from '../src/core/harness/install.ts';
 import { runCli } from './helpers/cli-spawn.ts';
 
 let home: string;
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'gbrain-thin-launcher-')); });
+beforeEach(() => { home = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-thin-launcher-')); });
 afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
 test.each([

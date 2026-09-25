@@ -499,7 +499,8 @@ function makeSkillWithoutTriggers(dir: string, name: string): void {
     join(dir, name, "SKILL.md"),
     "---\n" +
     `name: ${name}\n` +
-    "description: belongs to a different tool, no triggers field\n" +
+    // Description is a fallback trigger in the current loader; omit it to
+    // exercise a genuinely unroutable foreign skill.
     "---\n" +
     "body\n"
   );

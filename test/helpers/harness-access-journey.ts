@@ -1,5 +1,5 @@
 import { expect } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer, type AddressInfo } from 'node:net';
@@ -18,7 +18,7 @@ import { assertSafeE2eDatabaseUrl } from './db-guard.ts';
  * randomized clients, no providers, no production database or native-app claim. */
 export async function harnessAccessJourney(databaseUrl?: string) {
   if (databaseUrl) assertSafeE2eDatabaseUrl(databaseUrl);
-  const root = mkdtempSync(join(tmpdir(), 'gbrain-harness-http-'));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-harness-http-'));
   const seed = randomBytes(6).toString('hex');
   const name = `harness-${seed}`;
   const adminToken = `fixture-admin-${randomBytes(24).toString('hex')}`;

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -8,7 +8,7 @@ import { hashToken } from '../src/core/utils.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 test('live client secret gates journal recovery after rotation; resumed credentials renew instead of replaying access tokens', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'gbrain-delivery-recovery-'));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-delivery-recovery-'));
   const engine = new PGLiteEngine();
   try {
     await engine.connect({ engine: 'pglite' }); await engine.initSchema();

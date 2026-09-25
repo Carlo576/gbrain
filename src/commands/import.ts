@@ -1263,7 +1263,7 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   // vendored data/fixtures). `--cached --others --exclude-standard` = tracked
   // PLUS untracked-not-ignored, so uncommitted source is still indexed. Non-git
   // dirs (or git unavailable) fall through to the FS walk below.
-  const syncableOpts = repoSyncableOptions(dir, strategy);
+  const syncableOpts = { ...repoSyncableOptions(dir, strategy), includeHidden: opts.includeHidden };
   if (!opts.includeGitignored) {
     const gitFiles = gitListSyncableFiles(
       dir, strategy, multimodalOn, opts.onExcluded, opts.includeHidden,

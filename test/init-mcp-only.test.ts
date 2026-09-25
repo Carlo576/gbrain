@@ -17,7 +17,7 @@ import { describe, test as testRaw, expect, beforeAll, afterAll, beforeEach, aft
 function test(name: string, fn: () => void | Promise<unknown>): void {
   testRaw(name, fn, 30000);
 }
-import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, realpathSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { createServer, Server } from 'http';
@@ -72,7 +72,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  tmp = mkdtempSync(join(tmpdir(), 'gbrain-init-mcp-only-'));
+  tmp = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-init-mcp-only-'));
   discoveryStatus = 200;
   tokenStatus = 200;
   mcpStatus = 200;
@@ -308,7 +308,7 @@ describe('gbrain init re-run guard', () => {
     expect(JSON.parse(refused.stdout.trim().split('\n').pop()!).reason).toBe('local_config_present');
     expect(readFileSync(configPath(), 'utf8')).toBe(original);
     const converted = await run([...remoteArgs(), '--force'], { OPENAI_API_KEY: 'ambient-not-persisted', DATABASE_URL: 'postgres://foreign.invalid/brain' });
-    expect(converted.exitCode).toBe(0);
+    expect(converted.exitCode, converted.stdout + converted.stderr).toBe(0);
     const config = JSON.parse(readFileSync(configPath(), 'utf8'));
     expect(config.openai_api_key).toBeUndefined(); expect(config.database_url).toBeUndefined();
     expect(config.schema_pack).toBe('gbrain-base');

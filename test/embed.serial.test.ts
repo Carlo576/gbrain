@@ -2,6 +2,7 @@ import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import * as realEmbedding from '../src/core/embedding.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { DbLockHandle } from '../src/core/db-lock.ts';
+import { estimateEmbedTokens } from '../src/core/chunkers/token-estimate.ts';
 
 // Mock the embedding module BEFORE importing runEmbed, so runEmbed picks up
 // the mocked embedBatch. We track max concurrent invocations via a counter
@@ -92,7 +93,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.GBRAIN_EMBED_CONCURRENCY;
   delete process.env.GBRAIN_EMBED_TIME_BUDGET_MS;
-  delete process.env.GBRAIN_EMBED_RECHUNK_MAX_CHARS;
+  delete process.env.GBRAIN_MAX_CHUNK_TOKENS;
   delete process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS;
   delete process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS;
   delete process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS;
@@ -327,22 +328,22 @@ describe('runEmbed --all (parallel)', () => {
 
   test('re-chunks oversized stale rows before embedding', async () => {
     process.env.GBRAIN_EMBED_CONCURRENCY = '1';
-    process.env.GBRAIN_EMBED_RECHUNK_MAX_CHARS = '40';
+    process.env.GBRAIN_MAX_CHUNK_TOKENS = '64';
 
     const slug = 'oversized';
     let chunksBySlug = new Map<string, any[]>([
       [slug, [{
         chunk_index: 0,
-        chunk_text: 'x'.repeat(120),
+        chunk_text: 'x'.repeat(1200),
         chunk_source: 'compiled_truth',
         embedded_at: null,
-        token_count: 120,
+        token_count: 300,
       }]],
     ]);
 
     const upserts: any[][] = [];
     embedBatchBehavior = async (texts: string[]) => {
-      expect(texts.every(t => t.length <= 40)).toBe(true);
+      expect(texts.every(t => estimateEmbedTokens(t) <= 64)).toBe(true);
       return texts.map(() => new Float32Array(1536));
     };
 
@@ -351,14 +352,14 @@ describe('runEmbed --all (parallel)', () => {
       listStaleChunks: async () => [{
         slug,
         chunk_index: 0,
-        chunk_text: 'x'.repeat(120),
+        chunk_text: 'x'.repeat(1200),
         chunk_source: 'compiled_truth' as const,
         model: null,
-        token_count: 120,
+        token_count: 300,
         source_id: 'default',
         page_id: 1,
       }],
-      getPage: async () => ({ slug, compiled_truth: 'x'.repeat(120), timeline: '' }),
+      getPage: async () => ({ slug, compiled_truth: 'x'.repeat(1200), timeline: '' }),
       getChunks: async () => chunksBySlug.get(slug) || [],
       upsertChunks: async (_slug: string, inputs: any[]) => {
         upserts.push(inputs);

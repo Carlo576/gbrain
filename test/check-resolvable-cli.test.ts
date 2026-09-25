@@ -9,6 +9,7 @@ import {
   DEFERRED,
 } from '../src/commands/check-resolvable.ts';
 import { checkResolvable } from '../src/core/check-resolvable.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 // Path to the CLI entry point. Runs through bun directly so tests don't
 // require a pre-built binary. Always invoked from the repo root so bun can
@@ -195,7 +196,7 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
     expect(r.source).toBe('explicit');
   });
 
-  it('v0.31.7: empty cwd falls back to install-path (finds bundled skills/)', () => {
+  it('v0.31.7: empty cwd falls back to install-path (finds bundled skills/)', async () => {
     // Temporarily chdir to a guaranteed-empty tmpdir. findRepoRoot from cwd
     // walks up and fails — but autoDetectSkillsDirReadOnly's tier-5
     // install-path fallback then walks up from the gbrain module's own
@@ -209,12 +210,14 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
     const original = process.cwd();
     try {
       process.chdir(empty);
-      const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: null });
-      // Install-path fallback succeeds when test runs inside the gbrain repo.
-      expect(r.error).toBeNull();
-      // r.dir is join()/resolve()-built, so the separator is '\' on win32.
-      expect(r.dir).toMatch(/[\\/]skills$/);
-      expect(r.source).toBe('install_path');
+      await withEnv({ HOME: empty, OPENCLAW_WORKSPACE: undefined, GBRAIN_SKILLS_DIR: undefined }, () => {
+        const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: null });
+        // Install-path fallback succeeds when test runs inside the gbrain repo.
+        expect(r.error).toBeNull();
+        // r.dir is join()/resolve()-built, so the separator is '\' on win32.
+        expect(r.dir).toMatch(/[\\/]skills$/);
+        expect(r.source).toBe('install_path');
+      });
     } finally {
       process.chdir(original);
       rmSync(empty, { recursive: true, force: true });
@@ -447,7 +450,7 @@ describe('gbrain check-resolvable CLI — integration', () => {
       // Pass --fix; expect refusal exit + clear error message.
       const r = spawnSync('bun', ['run', CLI, 'check-resolvable', '--fix'], {
         cwd: empty,
-        env: { ...process.env, OPENCLAW_WORKSPACE: '', GBRAIN_SKILLS_DIR: '' },
+        env: { ...process.env, HOME: empty, OPENCLAW_WORKSPACE: '', GBRAIN_SKILLS_DIR: '' },
         encoding: 'utf-8',
       });
       expect(r.status).toBe(1);
