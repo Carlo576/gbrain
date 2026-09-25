@@ -52,21 +52,16 @@ describe('IngestionSource contract constants', () => {
 describe('computeContentHash', () => {
   test('produces a 64-char lowercase hex string', () => {
     const h = computeContentHash('hello world');
-    expect(h).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  test('deterministic for the same input', () => {
-    expect(computeContentHash('foo')).toBe(computeContentHash('foo'));
+    expect(h).toBe('b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9');
   });
 
   test('different inputs produce different hashes', () => {
     expect(computeContentHash('foo')).not.toBe(computeContentHash('bar'));
   });
 
-  test('empty string is allowed and stable', () => {
+  test('empty string yields a valid hash', () => {
     const h = computeContentHash('');
     expect(h).toMatch(/^[0-9a-f]{64}$/);
-    expect(computeContentHash('')).toBe(h);
   });
 });
 

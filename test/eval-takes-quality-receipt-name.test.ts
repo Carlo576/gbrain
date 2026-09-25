@@ -11,17 +11,12 @@ import {
 } from '../src/core/takes-quality-eval/receipt-name.ts';
 
 describe('corpusSha8', () => {
-  test('deterministic: same input → same sha', () => {
-    expect(corpusSha8('hello world')).toBe(corpusSha8('hello world'));
-  });
-
   test('different inputs → different shas', () => {
     expect(corpusSha8('a')).not.toBe(corpusSha8('b'));
   });
 
-  test('output is exactly 8 hex chars', () => {
-    const s = corpusSha8('any');
-    expect(s).toMatch(/^[0-9a-f]{8}$/);
+  test('uses an 8-character SHA-256 prefix for receipt identity', () => {
+    expect(corpusSha8('hello world')).toBe('b94d27b9');
   });
 });
 
