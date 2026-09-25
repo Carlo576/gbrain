@@ -207,6 +207,7 @@ describe('op-layer capture — search', () => {
   test('explicit source_id overrides ctx.sourceId for search retrieval', async () => {
     const ctx = makeCtx({
       sourceId: 'default',
+      remote: false,
       config: makeConfig({ capture: false }),
     });
 
