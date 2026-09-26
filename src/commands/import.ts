@@ -18,7 +18,7 @@ import {
   matchesAnyGlob,
   pruneDir,
   isPathPruned,
-  SYNC_SKIP_FILES,
+  isSyncMetafile,
   repoSyncableOptions,
   isSyncable,
   type SyncStrategy,
@@ -1187,7 +1187,7 @@ function isCollectibleForWalker(
   // applies. Guards both the FS-walk and the git-fast-path collection routes.
   const segments = path.split('/');
   const basename = segments[segments.length - 1] || '';
-  if ((SYNC_SKIP_FILES as readonly string[]).includes(basename)) return false;
+  if (isSyncMetafile(basename)) return false;
 
   switch (strategy) {
     case 'code':

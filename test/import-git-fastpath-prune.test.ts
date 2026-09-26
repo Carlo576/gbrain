@@ -79,7 +79,7 @@ describe('#2607 — git fast path excludes what incremental sync excludes', () =
     expect(files).not.toContain(join('people', 'pedro.raw', 'source.md'));
     // Metafiles stay excluded too.
     expect(files).not.toContain('README.md');
-    expect(files).not.toContain(join('notes', 'index.md'));
+    expect(files).toContain(join('notes', 'index.md')); // fork: authored knowledge hubs
   });
 
   test('full-sync enumeration agrees with incremental isSyncable for every collected file', () => {

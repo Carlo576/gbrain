@@ -1,6 +1,6 @@
 /**
  * Closes #345: the bulk-import walker must skip SYNC_SKIP_FILES metafiles
- * (README.md / index.md / log.md / schema.md / RESOLVER.md), the same way
+ * (README.md / log.md / schema.md / RESOLVER.md; fork admits authored index.md hubs), the same way
  * incremental `sync` (isSyncable) does.
  *
  * Root cause this locks: a directory-import pass imported every directory
@@ -43,11 +43,12 @@ describe('collectSyncableFiles metafile exclusion (closes #345)', () => {
     write('RESOLVER.md', '# Brain Resolver\n');
   }
 
-  test('FS-walk path excludes README/index/log/schema/RESOLVER, keeps real pages', () => {
+  test('FS-walk path excludes structural files, keeps real pages and authored index hubs', () => {
     seed();
     const got = collectSyncableFiles(tmp).map(f => basename(f));
     expect(got).toContain('example-person.md');
-    for (const meta of ['README.md', 'index.md', 'log.md', 'schema.md', 'RESOLVER.md']) {
+    expect(got).toContain('index.md');
+    for (const meta of ['README.md', 'log.md', 'schema.md', 'RESOLVER.md']) {
       expect(got).not.toContain(meta);
     }
   });
@@ -59,7 +60,7 @@ describe('collectSyncableFiles metafile exclusion (closes #345)', () => {
     const got = collectSyncableFiles(tmp).map(f => basename(f));
     expect(got).toContain('example-person.md');
     expect(got.filter(n => n === 'README.md')).toHaveLength(0);
-    expect(got).not.toContain('index.md');
+    expect(got).toContain('index.md');
     expect(got).not.toContain('log.md');
     expect(got).not.toContain('schema.md');
     expect(got).not.toContain('RESOLVER.md');

@@ -579,6 +579,14 @@ export function sanitizePathForDisplay(path: string): string {
 // to retrieve. schema.md/log.md/README.md/RESOLVER.md remain structural-only.
 export const SYNC_SKIP_FILES = ['schema.md', 'log.md', 'README.md', 'RESOLVER.md'] as const;
 
+/** Fork opt-in for repositories whose READMEs are authored knowledge guides.
+ * Does not bypass path pruning or repository include/exclude rules. */
+export function isSyncMetafile(basename: string): boolean {
+  if (basename === 'README.md' && process.env.GBRAIN_SYNC_INCLUDE_README === '1') return false;
+  return (SYNC_SKIP_FILES as readonly string[]).includes(basename);
+}
+
+
 /**
  * Internal classifier. Returns null when the path IS syncable, or a tagged
  * SyncableReason explaining why it isn't. The single source of truth that
@@ -608,7 +616,7 @@ function classifySync(path: string, opts: SyncableOptions = {}): SyncableReason 
   // Skip meta files that aren't pages
   const segments = path.split('/');
   const basename = segments[segments.length - 1] || '';
-  if ((SYNC_SKIP_FILES as readonly string[]).includes(basename)) return 'metafile';
+  if (isSyncMetafile(basename)) return 'metafile';
 
   if (opts.include && opts.include.length > 0 && !matchesAnyGlob(path, opts.include)) return 'include-glob-miss';
   if (opts.exclude && opts.exclude.length > 0 && matchesAnyGlob(path, opts.exclude)) return 'exclude-glob-hit';
