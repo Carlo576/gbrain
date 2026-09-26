@@ -63,7 +63,17 @@ fi
 # Run it against a temp GBRAIN_HOME. The smoketest boots a persistent PGLite
 # brain, upserts a page, and reads it back; it prints one JSON line and exits 0
 # only on a successful round-trip.
-OUTPUT="$(GBRAIN_HOME="$GBRAIN_HOME_DIR" HOME="$GBRAIN_HOME_DIR" GBRAIN_SKIP_STARTUP_HOOKS=1 "$OUT_BIN" 2>&1 || true)"
+set +e
+OUTPUT="$(GBRAIN_HOME="$GBRAIN_HOME_DIR" HOME="$GBRAIN_HOME_DIR" GBRAIN_SKIP_STARTUP_HOOKS=1 "$OUT_BIN" 2>&1)"
+RUN_STATUS=$?
+set -e
+
+if (( RUN_STATUS != 0 )); then
+  echo "[check-pglite-embedded] FAIL: compiled smoketest exited with status $RUN_STATUS." >&2
+  echo "[check-pglite-embedded] Output was:" >&2
+  echo "$OUTPUT" >&2
+  exit 1
+fi
 
 if echo "$OUTPUT" | grep -qE '\$bunfs|Extension bundle not found|PGLite failed to initialize|pglite\.data'; then
   echo "[check-pglite-embedded] FAIL: compiled binary hit a Bun-vfs asset error (assets not embedded)." >&2
