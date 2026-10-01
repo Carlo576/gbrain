@@ -29,12 +29,13 @@ import type { SearchResult, PageType, RelationalFanoutRow, PageReadPolicy } from
 import { createAuditWriter } from '../audit/audit-writer.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
 import { buildVisibilityClause } from './sql-ranking.ts';
+import { appendSearchTypesClause } from './type-filter-sql.ts';
 import { hasReadPolicy, pageReadFilter } from './read-policy-sql.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { parseRelationalQuery, type RelationalQuery, type RelationVocab } from './relational-intent.ts';
 import { stampEvidence, type EvidenceOpts } from './evidence.ts';
 
-export interface RelationalArmOpts extends PageReadPolicy {
+export interface RelationalArmOpts extends PageReadPolicy, Pick<import('../types.ts').SearchOpts, 'type' | 'types' | 'expandedTypes' | 'exclude_slugs'> {
   sourceId?: string;
   sourceIds?: string[];
   depth?: number;
@@ -128,11 +129,15 @@ async function hydrate(
   engine: BrainEngine,
   rows: RelationalFanoutRow[],
   seedSlug: string,
-  policy: PageReadPolicy,
+  policy: RelationalArmOpts,
 ): Promise<SearchResult[]> {
   if (rows.length === 0) return [];
   const params: unknown[] = [rows.map(r => r.source_id), rows.map(r => r.slug)];
-  const filter = pageReadFilter('p', policy, params);
+  let filter = pageReadFilter('p', policy, params);
+  if (policy.type) { params.push(policy.type); filter += ` AND p.type = $${params.length}`; }
+  const typesClause = appendSearchTypesClause(params, policy);
+  if (typesClause) filter += ` ${typesClause}`;
+  if (policy.exclude_slugs?.length) { params.push(policy.exclude_slugs); filter += ` AND p.slug != ALL($${params.length}::text[])`; }
   const pageRows = await engine.executeRaw<{
     page_id: number; slug: string; source_id: string; title: string; type: string; synopsis: string | null;
   }>(

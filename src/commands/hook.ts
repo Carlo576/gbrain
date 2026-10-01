@@ -105,6 +105,7 @@ import {
   recordBackupSpawn,
 } from '../core/backup/status-file.ts';
 import { realpathOrResolve } from '../core/path-confine.ts';
+import { isClaudeCliSelfTranscriptPath } from '../core/ai/providers/claude-cli-scratch.ts';
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 
@@ -1134,6 +1135,10 @@ async function hookUserPrompt(io: HookIo): Promise<number> {
     if (j.transcript_path !== undefined && j.transcript_path !== null) {
       const conf = confineTranscriptPath(j.transcript_path, {
         ...(io.transcriptRoot ? { root: io.transcriptRoot } : {}),
+        // #5701: bounded tail read below — the 50MiB whole-file gate must not
+        // reject a long session before it runs (full rationale in
+        // claude-code-jsonl.ts's confinement).
+        allowOversize: true,
       });
       if (!conf.ok) return { outcome: 'degraded', reason: `transcript_${conf.reason}` };
       try {
@@ -1337,6 +1342,10 @@ async function hookCompact(io: HookIo): Promise<number> {
     if (j.transcript_path !== undefined && j.transcript_path !== null) {
       const conf = confineTranscriptPath(j.transcript_path, {
         ...(io.transcriptRoot ? { root: io.transcriptRoot } : {}),
+        // #5701: bounded tail read below — the 50MiB whole-file gate must not
+        // reject a long session before it runs (full rationale in
+        // claude-code-jsonl.ts's confinement).
+        allowOversize: true,
       });
       if (!conf.ok) { outcome = 'degraded'; reason = `transcript_${conf.reason}`; return; }
       try {
@@ -1471,6 +1480,8 @@ async function hookStop(io: HookIo): Promise<number> {
       if (tp === undefined || tp === null) return 'no_transcript';
       const conf = confineTranscriptPath(tp as string, {
         ...(io.transcriptRoot ? { root: io.transcriptRoot } : {}),
+        // #5701: bounded tail reads (128KB probe, then the 2MB cap).
+        allowOversize: true,
       });
       if (!conf.ok) return `transcript_${conf.reason}`;
       const findLastUser = (parsed: ReturnType<typeof parseTranscript>): WindowTurn | undefined => {
@@ -1665,7 +1676,8 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
     // (today's behavior, pinned by the capture-spec golden test).
     const spec = captureSpecFor(io.harness);
     const rootOpt = io.transcriptRoot ? { root: io.transcriptRoot } : {};
-    let conf = spec.confine(j?.transcript_path, { ...rootOpt });
+    // #5701: every spec parser reads a bounded window (claude tail, codex head+tail).
+    let conf = spec.confine(j?.transcript_path, { ...rootOpt, allowOversize: true });
     // A newest-mtime discovery with NO session-id match is a guess: on a
     // machine with concurrent sessions it can be a different, still-RUNNING
     // rollout. Fine for the local corpus (overwritten on the real session
@@ -1685,6 +1697,16 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
     }
     if (!conf.ok) {
       degrade(`transcript_${conf.reason}`);
+    } else if (
+      isClaudeCliSelfTranscriptPath(conf.path) ||
+      (ws !== undefined && isClaudeCliSelfTranscriptPath(ws))
+    ) {
+      // #5413: this session is gbrain's OWN claude-cli subprocess (the
+      // scratch cwd fingerprint appears in the transcript path or the
+      // payload cwd). Writing it to the dream corpus is a self-ingestion
+      // feedback loop — extraction prompts and page content re-enter as
+      // "conversations", and synthesize mints duplicate idea pages.
+      segmentMode = 'self_transcript';
     } else {
       const parsed = spec.parse(conf.path, { collectToolCalls: memorableAllowed });
       if (sessionId === 'unknown') {

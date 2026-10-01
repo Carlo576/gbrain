@@ -236,9 +236,9 @@ describe('importFromContent type_warning (advisory, type stored literally)', () 
     await engine.putPage('notes/racing-projection-page', {
       type: 'happening', title: 'T', compiled_truth: 'Old body.', timeline: '', frontmatter: {},
     });
-    const originalTransaction = engine.transaction.bind(engine);
+    const originalTransaction = engine.transaction;
     let injected = false;
-    engine.transaction = (async (fn: Parameters<typeof engine.transaction>[0]) => {
+    engine.transaction = (async function (this: typeof engine, fn: Parameters<typeof engine.transaction>[0]) {
       if (!injected) {
         injected = true;
         await engine.putPage('notes/racing-projection-page', {
@@ -250,10 +250,10 @@ describe('importFromContent type_warning (advisory, type stored literally)', () 
           },
         });
       }
-      return originalTransaction(fn);
+      return originalTransaction.call(this, fn);
     }) as typeof engine.transaction;
     try {
-      await importWithType('notes/racing-projection-page', null, MAPPING_PACK as never);
+      await expect(importWithType('notes/racing-projection-page', null, MAPPING_PACK as never)).rejects.toMatchObject({ code: 'revision_conflict' });
     } finally {
       engine.transaction = originalTransaction as typeof engine.transaction;
     }

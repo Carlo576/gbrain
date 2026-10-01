@@ -56,7 +56,7 @@ beforeAll(async () => {
     compiled_truth: 'legacy telescope evidence appears here',
     frontmatter: { legacy_type: 'research' },
   });
-  await engine.upsertChunks('analysis/research-example', [
+  await installFixtureChunks(engine, 'analysis/research-example', [
     { chunk_index: 0, chunk_text: 'legacy telescope evidence appears here', chunk_source: 'compiled_truth' },
   ]);
   await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('team-b', 'team-b') ON CONFLICT (id) DO NOTHING`);
@@ -64,7 +64,7 @@ beforeAll(async () => {
     type: 'analysis', title: 'Team B research', compiled_truth: 'team-b legacy telescope evidence',
     frontmatter: { legacy_type: 'research' },
   }, { sourceId: 'team-b' });
-  await engine.upsertChunks('analysis/team-b-research', [
+  await installFixtureChunks(engine, 'analysis/team-b-research', [
     { chunk_index: 0, chunk_text: 'team-b legacy telescope evidence', chunk_source: 'compiled_truth' },
   ], { sourceId: 'team-b' });
   // Keyword-only path for the search op: no embedding provider needed.

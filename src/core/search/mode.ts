@@ -734,6 +734,10 @@ export interface ResolveSearchModeInput {
   overrides?: SearchKeyOverrides;
   /** Per-call opts (SearchOpts / HybridSearchOpts). */
   perCall?: SearchPerCallOpts;
+  /** Raw `search.source_boosts` (read in the same snapshot; see source-boost.ts). */
+  sourceBoosts?: string;
+  /** Raw `search.alias_token_hop` (read in the same snapshot; #5428, opt-in). */
+  aliasTokenHop?: string;
 }
 
 export interface ResolvedSearchKnobs extends ModeBundle {
@@ -872,6 +876,13 @@ export const KNOBS_HASH_VERSION = 29;
  * don't know the column produce a stable hash for the default case.
  */
 export interface KnobsHashContext {
+  /**
+   * #5691: the brain's `embedding_query_prefix`. The query embedding the
+   * cache keys on is computed from prefix + query, so a row written under one
+   * prefix must never serve another. Empty/undefined adds no key part, so
+   * rows written without a prefix keep their key.
+   */
+  queryPrefix?: string;
   /** Resolved column name, e.g. 'embedding', 'embedding_voyage'. */
   embeddingColumn?: string;
   /** Resolved provider:model, e.g. 'voyage:voyage-3-large'. */
@@ -1138,6 +1149,9 @@ export function knobsHash(
     // `always` lookup. A partial-knobs literal hashes as `always` — the deliberate pre-wave hash identity, NOT the bundle default (`lexical`).
     `mbg=${knobs.metadata_boost_gate ?? DEFAULT_METADATA_BOOST_GATE}`,
   ];
+  // #5691 (append-only, no version bump): only a non-empty query prefix adds
+  // a part, so every row written without one keeps its key.
+  if (ctx?.queryPrefix) parts.push(`qp=${createHash('sha256').update(ctx.queryPrefix).digest('hex').slice(0, 16)}`);
   const h = createHash('sha256');
   h.update(parts.join('|'));
   return h.digest('hex').slice(0, 16);
@@ -1441,6 +1455,10 @@ export const SEARCH_MODE_CONFIG_KEYS: ReadonlyArray<string> = Object.freeze(Obje
  * the operator's mode choice.
  */
 export const SEARCH_MODE_KEY = 'search.mode';
+/** Per-brain source-boost map, read alongside the mode keys (not a bundle knob). */
+export const SOURCE_BOOSTS_KEY = 'search.source_boosts';
+/** Opt-in single-token alias hop (#5428), read alongside the mode keys. */
+export const ALIAS_TOKEN_HOP_KEY = 'search.alias_token_hop';
 
 /**
  * Load the live mode config (mode + per-key overrides) from the brain engine.
@@ -1478,8 +1496,10 @@ export async function loadSearchModeConfig(
     }
   };
 
-  const [mode, ...overrideValues] = await Promise.all([
+  const [mode, sourceBoosts, aliasTokenHop, ...overrideValues] = await Promise.all([
     safeGet(SEARCH_MODE_KEY),
+    safeGet(SOURCE_BOOSTS_KEY),
+    safeGet(ALIAS_TOKEN_HOP_KEY),
     ...SEARCH_MODE_CONFIG_KEYS.map(safeGet),
   ]);
 
@@ -1491,5 +1511,7 @@ export async function loadSearchModeConfig(
   return {
     mode,
     overrides: loadOverridesFromConfig(configMap),
+    ...(sourceBoosts !== undefined ? { sourceBoosts } : {}),
+    ...(aliasTokenHop !== undefined ? { aliasTokenHop } : {}),
   };
 }

@@ -99,7 +99,7 @@ beforeAll(async () => {
     compiled_truth: 'Primary evidence with legacy-keyword-xyz.',
     frontmatter: { legacy_type: 'primary-source-page' },
   });
-  await engine.upsertChunks('sources/primary-1', [{
+  await installFixtureChunks(engine, 'sources/primary-1', [{
     chunk_index: 0, chunk_text: 'Primary evidence with legacy-keyword-xyz.',
     chunk_source: 'compiled_truth', embedding: basisEmbedding(13), token_count: 10,
   }]);
@@ -109,7 +109,7 @@ beforeAll(async () => {
     compiled_truth: 'Raw evidence with legacy-keyword-xyz.',
     frontmatter: { legacy_type: 'raw-source' },
   });
-  await engine.upsertChunks('sources/raw-1', [{
+  await installFixtureChunks(engine, 'sources/raw-1', [{
     chunk_index: 0, chunk_text: 'Raw evidence with legacy-keyword-xyz.',
     chunk_source: 'compiled_truth', embedding: basisEmbedding(14), token_count: 10,
   }]);

@@ -9,6 +9,7 @@ description: |
 triggers:
   - any brain read/write/lookup/citation
 tools:
+  - recall
   - search
   - query
   - get_page
@@ -49,6 +50,18 @@ suppresses writes for that turn, including when standing capture is enabled.
 > `put_page` / `add_link` / `add_timeline_entry` stay the page/graph write path.
 > Fall back to the classic ops when the verbs aren't on the surface. Contract:
 > `docs/protocol/MEMORY_VERBS_v1.md`.
+>
+> **Tight-budget page questions:** explicitly use
+> `recall({query: "zebra telescope", budget_tokens: 75, budget_policy: "query_first"})`
+> so ranked page evidence packs before recent facts. CLI:
+> `gbrain recall --query 'zebra telescope' --budget-tokens 75 --budget-policy query_first --json`.
+> Keep entity-first, event/session-filtered and fact-focused questions on their
+> existing facts-first route; do not change `context_pack`. Costs are character-based
+> estimates, and an oversized first item is dropped without skipping or truncation.
+> Read `budget_packing` before interpreting an empty result as missing memory.
+> See `skills/query/SKILL.md` for the MCP request and caller example. Guidance is
+> not native-harness activation: adoption remains unverified until a fresh
+> conversation is observed making the opted-in call.
 >
 > **Choose a readback path that can see the intended visibility.** Trusted local
 > CLI callers can recall and withdraw private facts. Every MCP caller, including
@@ -162,10 +175,16 @@ the write path:
   `gbrain serve --http` does not self-sweep — reconcile on demand with
   `gbrain sweep --once` (delegates to the live serve over IPC) or
   `gbrain extract links --source db`.
-  Use `add_link` for relationships you need immediately. Untrusted body text can plant
+  Use `add_link` for relationships you need immediately, except meeting
+  attendance, which auto-link derives from the meeting page. Untrusted body text can plant
   ranking-boosting edges, which is why the inline path is local-only.
-- Inferred link types: `attended` (meeting -> person), `works_at`, `invested_in`,
-  `founded`, `advises`, `source` (frontmatter), `mentions` (default).
+- Inferred link types: `attended`, `works_at`, `invested_in`, `founded`,
+  `advises`, `source` (frontmatter), `mentions` (default). Where the active
+  schema pack does not override attendance (gbrain-base-v2, which `gbrain init`
+  sets), `attended` comes only from a meeting page's explicit attendee list
+  (its `Attendees:` line or `attendees:` frontmatter) and points
+  `person -> meeting`; a pack that overrides it, such as the older
+  `gbrain-base`, sets its own rule and direction.
 - To disable: `gbrain config set auto_link false`. Default is on.
 - Timeline entries with specific dates still need explicit `gbrain timeline-add`
   (or batch via `gbrain extract timeline --source db`).
