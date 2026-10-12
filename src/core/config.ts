@@ -1765,7 +1765,13 @@ export function configDir(): string {
     }
     return join(trimmed, '.gbrain');
   }
-  return join(homedir(), '.gbrain');
+  // Bun's os.homedir() snapshots HOME at process start; Node re-reads it on
+  // every call. Read $HOME first so a runtime HOME change resolves the same
+  // way on both runtimes. Without this, a test that sets HOME=<tmp> and drops
+  // GBRAIN_HOME wrote autopilot-run.sh and env into the operator's real
+  // ~/.gbrain, and launchd then ran the test's fake binary every minute.
+  const home = process.env.HOME?.trim();
+  return join(home && isAbsolute(home) ? home : homedir(), '.gbrain');
 }
 
 export function configPath(): string {
