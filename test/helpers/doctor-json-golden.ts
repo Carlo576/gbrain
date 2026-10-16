@@ -184,7 +184,7 @@ export function normalizeTerminalByteWorkload(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizeTerminalByteWorkload);
   if (!value || typeof value !== 'object') return value;
   const row = value as Record<string, unknown>;
-  const derived = new Set(['used', 'max_day_7d', 'net_per_day_7d', 'per_day_7d']);
+  const derived = new Set(['used', 'max_day_7d', 'net_per_day_7d', 'per_day_7d', 'reclaimable_bytes']);
   return Object.fromEntries(Object.entries(row).map(([key, item]) => [key,
     row.resource === 'terminal_bytes' && derived.has(key) ? '<path-dependent-bytes>' : normalizeTerminalByteWorkload(item)]));
 }

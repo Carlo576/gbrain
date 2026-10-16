@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assertPgliteGraduationOpenable, currentProcessIdentity, graduatedPath, graduationHandOffRequested, inspectGraduationPath,
-  intentMarkerPath, moveAsideHeld, processStartTime, readIntentMarker, readTombstone, registerGraduationRunInProcess, removeTombstone,
+  intentMarkerPath, markerLiveness, moveAsideHeld, processStartTime, readIntentMarker, readTombstone, registerGraduationRunInProcess, removeTombstone,
   TombstonePathOccupiedError, writeIntentMarker, writeTombstone,
 } from '../src/core/persistence/graduation-custody.ts';
 import type { IntentMarker, ManifestState, Tombstone } from '../src/core/persistence/engine-graduation.types.ts';
@@ -209,4 +209,9 @@ describe('PGLite open-path refusals', () => {
     expect((error as { fix?: { argv?: string[]; actor?: string } }).fix).toMatchObject({ argv: ['gbrain', 'migrate', '--status', '--json'], actor: 'provider' });
     expect(readFileSync(intentMarkerPath(dataDir), 'utf8')).toContain('run-p');
   });
+});
+
+
+test('a marker from an unverifiable boot cannot use this process PID as local identity', () => {
+  expect(markerLiveness(marker('foreign', 'planned', { pid: process.pid, bootId: 'another-boot' }))).toBe('unknown');
 });

@@ -102,10 +102,10 @@ export function currentProcessIdentity(): Pick<IntentMarker, 'pid' | 'bootId' | 
  * the authority (an acquirable lock means the run is gone).
  */
 export function markerLiveness(marker: IntentMarker): 'alive' | 'dead' | 'unknown' {
-  if (marker.pid === process.pid) return isGraduationRunInProcess(marker.runId) ? 'alive' : 'dead';
   const bootId = readBootId(), pidNs = readPidNs();
   if (marker.bootId && marker.bootId !== bootId) return 'unknown';
   if (marker.pidNs && marker.pidNs !== pidNs) return 'unknown';
+  if (marker.pid === process.pid) return isGraduationRunInProcess(marker.runId) ? 'alive' : 'dead';
   if (!isProcessAlive(marker.pid)) return 'dead';
   if (marker.processStart) {
     const start = processStartTime(marker.pid);
