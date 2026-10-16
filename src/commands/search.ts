@@ -9,7 +9,7 @@
  *     active mode, the source of every resolved knob (mode default vs
  *     config override vs per-call), and a one-liner per knob.
  *
- *   gbrain search modes --reset [--source <mode>]
+ *   gbrain search modes --reset [--mode <mode>]   (--source <mode>: deprecated alias)
  *     Clears every search.* override key (per CDX-8). --source acts as
  *     a dry-run that lists what would change without writing.
  *
@@ -42,6 +42,7 @@ import {
   telemetryCoverage,
   TELEMETRY_COVERAGE_CAVEAT,
   type GraphSignalsStatsSection,
+  type RerankGateStats,
 } from '../core/search/telemetry.ts';
 import {
   buildModesReport,
@@ -54,6 +55,7 @@ import {
   TUNE_MIN_CALLS,
   type TuneRecommendation,
 } from '../core/search/tune-recommendations.ts';
+import { ROUTERS, SEARCH_SUBCOMMANDS, subcommandHelpRequested } from '../cli/subcommands.ts';
 
 function formatModesText(report: SearchModesReport): string {
   const lines: string[] = [];
@@ -97,28 +99,64 @@ function formatModesText(report: SearchModesReport): string {
   return lines.join('\n');
 }
 
+/**
+ * W4.13: the dry-run mode of `search modes --reset --mode <mode>`. `--source`
+ * is the deprecated spelling (it means a brain source everywhere else) and
+ * prints a notice. A flag without a value, or `--mode` and `--source` naming
+ * different modes, refuses with exit 2 before anything is read or deleted.
+ */
+async function modesDryRunMode(args: string[]): Promise<{ mode: string | null } | { refused: true }> {
+  const read = (flag: string): string | null | undefined => {
+    const at = args.indexOf(flag);
+    if (at === -1) return null;
+    const value = args[at + 1];
+    return value === undefined || value.startsWith('--') ? undefined : value;
+  };
+  const refuse = async (message: string, why: string): Promise<{ refused: true }> => {
+    const { usageError, writeCliError } = await import('../cli/cli-error.ts');
+    const { setCliExitVerdict } = await import('../core/cli-force-exit.ts');
+    setCliExitVerdict(writeCliError(usageError(message,
+      `Preview with gbrain search modes --reset --mode <${SEARCH_MODES.join('|')}>, or clear the overrides with gbrain search modes --reset.`,
+      { why, fix: { argv: ['gbrain', 'search', 'modes'], consent: [], actor: 'agent', requires_exclusive: false,
+        why: 'Shows every search.* override and its value; changes nothing.' } }), 'search', { json: args.includes('--json') }));
+    return { refused: true };
+  };
+  const mode = read('--mode');
+  const source = read('--source');
+  if (mode === undefined || source === undefined) {
+    return refuse(`${mode === undefined ? '--mode' : '--source'} needs a search mode value; nothing was changed.`,
+      'Without its value the command would reset every override instead of previewing.');
+  }
+  if (mode !== null && source !== null && mode !== source) {
+    return refuse(`--mode ${mode} and --source ${source} name different modes; nothing was changed.`, 'Only one preview mode can run.');
+  }
+  if (source !== null) process.stderr.write('[search modes] --source <mode> is deprecated here (--source names a brain source everywhere else); use --mode <mode>.\n');
+  return { mode: mode ?? source };
+}
+
 async function runModesSubcommand(engine: BrainEngine, args: string[]): Promise<void> {
   const json = args.includes('--json');
   const reset = args.includes('--reset');
-  const sourceIdx = args.indexOf('--source');
-  const dryRunSource = sourceIdx !== -1 ? args[sourceIdx + 1] : null;
+  const parsed = await modesDryRunMode(args);
+  if ('refused' in parsed) return;
+  const dryRunSource = parsed.mode;
 
   // --reset path: clear every search.* OVERRIDE key (not search.mode itself).
-  // --source <mode> is a dry-run that prints what would change.
+  // --mode <mode> (alias --source) is a dry-run that prints what would change.
   if (reset || dryRunSource) {
     const dryRun = Boolean(dryRunSource);
     if (dryRunSource && !isSearchMode(dryRunSource)) {
-      console.error(`Invalid --source value: ${dryRunSource}. Expected one of: ${SEARCH_MODES.join(', ')}`);
+      console.error(`Invalid --mode value: ${dryRunSource}. Expected one of: ${SEARCH_MODES.join(', ')}`);
       process.exit(1);
     }
     const overrides = await engine.listConfigKeys('search.');
-    const toRemove = overrides.filter((k) => k !== SEARCH_MODE_KEY && k !== 'search.mode_upgrade_notice_shown');
+    const toRemove = overrides.filter((k) => k !== SEARCH_MODE_KEY && k !== 'search.mode_upgrade_notice_shown' && k !== 'search.mode_source');
     if (toRemove.length === 0) {
       console.log('No search.* overrides set. Mode bundle is the only voice.');
       return;
     }
     if (dryRun) {
-      console.log(`--source ${dryRunSource} (dry run). Would unset ${toRemove.length} key(s):`);
+      console.log(`--mode ${dryRunSource} (dry run). Would unset ${toRemove.length} key(s):`);
       for (const k of toRemove) console.log(`  - ${k}`);
       console.log(`No changes written. Re-run with --reset to apply.`);
       return;
@@ -168,6 +206,7 @@ async function runStatsSubcommand(engine: BrainEngine, args: string[]): Promise<
           total_budget_dropped: 'sum of results dropped because the call exceeded its tokenBudget',
           graph_signals_enabled: 'whether graph_signals is on for the active mode (or via search.graph_signals override)',
           graph_signals_failures_count: 'count of fail-open events in the JSONL audit over the window',
+          rerank_gate_would_skip_rate: 'rerank_gate.would_skip / rerank_gate.graded — fraction of graded searches whose pre-rerank grade was strong for a skip reason (search.reranker.gate shadow)',
         },
       },
     }, null, 2));
@@ -220,8 +259,25 @@ async function runStatsSubcommand(engine: BrainEngine, args: string[]): Promise<
     console.log('');
     console.log(`  Window: ${stats.oldest_seen ?? '?'} → ${stats.newest_seen ?? '?'}`);
   }
+  if (stats.rerank_gate.graded > 0 || Object.keys(stats.rerank_gate.ineligible).length > 0) {
+    console.log('');
+    printRerankGateSection(stats.rerank_gate);
+  }
   console.log('');
   printGraphSignalsSection(gsSection);
+}
+
+function printRerankGateSection(g: RerankGateStats): void {
+  console.log('  Rerank gate:');
+  console.log(`    graded:         ${g.graded} of ${g.eligible} eligible`);
+  console.log(`    would skip:     ${g.would_skip} (${(g.would_skip_rate * 100).toFixed(1)}%)`);
+  console.log(`    reranker calls: ${g.provider_calls}`);
+  for (const [reason, count] of Object.entries(g.by_reason).sort((a, b) => b[1] - a[1])) {
+    console.log(`      ${reason.padEnd(20)} ${count}`);
+  }
+  for (const [why, count] of Object.entries(g.ineligible).sort((a, b) => b[1] - a[1])) {
+    console.log(`    not graded (${why}): ${count}`);
+  }
 }
 
 function printGraphSignalsSection(gs: GraphSignalsStatsSection): void {
@@ -352,14 +408,18 @@ function buildRevertCommand(r: TuneRecommendation): string {
   return r.apply_command;
 }
 
-const USAGE = `Usage: gbrain search <modes|stats|tune> [flags]
+const USAGE = `Usage: gbrain search <modes|stats|tune|diagnose> [flags]
+       gbrain search "<query>"     (free-text search; see gbrain search --help)
 
 Subcommands:
   modes [--json]              Show active mode, bundles, and per-knob source.
   modes --reset               Clear all search.* overrides (mode bundle wins).
-  modes --source <mode>       Dry-run: list what --reset would change.
+  modes --reset --mode <mode> Dry-run: list what --reset would change
+                              (--source <mode> is a deprecated alias).
   stats [--days N] [--json]   Cache hit rate, intent mix, budget pressure.
   tune [--apply] [--json]     Print recommendations; --apply mutates config.
+  diagnose "<query>" --target <slug> [--json] [--source <id>]
+                              Trace where a target page surfaces across retrieval layers.
 
 Examples:
   gbrain search modes
@@ -369,12 +429,18 @@ Examples:
   gbrain search tune --apply
 `;
 
+export { SEARCH_SUBCOMMANDS as SUBCOMMANDS } from '../cli/subcommands.ts';
+
+export function printUsage(): void {
+  console.log(USAGE);
+}
+
 export async function runSearch(engine: BrainEngine, args: string[]): Promise<void> {
-  const sub = args[0];
+  const sub = args[0] as Exclude<(typeof SEARCH_SUBCOMMANDS)[number], 'diagnose'> | undefined;
   const rest = args.slice(1);
 
-  if (!sub || sub === '--help' || sub === '-h') {
-    console.log(USAGE);
+  if (!sub || subcommandHelpRequested(args, ROUTERS.search)) {
+    printUsage();
     return;
   }
 

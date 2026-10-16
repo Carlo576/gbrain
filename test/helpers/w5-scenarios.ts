@@ -17,6 +17,7 @@ import { compactWriteReceipts } from '../../src/core/persistence/journal.ts';
 import { declarePersistenceProtocol } from '../../src/core/persistence/protocol.ts';
 import { localHostId } from '../../src/core/persistence/identity.ts';
 import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
+import { TEST_WRITE_ATTRIBUTION } from './write-attribution.ts';
 import { acquireWorktree, getWorktreeBinding } from '../../src/core/persistence/ownership.ts';
 import { extractStaleFromDB } from '../../src/commands/extract.ts';
 import { computeRecommendations } from '../../src/core/brain-score-recommendations.ts';
@@ -25,6 +26,7 @@ import { LINK_EXTRACTOR_VERSION_TS } from '../../src/core/link-extraction.ts';
 import { checkParkedEffects } from '../../src/commands/doctor/checks/parked-effects.ts';
 import { checkPersistenceCapacity } from '../../src/commands/doctor/checks/persistence-capacity.ts';
 import { managedBrain } from './managed-brain.ts';
+import { CODES } from '../../src/core/error-registry.ts';
 import { durableGitRepo, git } from './git-publication.ts';
 
 const put = (ctx: OperationContext, slug: string, body: string, type = 'note') => submitPageMutation(ctx, { operation: 'put_page',
@@ -172,6 +174,8 @@ export async function compactionSkipsUnfinishedReceipts(databaseUrl?: string) {
 export async function capacityWarnsAndRefusalNamesTheKey(databaseUrl?: string) {
   await managedBrain(async ({ engine, ctx }) => {
     expect(await checkPersistenceCapacity(engine)).toMatchObject({ status: 'ok', details: { exact: true, truncated: false } });
+    // The percentage line alone: the days-to-exhaustion thresholds (#6696) are off for this scenario.
+    await engine.setConfig('persistence.capacity.warn_days', '0'); await engine.setConfig('persistence.capacity.fail_days', '0');
     for (let i = 0; i < 8; i++) await put(ctx, `notes/cap-${i}`, `Cap ${i}.`);
     await engine.setConfig('persistence.limits.principal_outstanding', '10');
     expect((await checkPersistenceCapacity(engine)).status).toBe('ok');
@@ -187,9 +191,19 @@ export async function capacityWarnsAndRefusalNamesTheKey(databaseUrl?: string) {
     expect(value).toBeGreaterThanOrEqual(20);
     expect(warning.message).toContain(details.commands[0]);
 
-    await put(ctx, 'notes/cap-8', 'Cap 8.'); await put(ctx, 'notes/cap-9', 'Cap 9.');
-    const refusal = await put(ctx, 'notes/cap-10', 'Cap 10.').then(() => null, error => error);
-    expect(refusal).toMatchObject({ code: 'queue_capacity', detail: 'principal_lifetime_ids' });
+    // #6696 (A5): past the 80% pause line a background write refuses before any receipt; the user's own writes keep the rest.
+    const paused = await put(ctx, 'notes/cap-8', 'Cap 8.').then(() => null, error => error);
+    expect(paused).toMatchObject({ code: 'write_capacity_backpressure', reason: 'lifetime_ids', detail: 'principal_lifetime_ids' });
+    expect(CODES[paused.code as keyof typeof CODES]).toMatchObject({ class: 'host_only', retryable: false });
+    expect(await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE slug='notes/cap-8'")).toEqual([]);
+    const interactive = { ...ctx, admissionOrigin: 'interactive' as const };
+    await put(interactive, 'notes/cap-8', 'Cap 8.'); await put(interactive, 'notes/cap-9', 'Cap 9.');
+    const refusal = await put(interactive, 'notes/cap-10', 'Cap 10.').then(() => null, error => error);
+    // #6696 (A6): the cumulative wall has its own host-only code, and the fix is the reversible raise, verified by the capacity check.
+    expect(refusal).toMatchObject({ code: 'write_quota_exhausted', reason: 'lifetime_ids', detail: 'principal_lifetime_ids',
+      fix: { argv: ['gbrain', 'config', 'set', 'persistence.limits.principal_lifetime_ids', expect.stringMatching(/^\d+$/)], actor: 'host_admin',
+        verify: { argv: ['gbrain', 'doctor', '--only', 'persistence_capacity', '--json'] } } });
+    expect(CODES[refusal.code as keyof typeof CODES]).toMatchObject({ class: 'host_only', retryable: false });
     expect(refusal.message).toContain('10 used of 10');
     expect(refusal.suggestion).toMatch(/gbrain config set persistence\.limits\.principal_lifetime_ids \d+/);
   }, { databaseUrl });
@@ -223,6 +237,35 @@ export async function managedStaleSweep(databaseUrl?: string) {
   }, { databaseUrl });
 }
 
+/** #5984: on Postgres a managed extraction derives several pages at once; every page is stamped and every link resolves either way. */
+export async function managedStaleSweepManyPages(databaseUrl?: string) {
+  await managedBrain(async ({ engine, ctx }) => {
+    await engine.setConfig('auto_link', 'false');
+    const count = 12;
+    for (let i = 0; i < count; i++) await put(ctx, `notes/n${i}`, `Links [[notes/n${(i + 1) % count}]] and [[notes/hub]].`);
+    await put(ctx, 'notes/hub', 'The hub.');
+    await disposePersistenceConsumer(engine);
+    let open = 0, most = 0;
+    const transaction = engine.transaction;
+    engine.transaction = (async function (this: BrainEngine, fn: Parameters<BrainEngine['transaction']>[0], opts?: Parameters<BrainEngine['transaction']>[1]) {
+      if (this !== engine) return transaction.call(this, fn, opts);
+      open++; most = Math.max(most, open);
+      try { return await transaction.call(this, fn, opts); } finally { open--; }
+    }) as BrainEngine['transaction'];
+    try {
+      const { extractManagedStaleLinks, MANAGED_LINK_EXTRACTION_WIDTH } = await import('../../src/core/persistence/links-maintenance.ts');
+      const result = await extractManagedStaleLinks(engine, { sourceId: 'default', mentions: false, slugs: Array.from({ length: count }, (_, i) => `notes/n${i}`) });
+      expect(result).toMatchObject({ pages: count + 1, skipped: 0, remaining: 0 });
+      expect(most).toBe(engine.kind === 'postgres' ? MANAGED_LINK_EXTRACTION_WIDTH : 1);
+    } finally { engine.transaction = transaction; }
+    const links = await engine.executeRaw<{ f: string; t: string }>(`SELECT f.slug AS f, t.slug AS t FROM links l JOIN pages f ON f.id=l.from_page_id
+      JOIN pages t ON t.id=l.to_page_id ORDER BY 1, 2`);
+    expect(links).toEqual(Array.from({ length: 12 }, (_, i) => [{ f: `notes/n${i}`, t: 'notes/hub' }, { f: `notes/n${i}`, t: `notes/n${(i + 1) % 12}` }]).flat()
+      .sort((a, b) => a.f < b.f ? -1 : a.f > b.f ? 1 : a.t < b.t ? -1 : 1));
+    expect(await stale(engine)).toBe(0);
+  }, { databaseUrl });
+}
+
 /** A stored row that differs from its bullet only by whitespace is the same entry to the coordinator; stale extraction must not add a twin. */
 export async function managedStaleSweepKeepsNormalizedTimeline(databaseUrl?: string) {
   await managedBrain(async ({ engine, ctx }) => {
@@ -232,7 +275,7 @@ export async function managedStaleSweepKeepsNormalizedTimeline(databaseUrl?: str
     const [alice] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE slug='people/alice-example'");
     // A row written before timeline normalization (whitespace differs from the bullet).
     await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () =>
-      tx.executeRaw("UPDATE timeline_entries SET summary='Met  Acme ' WHERE page_id=$1", [alice.id])));
+      tx.executeRaw("UPDATE timeline_entries SET summary='Met  Acme ' WHERE page_id=$1", [alice.id]), TEST_WRITE_ATTRIBUTION));
     const timeline = () => engine.executeRaw('SELECT date::text,source,summary FROM timeline_entries WHERE page_id=$1 ORDER BY id', [alice.id]);
     const before = await timeline();
     expect(before).toEqual([{ date: '2026-01-02', source: 'test', summary: 'Met  Acme ' }]);

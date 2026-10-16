@@ -10,7 +10,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import {
-  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync,
+  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, symlinkSync,
 } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -19,6 +19,7 @@ import {
   workspacePush, acquirePushLock, pushLockDir, pushStatusPath, pushStatusPathForRoot,
   readPushStatuses, readPushStatusForRoot, summarizePushStatuses, verifyRemotePrivacy,
   parseGithubOwnerRepo, resolveWorkspaceRoot, PUSH_LOCK_STALE_MS, PUSH_DENY_GLOBS,
+  sanitizePushReason, SECRET_SCAN_REFUSAL_DOCS,
 } from '../src/core/workspace-push.ts';
 import { SCAN_ALLOW_FILENAME } from '../src/core/secret-scan.ts';
 import { visibilityCachePath } from '../src/core/repo-visibility.ts';
@@ -181,8 +182,46 @@ describe('deny-glob backstop [G6]', () => {
   }, T);
 
   test('the deny list covers the documented classes', () => {
-    expect(PUSH_DENY_GLOBS).toEqual(['*.pglite', '.env*', '*.pem', '*.key', '.gbrain/**']);
+    expect(PUSH_DENY_GLOBS).toEqual(['*.pglite', '.env*', '*.pem', '*.key', '.gbrain/**',
+      '.gbrain-owner.json', '.gbrain-owner-*.json', '.gbrain-owner.json.*.tmp', '.gbrain-bootstrap.lock/**']);
   });
+
+  // #5186 (W14 P1.5a): ownership markers and the bootstrap lock are denied like
+  // credentials; the ownership token must never reach a remote.
+  test('a TRACKED ownership marker hard-fails the push (#5186)', async () => {
+    mkdirSync(join(work, 'brain'));
+    writeFileSync(join(work, 'brain', '.gbrain-owner.json'), '{"version":1,"token":"not-a-real-token"}\n');
+    writeFileSync(join(work, `.gbrain-owner-${'ab'.repeat(32)}.json`), '{"version":1}\n');
+    git(work, 'add', '-A');
+    git(work, 'commit', '-qm', 'oops tracked markers');
+    const before = originHead(bare);
+    const r = await push();
+    expect(r.status).toBe('blocked_tracked_deny');
+    expect(r.denyMatches?.sort()).toEqual([`.gbrain-owner-${'ab'.repeat(32)}.json`, 'brain/.gbrain-owner.json']);
+    expect(originHead(bare)).toBe(before);
+  }, T);
+
+  test('UNTRACKED markers and the bootstrap lock are excluded from the commit; a page push is unchanged (#5186)', async () => {
+    // A stamp at the push root itself makes the root managed (writer_coordinator_required),
+    // so the markers sit on a nested root, where the first hardened commit would sweep them up.
+    mkdirSync(join(work, 'brain'));
+    writeFileSync(join(work, 'brain', '.gbrain-owner.json'), '{"version":1}\n');
+    writeFileSync(join(work, 'brain', '.gbrain-owner.json.11111111-2222-3333-4444-555555555555.tmp'), '{"version":1}\n');
+    writeFileSync(join(work, `.gbrain-owner-${'ab'.repeat(32)}.json`), '{"version":1}\n');
+    mkdirSync(join(work, '.gbrain-bootstrap.lock'));
+    writeFileSync(join(work, '.gbrain-bootstrap.lock', 'meta.json'), '{"pid":1}\n');
+    writeFileSync(join(work, 'note.md'), 'keep me\n');
+    const r = await push();
+    expect(r.status).toBe('pushed');
+    expect(r.excludedUntracked?.sort()).toEqual([
+      '.gbrain-bootstrap.lock/meta.json', `.gbrain-owner-${'ab'.repeat(32)}.json`, 'brain/.gbrain-owner.json',
+      'brain/.gbrain-owner.json.11111111-2222-3333-4444-555555555555.tmp']);
+    const shipped = git(bare, 'ls-tree', '-r', '--name-only', 'main');
+    expect(shipped).toContain('note.md');
+    expect(shipped).not.toContain('.gbrain-owner');
+    expect(shipped).not.toContain('.gbrain-bootstrap.lock');
+    expect(existsSync(join(work, 'brain', '.gbrain-owner.json'))).toBe(true);
+  }, T);
 
   test('a GITIGNORED deny match is named in excludedUntracked and never reaches the index', async () => {
     writeFileSync(join(work, '.gitignore'), '*.pglite\n');
@@ -264,6 +303,31 @@ describe('secret-scan gate', () => {
     // The documented escape hatch still works for a declared-safe value.
     writeFileSync(join(work, SCAN_ALLOW_FILENAME), `${r.findings![0]!.fingerprint}\n`);
     expect((await push()).status).toBe('pushed');
+  }, T);
+});
+
+describe('secret-scan refusal guidance (DX-3/ENG-11)', () => {
+  test('the status-file reason survives sanitizePushReason; fix steps ride findings[]', async () => {
+    const deep = join(work, ...Array.from({ length: 10 }, (_, i) => `folder-level-${i}`));
+    mkdirSync(deep, { recursive: true });
+    writeFileSync(join(deep, 'notes.md'), `ok\nmy key: ${OPENAI}\n`);
+    writeFileSync(join(work, 'other.md'), `again: ${OPENAI}\n`);
+    const r = await push();
+    expect(r.status).toBe('blocked_secrets');
+    expect(r.findings?.length).toBe(2);
+    const status = readPushStatuses()[0]!;
+    expect(status.reason).toBe(r.reason);
+    expect(r.reason!.length).toBeLessThanOrEqual(140);
+    expect(sanitizePushReason(status.reason)).toBe(status.reason!);
+    expect(status.reason).toMatch(/^2 secret finding\(s\), first .*notes\.md:2 \[openai\]; nothing committed/);
+    const repoRoot = git(work, 'rev-parse', '--show-toplevel');
+    for (const f of r.findings!) {
+      expect(f.allowlistPath).toBe(join(repoRoot, SCAN_ALLOW_FILENAME));
+      expect(f.allowCommand).toContain(f.fingerprint);
+      expect(f.retryCommand).toBe(`gbrain sources push --path ${work} --branch main --allow-unverified-remote`);
+      expect(f.docs).toBe(SECRET_SCAN_REFUSAL_DOCS);
+    }
+    expect(JSON.stringify(r).includes(OPENAI)).toBe(false);
   }, T);
 });
 
@@ -507,6 +571,24 @@ describe('single-flight lock [G14/A5, CX2-6]', () => {
       r.handle.release();
     }
     expect(existsSync(lockDir)).toBe(false);
+  }, T);
+
+  test('a symlinked spelling of the repo shares the physical lock (#5400)', () => {
+    const alias = join(root, 'alias-of-work');
+    symlinkSync(work, alias);
+    expect(pushLockDir(alias)).toBe(pushLockDir(work));
+    const first = acquirePushLock(work);
+    expect(first.acquired).toBe(true);
+    try {
+      const second = acquirePushLock(alias);
+      expect(second.acquired).toBe(false);
+      if (!second.acquired) expect(second.holderPid).toBe(process.pid);
+    } finally {
+      if (first.acquired) first.handle.release();
+    }
+    const absent = join(root, 'never-created');
+    expect(pushLockDir(absent)).toBe(pushLockDir(absent));
+    expect(existsSync(absent)).toBe(false);
   }, T);
 
   test('a corrupt owner file is never stolen while young (mtime fallback)', () => {

@@ -17,7 +17,7 @@
 import type { BrainEngine } from '../engine.ts';
 import { runThink, persistSynthesis, type ThinkLLMClient } from '../think/index.ts';
 import { resolveModel } from '../model-config.ts';
-import { embedQuery } from '../embedding.ts';
+import { embedQueryWithPrefix } from '../search/query-prefix.ts';
 import { BudgetMeter, loadAllowUnpriced, loadPricingOverrides, parseBudgetUsd } from './budget-meter.ts';
 
 /**
@@ -42,6 +42,8 @@ export interface AutoThinkPhaseOpts {
   client?: ThinkLLMClient;
   /** Override the audit-ledger path (tests). */
   auditPath?: string;
+  /** #5426: source the cycle runs for; syntheses are saved there. */
+  sourceId?: string;
 }
 
 export interface AutoThinkConfig {
@@ -166,13 +168,16 @@ export async function runPhaseAutoThink(
       const result = await runThink(engine, {
         question: q,
         // #3734: auto-think uses same vector takes retrieval as interactive think.
-        embedQuestion: (text) => embedQuery(text),
+        embedQuestion: (text) => embedQueryWithPrefix(engine, text),
         save: config.autoCommit,
         client: opts.client,
         model: modelId,
+        // The BudgetMeter above priced modelId; a chain hop would spend on a model it never checked.
+        allowFallback: false,
         // Fail-closed trust: the local dream cycle must say so explicitly, or
         // trajectory injection degrades to visibility='world' rows.
         remote: false,
+        ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
       });
       // #1698: an empty synthesis (no LLM available / malformed output / empty-JSON answer)
       // must NOT count as complete or advance the cooldown — that is the same silent-success
@@ -185,7 +190,7 @@ export async function runPhaseAutoThink(
       const warnings = [...result.warnings];
       let slug: string | undefined;
       if (config.autoCommit) {
-        const persisted = await persistSynthesis(engine, result);
+        const persisted = await persistSynthesis(engine, result, opts.sourceId ? { sourceId: opts.sourceId } : {});
         slug = persisted.slug || undefined;  // '' = persist-skip signal (#1698)
         warnings.push(...persisted.warnings);
       }

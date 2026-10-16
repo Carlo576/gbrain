@@ -1,7 +1,8 @@
 // ci-ubicloud-schedule.test.ts — the Ubicloud fan-out's work queue:
 // weighting (trusted tables first, lane p75 fallback), heaviest-first
-// same-lane batching with a draining batch target, marker-log parsing, and
-// the explicit-file seams the ci:local wrappers expose for it.
+// same-lane batching with a draining batch target, marker-log parsing, burst
+// fleet sizing from `ubi-runner.sh usage`, and the explicit-file seams the
+// ci:local wrappers expose for it.
 
 import { describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -10,7 +11,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   buildItems,
+  burstVms,
   parseItemLog,
+  parseUsageTotal,
   readWeightTable,
   sortQueue,
   takeBatch,
@@ -103,6 +106,34 @@ describe("parseItemLog", () => {
   });
 });
 
+describe("burst fleet sizing", () => {
+  const fleet = { vmVcpus: 16, defaultVms: 4, maxVms: 8, ceilingVcpus: 448, workVms: 100 };
+
+  it("reads the project total from the usage report", () => {
+    const report = "OWNER           VMS  VCPUS\ngbra40            4     64\ngbra49            1     16\ntotal             5     80\n";
+    expect(parseUsageTotal(report)).toBe(80);
+    expect(parseUsageTotal("ubi-runner: request failed")).toBeNull();
+  });
+
+  it("bursts to the maximum when the quota is free", () => {
+    expect(burstVms({ ...fleet, usedVcpus: 80 }).vms).toBe(8);
+    expect(burstVms({ ...fleet, usedVcpus: 0 }).reason).toContain("burst maximum 8");
+  });
+
+  it("never pushes the project past the ceiling, and falls back to the default when busy", () => {
+    expect(burstVms({ ...fleet, usedVcpus: 320 }).vms).toBe(8);
+    expect(burstVms({ ...fleet, usedVcpus: 352 }).vms).toBe(6);
+    expect(burstVms({ ...fleet, usedVcpus: 400 }).vms).toBe(4);
+    expect(burstVms({ ...fleet, usedVcpus: 500 }).reason).toContain("quota busy, default 4");
+  });
+
+  it("uses the default when usage cannot be read, and never more VMs than the work fills", () => {
+    expect(burstVms({ ...fleet, usedVcpus: null }).vms).toBe(4);
+    expect(burstVms({ ...fleet, usedVcpus: 0, workVms: 1 })).toMatchObject({ vms: 1 });
+    expect(burstVms({ ...fleet, usedVcpus: null, workVms: 2 }).vms).toBe(2);
+  });
+});
+
 describe("readWeightTable", () => {
   it("scales and prefixes lane weight files, and treats a missing file as empty", () => {
     const dir = mkdtempSync(join(tmpdir(), "ubi-weights-"));
@@ -132,6 +163,14 @@ describe("explicit-file seams in the ci:local wrappers", () => {
   it("run-slow-tests.sh lists discovery or the positional files", () => {
     expect(list("run-slow-tests.sh", "--dry-run-list").every((f) => f.endsWith(".slow.test.ts"))).toBe(true);
     expect(list("run-slow-tests.sh", "--dry-run-list", "test/x.slow.test.ts")).toEqual(["test/x.slow.test.ts"]);
+  });
+
+  it("run-slow-tests.sh exposes its exclusive subset of discovery", () => {
+    const exclusive = list("run-slow-tests.sh", "--dry-run-list-exclusive");
+    expect(exclusive).toContain("test/entity-card-perf.slow.test.ts");
+    const all = list("run-slow-tests.sh", "--dry-run-list");
+    for (const file of exclusive) expect(all).toContain(file);
+    expect(list("run-slow-tests.sh", "--dry-run-list-exclusive", "test/x.slow.test.ts")).toEqual([]);
   });
 
   it("run-serial-tests.sh lists positional files and exposes its exclusive subset", () => {

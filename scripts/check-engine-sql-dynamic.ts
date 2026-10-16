@@ -47,23 +47,37 @@ const CONSTANT_ALLOWLIST: Record<string, string> = {
   EMBED_SKIP_FILTER_FRAGMENT: 'src/core/embed-skip.ts: constant embed_skip predicate over alias p',
   QUARANTINE_FILTER_FRAGMENT: 'src/core/quarantine.ts: constant quarantine visibility predicate over the pages alias p',
   PAGE_SORT_SQL: 'src/core/types.ts: ORDER BY text keyed by the PageFilters sort union (whitelisted enum)',
+  TEMPORAL_LINK_SELECT_SQL: 'src/core/link-validity.ts: constant select list over the lr_t relationship-state join',
 };
 
 const VETTED_BUILDERS: Record<string, string> = {
   pageReadFilter: 'src/core/search/read-policy-sql.ts: binds scope values as params, splices only the caller alias',
   buildRecencyComponentSql: 'src/core/search/sql-ranking.ts: inlines LIKE literals + numeric coefficients from the decay map, as master (planner behavior)',
   privatePagesFilterFragment: 'src/core/search/private-visibility.ts: constant visibility predicate over a caller alias',
+  quarantineFilterFragment: 'src/core/quarantine.ts: constant quarantine predicate over a caller alias',
   currentCodeEdgeFilter: 'src/core/code-intel/read-scope.ts: constant current-edge predicate over a caller alias',
   buildCJKKeywordSql: 'src/core/search/cjk-keyword-sql.ts: binds the query as params; shared by both engines',
   currentTextProjectionFilter: 'src/core/search/safe-chunks.ts: constant projection predicate over a caller alias',
+  chunkVisibleFilter: 'src/core/search/safe-chunks.ts: constant projection + live body generation predicate over caller page/chunk aliases (Wave B)',
+  chunkGenerationFilter: 'src/core/search/safe-chunks.ts: constant live body generation predicate over caller page/chunk aliases (Wave B)',
+  chunkManifestJoin: 'src/core/search/safe-chunks.ts: constant LEFT JOIN onto the live page_body_manifest row over caller aliases (Wave B)',
+  chunkDocumentOrder: 'src/core/search/safe-chunks.ts: constant ORDER BY column list over caller chunk/manifest aliases (Wave B)',
   quoteIdentifier: 'src/core/search/embedding-column.ts: double-quoted identifier (embedded quotes doubled); callers pass registry-resolved or COLUMN_NAME_REGEX-checked embedding column names',
   vectorCastSuffix: 'src/core/search/embedding-column.ts: constant ::vector / ::halfvec cast suffix from the resolved column type',
   safeChunksFilter: 'src/core/search/safe-chunks.ts: constant safe-chunk predicate over a caller alias',
+  movableChunkSql: 'src/core/search/safe-chunks.ts: constant vector-matches-its-text predicate over a caller-quoted embedding column; no values',
   bodyWriteChunkVersion: 'src/core/search/safe-chunks.ts: constant chunker-version CASE over caller column expressions (or master\'s literal $1/$2 bind reuse); no values',
   privateLinkOriginFilterFragment: 'src/core/search/private-visibility.ts: constant link-origin visibility predicate over a caller alias',
   privateTimelineEventFilterFragment: 'src/core/search/private-visibility.ts: constant timeline-event visibility predicate over a caller alias',
   privateSnapshotFilterFragment: 'src/core/search/private-visibility.ts: constant snapshot visibility predicate over a caller alias',
+  rederiveHiddenSql: 'src/core/eligibility/sql.ts: constant needs_rederive NOT EXISTS predicate over a literal table name and caller alias; no values',
+  privateProvenanceFilterFragment: 'src/core/search/private-visibility.ts: constant fact-provenance visibility predicate over a caller alias',
+  rankingLinkSql: 'src/core/link-ranking-policy.ts: constant non-ranking link-type predicate (code-constant type names) over a caller alias',
   vectorLiteralSql: 'src/core/engine-sql/facts.ts: master\'s inlined vector literal; toPgVectorLiteral output (numbers joined by commas) + a ::vector/::halfvec constant',
+  temporalLinkJoinSql: 'src/core/link-validity.ts: constant LEFT JOIN onto link_relationships over a caller alias; scope is one of two literals',
+  projectionEligibleSql: 'src/core/eligibility/sql.ts: read-eligibility predicate over a caller alias; splices only closed tier and reason-family vocabularies (no values)',
+  pageEligibleSql: 'src/core/eligibility/sql.ts: page trust-floor and activation predicate over a caller alias; closed vocabularies only',
+  relationshipFilterSql: 'src/core/link-validity.ts: relationship-state probe over a caller alias; dates pass isCalendarDate and inline as DATE literals, status/scope are literals',
 };
 
 const SQL_ARG_METHODS: Record<string, number> = { query: 0, unsafe: 0, executeRaw: 0 };

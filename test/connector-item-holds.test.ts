@@ -3,6 +3,7 @@
  * classification table, circuit breaker, backoff schedule, cap and legacy
  * carry-over, with an injected clock. Pure logic; no engine.
  */
+import { fenceOperationError } from '../src/core/fence-repair/refusal.ts';
 import { describe, expect, test } from 'bun:test';
 import { CredentialError } from '../src/core/creds/errors.ts';
 import { OperationError } from '../src/core/ops/contract.ts';
@@ -36,6 +37,9 @@ describe('classifyConnectorError (the one classification table)', () => {
       [new OperationError('writer_coordinator_required', 'x'), 'writer_coordinator_required', 'source'],
       [new OperationError('owner_unavailable', 'x'), 'owner_unavailable', 'source'],
       [new OperationError('queue_capacity', 'x'), 'queue_capacity', 'source'],
+      // #6696 (A5/A6): the cumulative wall and the background pause hold the source, never the item.
+      [new OperationError('write_quota_exhausted', 'x'), 'write_quota_exhausted', 'source'],
+      [new OperationError('write_capacity_backpressure', 'x'), 'write_capacity_backpressure', 'source'],
       [new OperationError('write_pending', 'x'), 'write_pending', 'source'],
       [new OperationError('connector_account_changed', 'x'), 'connector_account_changed', 'source'],
       [new LockStolenError('lock'), 'lock_stolen', 'source'],
@@ -62,6 +66,18 @@ describe('classifyConnectorError (the one classification table)', () => {
       const got = classifyConnectorError(error);
       expect({ code: got.code, scope: got.scope }).toEqual({ code, scope: scope as never });
       if (klass) expect(got.class).toBe(klass as never);
+    }
+  });
+});
+
+describe('fence refusals (#6188)', () => {
+  test('a typed fence refusal keeps its wire code, so a connector item hold classifies it as content', () => {
+    const location = { reason: 'enum_unmapped', fence: 'facts', section: 'body', rows: [1], columns: ['kind'], line: 4 } as const;
+    const unparseable = fenceOperationError({ ...location, rows: [1], columns: ['kind'] }, 'notes/example', 'default');
+    const stored = fenceOperationError({ ...location, reason: 'stored_row_collision', fence: 'takes', rows: [2], columns: [] }, 'notes/example', 'default', { legacy_error: 'take_row_collision' });
+    for (const [error, code] of [[unparseable, 'invalid_params'], [stored, 'take_row_collision']] as const) {
+      expect(error.canonicalCode).toBe('invalid_fence');
+      expect(classifyConnectorError(error)).toMatchObject({ code, scope: 'item', class: 'content' });
     }
   });
 });

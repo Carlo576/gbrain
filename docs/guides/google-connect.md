@@ -99,6 +99,60 @@ Repeat `gbrain google connect --account work@yourco.com` per account; each
 account becomes its own source (`gbrain sources add gmail-work --kind google
 --account work@yourco.com`) with independent sync cursors and locks.
 
+## Contacts next to your own person pages
+
+A Google source renders each contact as a near-empty person page under
+`people/<slug>` by default, the same directory a brain repo uses for its own
+hand-written profiles. On a multi-source brain that collision has two
+costs: mentions in the Gmail source bind to the contact stub instead of the
+real profile, and `gbrain doctor` lists the stubs under `junk_entity_hubs`.
+Two remedies, independent of each other:
+
+- **Keep contacts out of `people/`.** Add the source with
+  `--contacts-dir contacts` (stored as the source's `g_contacts_dir`; any
+  relative directory of lower-case segments). Contact pages are found by
+  their `google_contact_id`, not by directory, so a source whose directory
+  changes moves every contact on its next sweep: the new page lands first,
+  then the page under the old directory is retired. The default stays
+  `people` for every existing source.
+- **Let the stub yield.** With `gbrain config set link_resolution.cross_source
+  true`, a mention in the Gmail source of a name that has a real page in
+  another source binds to that page instead of the connector's stub (one
+  canonical page, or the one sharing the stub's slug; a tie keeps the stub).
+  The next mention pass (`gbrain extract --stale`, or autopilot) re-binds
+  pages it reaches; `gbrain doctor --only junk_entity_hubs` names the
+  canonical twin of each stub and the next step.
+
+### What a contact page carries
+
+Each page records the contact's names, email addresses, organization and
+title, phone numbers and user-created contact groups:
+
+- `emails:` is always present (empty for a phone-only contact); `phones:`
+  appears when the contact has any, in E.164 form (`+15550100`) where Google
+  supplies it, else as entered. Phones are exact identifiers for a manual
+  `entity_identity_link` join, not aliases: a digit string never takes part
+  in mention matching.
+- `groups:` lists the display names of the contact's user-created groups
+  (Google's built-in groups such as My Contacts or Starred are omitted). The
+  names come from one bounded `contactGroups` read per sweep that needs it;
+  when that read fails the sweep uses the names it cached last time, and a
+  group it cannot name at all is carried as its raw `contactGroups/<id>`. A
+  renamed or deleted group reaches a page when that contact next changes, or
+  on `gbrain sync --full`.
+- A contact with phones but no email gets a page too; one with no name
+  either lives at `contact-<id-hash>` (never at its phone number). A contact
+  with neither emails nor phones renders nothing.
+
+The contacts cursor is bound to the field mask that minted it: the People
+API rejects a sync token reused with different request parameters, so the
+source state records the mask next to the token (`contacts_person_fields`),
+commits the two together only after a sweep completed, and lists every
+contact once when the mask changes (as it did when phones and groups
+arrived). A sync token Google rejects with a 400 that is not an expiry gets
+exactly one full-list attempt; if that list fails as well, the error
+surfaces and the cursor is left alone.
+
 ## Secondary calendars
 
 The calendar sweep reads ONE calendar per source (so each keeps its own
@@ -126,6 +180,68 @@ for. Re-pointing an existing source at a different calendar (its
 re-lists the new calendar from a fresh window instead of replaying the old
 calendar's delta. Pages already imported from the previous calendar stay in
 the brain until you remove them — they are not reconciled automatically.
+`gbrain sources set-calendar <source> <calendar-id>` makes that change in one
+step and prints the sync to run. On a managed brain the source's sync cursor
+is keyed by its configuration, so when the source also syncs Gmail or
+Contacts the change makes their next sync re-read history from the start; the
+command then refuses with `confirmation_required` (exit 3) until you re-run
+it with `--yes`.
+
+### Unreadable calendar
+
+When Google answers the sweep's calendar read with HTTP 403 or 404, the
+account cannot read the calendar the source names (a calendar id from another
+account, a calendar that was unshared or deleted). Before #5012 that sweep
+looked like an empty calendar. Now:
+
+- the sync records `calendar_unreadable` (with the calendar id and HTTP
+  status) in the source's state and logs
+  `[google] calendar_unreadable: <account> cannot read calendar "<id>"`
+  with both fix commands. The run itself does not fail, so Gmail and Contacts
+  keep syncing; a readable list clears the record;
+- `gbrain google status` probes each linked calendar live (one `events.list`
+  read; `--no-probe` reports what the last sync recorded instead), names the
+  unreadable one with the fix, and reports `ok: false` and exits 1;
+- `gbrain doctor` warns `google_calendar_readable` from the recorded state,
+  with no network call.
+
+The fix: list the calendars the account can read, then point the source at
+one.
+
+```bash
+gbrain google calendars --account you@example.com
+gbrain sources set-calendar <source> <calendar-id>   # e.g. primary
+gbrain sync --source <source>
+gbrain doctor --only google_calendar_readable --json # verify
+```
+
+## Calendar window
+
+Calendar pages cover events from `--history-days` ago up to 60 days from
+now (`gbrain sources add … --future-days <n>`, stored as the source's
+`g_future_days`, 1..3650, moves that horizon per source), and each sweep
+applies that range on its own. That matters for
+incremental syncs: after any edit to a recurring series, Google sends back
+the series' instances for years before and after, and only those inside the
+range are kept. Because the 60-day edge moves forward daily, the sweep also
+lists the days it has newly reached, so future instances of a series nobody
+touched still appear. If a meeting moves beyond 60 days out, its page goes
+away until the meeting is back within range. Meetings that have aged out of
+the range keep their pages.
+
+`gbrain sync --source <id> --full` re-lists the whole window and removes the
+pages of events that start inside it but are no longer listed (cancelled or
+deleted since), and the pages this source wrote for events that start at or
+past the horizon (instances a series edit imported years ahead before the
+window existed, or under a wider `g_future_days`). It never removes a page
+whose event starts before the window, so shrinking `--history-days` keeps
+your history, and it never touches a calendar page you wrote by hand. More
+than 200 removals in one run are refused, nothing is removed, and the run is
+reported partial; if that many are genuinely gone, run it once with
+`GBRAIN_ALLOW_MASS_RECONCILE=1`.
+
+**Say to your agent:** *"re-sync my calendar from scratch"* (your agent runs
+`gbrain sync --source <id> --full`).
 
 ## Continuous sync
 
@@ -159,6 +275,45 @@ deep backfill carries on. A thread that keeps failing is held (see
 source synced after its first sync; a source that has never synced stays idle
 until you run `gbrain sync --source <id>` once.
 
+### What runs on synced mail and calendar pages
+
+**Say to your agent:** *"Make sure my Gmail threads are checked for open loops
+and linked to the people in them"* or *"Also extract atoms from my email and
+calendar pages."*
+
+- **Links and timelines.** Every autopilot or dream cycle extracts links and
+  timeline entries for connector pages straight from the database (a connector
+  source has no checkout), source-scoped and bounded by the cycle's 3-minute
+  stale-drain budget; a large backlog finishes over later cycles. The cycle
+  reports `extract: ok` with `database_only: true`. On demand:
+  `gbrain extract --stale`.
+- **Open loops.** Every Gmail sweep queues commitment extraction for the
+  threads it touched, on managed and unmanaged brains. The sync result carries
+  `loops_enqueue` (`enqueued`, `deferred`, `skipped_reason`), and every skip is
+  logged with its reason (extraction off, no chat model, the enqueue ceiling).
+  On a managed brain the first sweep also runs a one-time catch-up over email
+  threads whose newest message is from the last 30 days, so threads synced
+  before extraction was queued are analyzed once; it finishes over later
+  sweeps when the enqueue ceiling binds. Threads under a label you listed in
+  `g_loops_exclude_labels` (or the brain-wide `loops.extraction_exclude_labels`)
+  are never queued and open no deterministic loop; an unknown label name
+  fails closed with `excluded_label_unresolved` until you fix it. See
+  [open loops](open-loops.md#which-threads-reach-the-extractor).
+- **Quiet threads.** A thread still inside its waiting window (24 h for
+  inbound, 72 h for your own question) is re-checked when the window ends,
+  even if no new mail arrives, and opens its loop then. See
+  [open loops](open-loops.md#quiet-threads-and-grace-holds).
+- **Atoms (on by default).** Atom extraction covers Gmail threads and Calendar
+  events like other pages: the text of each extracted email thread or calendar
+  event is sent to the configured `extract_atoms` model under the daily
+  auto-drain cap. `gbrain config set cycle.extract_atoms.connector_pages false`
+  opts out and stops new extraction. Caps, the off switch and exactly what leaves the machine:
+  [spend controls](../operations/spend-controls.md#atom-extraction-auto-drain-cap-and-connector-pages).
+
+`gbrain doctor`'s `orphan_ratio` reports orphaned email and meeting renders of
+a connector source apart (`connector_renders_excluded`), since a mail page
+with no links is normal, and leaves them out of the ratio.
+
 ### Rate limits during backfill
 
 A large mailbox backfilling a wide `--history-days` window can trip Gmail's
@@ -169,8 +324,8 @@ patiently — 6 attempts by default, exponential backoff with jitter capped at
 60s, honoring `Retry-After` when Google sends one — before finally giving up
 and reporting `rate_limited`. That budget is deliberately much larger than
 the 2-attempt budget used for other retryable failures (like a 401 needing a
-token refresh): giving up too early used to mean a thread that would have
-succeeded a few seconds later was instead skipped for the rest of the sync.
+token refresh), so a thread that would succeed a few seconds later is not
+skipped for the rest of the sync.
 
 Even when a thread's retry budget IS exhausted, a rate-limit failure is never
 counted toward a hold — unlike a genuine per-thread
@@ -288,6 +443,7 @@ attached. The catalog (also emitted as structured JSON with `--json`):
 | `scope_missing` | Connected with narrower `--scopes` than needed | `gbrain google connect --reauth <email>` |
 | `relay_unreachable` / `relay_session_expired` / `claim_already_used` / `relay_disabled` | Hosted fast-path (gbrain.io relay) issues | BYO connect always works: `gbrain google connect` |
 | `not_connected` | No vault entry for the account | `gbrain google connect` |
+| `calendar_unreadable` | Google answered the source's calendar read with HTTP 403 or 404: the account cannot read that calendar | `gbrain google calendars --account <email>`, then `gbrain sources set-calendar <source> <calendar-id>`; see [Unreadable calendar](#unreadable-calendar) |
 | `upstream` | Google returned an unexpected error | Retry; if it persists, run `gbrain google status --json` and file the output |
 | `access_command_failed` | The `--access command` token command exited non-zero, timed out, or printed nothing token-shaped | Run it by hand; it must print a bare token or JSON with `token`/`access_token` |
 | `access_env_missing` | The `--access env` variable is unset/blank in this process | Export a live token into it (refresh externally), or switch back to the vault flow |
@@ -295,22 +451,129 @@ attached. The catalog (also emitted as structured JSON with `--json`):
 Cursor expiries (`historyId` older than ~a week, calendar/contacts
 `syncToken` 410, or a contacts HTTP 400 explicitly reporting an expired sync
 token) use bounded re-lists automatically. Contacts recovery refreshes its
-own cursor without restarting Gmail. Unrelated HTTP 400 errors remain
-upstream failures rather than triggering a full re-list.
+own cursor without restarting Gmail. A contacts HTTP 400 on a sync-token
+request that is not an expiry (a token minted under other request
+parameters) gets one full-list attempt; every other HTTP 400 remains an
+upstream failure rather than triggering a re-list.
 
 ## Custody, privacy, spend
 
 - Tokens: local vault only, 0600, atomic writes. `sources.config` stores an
   account *pointer*, never a secret. `gbrain creds list` is always redacted.
+- Mail, calendar and contact pages and the sync state: 0600 files in 0700
+  directories gbrain creates. See [File permissions](#file-permissions).
 - Disconnect: `gbrain google disconnect <email>` removes local tokens; revoke
   Google-side at <https://myaccount.google.com/permissions>.
 - Upgrade/transfer: `gbrain creds export` produces a passphrase-encrypted
   bundle (a loud per-credential warning when a Testing-mode consent screen
   would travel with it — those tokens die within 7 days on the target).
 - LLM spend: commitment extraction sends recent email text (last 30 days,
-  capped per sweep) to your configured chat provider. Kill switch:
+  capped per sweep) to your configured chat provider, under a daily cap of
+  $2.00 (`loops.extraction_max_usd_per_day`; see
+  [open loops](open-loops.md#which-threads-reach-the-extractor)). Kill switch:
   `gbrain config set loops.extraction_enabled false`. The deterministic
   unanswered-thread detector is free and always on.
+- Atom extraction from email and calendar pages is on by default: page text
+  goes to the `extract_atoms` model under the auto-drain cap. Opt out with
+  `gbrain config set cycle.extract_atoms.connector_pages false`
+  ([spend controls](../operations/spend-controls.md#atom-extraction-auto-drain-cap-and-connector-pages)).
+
+## File permissions
+
+A Google source keeps its files in one directory: by default
+`~/.gbrain/clones/<source-id>-google`, or the directory you passed with
+`gbrain sources add <id> --kind google --account <email> --dir <path>`. gbrain
+writes these files there:
+
+- `.google-source.json`, the sync cursors (and `.google-source.json.corrupt`
+  if a damaged state file was set aside),
+- one Markdown page per email thread under `emails/`, per event under
+  `calendar/` and per contact under `people/`.
+
+Each of those files is written with mode 0600 (readable only by you).
+Directories gbrain creates for the source, including the source directory
+itself when it does not exist yet, are created 0700. A directory that
+already exists, such as one you chose with `--dir`, is never chmod-ed. The
+same modes apply when managed persistence publishes the pages. On Windows
+gbrain does not set modes.
+
+**gbrain enforces 0600.** Every time gbrain rewrites one of these files it
+sets 0600 again, so a looser mode you set by hand (for example
+`chmod 644` to share a page with a group) is reverted on the next rewrite.
+Pages that did not change are not rewritten and keep whatever mode they have.
+This is deliberate: the pages are your private mail, calendar and contacts,
+and a page that quietly stays group-readable after a sync is the failure
+this rule prevents. There is no per-source setting for a looser mode yet.
+
+### Files readable by other local users
+
+gbrain releases before v0.60.31.0 wrote these files with your umask, typically
+0644 (readable by every local user), and an upgrade does not rewrite them. In
+the default directory that is harmless, because gbrain keeps `~/.gbrain` at
+0700. In a custom `--dir` outside `~/.gbrain`, those pages stay readable by
+other local users until they are rewritten.
+
+The upgrade prints a one-time notice for each Google source outside
+`~/.gbrain`, naming the directory, how many readable entries it found and
+the repair commands. `gbrain doctor` checks the same thing on every run:
+
+```text
+  [WARN] google_file_modes: Google source gmail-you: 412 file(s) and 9 directories gbrain wrote under /data/mail are readable by other local users (written before this release). Preview: gbrain repair google-file-modes --source gmail-you — apply after the user agrees: gbrain repair google-file-modes --source gmail-you --apply
+```
+
+The check reports counts per directory, never file names (Gmail page names
+contain subject words). `gbrain doctor --json` carries `source_id`, `dir`,
+`loose_files`, `loose_dirs` and both commands under `details.sources`.
+
+**Fix it with gbrain (recommended):**
+
+```bash
+gbrain repair google-file-modes --source <id>          # preview: counts and up to 10 sample paths
+gbrain repair google-file-modes --source <id> --apply  # clear group and other permission bits
+```
+
+The repair only touches gbrain's own layout: `.google-source.json*`, the
+pages gbrain recorded for that source under `emails/`, `calendar/` and
+`people/` (and their leftover `.tmp` files), and the directories between the
+source directory and those pages. It clears the group and other bits and
+keeps your own. It never changes the source directory itself, never follows
+a symlink, and skips files owned by another user (counted as residuals).
+Without `--source` it covers every Google source outside `~/.gbrain`. The
+preview's sample paths are relative to the source directory, so they can
+show subject words; run it on the brain host. See
+[`gbrain repair`](repair.md#what-each-kind-fixes).
+
+**Or fix it with chmod.** If the directory holds only this source:
+
+```bash
+chmod -R go-rwx /path/to/google/dir
+```
+
+If the directory also holds other files you want to keep shared, limit the
+change to gbrain's files:
+
+```bash
+DIR=/path/to/google/dir
+chmod go-rwx "$DIR"/.google-source.json*
+chmod -R go-rwx "$DIR"/emails "$DIR"/calendar "$DIR"/people
+```
+
+**Verify:**
+
+```bash
+find /path/to/google/dir \( -perm -040 -o -perm -004 \) -print | head   # prints nothing
+gbrain doctor   # [OK] google_file_modes
+```
+
+### Related messages
+
+- `[google] could not secure the quarantined state file <path>: <chmod|rename> failed (<error>). It may be readable by other local users; run chmod 600 <path> or delete it.`
+  A damaged state file was set aside, but gbrain could not make the copy
+  private. The sync continues from empty cursors. Run the printed `chmod` or
+  delete the file.
+- `Stale temporary path <path>.tmp is a directory; remove it and re-run the sync.`
+  A directory sits where gbrain writes a page's temporary file. That item
+  fails until you remove the directory.
 
 ## For agents ([SHOW USER] protocol)
 
@@ -320,6 +583,14 @@ copy the harness should relay verbatim is fenced in `[SHOW USER]` blocks.
 The whole setup is exactly two user interactions: (1) the GCP checklist +
 client JSON hand-back, (2) one consent click. Never pass secrets via argv —
 use `--client-json <path>`, stdin, or env.
+
+**Exit codes (contract v1 legacy).** `gbrain google` exits 0 when done, 1 when
+it failed, and 2 both for usage errors and when it is waiting on the user (for
+example `status: "awaiting_consent"` after printing the consent URL, or
+`status: "no_brain"`). Other gbrain commands use exit 3 for "the user must agree
+first"; `google` keeps 2 under contract v1 and moves to 3 in a future contract
+version. Branch on the JSON `status`, not on exit 2 alone. `next_action` is the
+legacy name for `fix` ([legacy advice names](../protocol/AGENT_OPERATOR_v1.md#legacy-advice-names)).
 
 ## Attachment receipts and historical repair
 
@@ -352,10 +623,11 @@ explicit MIME metadata fields; `body.data`, raw messages and snippets are never
 selected. The selection includes child-identity sentinels beyond depth 32 so a
 deeper MIME tree remains incomplete rather than appearing empty. Decoded metadata
 responses are capped at 2 MiB before JSON parsing; oversized responses fail without
-advancing repair. Ordinary sync's message-body requests are unchanged.
+advancing repair. Ordinary sync fetches message bodies; only historical repair
+uses this metadata-only request.
 
-Upgrading changes future ingestion, **not** every historical page. Ordinary
-incremental sync only revisits changed threads and its success does not establish
+Sync records receipts for threads it ingests; it does **not** revisit every
+historical page. Ordinary incremental sync only revisits changed threads and its success does not establish
 historical inspection. To repair already-imported pages without replaying bodies:
 
 ```sh

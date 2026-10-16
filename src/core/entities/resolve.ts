@@ -24,7 +24,14 @@
 import type { BrainEngine } from '../engine.ts';
 import { normalizeAlias } from '../search/alias-normalize.ts';
 import { foldNonDecomposingLatin } from '../latin-fold.ts';
-import { isUndefinedTableError } from '../utils.ts';
+import { slugifySegment } from '../sync.ts';
+
+/** Lazy: the mentions graph stays out of the OpenClaw plugin's static import graph. */
+const siblingCanonical: typeof import('../mentions/siblings.ts').siblingCanonical = async (...args) =>
+  (await import('../mentions/siblings.ts')).siblingCanonical(...args);
+import { isMissingSchemaObject } from '../utils.ts';
+import { privatePagesFilterFragment } from '../search/private-visibility.ts';
+import { rankingLinkSql } from '../link-ranking-policy.ts';
 
 /**
  * Canonicalize a free-form entity reference to a page slug.
@@ -34,15 +41,17 @@ import { isUndefinedTableError } from '../utils.ts';
  *      exact pages.slug row in this source), return it untouched. A mention
  *      that is exactly one live page's own name (slug basename) resolves to
  *      it next, before any other page's alias.
- *   2. Resolve a bare name only when prefix expansion finds one candidate.
+ *   2. Resolve a bare name only when prefix expansion finds one candidate,
+ *      or one candidate whose title is exactly that name.
  *   3. For multi-token input, take a fuzzy candidate within the source only
  *      when it carries the same name tokens (sameEntityName).
  *   4. Fall back to a deterministic slugify: lowercase-no-spaces with
  *      hyphen-collapse. NOT prefixed with a directory — caller decides
  *      whether to prefix `people/`, `companies/`, etc.
  *
- * Returns null when raw is empty or whitespace-only. Non-empty input always
- * produces a non-null slug — the fallback path is the floor.
+ * Returns null when raw is empty, whitespace-only, or holds no letter or
+ * number (the fallback would mint an empty slug). Any other input produces a
+ * non-null slug: the fallback path is the floor.
  */
 export async function resolveEntitySlug(
   engine: BrainEngine,
@@ -84,7 +93,7 @@ export async function resolveEntitySlug(
   //    `"Alice"` → `people/alice-example` before we phantom-stub a bare
   //    `people/alice.md`.
   if (isBareName(trimmed)) {
-    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, slugify(trimmed));
+    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, trimmed);
     if (expanded) return expanded;
   } else {
     // 3. Fuzzy match against existing pages within the source. Bare names
@@ -104,13 +113,20 @@ export async function resolveEntitySlug(
  * corrupts a well-formed slug (`people/alice-example` → `people-alice-example`)
  * into one no page can ever have — and the flattened slug never resolves, so
  * every re-extraction re-mints it. Path-shaped input is slugified PER SEGMENT
- * (identity for already-well-formed slugs); display names keep plain slugify.
+ * (identity for already-well-formed slugs).
+ *
+ * #6691: a segment whose letters the ASCII slugify would delete (Cyrillic,
+ * CJK, any non-Latin script) takes the page-slug grammar sync mints
+ * (`slugifySegment`), so `Мария` lands on `мария`, not `''`. Latin names keep
+ * the ASCII form (`o-brien`, `soren`). Null when nothing is left.
  */
-function fallbackSlugify(trimmed: string): string {
-  if (trimmed.includes('/')) {
-    return trimmed.split('/').map(slugify).filter(Boolean).join('/');
-  }
-  return slugify(trimmed);
+function fallbackSlugify(trimmed: string): string | null {
+  const slug = trimmed.split('/').map(fallbackSegment).filter(Boolean).join('/');
+  return slug || null;
+}
+
+function fallbackSegment(segment: string): string {
+  return /[\p{L}\p{N}]/u.test(foldForSlug(segment).replace(/[a-z0-9]/g, '')) ? slugifySegment(segment) : slugify(segment);
 }
 
 const IDENTITY_TYPES = new Set(['person', 'company', 'fund', 'organization']);
@@ -126,7 +142,7 @@ const FACT_ENTITY_TYPES = new Set(['concept', 'project', 'deal']);
 const FACT_ENTITY_DIRS = ['hosts/', 'projects/', 'concepts/', 'deals/'];
 
 /** Pages a fuzzy fact attribution may land on: entities, never meetings, notes or other documents. */
-function isFactEntityPage(slug: string, type: string | null): boolean {
+export function isFactEntityPage(slug: string, type: string | null): boolean {
   return isIdentityEntity(slug, type) || (type != null && FACT_ENTITY_TYPES.has(type))
     || FACT_ENTITY_DIRS.some(dir => slug.startsWith(dir));
 }
@@ -171,9 +187,9 @@ async function tryAliasExact(engine: BrainEngine, source_id: string, raw: string
       [source_id, [...new Set(hits.map((h) => h.slug))]],
     );
     const live = [...new Set(rows.map((r) => r.slug))];
-    return live.length === 1 ? live[0] : null;
+    return live.length === 1 ? live[0] : await siblingCanonical(engine, source_id, live);
   } catch (err) {
-    if (!isUndefinedTableError(err) && !aliasExactWarned) {
+    if (!isMissingSchemaObject(err, 'table', 'page_aliases') && !aliasExactWarned) {
       aliasExactWarned = true;
       console.error(`[gbrain] alias-exact resolution degraded (falling through to fuzzy): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -275,17 +291,124 @@ export async function resolveEntitySlugWithSource(
   const aliased = await tryAliasExact(engine, source_id, trimmed);
   if (aliased) return { slug: aliased, source: 'alias_exact' };
 
-  if (basenames.length > 1) return { slug: fallbackSlugify(trimmed), source: 'fallback_slugify' };
+  if (basenames.length > 1) {
+    const sibling = await siblingCanonical(engine, source_id, basenames.map(b => b.slug));
+    return sibling ? { slug: sibling, source: 'fuzzy_match' } : fallbackResult(trimmed);
+  }
 
   if (isBareName(trimmed)) {
-    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, slugify(trimmed));
+    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, trimmed);
     if (expanded) return { slug: expanded, source: 'prefix_expansion' };
   } else {
     const fuzzy = await tryFuzzyMatch(engine, source_id, trimmed);
     if (fuzzy) return { slug: fuzzy, source: 'fuzzy_match' };
   }
 
-  return { slug: fallbackSlugify(trimmed), source: 'fallback_slugify' };
+  return fallbackResult(trimmed);
+}
+
+function fallbackResult(trimmed: string): ResolveResult | null {
+  const slug = fallbackSlugify(trimmed);
+  return slug ? { slug, source: 'fallback_slugify' } : null;
+}
+
+/**
+ * How a strict reference resolution found its page. `basename` is the
+ * unique-slug-basename arm and `same_name` the trigram arm restricted to
+ * pages carrying the same name tokens (both are `fuzzy_match` in
+ * resolveEntitySlugWithSource).
+ */
+export type StrictResolutionArm = 'exact_page' | 'alias_exact' | 'basename' | 'same_name';
+
+/**
+ * A strict resolution miss: `ambiguous` (two live pages qualify),
+ * `unverified` (only a bare-name prefix guess exists), `not_entity` (the
+ * reference names a live page that is not a fact entity, e.g. a meeting) or
+ * `no_page`.
+ */
+export type StrictResolution =
+  | { slug: string; arm: StrictResolutionArm }
+  | { slug: null; miss: 'ambiguous' | 'unverified' | 'not_entity' | 'no_page' };
+
+/**
+ * Resolve a name to a live fact-entity page using only identity evidence:
+ * exact slug, unique slug basename, unique alias and, with `sameName`, the
+ * same-name trigram arm. Never guesses from a bare-name prefix and never
+ * falls back to a slugified name. With `excludePrivate`, private pages are
+ * removed before uniqueness is counted, so an unreadable namesake can neither
+ * be returned nor change the outcome for a remote caller.
+ */
+export async function resolveStrictEntityReference(
+  engine: BrainEngine,
+  source_id: string,
+  raw: string,
+  opts: { sameName?: boolean; excludePrivate?: boolean } = {},
+): Promise<StrictResolution> {
+  const trimmed = raw.trim();
+  if (!trimmed) return { slug: null, miss: 'no_page' };
+  const privacy = opts.excludePrivate ? `AND ${privatePagesFilterFragment('p')}` : '';
+  const live = async (slugs: string[]) => slugs.length === 0 ? [] : engine.executeRaw<{ slug: string; type: string | null }>(
+    `SELECT p.slug, p.type FROM pages p
+      WHERE p.source_id = $1 AND p.deleted_at IS NULL AND p.slug = ANY($2::text[]) ${privacy}`,
+    [source_id, [...new Set(slugs)]],
+  );
+  // The source pack's linkable entity types (accounts, CRM records, ...) are fact entities too.
+  let linkable: Set<string> | null = null;
+  const isEntity = async (r: { slug: string; type: string | null }) => {
+    if (isFactEntityPage(r.slug, r.type)) return true;
+    linkable ??= new Set((await (await import('../mentions/policy.ts')).loadLinkableTypes(engine, source_id).catch(() => ({ types: [] as string[] }))).types);
+    return r.type != null && linkable.has(r.type);
+  };
+  const pick = async (rows: Array<{ slug: string; type: string | null }>, arm: StrictResolutionArm): Promise<StrictResolution | null> => {
+    if (rows.length > 1) {
+      const sibling = await siblingCanonical(engine, source_id, rows.map(r => r.slug), { excludePrivate: opts.excludePrivate });
+      return sibling ? { slug: sibling, arm } : { slug: null, miss: 'ambiguous' };
+    }
+    if (rows.length === 0) return null;
+    return await isEntity(rows[0]) ? { slug: rows[0].slug, arm } : { slug: null, miss: 'not_entity' };
+  };
+
+  if (looksLikeSlug(trimmed)) {
+    const exact = await pick(await live([trimmed]), 'exact_page');
+    if (exact) return exact;
+  }
+  const token = slugify(trimmed);
+  if (!trimmed.includes('/') && token.includes('-')) {
+    const basename = await pick(await live([...PREFIX_EXPANSION_DIRS, 'concepts'].map(dir => `${dir}/${token}`)), 'basename');
+    if (basename) return basename;
+  }
+  const norm = normalizeAlias(trimmed);
+  if (norm) {
+    try {
+      const hits = (await engine.resolveAliases([norm], { sourceId: source_id })).get(norm) ?? [];
+      const aliased = await pick(await live(hits.map(h => h.slug)), 'alias_exact');
+      if (aliased) return aliased;
+    } catch (err) {
+      if (!isMissingSchemaObject(err, 'table', 'page_aliases')) throw err;
+    }
+  }
+  if (opts.sameName && !isBareName(trimmed)) {
+    try {
+      const rows = await engine.executeRaw<{ slug: string; title: string; type: string | null }>(
+        `SELECT p.slug, p.title, p.type FROM pages p
+          WHERE p.source_id = $1 AND p.deleted_at IS NULL ${privacy}
+            AND (lower(p.title) % $2 OR p.slug ILIKE '%' || $3 || '%')
+          ORDER BY GREATEST(similarity(lower(p.title), $2), similarity(p.slug, $3)) DESC, p.slug ASC
+          LIMIT 5`,
+        [source_id, trimmed.toLowerCase(), token],
+      );
+      const named = await pick(rows.filter(row => isFactEntityPage(row.slug, row.type) && sameEntityName(trimmed, row.title, row.slug)), 'same_name');
+      if (named) return named;
+    } catch (err) {
+      if (!isMissingTrigramError(err)) throw err;
+    }
+  }
+  if (isBareName(trimmed) && token) {
+    const prefixed = (await findPrefixCandidates(engine, source_id, token)).map(c => c.slug);
+    // Readable scope applies here too, so a private namesake never changes a remote outcome.
+    if ((opts.excludePrivate ? await live(prefixed) : prefixed).length > 0) return { slug: null, miss: 'unverified' };
+  }
+  return { slug: null, miss: 'no_page' };
 }
 
 /**
@@ -310,20 +433,53 @@ export async function resolvePhantomCanonical(
   engine: BrainEngine,
   source_id: string,
   phantomSlug: string,
+  opts: { type?: string | null } = {},
 ): Promise<string | null> {
   if (!phantomSlug) return null;
   const trimmed = phantomSlug.trim();
   if (!trimmed) return null;
+  // Type guard: a phantom that declares an entity type only merges into a page
+  // of that type's directory (a company phantom never lands on people/…).
+  const allowedDirs = opts.type ? PHANTOM_TYPE_DIRS[opts.type] : undefined;
+  const typeOk = (slug: string) => !allowedDirs || allowedDirs.some(dir => slug.startsWith(`${dir}/`));
   // The phantom slug is the input; we treat it as the search term too,
   // because phantom slugs ARE the lowercased bare name a fuzzy / prefix
-  // lookup would naturally target.
-  const fuzzy = await tryFuzzyMatch(engine, source_id, trimmed, false);
-  if (fuzzy && fuzzy !== phantomSlug && fuzzy.includes('/')) return fuzzy;
+  // lookup would naturally target. Short or repetitive names carry too little
+  // signal for a trigram match, so they skip the fuzzy tier.
+  if (hasNameSignal(trimmed.replace(/-/g, ' '))) {
+    const fuzzy = await tryFuzzyMatch(engine, source_id, trimmed, false);
+    if (fuzzy && fuzzy !== phantomSlug && fuzzy.includes('/') && typeOk(fuzzy)) return fuzzy;
+  }
 
   const expanded = await tryPrefixExpansion(engine, source_id, slugify(trimmed));
-  if (expanded && expanded !== phantomSlug && expanded.includes('/')) return expanded;
+  if (expanded && expanded !== phantomSlug && expanded.includes('/') && typeOk(expanded)) return expanded;
 
   return null;
+}
+
+/** Entity types whose phantoms may only merge into their own directories. */
+const PHANTOM_TYPE_DIRS: Readonly<Record<string, readonly string[]>> = {
+  person: ['people'],
+  company: ['companies'],
+  project: ['projects'],
+  host: ['hosts'],
+};
+
+/**
+ * Name-specificity gate for fuzzy phantom merges: at least 6 characters or two
+ * tokens, and Shannon character entropy of at least 1.5 bits. Short or
+ * repetitive names ("ai", "aaaa") defer to the stricter prefix tier.
+ */
+export function hasNameSignal(name: string): boolean {
+  const normalized = name.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (normalized.length < 6 && normalized.split(' ').length < 2) return false;
+  const chars = normalized.replace(/ /g, '');
+  if (!chars) return false;
+  const counts = new Map<string, number>();
+  for (const c of chars) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let entropy = 0;
+  for (const n of counts.values()) { const p = n / chars.length; entropy -= p * Math.log2(p); }
+  return entropy >= 1.5;
 }
 
 /**
@@ -364,8 +520,8 @@ export async function findPrefixCandidates(
       connection_count: number;
     }>(
       `SELECT p.slug,
-              ((SELECT COUNT(*)::int FROM links WHERE to_page_id = p.id)
-               + (SELECT COUNT(*)::int FROM links WHERE from_page_id = p.id)
+              ((SELECT COUNT(*)::int FROM links l WHERE l.to_page_id = p.id AND ${rankingLinkSql('l')})
+               + (SELECT COUNT(*)::int FROM links l WHERE l.from_page_id = p.id AND ${rankingLinkSql('l')})
                + (SELECT COUNT(*)::int FROM content_chunks WHERE page_id = p.id))
                 AS connection_count
        FROM pages p
@@ -386,13 +542,43 @@ export async function findPrefixCandidates(
   }
 }
 
+/**
+ * The sole prefix candidate, or, when every candidate sits in one entity
+ * directory, the one page whose title is exactly the bare name: "Acme" is
+ * `companies/acme-0` titled "Acme", not `companies/acme-labs-50` titled
+ * "Acme Labs" (gbrain-evals N9-5). A collision across directories (a person
+ * and a host) or two exact titles stays ambiguous.
+ */
 async function tryUnambiguousPrefixExpansion(
   engine: BrainEngine,
   source_id: string,
-  token: string,
+  raw: string,
 ): Promise<string | null> {
+  const token = slugify(raw);
   const candidates = await findPrefixCandidates(engine, source_id, token);
-  return candidates.length === 1 ? candidates[0].slug : null;
+  if (candidates.length === 1) return candidates[0].slug;
+  if (candidates.length === 0) return null;
+  const patterns = PREFIX_EXPANSION_DIRS.flatMap(dir => [`${dir}/${token}`, `${dir}/${token}-%`]);
+  try {
+    const dirs = await engine.executeRaw<{ dir: string }>(
+      `SELECT DISTINCT split_part(slug, '/', 1) AS dir FROM pages
+        WHERE source_id = $1 AND deleted_at IS NULL AND slug LIKE ANY($2::text[])
+        LIMIT 2`,
+      [source_id, patterns],
+    );
+    if (dirs.length !== 1) return null;
+    const rows = await engine.executeRaw<{ slug: string; title: string | null }>(
+      `SELECT slug, title FROM pages
+        WHERE source_id = $1 AND deleted_at IS NULL
+          AND slug LIKE ANY($2::text[]) AND lower(title) = lower($3)
+        LIMIT 3`,
+      [source_id, patterns, raw.trim()],
+    );
+    const exact = rows.filter(r => sameEntityName(raw, r.title, r.slug));
+    return exact.length === 1 ? exact[0].slug : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -433,8 +619,8 @@ async function tryPrefixExpansion(
         // directly. Even on a pathological prefix matching 1000+ pages,
         // work is bounded per-candidate, not whole-table.
         `SELECT p.slug,
-                ((SELECT COUNT(*)::int FROM links WHERE to_page_id = p.id)
-                 + (SELECT COUNT(*)::int FROM links WHERE from_page_id = p.id)
+                ((SELECT COUNT(*)::int FROM links l WHERE l.to_page_id = p.id AND ${rankingLinkSql('l')})
+                 + (SELECT COUNT(*)::int FROM links l WHERE l.from_page_id = p.id AND ${rankingLinkSql('l')})
                  + (SELECT COUNT(*)::int FROM content_chunks WHERE page_id = p.id))
                   AS connection_count
          FROM pages p
@@ -463,12 +649,14 @@ async function tryPrefixExpansion(
   return null;
 }
 
-function looksLikeSlug(s: string): boolean {
-  // Slug shape: lowercase letters/digits with at least one slash OR matches
-  // [a-z0-9-]+ exactly. Anything with whitespace or capital letters fails.
+export function looksLikeSlug(s: string): boolean {
+  // Slug shape: lowercase Unicode letters/numbers plus the path and slug
+  // separators. Slugs are not ASCII-only: a non-Latin entity page such as
+  // `people/<hangul-name>` must take the exact-match path before fuzzy
+  // matching. Anything with whitespace or uppercase letters still fails.
   if (/\s/.test(s)) return false;
   if (s !== s.toLowerCase()) return false;
-  return /^[a-z0-9/_-]+$/.test(s);
+  return /^[\p{L}\p{N}/_-]+$/u.test(s);
 }
 
 async function tryExactSlug(
@@ -554,17 +742,15 @@ export function slugify(raw: string): string {
   // and the sweep below would DELETE them: "Đăng Example" slugged to
   // "ang-example". Fold after the strip so composed forms reduce in one pass
   // ("ǿ" → "ø" → "o").
-  const folded = foldNonDecomposingLatin(
-    raw
-      .toLowerCase()
-      .normalize('NFKD')
-      // NFKD decomposes accents into combining marks (U+0300..U+036F);
-      // strip them before replacing the rest with hyphens so "è" → "e",
-      // not "e" + "-".
-      .replace(/[̀-ͯ]/g, ''),
-  );
-  return folded
+  return foldForSlug(raw)
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+/** Lowercase, accent marks stripped, stroke letters folded: what `slugify` keeps `[a-z0-9]` from. */
+function foldForSlug(raw: string): string {
+  // NFKD decomposes accents into combining marks (U+0300..U+036F); strip them
+  // before replacing the rest with hyphens so "è" → "e", not "e" + "-".
+  return foldNonDecomposingLatin(raw.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, ''));
 }

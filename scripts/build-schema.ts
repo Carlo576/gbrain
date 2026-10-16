@@ -28,14 +28,24 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { SOURCE_INGESTION_RECEIPTS_SCHEMA_SQL } from '../src/core/company-brain/receipt-schema.ts';
+import { FTS_INPUT_FUNCTION_SQL } from '../src/core/fts-language.ts';
 import { FACT_WITHDRAWAL_SCHEMA_STATEMENTS } from '../src/core/facts/withdrawal-schema.ts';
 import { GRANT_AUDIT_SCHEMA_SQL } from '../src/core/grants/schema.ts';
 import { LEASE_TOKEN_SCHEMA_SQL } from '../src/core/lease-schema.ts';
+import { LINK_TEMPORAL_SCHEMA_SQL } from '../src/core/link-temporal-schema.ts';
+import { PAGE_BODY_SCHEMA_SQL, PAGE_GENERATION_BUMP_FN_SQL } from '../src/core/page-body/schema.ts';
 import { PAGE_PROJECTION_SCHEMA_SQL } from '../src/core/page-state/projection-schema.ts';
 import { PAGE_STATE_SCHEMA_SQL } from '../src/core/page-state/schema.ts';
 import { POSTGRES_CONCURRENT_PERSISTENCE_INDEXES, PERSISTENCE_SCHEMA_STATEMENTS } from '../src/core/persistence/schema.ts';
 import { PERSISTENCE_TOPOLOGY_SCHEMA_SQL } from '../src/core/persistence/topology-schema.ts';
+import { WORKTREE_REFRESH_SCHEMA_SQL } from '../src/core/persistence/worktree-refresh-schema.ts';
 import { SHARED_SKILLS_SCHEMA_SQL } from '../src/core/shared-skills/schema-all.ts';
+import { DECIDE_SCHEMA_SQL } from '../src/core/ai/decide/schema.ts';
+import { FACT_RELINK_SCHEMA_SQL } from '../src/core/facts/relink-schema.ts';
+import { PINNED_QUESTIONS_SCHEMA_SQL } from '../src/core/questions/schema.ts';
+import { CORE_EDIT_NOTICES_SCHEMA_SQL } from '../src/core/core-memory-schema.ts';
+import { FACT_PURGE_LOOKUP_INDEX_SQL, MEMORY_PURGE_SCHEMA_SQL } from '../src/core/facts/purge-schema.ts';
+import { WRITE_GATE_SCHEMA_SQL } from '../src/core/write-gate-schema.ts';
 
 const REPO = resolve(import.meta.dir, '..');
 export const SCHEMA_SQL_PATH = 'src/schema.sql';
@@ -66,6 +76,8 @@ export interface Fragment {
 const persistenceSql = (statements: readonly string[]) => `${statements.join(';\n')};`;
 
 export const FRAGMENTS: readonly Fragment[] = [
+  { source: 'src/core/page-body/schema.ts', expr: 'PAGE_GENERATION_BUMP_FN_SQL', postgres: PAGE_GENERATION_BUMP_FN_SQL, pglite: PAGE_GENERATION_BUMP_FN_SQL },
+  { source: 'src/core/fts-language.ts', expr: 'FTS_INPUT_FUNCTION_SQL', postgres: FTS_INPUT_FUNCTION_SQL, pglite: FTS_INPUT_FUNCTION_SQL },
   { source: 'src/core/grants/schema.ts', expr: 'GRANT_AUDIT_SCHEMA_SQL', postgres: GRANT_AUDIT_SCHEMA_SQL, pglite: GRANT_AUDIT_SCHEMA_SQL },
   {
     source: 'src/core/facts/withdrawal-schema.ts',
@@ -74,6 +86,7 @@ export const FRAGMENTS: readonly Fragment[] = [
     pglite: `${FACT_WITHDRAWAL_SCHEMA_STATEMENTS[0]};`,
   },
   { source: 'src/core/lease-schema.ts', expr: 'LEASE_TOKEN_SCHEMA_SQL', postgres: LEASE_TOKEN_SCHEMA_SQL, pglite: LEASE_TOKEN_SCHEMA_SQL },
+  { source: 'src/core/page-body/schema.ts', expr: 'PAGE_BODY_SCHEMA_SQL', postgres: PAGE_BODY_SCHEMA_SQL, pglite: PAGE_BODY_SCHEMA_SQL },
   { source: 'src/core/page-state/schema.ts', expr: 'PAGE_STATE_SCHEMA_SQL', postgres: PAGE_STATE_SCHEMA_SQL, pglite: PAGE_STATE_SCHEMA_SQL },
   {
     source: 'src/core/persistence/schema.ts',
@@ -87,8 +100,17 @@ export const FRAGMENTS: readonly Fragment[] = [
   },
   { source: 'src/core/page-state/projection-schema.ts', expr: 'PAGE_PROJECTION_SCHEMA_SQL', postgres: PAGE_PROJECTION_SCHEMA_SQL, pglite: PAGE_PROJECTION_SCHEMA_SQL },
   { source: 'src/core/persistence/topology-schema.ts', expr: 'PERSISTENCE_TOPOLOGY_SCHEMA_SQL', postgres: PERSISTENCE_TOPOLOGY_SCHEMA_SQL, pglite: PERSISTENCE_TOPOLOGY_SCHEMA_SQL },
+  { source: 'src/core/persistence/worktree-refresh-schema.ts', expr: 'WORKTREE_REFRESH_SCHEMA_SQL', postgres: WORKTREE_REFRESH_SCHEMA_SQL, pglite: WORKTREE_REFRESH_SCHEMA_SQL },
   { source: 'src/core/company-brain/receipt-schema.ts', expr: 'SOURCE_INGESTION_RECEIPTS_SCHEMA_SQL', postgres: SOURCE_INGESTION_RECEIPTS_SCHEMA_SQL, pglite: SOURCE_INGESTION_RECEIPTS_SCHEMA_SQL },
   { source: 'src/core/shared-skills/schema-all.ts', expr: 'SHARED_SKILLS_SCHEMA_SQL', postgres: SHARED_SKILLS_SCHEMA_SQL, pglite: SHARED_SKILLS_SCHEMA_SQL },
+  { source: 'src/core/ai/decide/schema.ts', expr: 'DECIDE_SCHEMA_SQL', postgres: DECIDE_SCHEMA_SQL, pglite: DECIDE_SCHEMA_SQL },
+  { source: 'src/core/facts/relink-schema.ts', expr: 'FACT_RELINK_SCHEMA_SQL', postgres: FACT_RELINK_SCHEMA_SQL, pglite: FACT_RELINK_SCHEMA_SQL },
+  { source: 'src/core/link-temporal-schema.ts', expr: 'LINK_TEMPORAL_SCHEMA_SQL', postgres: LINK_TEMPORAL_SCHEMA_SQL, pglite: LINK_TEMPORAL_SCHEMA_SQL },
+  { source: 'src/core/core-memory-schema.ts', expr: 'CORE_EDIT_NOTICES_SCHEMA_SQL', postgres: CORE_EDIT_NOTICES_SCHEMA_SQL, pglite: CORE_EDIT_NOTICES_SCHEMA_SQL },
+  { source: 'src/core/facts/purge-schema.ts', expr: 'MEMORY_PURGE_SCHEMA_SQL', postgres: MEMORY_PURGE_SCHEMA_SQL, pglite: MEMORY_PURGE_SCHEMA_SQL },
+  { source: 'src/core/facts/purge-schema.ts', expr: 'FACT_PURGE_LOOKUP_INDEX_SQL', postgres: FACT_PURGE_LOOKUP_INDEX_SQL, pglite: FACT_PURGE_LOOKUP_INDEX_SQL },
+  { source: 'src/core/write-gate-schema.ts', expr: 'WRITE_GATE_SCHEMA_SQL', postgres: WRITE_GATE_SCHEMA_SQL, pglite: WRITE_GATE_SCHEMA_SQL },
+  { source: 'src/core/questions/schema.ts', expr: 'PINNED_QUESTIONS_SCHEMA_SQL', postgres: PINNED_QUESTIONS_SCHEMA_SQL, pglite: PINNED_QUESTIONS_SCHEMA_SQL },
 ];
 
 const fragmentLabel = (f: Fragment) => `${f.source} (${f.expr})`;
@@ -363,6 +385,9 @@ const MIGRATION_TIMING = 'PGLite gets it later from its migration, so fresh PGLi
 export const PGLITE_RULES: readonly Rule[] = [
   { id: 'extension:pgcrypto', reason: 'PGLite ships no pgcrypto; gen_random_uuid() is core', action: 'drop' },
   { id: 'table:sources', reason: `sources.chunker_version: ${MIGRATION_TIMING}`, action: omitColumns('chunker_version') },
+  { id: 'add-column:sources.upstream_checked_at', reason: MIGRATION_TIMING, action: 'drop' },
+  { id: 'add-column:sources.upstream_commit', reason: MIGRATION_TIMING, action: 'drop' },
+  { id: 'add-column:sources.upstream_behind', reason: MIGRATION_TIMING, action: 'drop' },
   { id: 'index:pages_generation_idx', reason: MIGRATION_TIMING, action: 'drop' },
   { id: 'index:idx_pages_updated_at_desc', reason: MIGRATION_TIMING, action: 'drop' },
   {
@@ -411,7 +436,7 @@ export const PGLITE_RULES: readonly Rule[] = [
 
 /** DO blocks outside fragment regions are opaque, so each is classified by content hash. */
 export const PGLITE_DO_BLOCKS: Readonly<Record<string, { keep: boolean; reason: string }>> = {
-  d4724194ea02: { keep: false, reason: 'schema.sql RLS enablement block: PGLite has no role system (the shared-skills fragment keeps its own block)' },
+  '146e456b365a': { keep: false, reason: 'schema.sql RLS enablement block (#5227 conditional enables): PGLite has no role system (the shared-skills fragment keeps its own block)' },
 };
 
 interface Addition {

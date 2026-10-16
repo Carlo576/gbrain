@@ -8,13 +8,17 @@
  */
 
 import { loadCompletedMigrations } from '../../../core/preferences.ts';
+import { MIGRATION_OPT_OUT_KEYS, declinedMigrations, indexCompletedEntries, isFreshInstallStamp, migrationLedgerSummary, trailingPartialCount } from '../../../core/migration-ledger.ts';
+import { VERSION } from '../../../version.ts';
+import { pendingFreshInstallCheck } from './pending-fresh-install.ts';
 import { compareVersions } from '../../migrations/index.ts';
 import { bootstrapDoctorChecks } from '../bootstrap-checks.ts';
 import { buildMemorableRelayCheck } from './integrations-memorable.ts';
 import { buildMemoryWritebackCheck } from './memory-writeback.ts';
-import { checkSelfUpgradeHealth, checkUpgradeErrors } from './upgrade-health.ts';
+import { checkBunRuntime, checkSelfUpgradeHealth, checkUpgradeErrors } from './upgrade-health.ts';
 import type { Check } from '../../doctor.ts';
 import type { DoctorContext, DoctorEntry } from '../context.ts';
+import { checkError } from '../check-fix.ts';
 
 async function runBootstrapChecks(ctx: DoctorContext): Promise<Check[]> {
   const { engine } = ctx;
@@ -91,7 +95,7 @@ async function runConnectors(ctx: DoctorContext): Promise<Check[]> {
       const { dreamPaidLoopCheck } = await import('./dream-breaker.ts');
       checks.push(await dreamPaidLoopCheck(engine));
     } catch (e) {
-      checks.push({ name: 'dream_paid_loop', status: 'warn', message: `Could not count dead dream submissions: ${e instanceof Error ? e.message : String(e)}` });
+      checks.push(checkError('dream_paid_loop', 'count dead dream submissions', e));
     }
   }
   return checks;
@@ -100,6 +104,7 @@ async function runConnectors(ctx: DoctorContext): Promise<Check[]> {
 export const connectorsEntry: DoctorEntry = {
   name: 'connectors',
   emits: ['connectors', 'dream_paid_loop'],
+  engineChecks: ['connectors', 'dream_paid_loop'],
   run: runConnectors,
 };
 
@@ -122,21 +127,33 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
   // schema clearly advanced. Without this, every install that went through
   // a v0.11.0 stopgap and then upgraded carries the "MINIONS HALF-INSTALLED"
   // flag forever, even on installs that have been at v0.22+ for months.
+  // #6466: a migration the brain's config declines is reported as such,
+  // never as pending, partial or wedged.
+  const declined = engine ? await declinedMigrations(engine).catch(() => new Set<string>()) : new Set<string>();
   try {
     const completed = loadCompletedMigrations();
-    const byVersion = new Map<string, { complete: boolean; partial: boolean }>();
+    const byVersion = new Map<string, { complete: boolean; partial: boolean; ran: boolean }>();
     for (const entry of completed) {
-      const seen = byVersion.get(entry.version) ?? { complete: false, partial: false };
+      if (declined.has(entry.version)) continue;
+      const seen = byVersion.get(entry.version) ?? { complete: false, partial: false, ran: false };
       if (entry.status === 'complete') seen.complete = true;
+      if (entry.status === 'complete' && !isFreshInstallStamp(entry)) seen.ran = true;
       if (entry.status === 'partial') seen.partial = true;
       byVersion.set(entry.version, seen);
     }
+    // Init's fresh-install stamps are not forward progress: a newer stamped
+    // no-op must never hide a real partial on a new brain.
     const completedVersions = Array.from(byVersion.entries())
-      .filter(([, s]) => s.complete)
+      .filter(([, s]) => s.ran)
       .map(([v]) => v);
+    // A trailing `retry` marker (apply-migrations --force-retry) makes the
+    // version pending again, as statusForVersion and get_health read it: it
+    // is reported below as not run yet, never as still wedged.
+    const history = indexCompletedEntries(completed);
     const stuck = Array.from(byVersion.entries())
       .filter(([v, s]) => {
         if (!s.partial || s.complete) return false;
+        if (history.get(v)?.at(-1)?.status === 'retry') return false;
         // Forward-progress override: if any version >= v has completed, the
         // partial is stale. compareVersions returns 1 when first arg is newer.
         const supersededBy = completedVersions.find(cv => compareVersions(cv, v) >= 0);
@@ -155,12 +172,26 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
     // that won't unstick them.
     const wedged: string[] = [];
     for (const v of stuck) {
-      const partialCount = completed.filter(
-        e => e.version === v && e.status === 'partial',
-      ).length;
+      const partialCount = trailingPartialCount(history.get(v) ?? []);
       if (partialCount >= 3) wedged.push(v);
     }
+    // Registered host migrations get_health lists as `pending` (no ledger
+    // entry, or reset by a retry marker) that a NEWER migration already ran
+    // past were skipped, not merely not reached yet. Versions above the newest
+    // run are the next apply-migrations' ordinary work and stay quiet here.
+    const newestRun = completedVersions.reduce<string | null>((a, v) => (a === null || compareVersions(v, a) > 0 ? v : a), null);
+    const pending = completed.length === 0 ? [] : migrationLedgerSummary(VERSION, declined).pending.filter(v =>
+      (newestRun !== null && compareVersions(v, newestRun) < 0) || history.get(v)?.at(-1)?.status === 'retry');
 
+    if (declined.size > 0) {
+      const keys = [...declined].map(v => `${MIGRATION_OPT_OUT_KEYS[v]}=false`);
+      checks.push({
+        name: 'minions_migration',
+        status: 'ok',
+        message: `Declined by config: ${[...declined].join(', ')} (${keys.join(', ')}); apply-migrations skips it on every machine using this brain. Turn one back on: gbrain config set <key> true`,
+        details: { declined: [...declined] },
+      });
+    }
     if (wedged.length > 0) {
       // The wedged set is a STRICT subset of the stuck set, so a wedged
       // version is also stuck. Surface the force-retry hint instead of the
@@ -178,6 +209,16 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
         status: 'fail',
         message: `MINIONS HALF-INSTALLED (partial migration: ${stuck.join(', ')}). Run: gbrain apply-migrations --yes`,
       });
+    } else if (pending.length > 0) {
+      checks.push({
+        name: 'minions_migration',
+        status: 'warn',
+        message: `${pending.length} host migration(s) not run yet: ${pending.join(', ')}. Run: gbrain apply-migrations --yes`,
+        details: { pending },
+      });
+    } else {
+      const setup = pendingFreshInstallCheck();
+      if (setup) checks.push(setup);
     }
     // Note: the "no preferences.json but schema is v7+" case is detected
     // in the DB section below (needs schema version).
@@ -199,11 +240,12 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
   // so a wedged auto-upgrade loop was invisible exactly where it would be
   // diagnosed. Sits beside the upgrade_errors trail it complements.
   checks.push(checkSelfUpgradeHealth());
+  checks.push(checkBunRuntime());
   return checks;
 }
 
 export const minionsMigrationEntry: DoctorEntry = {
   name: 'minions_migration',
-  emits: ['minions_migration', 'upgrade_errors', 'self_upgrade_health'],
+  emits: ['minions_migration', 'upgrade_errors', 'self_upgrade_health', 'bun_runtime'],
   run: runMinionsMigration,
 };

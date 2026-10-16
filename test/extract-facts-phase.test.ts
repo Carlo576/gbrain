@@ -3,7 +3,7 @@
  *
  * Covers the reconciliation contract: parse fence → deleteFactsForPage
  * → insertFacts. Plus the empty-fence guard (Codex R2-#7) that refuses
- * to run when legacy v0.31 rows are pending the v0_32_2 backfill.
+ * to reconcile while unfenced rows the phase could not fence remain.
  *
  * Uses a real PGLite engine. Pages seeded via engine.putPage so
  * compiled_truth + frontmatter are realistic.
@@ -658,7 +658,7 @@ describe('runExtractFacts — happy path', () => {
     expect(cleanRows.rows.map((row: { fact: string }) => row.fact)).toEqual(['Clean']);
   });
 
-  test('#3625: a Facts fence below the timeline sentinel is loud-skipped, never treated as absence', async () => {
+  test('#3625 / #6686: a lone Facts fence below the timeline sentinel is read as the page fence, never treated as absence', async () => {
     await putPage('people/carol', FACT_FENCE(
       `| 1 | Seeded | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
     ));
@@ -680,7 +680,8 @@ describe('runExtractFacts — happy path', () => {
 
     const r = await runExtractFacts(engine, { slugs: ['people/carol'] });
 
-    expect(r.warnings.some(w => w.includes('FACTS_FENCE_BELOW_SENTINEL'))).toBe(true);
+    // #6686 (D8): the managed writers keep and edit a lone timeline fence in place, so reconcile reads it there.
+    expect(r.warnings).toEqual([]);
     expect(r.factsDeleted).toBe(0);
     expect(r.factsInserted).toBe(0);
 
@@ -713,7 +714,7 @@ describe('runExtractFacts — happy path', () => {
     expect(Number(rows.rows[0].n)).toBe(0);
   });
 
-  test('#3625: a Facts fence below the timeline sentinel is preserved, not deleted, and warns loudly', async () => {
+  test('#3625 / #6686: a lone Facts fence below the timeline sentinel reconciles from where it lives, not as a deleted fence', async () => {
     // Seed the page with the fence in its normal place (above the sentinel)
     // and let it index normally.
     await putPage('people/alice', FACT_FENCE(
@@ -743,16 +744,17 @@ describe('runExtractFacts — happy path', () => {
 
     const r = await runExtractFacts(engine, { slugs: ['people/alice'] });
 
-    // The fix: this must NOT read as "fence removed" and must NOT delete
-    // the previously-indexed rows.
+    // This must NOT read as "fence removed": #6686 (D8) reads the lone timeline fence as the page's fence, so the
+    // two rows the page write already projected from it stay indexed and the reconcile finds them in sync.
+    expect(r.warnings).toEqual([]);
     expect(r.factsDeleted).toBe(0);
-    expect(r.warnings.some(w => w.includes('FACTS_FENCE_BELOW_SENTINEL'))).toBe(true);
+    expect(r.factsInserted).toBe(0);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rows = await (engine as any).db.query(
-      `SELECT fact FROM facts WHERE source_markdown_slug = 'people/alice' ORDER BY row_num`,
+      `SELECT fact, row_num FROM facts WHERE source_markdown_slug = 'people/alice' AND expired_at IS NULL ORDER BY row_num`,
     );
-    expect(rows.rows.map((row: { fact: string }) => row.fact)).toEqual(['Founded Acme', 'Prefers async']);
+    expect(rows.rows.map((row: { fact: string; row_num: number }) => [row.fact, Number(row.row_num)])).toEqual([['Founded Acme', 1], ['Prefers async', 2]]);
   });
 
   test('#3625 control: a genuinely fence-less page (no fence anywhere in the body) still wipes as before', async () => {
@@ -1021,7 +1023,10 @@ describe('runExtractFacts — empty-fence guard (Codex R2-#7)', () => {
     expect(r.legacyRowsPending).toBe(1);
     expect(r.factsInserted).toBe(0);
     expect(r.factsDeleted).toBe(0);
-    expect(r.warnings.some(w => w.includes('apply-migrations'))).toBe(true);
+    // The page's canonical file is not on this host, so the phase's own fence
+    // step could not fence the row; the warning names the page and why.
+    expect(r.warnings.some(w => w.startsWith('FACTS_FENCE_FAILED: people/alice ('))).toBe(true);
+    expect(r.warnings.some(w => w.includes('unfenced fact row(s)') && !w.includes('v0.31'))).toBe(true);
 
     // Legacy row was NOT touched.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1320,7 +1325,7 @@ describe('runExtractFacts — empty-fence guard (Codex R2-#7)', () => {
     expect(r.legacyRowsPending).toBe(1);
     expect(r.factsInserted).toBe(0);
     expect(r.factsDeleted).toBe(0);
-    expect(r.warnings.some(w => w.includes('apply-migrations'))).toBe(true);
+    expect(r.warnings.some(w => w.startsWith('FACTS_FENCE_FAILED: people/bob ('))).toBe(true);
   });
 
   test('#2484: a soft-deleted backing page makes its legacy row unfenceable (does NOT gate)', async () => {
@@ -1442,9 +1447,8 @@ describe('runExtractFacts — multi-source isolation', () => {
     expect(rWork.guardTriggered).toBe(true);
     expect(rWork.legacyRowsPending).toBe(1);
     expect(rWork.factsInserted).toBe(0);
-    // The drain advice must be one that actually re-runs Phase B — a bare
-    // `apply-migrations --yes` no-ops once the ledger says complete.
-    expect(rWork.warnings.some(w => w.includes('--force-retry 0.32.2'))).toBe(true);
+    // The advice names the page the phase's own fence step could not fence.
+    expect(rWork.warnings.some(w => w.startsWith('FACTS_FENCE_FAILED: people/alice ('))).toBe(true);
     expect(rWork.warnings.some(w => w.includes('forget_fact'))).toBe(true);
     expect(rWork.warnings.some(w => w.includes('source "work"'))).toBe(true);
   });

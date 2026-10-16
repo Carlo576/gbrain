@@ -242,6 +242,9 @@ describe('runUpgrade target verification (#4366)', () => {
     writeFileSync(join(bin, 'gbrain'), `#!/bin/sh\necho "gbrain ${opts.observedVersion}"\n`);
     chmodSync(join(bin, 'clawhub'), 0o755);
     chmodSync(join(bin, 'gbrain'), 0o755);
+    // #6662: verify-target probes the release tag with `git ls-remote`; report it published, offline.
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase "$1" in ls-remote) exit 0;; esac\nexec ${JSON.stringify(Bun.which('git') ?? '/usr/bin/git')} "$@"\n`);
+    chmodSync(join(bin, 'git'), 0o755);
     if (opts.recordGitAndBun) {
       for (const tool of ['git', 'bun']) {
         writeFileSync(join(bin, tool), `#!/bin/sh\necho "$(pwd)|$*" >> "${join(home, 'calls.log')}"\nexit 0\n`);
@@ -272,7 +275,7 @@ describe('runUpgrade target verification (#4366)', () => {
       mockPrelude +
         `import { runUpgrade } from '${repoRoot}src/commands/upgrade.ts';\n` +
         `const t = process.env.TEST_TARGET_VERSION;\n` +
-        `await runUpgrade(['--swap-only'], t ? { targetVersion: t } : {});\n`,
+        `await runUpgrade(['--swap-only', '--no-bun-floor-check'], t ? { targetVersion: t } : {});\n`,
     );
     let bunExec = process.execPath;
     if (opts.binaryResult) {
@@ -429,7 +432,8 @@ describe('runUpgrade target verification (#4366)', () => {
     try {
       const root = join(home, repoDir);
       expect(stdout).toContain('Detected install method: bun-link');
-      const calls = readFileSync(join(home, 'calls.log'), 'utf-8').trim().split('\n');
+      // `rev-parse HEAD` records the pre-swap commit for #5855's recovery text.
+      const calls = readFileSync(join(home, 'calls.log'), 'utf-8').trim().split('\n').filter((c) => !c.endsWith(' rev-parse HEAD'));
       expect(calls[0]!.split('|')[1]).toBe(`-C ${root} pull --ff-only`);
       expect(calls[1]).toBe(`${realpathSync(root)}|install`);
       for (const dir of [home, repoRoot, join(root, 'src')]) {

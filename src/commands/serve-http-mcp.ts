@@ -4,25 +4,35 @@
  * verifier, the per-request effective surface, tools/list and tools/call
  * through the shared dispatcher, request logging and the admin SSE feed.
  */
+import { createHash } from 'node:crypto';
 import type { Express, Request, Response } from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema, CallToolRequestSchema, type CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { opAllowedForBoundClient } from '../core/operations.ts';
+import { authTransport } from '../core/ops/contract.ts';
 import type { AuthInfo, Operation } from '../core/operations.ts';
 import { disabledOpsForPublishGates } from '../mcp/publish-gates.ts';
-import { resolveMcpInstructions } from '../mcp/instructions.ts';
+import { installInstructionsResolver, readInstructionContent, resolveMcpInstructions } from '../mcp/instructions.ts';
+import { httpInstructionTools } from '../mcp/initialize-context.ts';
 import { installCapabilitiesResource, mcpAdministrationGuidance } from '../mcp/capabilities.ts';
 import { createSkillResources } from '../mcp/skill-resources.ts';
 import { resolveAuthCapabilities } from '../core/harness/capabilities.ts';
 import { resolveWritebackConfig, ambientOptsFrom } from '../core/facts/writeback-config.ts';
 import { hasScope, operationScopesAllowed } from '../core/scope.ts';
-import { summarizeMcpParams, dispatchToolCall, requestLogStatusForResult, type ToolResult } from '../mcp/dispatch.ts';
+import { summarizeMcpParams, dispatchToolCall, requestLogStatusForResult, requestMetaSessionId, acceptedPendingReceipt, unknownToolEnvelope, errorResult, dispatchRenderContext, grantBlockedNotices, admitNotices, type ToolResult } from '../mcp/dispatch.ts';
+import { toAgentError } from '../core/agent-output.ts';
+import { STATUS_TOOL_NAME, statusModeOf, statusToolResult } from '../mcp/status-mode.ts';
+import { isCallable, publishGatesFromDisabled } from '../core/ops/callable.ts';
+import { scopeDeniedError } from '../core/ops/op-fix.ts';
 import { resolveStrictParamsMode } from '../mcp/validate-params.ts';
+import { GBRAIN_CLIENT_HEADER, isGbrainThinClient, resolveResultRowsMode, resultRowsForRequest, type ResultRowsMode } from '../mcp/result-rows.ts';
 import { buildToolDefs } from '../mcp/tool-defs.ts';
 import {
   filterOpsForSurface,
+  advertisedOps,
+  resolveAdvertisedSurface,
   clampSurface,
   minSurface,
   resolveClientRowSurface,
@@ -45,6 +55,10 @@ interface McpRequestState {
   surface: McpSurface;
   surfaceCeiling: McpSurface;
   surfaceAllowedOps: ReadonlySet<string> | undefined;
+  /** C1: search/query row shape for this request (thin-client header, else host `mcp.result_rows`). */
+  resultRows: ResultRowsMode;
+  /** Large pages: the same header marks gbrain's thin client, whose default get_page mode stays whole. Never authority. */
+  thinClient: boolean;
 }
 
 export function mountMcp(app: Express, ctx: ServeHttpContext): void {
@@ -136,16 +150,21 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
     // can call it (surface + scope + bound-client fence — the same
     // predicates tools/list applies).
     const canWrite = hasScope(authInfo.scopes, 'write');
-    const [{ ceiling: surfaceCeiling, effective: surface }, writeback] = await Promise.all([
+    const [{ ceiling: surfaceCeiling, effective: surface }, writeback, hostResultRows] = await Promise.all([
       resolveEffectiveSurface(authInfo),
       canWrite ? resolveWritebackConfig(engine, config) : Promise.resolve(null),
+      resolveResultRowsMode(engine, config),
     ]);
+    // C1: gbrain's thin client keeps full rows. The header is unverified and
+    // selects a row shape only; it never gates anything security-relevant.
+    const resultRows = resultRowsForRequest(req.get(GBRAIN_CLIENT_HEADER), hostResultRows);
     const mcpOperations = filterOpsForSurface(mcpOperationsBase, surface)
       .filter(op => authInfo.allowedOperations == null || authInfo.allowedOperations.includes(op.name));
     authInfo.effectiveSurface = surface;
     const surfaceAllowedOps: ReadonlySet<string> | undefined =
       surface === 'full' && authInfo.allowedOperations == null ? undefined : new Set(mcpOperations.map(o => o.name));
-    const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps };
+    const thinClient = isGbrainThinClient(req.get(GBRAIN_CLIENT_HEADER));
+    const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows, thinClient };
     const server = createMcpRequestServer(ctx, state, writeback);
     await serveMcpRequest(server, req, res);
   });
@@ -180,8 +199,14 @@ function createMcpRequestServer(
       instructions: resolveMcpInstructions(config, process.env, { writeback: writebackOpts }),
     },
   );
+  // F1: the contract for THIS token's callable set + readiness tail, resolved at initialize.
+  installInstructionsResolver(server, async () => resolveMcpInstructions(config, process.env, {
+    writeback: writebackOpts,
+    tools: await httpInstructionTools(engine, config, { ops: mcpOperations, surface, auth: authInfo, allowedOps: surfaceAllowedOps, cache: ctx.readinessCache }),
+    ...await readInstructionContent(engine),
+  }));
   installCapabilitiesResource(server, async () => {
-    return { transport: authInfo.clientId.startsWith('gbrain_cl_') ? 'oauth' : 'legacy', client_id: authInfo.clientId,
+    return { transport: authTransport(authInfo), client_id: authInfo.clientId,
       ...await resolveAuthCapabilities(authInfo, engine, config), administration: mcpAdministrationGuidance(mcpResourceUrl.toString()) };
   }, createSkillResources(engine, async () => {
     const sourceId = authInfo.sourceId ?? 'default';
@@ -197,7 +222,7 @@ function createMcpRequestServer(
 
 async function listMcpTools(ctx: ServeHttpContext, state: McpRequestState) {
   const { engine, config, broadcastEvent } = ctx;
-  const { authInfo, agentName, startTime, mcpOperations } = state;
+  const { authInfo, agentName, startTime, mcpOperations, surface, surfaceAllowedOps } = state;
   // WP1 honest catalog: the advertised list is exactly what THIS token
   // can call. Three per-request filters, cheapest first:
   //   1. token scope — a read-only token never sees admin/write tools;
@@ -211,18 +236,21 @@ async function listMcpTools(ctx: ServeHttpContext, state: McpRequestState) {
   // stays as the fail-closed backstop for all three layers.
   // Both per-request config reads are independent — issue them
   // concurrently (one RTT of latency on network Postgres, not two).
-  const [gateDisabled, strictParamsMode] = await Promise.all([
+  const [gateDisabled, strictParamsMode, advertised] = await Promise.all([
     disabledOpsForPublishGates(engine, config),
     resolveStrictParamsMode(engine, config),
+    resolveAdvertisedSurface(engine, config),
   ]);
   // FOV-4: `agent` deliberately implies only itself, which would strand
   // agent-only tokens with ZERO discovery — ops flagged `agentCallable`
   // (request_tools) are visible to (and callable by, below) agent scope
   // in addition to their declared scope.
+  // Agent contract v1 (A2): the one callability predicate (isCallable) plus
+  // the bound-client op fence.
+  const publishGates = publishGatesFromDisabled(mcpOperations, gateDisabled);
   const visibleOps = mcpOperations.filter(op =>
-    operationScopesAllowed(authInfo.scopes, op)
-    && opAllowedForBoundClient(authInfo, op)
-    && !gateDisabled.has(op.name),
+    isCallable(op, { transport: 'http', surface, scopes: authInfo.scopes, publishGates, allowedOps: surfaceAllowedOps })
+    && opAllowedForBoundClient(authInfo, op),
   );
   // WP3 (amendment 14): ONE schema mapper — the inline map this handler
   // carried is unified onto buildToolDefs so the byte-pin test covers the
@@ -231,7 +259,9 @@ async function listMcpTools(ctx: ServeHttpContext, state: McpRequestState) {
   // 'reject' closes each schema with additionalProperties:false and
   // declares the _meta/dry_run passthrough keys (D14.1).
   const strictParams = strictParamsMode === 'reject';
-  const tools = buildToolDefs(visibleOps, { strictParams });
+  // mcp.advertised_surface narrows the list only; dispatch below keeps the callable set (request_tools reaches the rest).
+  // A client that chose its own surface (request_tools {surface}, an operator rescope) gets that surface listed in full.
+  const tools = buildToolDefs(authInfo.surface ? visibleOps : advertisedOps(visibleOps, surface, advertised), { strictParams });
   // v0.28.10: log every JSON-RPC method, not just successful tools/call.
   // Pre-fix, /admin/api/requests showed nothing for clients that only
   // ever called tools/list, and the v0.26.3 persistence regression test
@@ -262,11 +292,14 @@ async function listMcpTools(ctx: ServeHttpContext, state: McpRequestState) {
 
 async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, request: CallToolRequest): Promise<ToolResult> {
   const { engine, broadcastEvent, logFullParams } = ctx;
-  const { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps } = state;
+  const { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows, thinClient } = state;
   const { name, arguments: params } = request.params;
+  // A server that recovered from status-only mode answers clients still holding the status tool list (never listed).
+  const statusMode = name === STATUS_TOOL_NAME ? statusModeOf(engine) : null;
+  if (statusMode && hasScope(authInfo.scopes, 'read')) return statusToolResult(statusMode, 'http');
   const op = mcpOperations.find(o => o.name === name);
   if (!op) {
-    return rejectUnknownMcpOperation(ctx, state, name);
+    return rejectUnknownMcpOperation(ctx, state, name, requestMetaSessionId(request.params));
   }
 
   // Scope enforcement (v0.28: hasScope replaces exact-string-match so
@@ -277,9 +310,12 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
   const requiredScope = op.scope || 'read';
   // FOV-4: agentCallable carve-out mirrors the tools/list filter above —
   // an op listed for an agent-only token must not scope-deny at call time.
-  const scopeSatisfied = operationScopesAllowed(authInfo.scopes, op);
+  // #5575: an owner-only (cliOnly) op is refused for every remote caller by the
+  // shared dispatcher with `trusted_local_only` and the host command; a scope
+  // denial first would tell the operator to widen the grant for nothing.
+  const scopeSatisfied = op.cliOnly !== undefined || operationScopesAllowed(authInfo.scopes, op);
   if (!scopeSatisfied) {
-    return rejectInsufficientMcpScope(ctx, state, name, requiredScope);
+    return rejectInsufficientMcpScope(ctx, state, name, requiredScope, requestMetaSessionId(request.params));
   }
 
   // F8: redact request payload by default (declared keys only via the
@@ -340,22 +376,41 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
     tokenSourceId,
   );
 
+  // #4817: written before dispatch, so a request that never returns (a spin
+  // the stall watchdog later kills) still leaves its op name and an argument
+  // digest behind. The digest identifies the request without logging content.
+  let argsDigest = 'none';
+  try { argsDigest = createHash('sha256').update(JSON.stringify(params ?? null)).digest('hex').slice(0, 16); } catch { /* unserializable */ }
+  process.stderr.write(`[gbrain-serve] dispatch op=${name} args_sha256=${argsDigest}\n`);
+  // CX2-11 parity with stdio: the request-level `_meta.session_id` (a sibling
+  // of `arguments`) becomes OperationContext.sessionId, so the hot-memory
+  // metaHook and every other session consumer key per remote session. Identity
+  // only, never a trust surface.
+  const sessionId = requestMetaSessionId(request.params);
   let toolResult: Awaited<ReturnType<typeof dispatchToolCall>>;
   try {
     toolResult = await dispatchToolCall(engine, name, params as Record<string, unknown> | undefined, {
       remote: true,
+      admissionOrigin: 'interactive',
+      config: ctx.config,
       // WP1/D7: network transport — the dispatch-layer localOnly
       // backstop keys off this marker.
       transport: 'http',
+      ...(sessionId ? { sessionId } : {}),
       takesHoldersAllowList: tokenAllowList,
       sourceId: tokenSourceId,
       ...(localFederated ? { localFederatedSourceIds: localFederated } : {}),
       metaHook: getBrainHotMemoryMeta,
+      ...(ctx.noticeLedger ? { noticeLedger: ctx.noticeLedger } : {}),
       // MEMORY_VERBS v1: fail-closed surface enforcement + usage attribution.
       ...(surfaceAllowedOps ? { allowedOps: surfaceAllowedOps } : {}),
       surface,
       // WP4 (D2): request_tools bounds its catalog + persist by this.
       surfaceCeiling,
+      // D2: a callable tool the advertised surface leaves out of tools/list (same rule as listMcpTools).
+      isListed: async op => !!authInfo.surface || advertisedOps([op], surface, await resolveAdvertisedSurface(engine, ctx.config)).length > 0,
+      resultRows,
+      ...(thinClient ? { thinClient: true } : {}),
       // v0.31 follow-up fix: thread auth so the whoami op (and any
       // future scope-aware handlers) can introspect the caller. The
       // original D12/eE1 refactor moved dispatch into dispatchToolCall
@@ -395,13 +450,14 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
       error: errorPayload,
       timestamp: new Date().toISOString(),
     });
-    return { content: [{ type: 'text', text: JSON.stringify({ error: errorPayload }) }], isError: true };
+    // Agent contract v1 (A1): the one envelope, not the nested legacy StructuredError.
+    return errorResult(e, { remote: true, transport: 'http', auth: authInfo, surface, ...(surfaceAllowedOps ? { allowedOps: surfaceAllowedOps } : {}) }, { op: name });
   }
 
   return recordMcpToolResult(ctx, state, name, toolResult, logParamsObj, broadcastParams);
 }
 
-async function rejectUnknownMcpOperation(ctx: ServeHttpContext, state: McpRequestState, name: string): Promise<ToolResult> {
+async function rejectUnknownMcpOperation(ctx: ServeHttpContext, state: McpRequestState, name: string, sessionId?: string): Promise<ToolResult> {
   const { engine, broadcastEvent } = ctx;
   const { authInfo, agentName, startTime } = state;
   // v0.28.10: persist unknown-op attempts. Operators investigating
@@ -426,7 +482,11 @@ async function rejectUnknownMcpOperation(ctx: ServeHttpContext, state: McpReques
     error: { code: 'unknown_operation', message: `Unknown: ${name}` },
     timestamp: new Date().toISOString(),
   });
-  return { content: [{ type: 'text', text: JSON.stringify({ error: 'unknown_operation', message: `Unknown: ${name}` }) }], isError: true };
+  // Frozen v1 pair: `error: unknown_operation` stays; `code: unknown_tool`.
+  const opts = { remote: true, transport: 'http' as const, auth: authInfo, surface: state.surface, config: ctx.config, surfaceCeiling: state.surfaceCeiling,
+    ...(sessionId ? { sessionId } : {}), ...(ctx.noticeLedger ? { noticeLedger: ctx.noticeLedger } : {}),
+    ...(state.surfaceAllowedOps ? { allowedOps: state.surfaceAllowedOps } : {}) };
+  return unknownToolEnvelope(name, opts, 'unknown_operation', await grantBlockedNotices(engine, opts, true));
 }
 
 async function rejectInsufficientMcpScope(
@@ -434,6 +494,7 @@ async function rejectInsufficientMcpScope(
   state: McpRequestState,
   name: string,
   requiredScope: string,
+  sessionId?: string,
 ): Promise<ToolResult> {
   const { engine, broadcastEvent } = ctx;
   const { authInfo, agentName, startTime } = state;
@@ -464,17 +525,13 @@ async function rejectInsufficientMcpScope(
     error: { code: 'insufficient_scope', message: `requires '${requiredScope}'` },
     timestamp: new Date().toISOString(),
   });
-  return {
-    content: [{
-      type: 'text',
-      text: JSON.stringify({
-        error: 'insufficient_scope',
-        message: `Operation ${name} requires '${requiredScope}' scope`,
-        your_scopes: authInfo.scopes,
-      }),
-    }],
-    isError: true,
-  };
+  const denial = scopeDeniedError({ op: name, required: [requiredScope], auth: authInfo, transport: 'http' });
+  const opts = { remote: true, transport: 'http' as const, auth: authInfo, config: ctx.config, surfaceCeiling: state.surfaceCeiling,
+    ...(sessionId ? { sessionId } : {}), ...(ctx.noticeLedger ? { noticeLedger: ctx.noticeLedger } : {}) };
+  const notices = await grantBlockedNotices(engine, opts, true);
+  if (notices.length) denial.notices = admitNotices(notices, opts);
+  const envelope = toAgentError(denial, { transport: 'http', op: name, render: dispatchRenderContext(opts) });
+  return { content: [{ type: 'text', text: JSON.stringify({ ...envelope, your_scopes: authInfo.scopes }) }], isError: true };
 }
 
 async function recordMcpToolResult(
@@ -504,13 +561,15 @@ async function recordMcpToolResult(
       errMsg = parsed.error?.message ?? parsed.message ?? errMsg;
     } catch { /* ignore */ }
     const errStatus = requestLogStatusForResult(toolResult);
+    // #5249: the opaque request id lets admin stats count pending writes that later fail.
+    const pending = errStatus === 'accepted_pending' ? acceptedPendingReceipt(toolResult) : null;
     try {
       await executeRawJsonb(
         engine,
         `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
         [authInfo.clientId, agentName, name, latency, errStatus, errMsg],
-        [logParamsObj],
+        [pending ? { ...(logParamsObj && typeof logParamsObj === 'object' ? logParamsObj : {}), write_request_id: pending.request_id } : logParamsObj],
       );
     } catch { /* best effort */ }
     broadcastEvent({
@@ -568,10 +627,7 @@ async function serveMcpRequest(server: Server, req: Request, res: Response): Pro
   } catch (e) {
     console.error('MCP request handler error:', e instanceof Error ? e.message : e);
     if (!res.headersSent) {
-      res.status(500).json({
-        error: 'internal_error',
-        message: e instanceof Error ? e.message : 'Unknown error',
-      });
+      res.status(500).json(toAgentError(e, { transport: 'http', render: dispatchRenderContext({ remote: true, transport: 'http' }) }));
     }
   }
 }

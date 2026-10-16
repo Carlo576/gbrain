@@ -161,3 +161,24 @@ describe('#1305 — getHealth excludes soft-deleted pages', () => {
     expect(h.missing_embeddings).toBe(1);
   });
 });
+
+
+describe('archived source health boundary', () => {
+  test('archived pages do not inflate active health or rescue an active orphan', async () => {
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('health-retired-fixture', 'health-retired-fixture') ON CONFLICT (id) DO UPDATE SET archived = false");
+    await seedNote('notes/active-fixture');
+    await engine.putPage('notes/retired-fixture', { type: 'note', title: 'Retired fixture', compiled_truth: 'Retired fixture', frontmatter: {} }, { sourceId: 'health-retired-fixture' });
+    const rows = await engine.executeRaw<{ id: number; source_id: string }>('SELECT id, source_id FROM pages');
+    const live = rows.find(row => row.source_id === 'default')!.id;
+    const retired = rows.find(row => row.source_id === 'health-retired-fixture')!.id;
+    await engine.executeRaw("INSERT INTO links (from_page_id, to_page_id, link_type) VALUES ($1, $2, 'mentions')", [retired, live]);
+    await engine.executeRaw("UPDATE sources SET archived = true WHERE id = 'health-retired-fixture'");
+    const health = await engine.getHealth();
+    expect(health.page_count).toBe(1);
+    expect(health.linkable_page_count).toBe(1);
+    expect(health.orphan_pages).toBe(1);
+    const retiredScope = await engine.getHealth({ sourceId: 'health-retired-fixture' });
+    expect(retiredScope.page_count).toBe(0);
+    expect(retiredScope.orphan_pages).toBe(0);
+  });
+});

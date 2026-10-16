@@ -43,10 +43,18 @@ export const SNAPSHOT_DYNAMIC_IMPORTS_NOT_HASHED: Readonly<Record<string, string
   'operations.ts': 'verbs.ts request-time verb handlers',
   'persistence/memory-mutations.ts': 'verbs.ts request-time verb handlers',
   'persistence/verb-errors.ts': 'verbs.ts request-time verb handlers',
+  'feedback/record.ts': 'verbs.ts request-time answer recording',
   'verbs/entity-card.ts': 'verbs.ts request-time verb handlers',
+  'verbs/entity-card-identity.ts': 'verbs.ts request-time verb handlers (identity siblings notice)',
+  'verbs/entity-names.ts': 'verbs.ts request-time verb handlers (entity names[] compact rows)',
+  'mentions/coverage.ts': 'verbs.ts request-time verb handlers (entity coverage notice)',
   'think/index.ts': 'verbs.ts request-time verb handlers',
-  'embedding.ts': 'verbs.ts request-time verb handlers',
+  'search/query-prefix.ts': 'verbs.ts request-time verb handlers (synthesize question embed, #3783)',
   'model-pricing.ts': 'verbs.ts request-time verb handlers',
+  'interop-notices.ts': 'verbs.ts request-time verb handlers (agent contract notices)',
+  'remember-batch.ts': 'verbs.ts request-time verb handlers (remember items[])',
+  'mentions/siblings.ts': 'entities/resolve.ts request-time entity resolution (identity-sibling names)',
+  'mentions/policy.ts': 'entities/resolve.ts request-time entity resolution (pack linkable types)',
 };
 
 const STATIC_SPECIFIER =

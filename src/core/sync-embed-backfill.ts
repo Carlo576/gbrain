@@ -6,6 +6,7 @@
  */
 import type { BrainEngine } from './engine.ts';
 import { syncFailureJsonFields, type ManagedSyncFailure } from './persistence/sync-failures.ts';
+import { syncHoldJsonFields } from './persistence/sync-holds.ts';
 import { submitEmbedBackfill } from './embed-backfill-submit.ts';
 import { resolveWorkerBackedSyncEmbedMode } from './embedding.ts';
 import {
@@ -134,7 +135,8 @@ export type SyncEmbedBackfillOutcome =
       reason: 'no_worker_surface' | 'auto_submit_disabled';
     }
   | { status: 'skipped'; reason: 'cooldown'; command: string }
-  | { status: 'skipped'; reason: 'spend_capped'; command: string; spend_cap_usd: number };
+  | { status: 'skipped'; reason: 'spend_capped'; command: string; spend_cap_usd: number }
+  | { status: 'skipped'; reason: 'stalled'; command: string; failures: number };
 
 export async function resolveSyncEmbedBackfill(
   engine: BrainEngine,
@@ -167,6 +169,8 @@ export async function resolveSyncEmbedBackfill(
       };
     case 'no_worker_surface':
       return { status: 'manual_drain_required', command, reason: 'no_worker_surface' };
+    case 'stalled':
+      return { status: 'skipped', reason: 'stalled', command, failures: submitted.failures };
     default:
       submitted satisfies never;
       throw new Error('unreachable embed-backfill submission result');
@@ -184,6 +188,10 @@ export function formatSyncEmbedBackfillOutcome(
     case 'manual_drain_required':
       return `embed-backfill not queued; manual drain required: \`${outcome.command}\`${source}`;
     case 'skipped': {
+      if (outcome.reason === 'stalled') {
+        return `embed-backfill skipped${source}: the last ${outcome.failures} runs failed on the same blocked pages with nothing embedded; `
+          + `see \`gbrain doctor --only embed_backfill_stalled\` (manual drain: \`${outcome.command}\`)`;
+      }
       const detail = outcome.reason === 'cooldown'
         ? 'cooldown'
         : `24h spend cap $${outcome.spend_cap_usd}`;
@@ -221,6 +229,7 @@ export function buildSingleSyncJsonEnvelope(
     source_id: sourceId,
     sync_status: result.status,
     ...syncFailureJsonFields(result),
+    ...syncHoldJsonFields(result),
     ...(result.reason ? { reason: result.reason } : {}),
     added: result.added,
     modified: result.modified,

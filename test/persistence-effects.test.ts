@@ -216,6 +216,35 @@ test('a parked withdrawal mirror target retries through physical publication wit
   for (const file of [f.file, laterFile]) expect(parseFactsFence(readFileSync(file, 'utf8')).facts.filter(fact => fact.active)).toHaveLength(0);
 });
 
+test('a divergent RESOLVER.md page and a locally edited page no longer block the withdrawal request\'s git and embedding effects (#5396)', async () => {
+  const f = await fixture(body());
+  await engine.putPage('resolver', page(body()), { sourceId: f.sourceId });
+  await engine.executeRaw("UPDATE pages SET source_path='RESOLVER.md' WHERE source_id=$1 AND slug='resolver'", [f.sourceId]);
+  const resolver = (await engine.readPageSnapshot('resolver', { sourceId: f.sourceId }))!;
+  const resolverFile = join(f.root, 'RESOLVER.md');
+  const durable = `${serializePageToMarkdown(resolver.page, resolver.tags)}\n<!-- BEGIN gbrain-brain-durability (managed; do not edit between markers) -->\nCommit every page.\n<!-- END gbrain-brain-durability -->\n`;
+  writeFileSync(resolverFile, durable);
+  await engine.putPage('notes/drifted', page(body()), { sourceId: f.sourceId });
+  const drifted = (await engine.readPageSnapshot('notes/drifted', { sourceId: f.sourceId }))!;
+  const driftedFile = join(f.root, 'notes/drifted.md'); mkdirSync(dirname(driftedFile), { recursive: true });
+  const localEdit = `${serializePageToMarkdown(drifted.page, drifted.tags)}\nA local edit nobody imported.\n`;
+  writeFileSync(driftedFile, localEdit);
+  const row = await withdraw(f, { subjectless: true });
+  for (let pass = 0; pass < 4; pass++) {
+    await onlyEffects(row.id);
+    await runPersistenceEffects(engine, config, { hostId, limit: 10 });
+  }
+  const effects = await engine.executeRaw<{ kind: string; state: string; attempts: number; data: Record<string, unknown> }>(
+    'SELECT kind,state,attempts,data FROM persistence_effects WHERE request_id=$1::uuid ORDER BY kind', [row.id]);
+  expect(effects.map(effect => [effect.kind, effect.state])).toEqual([['embedding', 'queued'], ['git', 'committed'], ['withdrawal-mirror', 'committed']]);
+  expect(effects.find(effect => effect.kind === 'embedding')!.attempts).toBeGreaterThan(0);
+  expect(effects.find(effect => effect.kind === 'withdrawal-mirror')!.data.skipped).toEqual([
+    { slug: 'notes/drifted', reason: 'file_database_drift' }, { slug: 'resolver', reason: 'metafile' }]);
+  expect(readFileSync(resolverFile, 'utf8')).toBe(durable);
+  expect(readFileSync(driftedFile, 'utf8')).toBe(localEdit);
+  expect(parseFactsFence(readFileSync(f.file, 'utf8')).facts.filter(fact => fact.active)).toHaveLength(0);
+});
+
 test('configured recovery capacity refuses file mutation without undoing withdrawal', async () => {
   const f = await fixture(body()); const original = readFileSync(f.file, 'utf8'); const row = await withdraw(f); await onlyEffects(row.id);
   await engine.setConfig('persistence.limits.worktree_recovery_bytes', '1');
@@ -268,4 +297,28 @@ test('Git retry disables legacy hooks, preserves unrelated staging and never reb
   expect(existsSync(join(root, 'forbidden-hook-ran'))).toBe(false);
   expect(await publishGitEffect(root, 'page.md')).toMatchObject({ git: 'unchanged' });
   expect(git(root, ['rev-parse', 'HEAD'])).toBe(head);
+});
+
+test('#6305: a Git effect this process cannot lock never parks and commits once the lock opens', async () => {
+  const f = await fixture();
+  durableGitRepo(f.root, ['page.md']);
+  const admitted = await admit(f);
+  const row = (await claimNextWrite(engine, hostId))!;
+  expect(row.id).toBe(admitted.id);
+  const published = await publishMutation(engine, row, { observedRevision: f.snapshot.revision, file: { path: f.file, root: f.root, content: 'After' },
+    apply: async tx => { await tx.putPage('page', page('After'), { sourceId: f.sourceId }); return {}; } }, hostId);
+  expect(published.state).toBe('committed');
+  await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now()+interval '1 hour' WHERE request_id=$1::uuid AND kind<>'git'", [row.id]);
+  rmSync(f.binding.coordination_path!, { force: true }); mkdirSync(f.binding.coordination_path!);
+  const effect = async () => (await engine.executeRaw<{ state: string; error_code: string | null }>(
+    "SELECT state,error_code FROM persistence_effects WHERE request_id=$1::uuid AND kind='git'", [row.id]))[0];
+  for (let attempt = 0; attempt < 7; attempt++) {
+    await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now() WHERE request_id=$1::uuid AND kind='git'", [row.id]);
+    await runPersistenceEffects(engine, config, { hostId, limit: 1 });
+  }
+  expect(await effect()).toMatchObject({ state: 'queued', error_code: 'writer_lock_unavailable' });
+  rmSync(f.binding.coordination_path!, { recursive: true, force: true });
+  await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now() WHERE request_id=$1::uuid AND kind='git'", [row.id]);
+  await runPersistenceEffects(engine, config, { hostId, limit: 1 });
+  expect((await effect())!.state).toBe('committed');
 });

@@ -61,10 +61,23 @@ export interface ConnectorState {
    * connector sources that have one; checkpoint-row existence never counts.
    */
   first_attempt_at?: string | null;
+  /**
+   * #6803: the last account check refused with `connector_account_changed`.
+   * Autopilot skips the source (unavailable-path) while the connector config
+   * still digests to `config_digest`; a sync that passes the check clears it.
+   */
+  account_mismatch?: ConnectorAccountMismatch | null;
+}
+
+export interface ConnectorAccountMismatch {
+  at: string;
+  detail: 'account_changed' | 'account_unresolved';
+  /** `connectorConfigDigest` of the config the refused run read (credential settings included). */
+  config_digest: string;
 }
 
 export const emptyConnectorState = (): ConnectorState => ({ version: 1, account: null, pinned_at: null, continuity_unverified: false,
-  pending: [], upgrade_recovery: 'none', resumed_from: null, last_run: null, first_attempt_at: null });
+  pending: [], upgrade_recovery: 'none', resumed_from: null, last_run: null, first_attempt_at: null, account_mismatch: null });
 
 export function connectorStateKey(sourceId: string, incarnation: string): string {
   return digest({ sourceId, incarnation });
@@ -156,3 +169,4 @@ export function describeConnectorAccount(account: ConnectorAccount): string {
   return [account.installationId !== null ? `installation ${account.installationId}` : null, account.login ? `login ${account.login}` : null]
     .filter(Boolean).join(', ') || 'no installation or login';
 }
+

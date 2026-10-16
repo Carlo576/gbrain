@@ -11,6 +11,7 @@ import { claimWorktree, getWorktreeBinding } from '../src/core/persistence/owner
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { INCOMPLETE_SYNC_RECEIPT_SQL, checkpointRetryCommand, findIncompleteSyncReceipt, formatCheckpointTimeoutHint, readRequestIndexStates } from '../src/core/persistence/checkpoint-validation.ts';
 import { persistenceOperations } from '../src/core/ops/persistence.ts';
 import { printManagedSyncDiagnostic } from '../src/commands/sync-diagnostics.ts';
@@ -48,7 +49,7 @@ async function fixture(engine: BrainEngine) {
   await engine.executeRaw('INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,\'{}\')', [id, root]);
   await claimWorktree(engine, id, root);
   await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
-  return { id, root, opts: { sourceId: id, noPull: true, noEmbed: true, noExtract: true, explicitProcessing: [] } };
+  return { id, root, opts: { sourceId: id, noPull: true, noEmbed: true, noExtract: true } };
 }
 
 /** The validation statement exactly as it ran before #5762, kept only to prove parity. */
@@ -137,7 +138,7 @@ test('#5762 a validation statement timeout fails the checkpoint terminally with 
   expect(lines.join('')).toContain('Docs: docs/guides/write-refusals.md#checkpoint-validation-timeout');
 
   // Nothing is left queued ahead of other writes to the source.
-  await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.executeRaw("UPDATE pages SET title='edited' WHERE source_id=$1 AND slug='a'", [f.id])));
+  await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.executeRaw("UPDATE pages SET title='edited' WHERE source_id=$1 AND slug='a'", [f.id]), TEST_WRITE_ATTRIBUTION));
   expect(await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND state IN ('queued','running','recovering')", [f.id])).toEqual([]);
 
   // The receipt rebuilds the same hint from its durable code after a restart.
@@ -195,11 +196,12 @@ test('#5762 the hint names one of three index states and keeps the saved process
 });
 
 test('#5762 a dropped index reads as missing and the hint then names the rebuild command', async () => each(async engine => {
-  expect((await readRequestIndexStates(engine)).map(index => index.state)).toEqual(['valid', 'valid']);
+  // #6511 added the purge slug index to the online-built set; the default read lists it after the checkpoint pair.
+  expect((await readRequestIndexStates(engine)).map(index => index.state)).toEqual(['valid', 'valid', 'valid']);
   await engine.executeRaw('DROP INDEX persistence_requests_sync_run_committed');
   try {
     expect(await readRequestIndexStates(engine)).toEqual([{ name: 'persistence_requests_sync_run_open', state: 'valid' },
-      { name: 'persistence_requests_sync_run_committed', state: 'missing' }]);
+      { name: 'persistence_requests_sync_run_committed', state: 'missing' }, { name: 'persistence_requests_slug_intent', state: 'valid' }]);
   } finally {
     const { PERSISTENCE_SYNC_RUN_COMMITTED_INDEX_SQL } = await import('../src/core/persistence/schema.ts');
     await engine.executeRaw(PERSISTENCE_SYNC_RUN_COMMITTED_INDEX_SQL);

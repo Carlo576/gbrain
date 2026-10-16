@@ -36,6 +36,15 @@ Path requirements:
 
 - Each directory must end with `/` for canonical form. The validator auto-normalizes missing trailing slashes (one-time info note shows what changed).
 - A directory cannot appear in both tiers — that's a tier-overlap error and `loadStorageConfig` throws `StorageConfigError`. Edit `gbrain.yml` to remove the overlap and try again.
+- Any other key under `storage:` is ignored with a warning naming it (a typo such as `kep_db` used to be ignored silently).
+
+Optional: `keep_db:` lists directory prefixes whose drifted pages (the file and the database copy disagree, so writes refuse `source_changed`) the canonical owner host's resident consumer reconciles with the database copy, at most 10 every 10 minutes. It is opt-in, matches page slugs like the tiers, and changes nothing for other hosts or callers. See [the keep_db policy](guides/repair.md#file-drift-keep-db).
+
+```yaml
+storage:
+  keep_db:
+    - concepts/
+```
 
 ## Behavior Changes
 
@@ -63,7 +72,12 @@ backing file that sit outside every declared `db_only` path. The engine's own
 derive-phase output prefixes (`life/events/`, `atoms/`, `extracts/`,
 `dream-cycle-summaries/`) count as implicitly declared for that check, so healthy
 brains stay quiet without adding them to `gbrain.yml`. They are NOT auto-added to
-`.gitignore` — only explicitly declared `db_only` dirs are.
+`.gitignore` — only explicitly declared `db_only` dirs are. Google and GitHub
+connector sources running under managed persistence without a worktree binding
+(`connector_database`) are skipped by that check: their pages live only in the
+database by design, so no `gbrain.yml` is needed in the connector's directory.
+Recover them with a full re-sync from the provider
+(`gbrain sync --source <id> --full`).
 
 Example `.gitignore` addition:
 
@@ -112,6 +126,7 @@ Output includes:
 - Total page counts by storage tier.
 - Disk usage breakdown by tier.
 - Missing files that need restoration (top 10 shown; full list in `--json`).
+- The `gbrain export --restore-only` command that restores them.
 - Configuration validation warnings.
 - Current tier directory listing.
 
@@ -141,7 +156,7 @@ Missing Files (need restore):
   media/x/tweet-0987654321
   ... and 47 more
 
-Use: gbrain export --restore-only --repo "/data/brain"
+Use: gbrain export --restore-only --source default --repo /data/brain
 
 Configuration:
 --------------
@@ -155,6 +170,57 @@ DB-only directories:
   - media/articles/
   - meetings/transcripts/
 ```
+
+Status picks the repo and source with the same rule as `gbrain export
+--restore-only`, counts only that source's pages, and lists a page as missing
+exactly when that export would restore it: the page is under a `db_only`
+directory (even one nested in a `db_tracked` directory) and its recorded source
+file, else `<slug>.md`, is absent from the repo. The `Use:` command therefore
+writes exactly the listed files, into `--dir` (default `./export` under the
+current directory, not into the repo). The repo path is shell-quoted, so the
+line is safe to paste. Export refuses the whole restore when a page's recorded
+path is unsafe or its file path runs through a symlink or has no unambiguous
+native identity; status then names those pages under warnings (one line per
+reason, with the first slug and a count) and prints the refusal instead of a
+command, also when no file is left missing. When the source rule refuses (for example, a `--repo`
+that no single active source owns, one registered only to an archived
+source, or one inside an archived source's tree), status prints `Cannot suggest a restore command:` with the reason. It
+then counts the pages of the active source that owns the repo path (its
+`.gbrain-source` or the longest registered `local_path` containing it), or
+every source's pages when no active source owns it.
+
+## Restoring a page whose file is gone
+
+On a classic brain (no managed persistence) sync keys a page on the file it
+recorded (`source_path`). When that file leaves the checkout (`git rm
+--cached`, an ignore rule, a deletion), sync soft-deletes the page. Restoring
+it with `gbrain restore <slug> --force` while the restore writes no file
+(`sync.write_through` off, a sandboxed agent, a database-only source) used to
+bring the page back still recording the missing file, so the next
+`gbrain sync --full` soft-deleted it again.
+
+Since #6609 such a restore refuses with `source_changed` / detail
+`canonical_file_absent`, restores nothing, and asks you to choose:
+
+- **Keep it file-backed:** put the file back at its recorded path, commit it
+  and run `gbrain sync --source <id>`. Sync restores the page from its file.
+- **Keep it database-only:** `gbrain restore <slug> --source-id <id> --detach`
+  (MCP `restore_page` with `detach: true`). The page is restored without its
+  recorded file and stamped `pages.database_only_reason='detached'`, so no
+  sync removes it. A file synced later at its path binds the page to it again
+  and clears the stamp.
+
+A file that is only missing on this host (an unpulled checkout, another
+machine) never makes a page database-only by itself: detaching is always an
+explicit choice. `--detach` is refused (`invalid_params`) when there is
+nothing to detach (the page is not soft-deleted, its file is in place, or the
+restore re-creates it).
+
+Doctor `missing_recorded_files` warns about live pages whose recorded file is
+not among the files `gbrain sync --full` enumerates (for example a page
+restored the old way), so that sync would soft-delete them; it inspects at most
+50,000 pages per source and asks you which of the choices above each page
+gets. Managed sources are covered by `ghost_pages` instead.
 
 ## Validation
 
@@ -212,7 +278,7 @@ Enables consistent data access across environments:
 
 ## PGLite engine note
 
-On the PGLite engine (gbrain's local-only embedded Postgres), the "DB" your db_only pages live in IS the local file gbrain uses for everything else. The `.gitignore` housekeeping still helps (keeps bulk content out of git history), but the offload-to-DB promise is technically vacuous. A once-per-process soft-warn explains when the engine is detected. To get full tiering, migrate to Postgres with `gbrain migrate --to supabase`.
+On the PGLite engine (gbrain's local-only embedded Postgres), the "DB" your db_only pages live in IS the local file gbrain uses for everything else. The `.gitignore` housekeeping still helps (keeps bulk content out of git history), but the offload-to-DB promise is technically vacuous. A once-per-process soft-warn explains when the engine is detected. To get full tiering, move the brain to Postgres with `gbrain migrate --to postgres` ([guide](guides/move-to-postgres.md)).
 
 ## Compatibility
 

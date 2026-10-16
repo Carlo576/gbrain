@@ -118,14 +118,18 @@ chat: the server must expose a `search`/`fetch` tool PAIR, where every
 `{ id, title, text, url, metadata }`. GBrain ships both:
 
 - `search` results carry an opaque, versioned `id` identifying the hit's
-  source and slug alongside the native fields. `query` uses the same IDs.
+  source and slug alongside the native fields. `query` uses the same IDs;
+  its fact rows (`result_type: "fact"`) carry no `id` and are not fetchable.
 - Pass the `id` unchanged to `fetch`; do not replace it with the slug or
   construct it from the current source. `fetch` returns the OpenAI shape — `text` is the
   page's full canonical markdown, `url` is a stable `gbrain://page/...`
   URI for the citation slot, and `metadata` carries type/source/tags.
 
 `fetch` is a thin read-only adapter over the same page read as `get_page`
-(same source scoping, same privacy fences for remote readers). Normal chat
+(same source scoping, same privacy fences for remote readers). A page the
+content-quality gate quarantined comes back with `metadata.quarantined` and a
+`page_quarantined` notice; for a remote caller `text` is empty unless an
+admin-scoped caller passes `include_quarantined: true`. Normal chat
 keeps using the richer gbrain-native tools; deep research uses the pair.
 An ID does not grant access: fetch rechecks current source grants and page
 visibility. Legacy bare-slug IDs still work when unambiguous within the current

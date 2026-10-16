@@ -215,6 +215,9 @@ export function classifyErrorCode(errorMsg: string): string {
   // it the blocked-run breakdown also printed a bare `UNKNOWN: 1`.
   if (/rename reconcile failed|RENAME_RECONCILE/i.test(errorMsg)) return 'RENAME_RECONCILE';
 
+  // #5032: a ':' file name on Windows (src/commands/sync/imports.ts).
+  if (/^colon_slug_windows_write_through:/.test(errorMsg)) return 'COLON_SLUG_WINDOWS_WRITE_THROUGH';
+
   // SLUG_MISMATCH: thrown by importFromFile() at src/core/import-file.ts.
   if (/slug.*does not match|SLUG_MISMATCH/i.test(errorMsg)) return 'SLUG_MISMATCH';
 
@@ -664,10 +667,12 @@ export function mirrorManagedSyncFailure(failure: { source_id: string; path: str
   });
 }
 
-export function clearManagedSyncFailure(key: string): void {
-  withLedgerLock(() => {
+/** Removes the mirror row(s) under a managed cursor key; true when one was there. */
+export function clearManagedSyncFailure(key: string): boolean {
+  return withLedgerLock(() => {
     const entries = loadSyncFailures(), kept = entries.filter(row => row.managed_cursor_key !== key);
     if (kept.length !== entries.length) _writeAll(kept);
+    return kept.length !== entries.length;
   });
 }
 

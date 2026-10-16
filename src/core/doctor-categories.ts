@@ -57,16 +57,35 @@ export type CheckCategory = 'brain' | 'skill' | 'ops' | 'meta';
 export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'abandoned_threads',
   'atom_provenance_drift',
+  'captured_facts_active',
+  'conversation_label_facts',
+  'conversation_outcomes_stale',
   'connector_checkpoints',
   'connector_held_items',
+  'git_held_files',
+  'fence_integrity',
+  // #5575: stored trust tier counts, the legacy-row backfill, scan and source claims.
+  'trust_tiers',
+  'trust_scan',
+  'trust_sources_unclaimed',
+  'credential_projection_pending',
   'derived_visibility',
+  'extractor_facts_expired',
+  'loop_facts_drift',
+  'ontology_facts_fenced',
   'orphan_persistence_bindings',
+  'foreign_ownership_marker',
   'safe_index_pending',
   'self_capture',
   'brain_score',
   'calibration_freshness',
   'child_table_orphans',
   'chronicle_projection_health',
+  'auto_chronicle',
+  'auto_chronicle_default_on',
+  'chronicle_config_invalid',
+  'facts_drain',
+  'fact_take_vectors',
   'code_chunk_metadata',
   'content_hash_duplicates',
   'content_sanity_audit_recent',
@@ -85,27 +104,42 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
+  // #6113: a bare legacy embedding_model DB row; the fix previews migrate embeddings.
+  'embedding_identity_unqualified',
+  // #5137: an env provider key shadowing a different config key.
+  'embedding_key_source',
   'embedding_migration_state',
   'embedding_provider',
   // #5691: query-instruction advisory for instruction-style embedding models.
   'embedding_query_prefix',
+  'embedding_state',
   'embedding_width_consistency',
   'embeddings',
   'entity_link_coverage',
   'eval_drift',
   'extract_atoms_backlog',
+  // #6325: managed atom origins held after repeated extraction failures.
+  'extract_atoms_held_failed',
   'extract_health',
+  // Large pages A7: page extractions that read only part of their input.
+  'extraction_input_truncated',
   'facts_embedding_width_consistency',
   'facts_extraction_health',
   'facts_health',
   'frontmatter_integrity',
+  'frontmatter_repairable',
   'malformed_path_pages',
   'memory_writeback',
+  'core_memory',
   'grade_confidence_drift',
   'graph_coverage',
   'graph_signals_coverage',
+  // Which extraction prompts resolve relative dates (informational).
+  'extraction_date_grounding',
   'hidden_by_search_policy',
   'image_assets',
+  // #6529: image pages without an image vector, apart from text coverage (plus NULL source_path and held images).
+  'image_embedding_coverage',
   'integrity',
   'jsonb_integrity',
   // #4222 — near-empty entity pages that accreted huge edge counts (junk
@@ -120,6 +154,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_ratio',
   'oversized_pages',
   'parked_effects',
+  'partial_embedding',
   'pglite_scratch_probe',
   'quarantined_pages',
   'raw_provenance',
@@ -131,17 +166,36 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'source_routing_health',
   'stale_mentions',
   'stub_guard_24h',
+  // Fact supersession threshold calibrated for the active embedding model (facts/supersession-threshold.ts).
+  'supersession_calibration',
+  // #6590: whether the embedding model has measured fact admission cosine floors (search/fact-relevance.ts).
+  'fact_admission_floors',
   'sync_failures',
+  // #5984: unfinished managed sync cursors, their remaining entries and indexing ETA.
+  'managed_sync_backlog',
   'sync_freshness',
+  // #5063: source checkouts with commits not on their upstream or stale uncommitted changes.
+  'git_convergence',
+  // #5186: an ownership marker committed to a source checkout's Git index.
+  'tracked_ownership_marker',
   'takes_count',
   'takes_weight_grid',
+  // #5836: active facts with no entity (invisible to entity recall and the conflict sweep).
+  'unlinked_facts',
+  'edge_validity',
   'text_projection_readiness',
   'timeline_coverage',
   'timeline_orphans',
   'timeline_history',
+  // #6147: imported conversation pages that may still carry a typed credential (cached audit).
+  'transcript_secret_exposure',
   // #5254 — pages written database-only to a source with no canonical owner.
   'unbound_source',
   'undeclared_db_only_pages',
+  // #6696 B5: live pages whose canonical file is missing on the owner host (doctor/checks/ghost-pages.ts).
+  'ghost_pages',
+  // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
+  'missing_recorded_files',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',
@@ -174,6 +228,15 @@ export const SKILL_CHECK_NAMES: ReadonlySet<string> = new Set([
  * Infrastructure liveness signals. DB, workers, OAuth, RLS, locks, providers.
  */
 export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
+  // The effective chat_fallback_chain, its config plane, the providers it reaches and per-entry readiness.
+  'chat_fallback_chain',
+  // Agent operator wave: is an agent harness wired to this brain (registration read; --only adds the smoke test).
+  'harness_wiring',
+  // Cat 41: the provider-use decision gbrain setup recorded; declined = no provider request (discovery, probe).
+  'provider_consent',
+  'frontmatter_hook',
+  // F4b: PGLite row-delta planner statistics / Postgres autovacuum ANALYZE lag on the hot tables.
+  'planner_stats_stale',
   'alternative_providers',
   'autopilot_fanout_concurrency',
   'autopilot_lock_scope',
@@ -189,13 +252,17 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'bootstrap_serve_lock',
   'batch_retry_health',
   'canonical_content_writes',
+  // Sources opted out of, or parked by, the shared-skills migration (checks/shared-skills.ts).
+  'shared_skills_sources',
   'brainstorm_health',
   'connectors',
   'dream_paid_loop',
-  'chat_fallback_chain_inert',
   'connection',
   'db_only_collector_collision',
   'federation_health',
+  'google_file_modes',
+  // #5012 item 9: a Google source's configured calendar was unreadable at its last sync (doctor/checks/google-calendar.ts).
+  'google_calendar_readable',
   'google_oauth',
   'home_dir_in_worktree',
   'index_audit',
@@ -204,28 +271,68 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'oauth_confidential_client_health',
   'orphan_clones',
   'persistence_capacity',
+  'persistence_compaction',
+  'persistence_counter_drift',
+  'worktree_refresh_stuck',
+  'managed_guard_schema_drift',
+  'publication_refusals',
   'persistence_request_growth',
   'persistence_request_indexes',
+  'persistence_write_stall',
+  'lost_caller_writes',
+  // #6650: terminal write receipts that block work or are a gbrain-defect class (doctor/checks/persistence-requests.ts).
+  'persistence_terminal_failures',
+  'stale_frontmatter_keys',
+  'maintenance_write_drift',
+  'managed_sync_not_moving',
+  'persistence_session_timeouts',
+  // #6317: consumer heartbeat rows and host identity (doctor/checks/persistence-consumers.ts).
+  'two_consumers_on_host',
+  'consumers_without_heartbeat',
+  'host_identity_mismatch',
+  // #6696 C6: a live serve or worker on an older build than this checkout (doctor/checks/persistence-consumers.ts).
+  'serve_build_drift',
   'stale_embedding_effects',
+  'vector_plan',
+  'keyword_plan',
   'writer_version',
   'pgbouncer_prepare',
   'pglite_data_dir',
+  // #6573: a local IPC socket path over the platform's AF_UNIX budget (doctor/checks/local-ipc.ts).
+  'ipc_socket_path',
   // db-availability loop: engine-fit + repair-recurrence signals.
   'pglite_scale',
   'db_repair_recurrence',
   'pglite_leftovers',
+  // Engine graduation (PGLite -> Postgres) interrupted / split brain.
+  'graduation_interrupted',
   'pgvector',
   'postgres_cancellation_driver',
   'plugin_lane_collision',
   'pool_budget',
   'progressive_batch_audit_health',
   'queue_health',
+  // #4578: brain-wide maintenance jobs dying at their deadline.
+  'global_maintenance_timeouts',
+  'embed_backfill_stalled',
+  'connector_account_mismatch',
+  // #5157: queued jobs from before the v0.50 authority cutover block every worker.
+  'legacy_job_authority',
+  // F3: legacy tokens on the JSONB-only grant shape (info) and grant drift (warn).
+  'legacy_token_grant_shape',
+  'legacy_token_grant_drift',
+  // Lane E: tokens minted without scopes (grandfathered read+write+admin).
+  'legacy_token_null_scope',
+  // D4: grants whose operation snapshot or stored surface keeps operations their scopes allow out of reach.
+  'grant_new_ops_available',
   'reranker_health',
   'rls',
   'rls_event_trigger',
   'search_mode',
+  'decide_health',
   'pool_reap_health',
   'self_upgrade_health',
+  'bun_runtime',
   'stale_locks',
   'subagent_capability',
   'subagent_health',
@@ -243,9 +350,14 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
  * housekeeping. Default category for unknown names (with stderr warn).
  */
 export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
+  // The one-time behavior-change disclosure, readable again here (read-only).
+  'behavior_changes',
+  // Agent operator wave E11: recent agent dead ends from the agent-contract event log.
+  'agent_contract',
   'cycle_phase_scope',
   'default_source_local_path',
   'eval_capture',
+  'retrieval_feedback_health',
   // #4613 — links_link_source_check CHECK shape: schema coherence healed by
   // `gbrain apply-migrations` (sibling of pages_upsert_arbiter).
   'links_link_source_check',
@@ -256,6 +368,8 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   // coherence healed by `gbrain apply-migrations` (sibling of
   // timeline_dedup_index / schema_version).
   'pages_upsert_arbiter',
+  // #5216: the resumable pages.knowledge_revision backfill (resumed by apply-migrations --force-schema).
+  'revision_backfill',
   'schema_columns',
   'schema_pack_active',
   'schema_pack_consistency',

@@ -57,6 +57,8 @@ test('a frontmatter slug that conflicts with its path is named in sync output an
     await engine.executeRaw("INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,'{}')", [id, root]);
     await claimWorktree(engine, id, root);
     await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    // #5988: sync holds such a file by default; sync.holds=fail keeps the fail-closed receipt this pins.
+    await engine.setConfig('sync.holds', 'fail');
     try {
       const result = await performManagedSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true });
       expect(result).toMatchObject({ status: 'blocked_by_failures', managedWrite: { write_error: 'invalid_params', message: expected } });
@@ -71,6 +73,7 @@ test('a frontmatter slug that conflicts with its path is named in sync output an
       const receipt = await operations.find(op => op.name === 'get_write_request')!.handler(ctx, { request_id: requestId });
       expect(receipt).toMatchObject({ request_id: requestId, state: 'failed', write_error: 'invalid_params', write_error_message: expected });
     } finally {
+      await engine.unsetConfig('sync.holds');
       await disposePersistenceConsumer(engine);
       await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
     }
@@ -81,7 +84,7 @@ test('only the slug-conflict shape passes through; other invalid_params causes k
   expect(writeFailureDiagnostic('invalid_params', expected)).toEqual({ reason: 'invalid_params', message: expected,
     suggestion: 'Correct the frontmatter in the file and commit the change.' });
   for (const message of [expected.replace('books/fairml/ch01.md', '/private/books/ch01.md'), 'limit must be an integer from 1 to 100.', `${expected} credential=redacted`]) {
-    expect(writeFailureDiagnostic('invalid_params', message).message).toBe('The write did not commit. Inspect its durable request on the source host.');
+    expect(writeFailureDiagnostic('invalid_params', message).message).toBe('The write did not commit: it ended with invalid_params, and nothing was saved.');
   }
   expect(writeFailureDiagnostic('storage_error', expected).message).not.toContain('books/other-chapter');
 });

@@ -11,6 +11,8 @@ export type GoogleService = 'gmail' | 'calendar' | 'contacts';
 export const ALL_GOOGLE_SERVICES: readonly GoogleService[] = ['gmail', 'calendar', 'contacts'];
 
 /** The account's primary calendar — the Calendar API's own alias, and the default a google source sweeps. */
+/** Where a Google source renders its contact pages unless `g_contacts_dir` says otherwise. */
+export const DEFAULT_CONTACTS_DIR = 'people';
 export const DEFAULT_CALENDAR_ID = 'primary';
 
 export interface GoogleSourceConfig {
@@ -20,10 +22,33 @@ export interface GoogleSourceConfig {
   services: GoogleService[];
   /** Backfill/reconcile window in days (default 90). */
   historyDays: number;
+  /**
+   * How far ahead calendar pages are kept, in days (`g_future_days`, 1..3650).
+   * Present only when the source sets it, so an unset knob leaves every
+   * existing source's connector identity unchanged; the sweep falls back to
+   * CALENDAR_HORIZON_DAYS.
+   */
+  futureDays?: number;
+  /**
+   * Gmail label names or ids whose threads the open-loop engine leaves alone
+   * (`g_loops_exclude_labels`, comma-separated; #5445). Present only when the
+   * source sets it; the brain-wide `loops.extraction_exclude_labels` is the
+   * fallback. Not part of the connector identity: it changes what is
+   * extracted, not which pages exist.
+   */
+  loopsExcludeLabels?: string[];
   /** Calendar swept by this source (default DEFAULT_CALENDAR_ID). One calendar per
    *  source so each keeps its own sync token — point a second source at a
    *  secondary calendar id to ingest it too. */
   calendarId: string;
+  /**
+   * Directory (relative to `dir`) the contact pages render under
+   * (`g_contacts_dir`, default DEFAULT_CONTACTS_DIR = `people`; #4845). A brain
+   * that maintains its own `people/` pages points its Google source at
+   * `contacts` so the two namespaces never collide. Contact pages are found
+   * by `google_contact_id`, not by directory, so changing it moves them.
+   */
+  contactsDir: string;
   /** Managed dir where pages are materialized. */
   dir: string;
   /**
@@ -80,6 +105,31 @@ export interface GoogleSourceState {
   gmail_fail_counts?: Record<string, number>;
   /** Fix wave 4: connector item holds (src/core/connectors/item-holds.ts). */
   item_holds?: unknown;
+  /**
+   * #5868: threads whose loop a grace window withheld, keyed by thread id
+   * (src/core/google/loop-catchup.ts). Separate from `item_holds`: never a
+   * failure, never counted by doctor `connector_held_items` or `waiting`.
+   */
+  loop_grace_holds?: Record<string, LoopGraceHold>;
+  /** #5868: one-shot 14-day grace-hold backfill done (set after a non-aborted sweep). */
+  loop_grace_backfill_done?: boolean;
+  /** #5867: managed-source 30-day loops_extract catch-up progress. */
+  loops_catchup?: LoopsCatchupState;
+  /**
+   * #5012: the record of reply-owed loops the detector withheld, per sender
+   * (src/core/google/loop-catchup.ts, capped). A sender leaves it when a later
+   * thread of theirs opens a loop. `gbrain waiting` counts the open loops
+   * from these senders that the rule would not have opened.
+   */
+  loop_withheld_senders?: Record<string, LoopWithheldSender>;
+  /** #5012: one-shot re-check of the senders behind open reply-owed loops (set when seeded). */
+  loop_automated_backfill_done?: boolean;
+  /**
+   * #5012 item 9: set when `events.list` on the configured calendar returned
+   * 403 or 404 (the account cannot read it), cleared by the next successful
+   * list. `gbrain doctor` and `gbrain google status --no-probe` read it.
+   */
+  calendar_unreadable?: CalendarUnreadable | null;
   calendar_sync_token: string | null;
   /**
    * Calendar id `calendar_sync_token` was minted for. A token is only valid
@@ -89,7 +139,29 @@ export interface GoogleSourceState {
    * calendars and was therefore always primary's.
    */
   calendar_id?: string | null;
+  /**
+   * Ceiling (epoch ms) of the last calendar list that reached the window's
+   * leading edge. Deltas omit unchanged events, so once the edge is a day
+   * past this value the sweep lists the gap (calendar-window.ts). Missing on
+   * state saved before it existed, which is listed from now instead.
+   */
+  calendar_horizon_ms?: number | null;
   contacts_sync_token: string | null;
+  /**
+   * #6324: the `personFields` mask `contacts_sync_token` was minted under
+   * (`CONTACT_PERSON_FIELDS` at the time). Written together with the token
+   * after a successful sweep and never on its own: People rejects a token
+   * reused with different request parameters, so a mask that differs from
+   * the current constant means the token is unusable and the sweep lists
+   * fully. Absent on state saved before the mask grew (legacy = the old mask).
+   */
+  contacts_person_fields?: string | null;
+  /**
+   * #6324: contact-group directory cache (resource name → display name) from
+   * the last successful `contactGroups` read; the fallback when the directory
+   * cannot be read during a sweep. Never authoritative on its own.
+   */
+  contact_groups?: Record<string, string>;
   last_full_at: string | null;
   gmail_attachment_backfill?: {
     version: 1;
@@ -120,6 +192,48 @@ export function deriveSourceId(account: string): string {
   return id || 'gmail';
 }
 
+/**
+ * #5868: one grace-held thread. `spec` is the loop its last detection would
+ * open at `due_ms`; `rev` is the page's newest message id it was computed
+ * from. A backfill seed has neither and is re-fetched once due.
+ */
+export interface LoopGraceHold {
+  due_ms: number;
+  slug: string | null;
+  rev: string | null;
+  spec: {
+    loopType: 'unanswered_inbound' | 'unanswered_outbound';
+    counterpartyEmail: string;
+    summary: string;
+    evidence: Array<{ message_id?: string; page_slug?: string; quote?: string }>;
+    lastActivityMs: number;
+    openedMs: number;
+  } | null;
+}
+
+/** #5012: one sender whose reply-owed loops the detector withheld. */
+export interface LoopWithheldSender {
+  reason: 'automated_mail' | 'updates_without_reciprocity';
+  count: number;
+  last_ms: number;
+}
+
+/** #5012 item 9: the configured calendar could not be read. */
+export interface CalendarUnreadable {
+  code: 'calendar_unreadable';
+  calendar_id: string;
+  http_status: 403 | 404;
+  at: string;
+}
+
+/** #5867: the managed catch-up's window floor, its one-retry set and its done marker. */
+export interface LoopsCatchupState {
+  version: 1;
+  floor_ms: number;
+  retried: string[];
+  done: boolean;
+}
+
 export interface GmailMessageMeta {
   id: string;
   threadId: string;
@@ -133,6 +247,14 @@ export interface GmailMessageMeta {
   internalDateMs: number;
   labelIds: string[];
   listUnsubscribe: boolean;
+  /** RFC 3834 `Auto-Submitted` other than `no` (tracker notices, auto-replies); absent means human mail. */
+  autoSubmitted?: boolean;
+  /** #5012: the `Precedence` header, trimmed and lowercased (`bulk`, `list`, `junk`); absent or '' when not sent. */
+  precedence?: string;
+  /** #5012: an RFC 2919 `List-Id` header was present (mailing-list or list-manager mail). */
+  listId?: boolean;
+  /** #5012: bare lowercased `Reply-To` addresses; absent or empty when not sent. */
+  replyTo?: string[];
   /**
    * iCalendar method when the message carries a `text/calendar` part or an
    * `.ics` attachment — 'REQUEST' | 'REPLY' | 'CANCEL' | 'COUNTER' | '' when a
@@ -208,8 +330,17 @@ export interface ContactData {
   resourceName: string;
   displayName: string | null;
   emails: string[];
+  /** #6324: E.164 `canonicalForm` when Google supplies it, else the entered value; deduplicated. */
+  phones: string[];
   organization: string | null;
   title: string | null;
+  /**
+   * #6324: user-created contact groups (system groups dropped). The client
+   * fills `id` (`contactGroups/<id>`); the sweep resolves `name` from the
+   * group directory and leaves null for a group it could not resolve, which
+   * the page then carries as the raw id.
+   */
+  groups: Array<{ id: string; name: string | null }>;
   deleted: boolean;
 }
 

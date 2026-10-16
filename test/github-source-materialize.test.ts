@@ -7,6 +7,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { runGitHubSync, type GitHubSourceConfig } from '../src/core/github-source.ts';
+import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 
 let engine: PGLiteEngine;
 
@@ -371,7 +372,7 @@ describe('github-source materialize', () => {
         expect(initial.failedFiles ?? 0).toBe(0);
         expect(JSON.parse(readFileSync(join(dir, '.github-source.json'), 'utf-8')).last_sweep_at).toBe('2026-08-02T00:00:00Z');
         const oldPage = readFileSync(join(dir, 'gh', REPO, '3.md'), 'utf-8');
-        fx.items.get(3)!.body = 'x'.repeat(5_000_001);
+        fx.items.get(3)!.body = 'x'.repeat(PAGE_MAX_BYTES + 1);
         fx.items.get(3)!.updated_at = '2026-08-07T00:00:00Z';
         const res = await runGitHubSync(
           engine,
@@ -382,6 +383,9 @@ describe('github-source materialize', () => {
         );
         expect(res.status).toBe('partial');
         expect(res.failedFiles).toBeGreaterThan(0);
+        // #5012: the partial names its real cause, never the git path's timeout default.
+        expect(res.reason).toBe('connector_item_failures');
+        expect(res.filesImported).toBe(res.added + res.modified);
         expect(readFileSync(join(dir, 'gh', REPO, '3.md'), 'utf-8')).toBe(oldPage);
         const state = JSON.parse(readFileSync(join(dir, '.github-source.json'), 'utf-8')) as { last_sweep_at: string };
         expect(state.last_sweep_at).toBe('2026-08-02T00:00:00Z');
@@ -400,7 +404,7 @@ describe('github-source materialize', () => {
       await withEnv({ GH_TOKEN: 'test-token' }, async () => {
         await runGitHubSync(engine, 'ghsrc', makeCfg(dir), { sourceId: 'ghsrc', full: true }, fetchImpl);
         const oldPage = readFileSync(join(dir, 'gh', REPO, '3.md'), 'utf-8');
-        fx.items.get(3)!.body = 'x'.repeat(5_000_001);
+        fx.items.get(3)!.body = 'x'.repeat(PAGE_MAX_BYTES + 1);
         await expect(runGitHubSync(
           engine,
           'ghsrc',

@@ -1,4 +1,5 @@
 /** Full PGLite state recovery for managed in-agent installations. Never starts workers. */
+import { trueUpRequests } from '../persistence/receipt-true-up.ts';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -7,12 +8,14 @@ import { PGLiteEngine } from '../pglite-engine.ts';
 import { acquireBootstrapLock } from '../bootstrap/lock.ts';
 import { configDir, type GBrainConfig } from '../config.ts';
 import { LATEST_VERSION } from '../migrate.ts';
+import { backupDumpFailed, sweepStaleRuntimeArtefacts } from './runtime-artefacts.ts';
 import { AgentInstallError, checkedManagedPaths, checkedRoot, confinedPath, privateWrite, readFileConfigState, readInstallReceipt, syncDirectory, type AgentInstallReceipt } from '../agent-install/state.ts';
 import { extractPgliteDump, hashFile, isBackupArchiveFile, readBackupArchive, writeBackupArchive, type ArchiveManifest } from './archive.ts';
 import { quarantineRestoredExecution, rebaseRestorePath, relativeBackupPath, type RestoreQuarantine } from './quarantine.ts';
 import { quarantineSharedSkillRestore, validateSharedSkillRestoreMode, type SharedSkillRestore, type SharedSkillRestoreOptions } from '../shared-skills/restore.ts';
 import { isPhysicalRootMetadata } from '../persistence/physical-root-record.ts';
 import { protectNewBackupPath } from './private-path.ts';
+import { pgliteBackupPreflight } from './preflight.ts';
 
 interface SourceInventory { id: string; local_path: string | null; managed_relative_path: string | null }
 interface BackupMetadata {
@@ -135,9 +138,13 @@ export async function createPgliteBackup(options: { output: string; root?: strin
     throw new AgentInstallError('pglite_required', 'Full local snapshots require an existing file-configured PGLite brain.');
   }
   const dbPath = state.config.database_path;
-  if (typeof dbPath !== 'string' || resolve(dbPath) !== join(root, '.gbrain', 'brain.pglite') || !existsSync(dbPath)) {
+  if (typeof dbPath !== 'string' || !existsSync(dbPath)) {
     throw new AgentInstallError('unmanaged_database_path', 'This recovery format requires .gbrain/brain.pglite within the selected root.');
   }
+  // #6649: refuse a layout or a size this format cannot hold before the lock, the dump and the archive write.
+  const refusal = pgliteBackupPreflight(root, dbPath, () => checkedManagedPaths(root, readInstallReceipt(root)?.managed_paths ?? [])
+    .flatMap(path => walkFiles(root, path)).reduce((sum, path) => sum + lstatSync(confinedPath(root, path)).size, 0));
+  if (refusal) throw refusal;
   confinedPath(root, '.gbrain/brain.pglite');
   const lock = await acquireBootstrapLock(root);
   let work: string | undefined;
@@ -163,7 +170,9 @@ export async function createPgliteBackup(options: { output: string; root?: strin
     const externalPaths: string[] = [];
     rebaseManagedConfig(state.config, root, root, managedPaths, externalPaths);
     const inventoryBefore = originals.map(path => ({ path, ...hashFile(confinedPath(root, path)) }));
-    const dump = await engine.db.dumpDataDir('none');
+    // Under the writer lock: a dead serve's IPC socket in the data dir would fail the dump (#5312).
+    const sweep = await sweepStaleRuntimeArtefacts(dbPath);
+    const dump = await engine.db.dumpDataDir('none').catch(cause => { throw backupDumpFailed(cause, sweep); });
     privateWrite(join(work, 'database.tar'), new Uint8Array(await dump.arrayBuffer()));
     const files = [
       { path: 'database.tar', file: join(work, 'database.tar') },
@@ -186,6 +195,7 @@ export async function createPgliteBackup(options: { output: string; root?: strin
         'Unmanaged files, including .gbrain/credential-deliveries, browser sessions, git metadata, caches and prior backups outside managed data paths, are not included.',
         ...excludedPaths,
         ...externalPaths,
+        ...sweep.removed.map(path => `Removed stale runtime socket left by an exited gbrain process: ${path}`),
         ...(state.config.storage && (state.config.storage as { backend?: string }).backend !== 'local' ? ['Remote object storage content is not included; reconnect and verify the configured storage backend.'] : []),
         ...sources.filter(s => s.local_path && !s.managed_relative_path).map(s => `External source ${s.id}: ${s.local_path}`),
         'Native harness skills/routines must be reattached and verified; no platform account state is included.',
@@ -268,6 +278,9 @@ export async function restorePgliteBackup(options: { archive: string; into: stri
       const jobs = await tx.executeRaw<{ id: number }>(`UPDATE minion_jobs SET status = 'cancelled', lock_token = NULL, lock_until = NULL, finished_at = NOW(), updated_at = NOW(), error_text = 'quarantined by backup restore; inspect and explicitly resubmit', data = data || jsonb_build_object('__restore_previous_status', status, '__restore_id', $1::text) WHERE status NOT IN ('completed', 'failed', 'dead', 'cancelled') RETURNING id`, [restoreId]);
       quarantined = jobs.length;
     });
+    // #6696 (A1): the restore failed every pending effect; their requests give back their unused reservations.
+    await trueUpRequests(engine, (await engine.executeRaw<{ request_id: string }>(
+      "SELECT DISTINCT request_id FROM persistence_effects WHERE error_code IN ('restore_recovery','restore_new_brain')")).map(row => row.request_id));
     await engine.executeRaw('CHECKPOINT');
     const restoredDatabase = engine.db;
     await engine.disconnect();

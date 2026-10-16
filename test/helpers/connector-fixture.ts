@@ -1,16 +1,19 @@
+import { expect } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import type { GBrainConfig } from '../../src/core/config.ts';
-import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
-import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
+import { disposePersistenceConsumer, waitForWrites } from '../../src/core/persistence/service.ts';
+import { TERMINAL_STATES, type WriteRequest } from '../../src/core/persistence/model.ts';
 import { isolatedPersistencePostgres } from './persistence-postgres.ts';
 import { syncLockId } from '../../src/core/db-lock.ts';
 import { testBackends } from './test-backends.ts';
-import { connectorWaitBudget } from '../../src/core/persistence/connector-sync.ts';
+import { CONNECTOR_WAIT_BUDGET_MS, connectorWaitBudget } from '../../src/core/persistence/connector-sync.ts';
+import { testWaitMs } from './wait-for.ts';
+import { connectTemplateBrain } from './brain-template.ts';
 import { readManagedConnectorState } from '../../src/core/persistence/connector-state.ts';
 
 export const options = { noEmbed: true, noExtract: true, noSchemaPack: true };
@@ -38,6 +41,23 @@ export function githubFetch(opts: { failDetail?: boolean; failSecondPage?: boole
   };
 }
 
+/**
+ * A baseline sweep that finished: re-run `run` until the source has no
+ * accepted-pending connector writes and no unfinished write request. A sweep
+ * whose writes outlast its wait budget ends partial (its cursor is saved by the
+ * next run), so a test that snapshots the cursor right after one `run()` could
+ * read the state before the cursor moved and then see the next run move it.
+ */
+export async function completeBaselineSweep(engine: BrainEngine, sourceId: string, run: () => Promise<unknown>, attempts = 5): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    await run();
+    const unfinished = await engine.executeRaw<{ n: number }>(
+      'SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND NOT (state = ANY($2::text[]))', [sourceId, [...TERMINAL_STATES]]);
+    if ((await connectorPendingSet(engine, sourceId)).length === 0 && unfinished[0]!.n === 0) return;
+  }
+  throw new Error(`baseline sweep of ${sourceId} still had pending connector writes after ${attempts} runs`);
+}
+
 export async function sourceCheckpoint(engine: BrainEngine, id: string) {
   return engine.executeRaw("SELECT completed_keys FROM op_checkpoints WHERE op='managed-connector' AND fingerprint IN (SELECT intent->>'checkpointKey' FROM persistence_requests WHERE source_id=$1)", [id]);
 }
@@ -49,13 +69,9 @@ export function createConnectorFixture() {
   let closePostgres: (() => Promise<void>) | undefined;
   const env = { GBRAIN_HOME: home, CONNECTOR_TEST_TOKEN: 'synthetic-local-fixture' };
   const setup = async () => {
-    // Paused-owner fixtures stop on a 10 s wait budget instead of the production 30 s.
-    connectorWaitBudget.ms = 10_000;
+    connectorWaitBudget.ms = CONNECTOR_WAIT_BUDGET_MS;
     if (backends.includes('pglite')) {
-      const lite = new PGLiteEngine();
-      await lite.connect({ database_path: join(home, 'database') });
-      await lite.initSchema();
-      engines.push(lite);
+      engines.push(await connectTemplateBrain(join(home, 'database')));
     }
     if (backends.includes('postgres')) {
       const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
@@ -64,6 +80,7 @@ export function createConnectorFixture() {
     }
   };
   const teardown = async () => {
+    connectorWaitBudget.ms = CONNECTOR_WAIT_BUDGET_MS;
     for (const engine of engines) { await disposePersistenceConsumer(engine); await engine.disconnect(); }
     await closePostgres?.();
     rmSync(home, { recursive: true, force: true });
@@ -134,6 +151,30 @@ export function withGoogleAccount(fetcher: ((url: string, init?: RequestInit) =>
     if (!fetcher) throw new Error('Unexpected external fixture route');
     return fetcher(url, init);
   };
+}
+
+/**
+ * A managed sweep returns with an accepted write still pending once its wait
+ * budget runs out; the cursor stays put and the write publishes later. A seed
+ * that reads its imported pages, or stops the consumer and hands the database
+ * to a child, first waits for every write the source admitted to commit.
+ */
+export async function settleConnectorWrites(engine: BrainEngine, sourceId: string) {
+  const rows = await engine.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE source_id=$1 ORDER BY created_at', [sourceId]);
+  const settled = await waitForWrites(engine, rows, { engine: engine.kind }, testWaitMs(30_000));
+  expect(settled.map(row => [row.slug, row.state])).toEqual(rows.map(row => [row.slug, 'committed']));
+}
+
+/**
+ * The fixture's 1.5 s wait budget is for runs against a paused owner. A run whose assertions need every write
+ * published (a healthy owner) runs on the production budget, so a slow host waits for the owner instead of
+ * stopping the sweep `writer_pending`. A committed write returns at once, so this costs nothing on a fast host.
+ */
+/** A run that expects `writer_pending` against a paused owner stops on a 1.5 s budget instead of the production 30 s. */
+export async function withPausedOwnerBudget<T>(run: () => Promise<T>): Promise<T> {
+  const budget = connectorWaitBudget.ms;
+  connectorWaitBudget.ms = testWaitMs(1_500);
+  try { return await run(); } finally { connectorWaitBudget.ms = budget; }
 }
 
 /** #5600: the pending set a managed connector run ended with (connector state row). */

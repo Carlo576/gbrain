@@ -1,5 +1,5 @@
 import type { BrainEngine } from '../engine.ts';
-import { isUndefinedTableError } from '../utils.ts';
+import { isMissingSchemaObject } from '../utils.ts';
 import { MOVE_WITHDRAWAL_SUBJECT_SQL } from '../facts/withdrawal-schema.ts';
 
 /**
@@ -28,7 +28,7 @@ export async function recordRenameAlias(
       [sourceId, oldSlug, newSlug]);
     });
   } catch (error) {
-    if (!isUndefinedTableError(error)) throw error;
+    if (!isMissingSchemaObject(error, 'table', 'slug_aliases')) throw error;
   }
 }
 
@@ -56,14 +56,49 @@ export async function moveSlugBindings(
        AND EXISTS (SELECT 1 FROM facts o WHERE o.source_id = $1 AND o.source_markdown_slug = $2 AND o.row_num = f.row_num)`,
     `UPDATE facts SET source_markdown_slug = $3 WHERE source_id = $1 AND source_markdown_slug = $2`,
     `DELETE FROM page_aliases a WHERE a.source_id = $1 AND a.slug = $3
-       AND EXISTS (SELECT 1 FROM page_aliases o WHERE o.source_id = $1 AND o.slug = $2 AND o.alias_norm = a.alias_norm)`,
+       AND EXISTS (SELECT 1 FROM page_aliases o WHERE o.source_id = $1 AND o.slug = $2 AND o.alias_norm = a.alias_norm AND o.origin = a.origin)`,
     `UPDATE page_aliases SET slug = $3 WHERE source_id = $1 AND slug = $2`,
   ];
   for (const sql of statements) {
     try {
       await tx.transaction(savepoint => savepoint.executeRaw(sql, [sourceId, oldSlug, newSlug]));
     } catch (error) {
-      if (!isUndefinedTableError(error)) throw error;
+      if (!isMissingSchemaObject(error, 'table', ['facts', 'page_aliases'])) throw error;
     }
   }
+}
+
+/**
+ * Move the page-id-keyed rows of a page whose rename fell back to add
+ * semantics (#5431) onto the row that materialized at the destination, before
+ * the stale row is soft-deleted: edges where it is the source, target or
+ * origin, its timeline entries and its version history. Rows the surviving
+ * page already holds under the same unique key (`links` composite key,
+ * timeline dedup indexes) are dropped from the stale side, never duplicated.
+ * Runs inside the caller's transaction and is idempotent.
+ */
+export async function movePageIdReferences(
+  tx: Pick<BrainEngine, 'executeRaw'>,
+  fromPageId: number,
+  toPageId: number,
+): Promise<void> {
+  if (fromPageId === toPageId) return;
+  const statements: Array<[string, unknown[]]> = [
+    [`DELETE FROM links s WHERE s.from_page_id = $1 AND EXISTS (SELECT 1 FROM links o WHERE o.from_page_id = $2 AND o.to_page_id = s.to_page_id
+        AND o.link_type = s.link_type AND o.link_source IS NOT DISTINCT FROM s.link_source AND o.origin_page_id IS NOT DISTINCT FROM s.origin_page_id)`, [fromPageId, toPageId]],
+    [`UPDATE links SET from_page_id = $2 WHERE from_page_id = $1`, [fromPageId, toPageId]],
+    [`DELETE FROM links s WHERE s.to_page_id = $1 AND EXISTS (SELECT 1 FROM links o WHERE o.to_page_id = $2 AND o.from_page_id = s.from_page_id
+        AND o.link_type = s.link_type AND o.link_source IS NOT DISTINCT FROM s.link_source AND o.origin_page_id IS NOT DISTINCT FROM s.origin_page_id)`, [fromPageId, toPageId]],
+    [`UPDATE links SET to_page_id = $2 WHERE to_page_id = $1`, [fromPageId, toPageId]],
+    [`DELETE FROM links s WHERE s.origin_page_id = $1 AND EXISTS (SELECT 1 FROM links o WHERE o.origin_page_id = $2 AND o.from_page_id = s.from_page_id
+        AND o.to_page_id = s.to_page_id AND o.link_type = s.link_type AND o.link_source IS NOT DISTINCT FROM s.link_source)`, [fromPageId, toPageId]],
+    [`UPDATE links SET origin_page_id = $2 WHERE origin_page_id = $1`, [fromPageId, toPageId]],
+    [`DELETE FROM timeline_entries s WHERE s.page_id = $1 AND EXISTS (SELECT 1 FROM timeline_entries o WHERE o.page_id = $2 AND o.date = s.date
+        AND md5(o.summary) = md5(s.summary) AND o.source = s.source)`, [fromPageId, toPageId]],
+    [`UPDATE timeline_entries SET page_id = $2 WHERE page_id = $1`, [fromPageId, toPageId]],
+    [`DELETE FROM timeline_entries s WHERE s.event_page_id = $1 AND EXISTS (SELECT 1 FROM timeline_entries o WHERE o.event_page_id = $2 AND o.date = s.date)`, [fromPageId, toPageId]],
+    [`UPDATE timeline_entries SET event_page_id = $2 WHERE event_page_id = $1`, [fromPageId, toPageId]],
+    [`UPDATE page_versions SET page_id = $2 WHERE page_id = $1`, [fromPageId, toPageId]],
+  ];
+  for (const [sql, params] of statements) await tx.executeRaw(sql, params);
 }

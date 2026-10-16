@@ -78,7 +78,9 @@ function resolveRetypeRule(type: string, pack: ProjectionAwareTypePack | undefin
   if (!pack || pack.page_types.some((pt) => pt.name === type)) return null;
   const rules = pack.mapping_rules?.filter((rule) => rule.kind === 'retype') ?? [];
   const explicit = rules.find((rule) => rule.from_type === type && !rule.path_filter && !rule.slug_filter);
-  const rule = explicit ?? rules.find((candidate) => candidate.from_type === '*unknown*');
+  // A declared alias is not an unknown type; only its explicit rule may retype it.
+  const declaredAlias = pack.page_types.some(pt => pt.aliases?.includes(type));
+  const rule = explicit ?? (!declaredAlias ? rules.find(candidate => candidate.from_type === '*unknown*') : undefined);
   if (!rule || typeof rule.to_type !== 'string') return null;
   if (!pack.page_types.some((pt) => pt.name === rule.to_type)) return null;
   return rule;

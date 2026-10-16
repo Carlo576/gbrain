@@ -65,26 +65,34 @@ export async function deleteCodeEdgesForChunks(exec: SqlExecutor, chunkIds: numb
     (await exec.run(sqlFragment`DELETE FROM code_edges_symbol WHERE from_chunk_id = ANY(${chunkIds}::int[])`)).rows;
   }
 
+/**
+ * #5439: `opts.chunkId` keys the read on chunk identity instead of the name.
+ * Callers of a chunk: code_edges_chunk rows pointing at it plus
+ * code_edges_symbol rows the resolver stamped with that resolved_chunk_id.
+ * The source filter still applies, so a chunk id is only ever read inside
+ * the caller's source.
+ */
 export async function getCallersOf(
   exec: LegacyUnscopedRead,
     qualifiedName: string,
-    opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number; chunkId?: number },
   ): Promise<CodeEdgeResult[]> {
     const limit = Math.min(opts?.limit ?? 100, 500);
     const scopedSource: string | null =
       !opts?.allSources && opts?.sourceId ? opts.sourceId : null;
+    const byChunk = typeof opts?.chunkId === 'number';
     const rows = (await exec.run(sqlFragment`
       SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
              edge_type, edge_metadata, source_id, true as resolved
         FROM code_edges_chunk
-        WHERE to_symbol_qualified = ${qualifiedName}
+        WHERE ${byChunk ? sqlFragment`to_chunk_id = ${opts!.chunkId as number}::int` : sqlFragment`to_symbol_qualified = ${qualifiedName}`}
         AND ${trustedSql(currentCodeEdgeFilter('code_edges_chunk', true))}
         ${scopedSource ? sqlFragment`AND source_id = ${scopedSource}` : sqlFragment``}
       UNION ALL
       SELECT id, from_chunk_id, NULL::int as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
              edge_type, edge_metadata, source_id, false as resolved
         FROM code_edges_symbol
-        WHERE to_symbol_qualified = ${qualifiedName}
+        WHERE ${byChunk ? sqlFragment`(edge_metadata->>'resolved_chunk_id')::int = ${opts!.chunkId as number}::int` : sqlFragment`to_symbol_qualified = ${qualifiedName}`}
         AND ${trustedSql(currentCodeEdgeFilter('code_edges_symbol', false))}
         ${scopedSource ? sqlFragment`AND source_id = ${scopedSource}` : sqlFragment``}
       LIMIT ${limit}
@@ -92,10 +100,11 @@ export async function getCallersOf(
     return rows.map(r => rowToCodeEdge(r as Record<string, unknown>));
   }
 
+/** #5439: `opts.chunkId` reads the edges leaving that chunk (both tables) instead of the name's. */
 export async function getCalleesOf(
   exec: LegacyUnscopedRead,
     qualifiedName: string,
-    opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean },
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean; chunkId?: number },
   ): Promise<CodeEdgeResult[]> {
     const limit = Math.min(opts?.limit ?? 100, 500);
     const scopedSource: string | null =
@@ -116,6 +125,9 @@ export async function getCalleesOf(
         ${scopedSource ? sqlFragment`AND source_id = ${scopedSource}` : sqlFragment``}
       LIMIT ${limit}
     `)).rows;
+    if (typeof opts?.chunkId === 'number') {
+      return (await run(sqlFragment`from_chunk_id = ${opts.chunkId}::int`)).map(r => rowToCodeEdge(r as Record<string, unknown>));
+    }
     let rows = await run(sqlFragment`from_symbol_qualified = ${qualifiedName}`);
     // #4670: opt-in bare-name fallback (both engines).
     // Opt-in; zero-row exact miss + delimiter-free input re-keys on the bare
@@ -161,7 +173,14 @@ export async function getEdgesByChunk(
     return [...chunkRows, ...symbolRows].map(r => rowToCodeEdge(r as Record<string, unknown>));
   }
 
-function rowToCodeEdge(row: Record<string, unknown>): CodeEdgeResult {
+/**
+ * Shared by both engines' reads. `resolved` is true for a code_edges_chunk
+ * row AND for a code_edges_symbol row the resolver stamped with
+ * edge_metadata.resolved_chunk_id (gbrain-evals N13-2); to_chunk_id still
+ * reports the stored column.
+ */
+export function rowToCodeEdge(row: Record<string, unknown>): CodeEdgeResult {
+  const edgeMetadata = (row.edge_metadata as Record<string, unknown>) ?? {};
   return {
     id: row.id as number,
     from_chunk_id: row.from_chunk_id as number,
@@ -169,8 +188,8 @@ function rowToCodeEdge(row: Record<string, unknown>): CodeEdgeResult {
     from_symbol_qualified: (row.from_symbol_qualified as string) ?? '',
     to_symbol_qualified: (row.to_symbol_qualified as string) ?? '',
     edge_type: (row.edge_type as string) ?? '',
-    edge_metadata: (row.edge_metadata as Record<string, unknown>) ?? {},
+    edge_metadata: edgeMetadata,
     source_id: row.source_id == null ? null : (row.source_id as string),
-    resolved: Boolean(row.resolved),
+    resolved: Boolean(row.resolved) || typeof edgeMetadata.resolved_chunk_id === 'number',
   };
 }

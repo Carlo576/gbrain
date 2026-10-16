@@ -1,4 +1,6 @@
 import type { BrainEngine } from '../core/engine.ts';
+import { currentExitCode } from '../core/cli-force-exit.ts';
+import { consentGate, engineConsentEnv } from '../core/consent-cli.ts';
 import { serr, slog } from '../core/console-prefix.ts';
 import {
   planEmbeddingMigration,
@@ -18,6 +20,7 @@ import {
   readMigrationStatus,
   verifySearchRoundTrip,
   MIGRATION_STATE_KEY,
+  DEFERRED_ANN_TABLES,
   type EmbeddingMigrationPlan,
   type MigrationVerify,
   type MigrationState,
@@ -27,7 +30,8 @@ import {
 } from '../core/embedding-migration.ts';
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
 import { embedBackfillLockId, EMBED_BACKFILL_LOCK_TTL_MIN } from '../core/embed-backfill-lock.ts';
-import { PGVECTOR_HNSW_VECTOR_MAX_DIMS } from '../core/vector-index.ts';
+import { PGVECTOR_HNSW_VECTOR_MAX_DIMS, hnswIndexExpected } from '../core/vector-index.ts';
+import { annIndexValidity, buildDeferredAnnIndexes, canonicalChunkAnnIndex, mergeDeferredAnnIndexes, parseDeferredAnnIndexes } from '../core/embedding-ann-build.ts';
 import { redactPgUrl } from '../core/url-redact.ts';
 import { runEmbedCore, type EmbedResult, type parsePaceArgs } from './embed.ts';
 import { parseMigrateEmbeddingsFlags } from '../core/embedding-migration-cli.ts';
@@ -36,7 +40,7 @@ import { prepareEmbeddingProjections } from '../core/embedding-readiness.ts';
 import { assertRetainedEmbeddingRebuildability } from '../core/embedding-migration-retention.ts';
 import { embedStaleFacts } from '../core/embed-facts.ts';
 import { countStaleFactEmbeddings } from '../core/facts/embedding-identity.ts';
-import { authorizeMigrationBudget, assertMigrationLeases, ceilCents, MigrationBudgetRefusal, type MigrationBudgetRefusalDetails, type MigrationWorstCase } from '../core/embedding-migration-budget.ts';
+import { authorizeMigrationBudget, assertMigrationLeases, ceilCents, MigrationBudgetRefusal, withMigrationLeaseTransaction, type MigrationBudgetRefusalDetails, type MigrationLeaseAssert, type MigrationWorstCase } from '../core/embedding-migration-budget.ts';
 import { planMigrationWorstCase, MIGRATION_PROBE_TEXT, RERANKER_PROBE } from '../core/embedding-migration-worst-case.ts';
 import { withAIInvocationGuard } from '../core/ai/invocation-guard.ts';
 
@@ -69,7 +73,8 @@ Flags:
   --dim <N>               Target dimensions. Defaults to the provider recipe's
                           declared width; required when the recipe declares none.
   --dry-run               Plan + cost estimate only; change nothing.
-  --yes                   Skip the confirm prompt (required non-interactively).
+  --yes                   The user's approval (paid + destructive); without it a
+                          non-interactive run changes nothing and exits 3.
   --max-cost-usd <USD>    Total durable authorization; must cover the printed worst case (or the run
                           refuses before any change). Requests settle to reported usage; raise to renew.
   --json                  Machine-readable envelope on stdout.
@@ -113,7 +118,7 @@ function renderPlan(ctx: MigrationPlanContext): string {
   lines.push(`  Brain: ${identity.engine} (${identity.target}); scope: brain-wide (all sources)`);
   lines.push(`  From: ${plan.from_model} (${plan.from_dims}d${plan.column_dims !== null && plan.column_dims !== plan.from_dims ? `; column is actually ${plan.column_dims}d` : ''})`);
   lines.push(`  To:   ${plan.to_model} (${plan.to_dims}d)`);
-  lines.push(`  Work: ${plan.chunks_to_embed} chunks to embed, ${plan.chunks_to_restamp} to restamp, ${plan.facts_to_embed ?? 0} active facts; ${plan.blocked_projection_pages ?? 0} projection-blocked pages.`);
+  lines.push(`  Work: ${plan.chunks_to_embed} chunks to embed, ${plan.chunks_to_restamp} to restamp, ${plan.facts_to_embed ?? 0} active facts, ${plan.takes_to_embed ?? 0} active takes; ${plan.blocked_projection_pages ?? 0} projection-blocked pages.`);
   lines.push('  Paid authorization: --max-cost-usd is a durable total cap; each attempt reserves its maximum input size and settles to reported usage; unknown prices refuse.');
   // DB-reality census: what pages say they were embedded with (env can lie
   // about From; the census cannot).
@@ -262,21 +267,6 @@ function renderRerankerOutcome(outcome: RerankerOutcome): string[] {
   }
 }
 
-/** Single-keypress y/N confirm on stdin. Injectable for tests. */
-async function defaultConfirm(question: string): Promise<boolean> {
-  process.stderr.write(`${question} [y/N] `);
-  const stdin = process.stdin;
-  stdin.setRawMode?.(true);
-  stdin.resume();
-  const key: string = await new Promise((resolve) => {
-    stdin.once('data', (d) => resolve(d.toString()));
-  });
-  stdin.setRawMode?.(false);
-  stdin.pause();
-  process.stderr.write('\n');
-  return key.trim().toLowerCase().startsWith('y');
-}
-
 /**
  * One tiny embed against the TARGET provider, BEFORE any mutation: validates
  * the API key, the model id, and dimension support in a single call, so a bad
@@ -303,6 +293,14 @@ export async function probeTargetProvider(
     }
     return { ok: true };
   } catch (e) {
+    // #6587: the invocation guard refuses dispatch once the migration lost its lease; that is not a provider
+    // fault, so say so (provider error text stays private).
+    if (e instanceof Error && /lease lost/i.test(e.message)) {
+      return {
+        ok: false,
+        message: `Preflight embed against ${toModel} stopped because the migration lost its lock lease (another process took it, or the heartbeat could not renew it); no migration invalidation performed. Any authorized request debit is retained for safe resume. Inspect migration status before retrying.`,
+      };
+    }
     return {
       ok: false,
       message: `Preflight embed against ${toModel} failed; no migration invalidation performed. Any authorized request debit is retained for safe resume. Check provider configuration and migration status before retrying.`,
@@ -612,10 +610,10 @@ export async function executeMigrationFlow(
   let expectedSources: string | undefined;
   let lost = false;
   let renewing: Promise<void> | undefined;
-  const assertOwned = async (tx?: BrainEngine) => {
+  const assertOwned: MigrationLeaseAssert = async (tx, lease) => {
     if (!tx && renewing) await renewing;
     if (lost) throw new Error('Migration lock lease lost; durable work retained. Inspect --status before resuming.');
-    if (tx) await assertMigrationLeases(tx, heldLocks);
+    if (tx) await assertMigrationLeases(tx, heldLocks, lease);
     else for (const lock of heldLocks) {
       if (!await lock.refresh({ signal: AbortSignal.timeout(30_000) })) { lost = true; controller.abort(); throw new Error('Migration lock lease lost; further mutations refused.'); }
     }
@@ -681,7 +679,8 @@ export async function executeMigrationFlow(
     if (runtimeConfig?.embedding_disabled || disabled !== null && disabled !== 'false') {
       return { status: 'apply_failed', reason: 'Embedding is disabled or its policy is invalid; no provider requests or migration invalidation performed. Review the selected brain embedding configuration before retrying.' };
     }
-    await engine.transaction(async tx => { await assertOwned(tx); await assertRetainedEmbeddingRebuildability(tx, plan.to_dims, plan.to_model, plan); });
+    await withMigrationLeaseTransaction(engine, assertOwned,
+      tx => assertRetainedEmbeddingRebuildability(tx, plan.to_dims, plan.to_model, plan), { deadlockRetries: 3 });
     const rerankerModel = ctx.rerankerPlan.action.kind === 'switch' ? ctx.rerankerPlan.action.to : undefined;
     let debit: Awaited<ReturnType<typeof authorizeMigrationBudget>>;
     try {
@@ -751,6 +750,7 @@ export async function executeMigrationFlow(
       catchUp: true,
       singleFlight: true,
       includeNullSignature: true,
+      takes: true,
       quiet: opts.quiet,
       heldLocks,
       assertOwned,
@@ -766,7 +766,9 @@ export async function executeMigrationFlow(
       const [active] = await engine.executeRaw('SELECT id FROM sources WHERE id=$1 AND NOT archived', [sourceId]);
       if (!active) continue;
       await assertOwned();
-      const facts = await embedStaleFacts(engine, { sourceId, yes: true, maxCostUsd: opts.maxCostUsd ?? marker.state?.budget?.max_cost_usd ?? 0, maxFacts: 10_000, signal: controller.signal, assertOwned });
+      const facts = await embedStaleFacts(engine, { sourceId, yes: true,
+        maxCostUsd: opts.maxCostUsd ?? marker.state?.budget?.max_cost_usd ?? 0,
+        migrationDrain: { signal: controller.signal, assertOwned } });
       embeddedFacts += facts.embedded;
       if (facts.failures) break;
     }
@@ -780,18 +782,21 @@ export async function executeMigrationFlow(
       includeNullSignature: true,
     });
     const remainingFacts = await countStaleFactEmbeddings(engine, plan.to_model, plan.to_dims);
+    const remainingTakes = await engine.countStaleTakes({ model: plan.to_model, dims: plan.to_dims });
     const finalReadiness = await prepareEmbeddingProjections(engine);
     const finalSources = (await engine.listAllSources({ includeArchived: true })).map(s => s.id).sort();
     const sourceChanged = JSON.stringify(sourceIds) !== JSON.stringify(finalSources);
     const configChanged = await engine.getConfig('embedding_model') !== plan.to_model
       || Number(await engine.getConfig('embedding_dimensions')) !== plan.to_dims;
     const chunkless = await engine.countChunklessPagesWithContent();
-    const remaining = remainingChunks + remainingFacts.count + finalReadiness.blocked + chunkless + (sourceChanged || configChanged ? 1 : 0);
+    const remaining = remainingChunks + remainingFacts.count + remainingTakes + finalReadiness.blocked + chunkless + (sourceChanged || configChanged ? 1 : 0);
 
     const base = {
       embedded: embedResult.embedded + embeddedFacts,
       facts_embedded: embeddedFacts,
       facts_remaining: remainingFacts.count,
+      takes_embedded: embedResult.takes?.embedded ?? 0,
+      takes_remaining: remainingTakes,
       blocked_projection_pages: finalReadiness.blocked,
       signatures_reconciled: reconciled,
       invalidated: applied.invalidated,
@@ -801,6 +806,8 @@ export async function executeMigrationFlow(
       reranker,
     };
     if (remaining === 0 && !embedResult.lock_lost) {
+      // #5088: ANN indexes are built only now, after the drain, and before the marker clears.
+      await buildMigrationAnnIndexes(engine, plan.to_dims, assertOwned);
       // Completion smoke check (D11): warn-don't-block self-retrieval. The
       // outcome is stamped into the completion marker (content-free) so
       // `--status` can READ it later without re-spending on live probes.
@@ -814,7 +821,7 @@ export async function executeMigrationFlow(
         envMatchesTarget: envFullyPinsTarget(plan.to_model, plan.to_dims), envPresent: detectEnvPresence().present,
       });
       if (!verified.complete) return { status: 'incomplete', remaining: Math.max(1,
-        verified.details.stale_wide + (verified.details.stale_facts ?? 0) + (verified.details.blocked_projection_pages ?? 0)), ...base };
+        verified.details.stale_wide + (verified.details.stale_facts ?? 0) + (verified.details.stale_takes ?? 0) + (verified.details.blocked_projection_pages ?? 0)), ...base };
       await assertOwned();
       await completeEmbeddingMigration(engine, plan, {
         verify_search: { status: verifySearch.status, samples: verifySearch.samples },
@@ -855,11 +862,78 @@ export async function executeMigrationFlow(
   }
 }
 
+/**
+ * #5088: build the marker's deferred ANN indexes, plus the canonical chunk
+ * index when the cap policy expects it and it is missing or INVALID. Each
+ * built index leaves the marker in its own transaction, so a kill resumes.
+ */
+async function buildMigrationAnnIndexes(engine: BrainEngine, targetDims: number, assertOwned: (tx?: BrainEngine) => Promise<void>): Promise<void> {
+  const canonical = canonicalChunkAnnIndex();
+  const expected = hnswIndexExpected('vector', targetDims) && await annIndexValidity(engine, canonical.name) !== true ? [canonical] : [];
+  await buildDeferredAnnIndexes(engine, {
+    targetDims,
+    readPending: async () => mergeDeferredAnnIndexes(parseDeferredAnnIndexes((await readMigrationState(engine)).state?.deferred_ann_indexes, DEFERRED_ANN_TABLES), expected),
+    writePending: pending => engine.transaction(async tx => {
+      await assertOwned(tx);
+      const raw = await tx.getConfig(MIGRATION_STATE_KEY);
+      if (raw) await tx.setConfig(MIGRATION_STATE_KEY, JSON.stringify({ ...JSON.parse(raw) as MigrationState, deferred_ann_indexes: pending }));
+    }),
+    assertOwned: () => assertOwned(),
+  });
+}
+
 export interface RunMigrateEmbeddingsOpts {
   /** Test seams. */
   confirm?: (question: string) => Promise<boolean>;
   isTTY?: boolean;
   exit?: (code: number) => never;
+}
+
+/**
+ * Consent gate (A4): effects paid + destructive. `spend.posture=tokenmax`
+ * covers only the paid part; the schema rebuild (existing vectors are
+ * dropped, retrieval is degraded until the re-embed finishes) still needs
+ * `--yes`. Spend stays bounded by the migration's own durable authorization
+ * (`--max-cost-usd` must cover the printed worst case), so the consent cap is
+ * not threaded into the run. No plan hash: the brain-wide target is fully
+ * named by the argv, and a resume re-runs the same command. Resolves false
+ * after a printed refusal.
+ */
+async function migrateConsent(engine: BrainEngine, args: string[], flags: ReturnType<typeof parseMigrateEmbeddingsFlags>,
+  plan: MigrationPlan, opts: RunMigrateEmbeddingsOpts): Promise<boolean> {
+  if (!flags.yes) {
+    const { resolveSpendPosture } = await import('../core/spend-posture.ts');
+    if (await resolveSpendPosture(engine) === 'tokenmax') {
+      serr('  [migrate] spend.posture=tokenmax: the cost estimate above is informational; the destructive rebuild still needs the user\'s approval.');
+    }
+  }
+  const priceNote = plan.price_known ? `about $${plan.est_cost_usd.toFixed(2)}` : 'an unpriced amount';
+  const worstCase = plan.worst_case_authorization.usd;
+  const auth = await consentGate({
+    command: 'migrate embeddings',
+    effects: ['paid', 'destructive'],
+    actor: 'agent',
+    what: `Move the brain's embeddings to ${flags.to}${flags.dim !== undefined ? ` (${flags.dim}d)` : ''}`,
+    why: `Re-embeds ${plan.chunks_to_embed} chunk(s), ${plan.facts_to_embed ?? 0} fact(s) and ${plan.takes_to_embed ?? 0} take(s) with ${flags.to} (${priceNote}) so search runs in the new model's vector space; pages and facts are kept.`,
+    risk: 'Rebuilds the embedding column in place: existing vectors are dropped and vector search is degraded until the re-embed finishes '
+      + `(a killed run resumes with the same command; status: ${EMBEDDING_MIGRATION_RECOVERY.status_command}). `
+      + `Spends up to the --max-cost-usd authorization${worstCase !== null ? ` (worst case $${worstCase.toFixed(2)})` : ''} with the target provider.`,
+    user_message: `Switch your brain's embeddings to ${flags.to}? It re-embeds ${plan.chunks_to_embed} chunk(s) for ${priceNote}`
+      + `${worstCase !== null ? ` (at most $${worstCase.toFixed(2)})` : ''}; search is degraded until it finishes. Your pages and facts are kept.`,
+    argv: ['gbrain', 'migrate', 'embeddings', ...args.filter(a => a !== '--yes')],
+    preview_argv: ['gbrain', 'migrate', 'embeddings', ...args.filter(a => a !== '--yes' && a !== '--json'), '--dry-run', '--json'],
+    est_usd: plan.price_known ? plan.est_cost_usd : null,
+    args,
+  }, {
+    json: flags.json,
+    env: engineConsentEnv(engine, {
+      configuredCapUsd: flags.maxCostUsd ?? 0,
+      note: () => {},
+      ...(opts.isTTY !== undefined ? { interactive: opts.isTTY } : {}),
+      ...(opts.confirm ? { readLine: async ({ prompt }: { prompt: string }) => ({ kind: 'line' as const, text: (await opts.confirm!(prompt)) ? 'y' : 'n' }) } : {}),
+    }),
+  });
+  return auth !== null;
 }
 
 export async function runMigrateEmbeddings(
@@ -927,7 +1001,7 @@ export async function runMigrateEmbeddings(
     console.log(`  File plane: ${filePlane ? `${filePlane.model ?? '(none)'} @ ${filePlane.dims ?? '?'}d` : '(no ~/.gbrain/config.json)'}`);
     console.log(`  DB plane:   ${report.db_plane.model ?? '(none)'} @ ${report.db_plane.dims ?? '?'}d`);
     console.log(`  Column:     content_chunks.embedding ${report.column_dims === null ? 'absent/unreadable' : `${report.column_dims}d`}${report.pinned_widths.map((p) => `; ${p.table} ${p.dims === null ? '?' : `${p.dims}d`}`).join('')}`);
-    console.log(`  Vectors:    ${report.missing_embeddings ?? '?'} chunk(s) missing; ${report.chunkless_pages ?? '?'} contentful page(s) without chunks; facts pending: ${report.facts_pending ?? 'n/a'}`);
+    console.log(`  Vectors:    ${report.missing_embeddings ?? '?'} chunk(s) missing; ${report.chunkless_pages ?? '?'} contentful page(s) without chunks; facts pending: ${report.facts_pending ?? 'n/a'}; takes pending: ${report.takes_pending ?? 'n/a'}`);
     console.log(`  Projection: ${report.blocked_projection_pages ?? '?'} page(s) blocked; bounded canonical recovery runs before invalidation.`);
     if (report.embed_skip_null_chunks !== null && report.embed_skip_null_chunks > 0) {
       console.log(`  Embed-skip: ${report.embed_skip_null_chunks} chunk(s) on embed_skip pages have NULL vectors — excluded from re-embedding by design (remove the frontmatter marker to re-embed them)`);
@@ -1020,32 +1094,7 @@ export async function runMigrateEmbeddings(
     exit(0);
   }
 
-  // ── Consent gate. Unlike the pure cost gates in
-  // docs/operations/spend-controls.md, `spend.posture=tokenmax` does NOT
-  // bypass this one: posture waives the SPEND ceiling, and this gate also
-  // guards a destructive schema rebuild (existing vectors are dropped, and
-  // retrieval is degraded until the re-embed finishes). We honor the posture
-  // by marking the dollar figure informational, and still ask.
-  if (!flags.yes) {
-    const { resolveSpendPosture } = await import('../core/spend-posture.ts');
-    const posture = await resolveSpendPosture(engine);
-    if (posture === 'tokenmax') {
-      serr('  [migrate] spend.posture=tokenmax: the cost estimate above is informational.');
-      serr('  [migrate] Confirmation is still required — this rebuilds the embedding column (destructive, not just costly).');
-    }
-    const isTTY = opts.isTTY ?? Boolean(process.stdin.isTTY);
-    if (!isTTY) {
-      serr('Refusing to migrate without confirmation in a non-TTY environment. Re-run with --yes.');
-      exit(2);
-    }
-    const confirm = opts.confirm ?? defaultConfirm;
-    const priceNote = plan.price_known ? `~$${plan.est_cost_usd.toFixed(2)}` : 'an UNKNOWN amount';
-    const ok = await confirm(`Re-embed ${plan.chunks_to_embed} chunks and ${plan.facts_to_embed ?? 0} facts (${priceNote}) with total authorization ${flags.maxCostUsd === undefined ? 'retained from the existing run (required for new work)' : `$${flags.maxCostUsd}`}?`);
-    if (!ok) {
-      serr('Aborted. Nothing was changed.');
-      exit(1);
-    }
-  }
+  if (!(await migrateConsent(engine, args, flags, plan, opts))) return (opts.exit ?? ((value: number) => process.exit(value)))(currentExitCode());
 
   // ── Execute: locks → probe → apply → drain → reconcile → complete, all in
   // the shared orchestrator (identical semantics on the op path).

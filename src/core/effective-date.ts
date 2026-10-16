@@ -109,6 +109,8 @@ const NUMERIC_DATE_RE = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/;
 const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/i;
 const MONTH_DAY_YEAR_RE = /^(?:[a-z]+,?\s+)?([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$/i;
 const DAY_MONTH_YEAR_RE = /^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3,9})\.?,?\s+(\d{4})$/i;
+/** Chat-export style "1:56 pm on 8 May, 2023": the clock time is dropped and the date parsed. */
+const TIME_ON_PREFIX_RE = /^\d{1,2}:\d{2}\s*(?:am|pm)?\s+on\s+/i;
 
 /** A UTC calendar date, or null when Y/M/D does not name a real day (2024-02-30). */
 function utcCalendarDate(year: number, month: number, day: number, h = 0, m = 0, sec = 0, ms = 0): Date | null {
@@ -131,6 +133,28 @@ export function isValidTimeZone(timeZone: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The calendar day an instant falls on in `timeZone`, as YYYY-MM-DD. */
+export function dayInZone(instant: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(instant);
+}
+
+/**
+ * The one rule for rendering a stored date as YYYY-MM-DD (think's `<page
+ * date>`, C1 evidence headers): exactly midnight UTC is a day-only date and
+ * renders as written; any other instant renders in `timeZone`
+ * (`brain.timezone`; UTC when unset or invalid). Null for a missing or
+ * invalid value. Which date to render (content vs observation) is the
+ * caller's choice.
+ */
+export function formatBrainDay(value: Date | string | null | undefined, timeZone?: string | null): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(d.getTime())) return null;
+  const iso = d.toISOString();
+  if (iso.endsWith('T00:00:00.000Z')) return iso.slice(0, 10);
+  return dayInZone(d, timeZone && isValidTimeZone(timeZone) ? timeZone : 'UTC');
 }
 
 /** The instant a wall-clock time (held in `wall`'s UTC fields) names in `timeZone`, DST included. */
@@ -178,9 +202,10 @@ export function parseDateLoose(value: unknown, timeZone?: string): Date | null {
       const [zh, zm] = [+offset.slice(1, 3), +offset.slice(-2)];
       return new Date(wall.getTime() - sign * (zh * 60 + zm) * 60_000);
     }
-    const mdy = MONTH_DAY_YEAR_RE.exec(trimmed);
+    const dated = trimmed.replace(TIME_ON_PREFIX_RE, '');
+    const mdy = MONTH_DAY_YEAR_RE.exec(dated);
     if (mdy && MONTHS[mdy[1].toLowerCase()]) return utcCalendarDate(+mdy[3], MONTHS[mdy[1].toLowerCase()], +mdy[2]);
-    const dmy = DAY_MONTH_YEAR_RE.exec(trimmed);
+    const dmy = DAY_MONTH_YEAR_RE.exec(dated);
     if (dmy && MONTHS[dmy[2].toLowerCase()]) return utcCalendarDate(+dmy[3], MONTHS[dmy[2].toLowerCase()], +dmy[1]);
     const ms = Date.parse(trimmed);
     if (!Number.isFinite(ms)) return null;
@@ -212,7 +237,7 @@ function validateInRange(d: Date | null): Date | null {
 function validateExplicit(value: unknown, timeZone?: string): Date | null {
   const d = parseDateLoose(value, timeZone);
   const structured = value instanceof Date || (typeof value === 'string'
-    && [NUMERIC_DATE_RE, DATETIME_RE, MONTH_DAY_YEAR_RE, DAY_MONTH_YEAR_RE].some(re => re.test(value.trim())));
+    && [NUMERIC_DATE_RE, DATETIME_RE, MONTH_DAY_YEAR_RE, DAY_MONTH_YEAR_RE].some(re => re.test(value.trim().replace(TIME_ON_PREFIX_RE, ''))));
   if (!structured) return validateInRange(d);
   if (d === null) return null;
   const ms = d.getTime();

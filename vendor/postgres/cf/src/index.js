@@ -63,9 +63,35 @@ function Postgres(a, b) {
       , full = Queue()
       , queues = { connecting, reserved, closed, ended, open, busy, full }
 
-  const connections = [...Array(options.max)].map(() => Connection(options, queues, { onopen, onend, onclose }))
+  const connections = [...Array(options.max)].map(() => Connection(options, queues, { onopen, onend, onclose, onstuck, ondesync }))
 
   const sql = Sql(handler)
+
+  // GBrain: the pool's own queue lengths, read-only, for the consumer's pool diagnostics (#6317). A property
+  // getter, not an Object.assign member: Object.assign reads a getter once and copies its value, which froze
+  // these numbers at construction (#6383). `inflight_oldest_ms` is the age of the oldest head statement across
+  // the pool's connections and `completed` counts every ReadyForQuery that settled a statement.
+  Object.defineProperty(sql, 'pool', {
+    enumerable: false,
+    get() {
+      const now = performance.now()
+      return {
+        max: options.max,
+        open: open.length,
+        busy: busy.length,
+        full: full.length,
+        reserved: reserved.length,
+        connecting: connecting.length,
+        closed: closed.length,
+        ended: ended.length,
+        queued: queries.length,
+        inflight_oldest_ms: connections.reduce((age, c) => c.inflightSince ? Math.max(age, Math.round(now - c.inflightSince)) : age, 0),
+        // GBrain (#6543 A4): the oldest head statement past its own budget (the cap the driver retires it at), 0 when none is.
+        inflight_over_budget_ms: connections.reduce((age, c) => c.inflightSince && c.inflightCap && now - c.inflightSince > c.inflightCap ? Math.max(age, Math.round(now - c.inflightSince)) : age, 0),
+        completed: options.shared.completed
+      }
+    }
+  })
 
   Object.assign(sql, {
     get parameters() { return options.parameters },
@@ -203,7 +229,7 @@ function Postgres(a, b) {
 
   function own(c) {
     const queue = Queue()
-    let busy = false, fence = null, holding = null, releasing = false
+    let busy = false, fence = null, holding = null, releasing = false, discarding = false, discardPromise = null
     const reservation = c.reserved = (ended = false) => {
       if (c.reserved !== reservation)
         return
@@ -227,7 +253,7 @@ function Postgres(a, b) {
       }
     }
     reservation.enqueue = q => {
-      if (c.reserved !== reservation || releasing)
+      if (c.reserved !== reservation || releasing || discarding)
         return q.reject(Errors.generic('CONNECTION_CLOSED', 'Connection is no longer owned'))
       queue.push(q)
       pump()
@@ -243,6 +269,52 @@ function Postgres(a, b) {
       reservation.reject(Errors.generic('CONNECTION_CLOSED', 'Connection was discarded'))
       c.terminate()
     }
+    // A Terminate message on the busy socket cannot interrupt its current
+    // statement. Preserve the fenced Query/canceller until CancelRequest and
+    // the query's backend response settle; never let a later query use it.
+    // The bounded fallback still discards, but rejects as unconfirmed.
+    reservation.cancelAndDiscard = ({ timeout = 2000 } = {}) => {
+      if (discardPromise)
+        return discardPromise
+      if (c.reserved !== reservation)
+        return Promise.resolve()
+      discarding = true
+      reservation.reject(Errors.generic('CONNECTION_CLOSED', 'Connection is being discarded'))
+      const q = fence || holding
+      if (!q) {
+        // A busy, unfenced query has no retained canceller/settlement proof.
+        // Retire the socket but never report that as confirmed server stop.
+        const unconfirmed = busy
+        reservation.discard()
+        return discardPromise = unconfirmed
+          ? Promise.reject(Errors.generic('CANCEL_UNCONFIRMED', 'Busy unfenced query cancellation cannot be confirmed'))
+          : Promise.resolve()
+      }
+      let timer
+      let cancelling
+      try {
+        cancelling = q.cancel()
+      } catch (error) {
+        reservation.discard()
+        return discardPromise = Promise.reject(error)
+      }
+      discardPromise = Promise.race([
+        Promise.all([
+          cancelling,
+          Promise.prototype.then.call(q, () => {}, error => {
+            if (!error || error.code !== '57014')
+              throw error
+          })
+        ]),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Errors.generic('CANCEL_UNCONFIRMED', 'Query cancellation did not settle before discard')), timeout)
+        })
+      ]).then(() => {}).finally(() => {
+        clearTimeout(timer)
+        reservation.discard()
+      })
+      return discardPromise
+    }
     reservation.releaseConnection = () => {
       if (c.reserved !== reservation)
         return
@@ -252,7 +324,7 @@ function Postgres(a, b) {
     return reservation
 
     function pump() {
-      if (c.reserved !== reservation || holding || fence)
+      if (c.reserved !== reservation || discarding || holding || fence)
         return
       while (queue.length) {
         const q = queue.peek()
@@ -274,7 +346,7 @@ function Postgres(a, b) {
       if (!busy) {
         if (releasing) {
           c.reserved = null
-          onopen(c)
+          onopen(c, true)
         } else {
           move(c, reserved)
         }
@@ -323,6 +395,7 @@ function Postgres(a, b) {
       const sql = Sql(reservation.enqueue)
       sql.release = reservation.releaseConnection
       sql.discard = reservation.discard
+      sql.cancelAndDiscard = reservation.cancelAndDiscard
       return sql
     }
   }
@@ -351,6 +424,7 @@ function Postgres(a, b) {
       sql.savepoint = savepoint
       sql.prepare = x => prepare = x.replace(/[^a-z0-9$-_. ]/gi)
       sql.discard = reservation.discard
+      sql.cancelAndDiscard = reservation.cancelAndDiscard
       let uncaughtError
         , result
 
@@ -450,7 +524,7 @@ function Postgres(a, b) {
     return new Promise((resolve, reject) => {
       query.state
         ? query.active
-          ? Connection(options).cancel(query.state, resolve, reject)
+          ? cancelActive(query, resolve, reject)
           : query.cancelled = { resolve, reject }
         : (
           queries.remove(query),
@@ -459,6 +533,25 @@ function Postgres(a, b) {
           resolve()
         )
     })
+  }
+
+  function cancelActive(query, resolve, reject, delay = 50) {
+    Connection(options).cancel(query.state, () => {
+      if (!query.active)
+        return resolve()
+      let waiting = true
+      const timer = setTimeout(next, delay)
+      Promise.prototype.then.call(query, next, next)
+      function next() {
+        if (!waiting)
+          return
+        waiting = false
+        clearTimeout(timer)
+        query.active
+          ? cancelActive(query, resolve, reject, Math.min(delay * 2, 1000))
+          : resolve()
+      }
+    }, reject)
   }
 
   async function end({ timeout = null } = {}) {
@@ -497,7 +590,9 @@ function Postgres(a, b) {
     move(c, ended)
   }
 
-  function onopen(c) {
+  function onopen(c, released) {
+    if (c.status && c.status !== 73 && (released || options.max !== 1)) // not I
+      return poisoned(c)
     if (ending) {
       while (queries.length)
         queries.shift().reject(Errors.connection('CONNECTION_ENDED', options))
@@ -520,6 +615,34 @@ function Postgres(a, b) {
     ready
       ? move(c, busy)
       : move(c, full)
+  }
+
+  // GBrain (#6383): a connection the in-flight watchdog retired leaves rotation before its socket closes, so no
+  // statement is routed to it in between; onclose then returns it to `closed` like any other dropped connection.
+  function onstuck(c, info) {
+    c.queue !== ended && move(c, ended)
+    try {
+      options.onstuck && options.onstuck(info)
+    } catch (_) {}
+  }
+
+  // GBrain: a connection whose answers no longer match its statements leaves rotation before its socket closes.
+  function ondesync(c, info) {
+    c.queue !== ended && move(c, ended)
+    c.reserved && c.reserved.reject && c.reserved.reject(Errors.generic('CONNECTION_DESYNC', 'The connection was retired: an answer arrived for no statement'))
+    try {
+      options.ondesync && options.ondesync(info)
+    } catch (_) {}
+  }
+
+  function poisoned(c) {
+    if (c.queue === ended)
+      return
+    move(c, ended)
+    try {
+      options.onpoisoned && options.onpoisoned(String.fromCharCode(c.status))
+    } catch (_) {}
+    c.terminate()
   }
 
   function onclose(c, e) {
@@ -558,7 +681,7 @@ function parseOptions(a, b) {
   'timeout' in o && (console.log('The timeout option is deprecated, use idle_timeout instead'), o.idle_timeout = o.timeout) // eslint-disable-line
   query.sslrootcert === 'system' && (query.ssl = 'verify-full')
 
-  const ints = ['idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'backoff', 'keep_alive']
+  const ints = ['idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'backoff', 'keep_alive', 'inflight_timeout', 'inflight_max', 'inflight_grace']
   const defaults = {
     max             : globalThis.Cloudflare ? 3 : 10,
     ssl             : false,
@@ -567,6 +690,9 @@ function parseOptions(a, b) {
     connect_timeout : 30,
     max_lifetime    : max_lifetime,
     max_pipeline    : 100,
+    inflight_timeout: null,
+    inflight_max    : null,
+    inflight_grace  : null,
     backoff         : backoff,
     keep_alive      : 60,
     prepare         : true,
@@ -605,11 +731,18 @@ function parseOptions(a, b) {
     onnotice        : o.onnotice,
     onnotify        : o.onnotify,
     onclose         : o.onclose,
+    onpoisoned      : o.onpoisoned,
+    onstuck         : o.onstuck,
+    onbuilderror    : o.onbuilderror,
+    ondesync        : o.ondesync,
+    onrecovered     : o.onrecovered,
+    onrecoveryfailed: o.onrecoveryfailed,
+    shared_types    : o.shared_types === false ? null : o.shared_types instanceof Map ? o.shared_types : new Map(),
     onparameter     : o.onparameter,
     socket          : o.socket,
     transform       : parseTransform(o.transform || { undefined: undefined }),
     parameters      : {},
-    shared          : { retries: 0, typeArrayMap: {} },
+    shared          : { retries: 0, typeArrayMap: {}, completed: 0 },
     ...mergeUserTypes(o.types)
   }
 }

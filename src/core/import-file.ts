@@ -1,5 +1,7 @@
 import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
-import { assertImportBase, sameCanonicalImport } from './page-state/import-guard.ts';
+import { suffixedFrontmatterSlugHold } from './persistence/suffixed-slug.ts';
+import { maintenanceTransaction, ownerSourceGateInput, suppliedTrustMarkerView, trustMarkerChanged, writeTrustOfGate } from './persistence/attribution.ts';
+import { assertImportBase, sameCanonicalImport, sameContentAnyKeyOrder } from './page-state/import-guard.ts';
 import { stabilizeSafetyAssessments } from './persistence/reconcile-safety.ts';
 import { decideImportIdentity, collidingSlugOwner, fileOriginUri } from './import-identity.ts';
 import { readSourceFileSync } from './minions/source-filesystem.ts';
@@ -7,20 +9,25 @@ import { readFileSync, statSync, lstatSync } from 'fs';
 import { basename, extname, resolve } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine, FileSpec } from './engine.ts';
-import { parseMarkdown } from './markdown.ts';
+import { classifyImportHold, parseMarkdown, resolveParsedSubtype, type ParseOpts, type ParsedMarkdown } from './markdown.ts';
+import { CODE_FILE_MAX_BYTES, isLargePageBytes } from './page-size-policy.ts';
+import { importSizeLimit, MAX_FILE_SIZE, screenImportContent, settleContentDisposition, stripGateOwnedMarkers, type ContentRefusal, type FenceScreen } from './import-screen.ts';
+import type { WriteGateAssessment, WriteGateInput } from './write-gate.ts';
+import { applyImportFences } from './fence-repair/import-step.ts';
+import type { FenceIssueWire } from './fence-repair/tier1.ts';
+import type { FenceFix } from './fence-repair/types.ts';
 import { classifyStoredType } from './schema-pack/type-usage.ts';
 import { resolveUnifiedImportType, type ProjectionAwareTypePack } from './schema-pack/unified-import-type.ts';
-import { prepareMarkdownChunks } from './markdown-chunks.ts';
-import { prepareCodeChunks, installCodeChunkEdges } from './code-chunks.ts';
-import { detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
+import { prepareFenceAwareMarkdownChunks } from './markdown-chunks.ts';
+import { prepareCodeChunks, installCodeChunkEdges, mapCodeEdges } from './code-chunks.ts';
+import { detectCodeLanguage, CHUNKER_VERSION, GRAMMAR_REVISIONS, type SupportedCodeLanguage } from './chunkers/code.ts';
 import { sanitizeRemoteBody } from './remote-body.ts';
 import { installPageEmbeddings, installPageProjection, preparePageProjection, projectionBelowSafeFence, queuePageProjection, readProjectionSnapshot, resealSafeChunks,
-  sealPageTextProjection, stampEmbeddingInputs, embeddingWriteTarget, embeddingInputContext, type ProjectionSnapshot } from './page-state/projections.ts';
-import { embeddingInputHash } from './embedding-input-hash.ts';
+  sealPageTextProjection, stampEmbeddingInputs, type ProjectionSnapshot } from './page-state/projections.ts';
 import { sanitizeText } from './batch-rows.ts';
 import { hasProtectedBody, safeChunksFilter } from './search/safe-chunks.ts';
-import { findChunkForOffset } from './chunkers/edge-extractor.ts';
 import { planEmbeddingReuse } from './embed-reuse.ts';
+import { reuseStoredChunkVectors } from './import-chunk-reuse.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
 import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
 // #3374 — import-path embeds ride the shared retry loop (429 retry-after +
@@ -31,31 +38,30 @@ import { embedBatchKeepingUsable, embedBatchWithBackoff } from './embed-retry.ts
 import { isEmbeddingZeroNormError, type EmbeddingZeroNormError } from './ai/embedding-guard.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
 import type { ChunkInput, Page, PageInput, PageType } from './types.ts';
+import type { PageSnapshot } from './page-state/types.ts';
+import { pipelined } from './page-state/transactions.ts';
+import { addPageTags } from './page-state/tags.ts';
 import { computeEffectiveDate, fallbackCreatedAt, isValidTimeZone } from './effective-date.ts';
 import { MARKDOWN_CHUNKER_VERSION } from './chunkers/recursive.ts';
 import { logSlugFallback } from './audit-slug-fallback.ts';
-import { assessContentSanity, ContentSanityBlockError } from './content-sanity.ts';
-import { loadOperatorLiterals } from './content-sanity-literals.ts';
-import { logContentSanityAssessment } from './audit/content-sanity-audit.ts';
-import { buildEmbedSkipMarker, EMBED_SKIP_KEY } from './embed-skip.ts';
-import {
-  QUARANTINE_KEY,
-  CONTENT_FLAG_KEY,
-  buildQuarantineMarker,
-  buildContentFlagMarker,
-} from './quarantine.ts';
-import { loadConfig, loadConfigWithEngine } from './config.ts';
+import { isEmbedSkipped } from './embed-skip.ts';
 import {
   buildContextualPrefix,
   modeRequiresSynopsis,
   modeRequiresWrapper,
   wrapChunkForEmbedding,
 } from './embedding-context.ts';
-import { normalizeAliasList } from './search/alias-normalize.ts';
+import { writePageAliases } from './mentions/pass.ts';
+import { readMentionPolicy } from './mentions/policy.ts';
 import { warnOncePerProcess, validateSlug, contentHash, contentHashLegacy, ATOMS_SCAN_HASH_KEY } from './utils.ts';
 import { decorateEmbeddingDimError } from './embedding-dim-check.ts';
 import { resolveImportContextualMode } from './import-contextual-mode.ts';
 import { runGuardrails } from './guardrails.ts';
+import { fenceBody } from './page-body/page-shape.ts';
+import { abortSegmentedStaging, bodyStorageOf, demoteSegmentedPage, materializedPage, materializedSnapshot, sealSegmentedPage, stageSegmentedImport,
+  stringWriteStorage, type SegmentedImport } from './persistence/segmented-apply.ts';
+import type { SegmentedStagingOwner } from './page-body/ingest.ts';
+import type { PageBodyPolicy } from './page-body/limits.ts';
 import { parseFactsFence, renderFactsTable, restoreHiddenFactRows, factsGapWarning, replaceOrInsertFactsFence } from './facts-fence.ts';
 
 /**
@@ -131,14 +137,14 @@ export interface ImportResult {
    * Absent on early rejection before a page can be parsed.
    */
   parsedPage?: ParsedPage;
-  /** Content-quality gate (issue #1699): true when the page landed with a
-   *  `quarantine` marker (high-confidence junk, hidden from search). */
+  /** Content-quality gate (#1699): the page landed with a `quarantine` marker (hidden from search). */
   quarantined?: boolean;
   /** True when the page landed with a `content_flag` marker (fuzzy
    *  markup-heavy or oversize — stays searchable, agent warned). */
   flagged?: boolean;
-  /** Which flag tier fired, when `flagged`. */
-  flag_reason?: 'markup_heavy' | 'oversized';
+  /** Which flag tier fired, when `flagged` (`instruction_like`: the #5575 write gate). */
+  flag_reason?: 'markup_heavy' | 'oversized' | 'instruction_like';
+  gate?: WriteGateAssessment; // #5575: the write-gate assessment, when the caller passed writeGate
   /** #5050: unchanged content below the safe-chunk fence was re-sealed; chunks left to embed. */
   resealed?: { pendingChunks: number; pendingChars: number };
   /**
@@ -148,9 +154,10 @@ export interface ImportResult {
    * in its malformed summary and keeps them OUT of failedFiles / the failure
    * ledger so they can never gate bookmark advancement. 'slug_collision' =
    * another live file already owns this slug (see importFromContent); the
-   * skip repeats until one file is renamed.
+   * skip repeats until one file is renamed. #5988: a content refusal carries
+   * its hold code (with `refusal`); sync holds it, other callers fail it.
    */
-  skip_reason?: 'malformed_path' | 'slug_collision';
+  skip_reason?: 'malformed_path' | 'slug_collision' | ContentRefusal['code'];
   /**
    * Advisory (schema.type_warnings): the page's explicit frontmatter `type:`
    * is an alias of a canonical pack type or undeclared in the pack. The type
@@ -161,16 +168,20 @@ export interface ImportResult {
   /** True when the text committed but the embedding provider failed; the
    *  chunks carry NULL vectors until the stale sweep embeds them. */
   embedding_deferred?: boolean;
+  /** #5988: the typed content refusal behind `error`, for callers that refuse with its code. */
+  refusal?: ContentRefusal;
+  /** #5988: the file imported only after quoting unreadable frontmatter values, or carries a `#`-comment value. */
+  frontmatter_recovery?: { quoted: boolean; comment_value: boolean };
+  /** #6188: Tier 1 rewrote a fence (the stored body and hash are normalized); `fence_issues`: a lenient import stored a residual fence as written. */
+  fences_normalized?: FenceFix[];
+  fence_issues?: FenceIssueWire[];
 }
 
-export const MAX_FILE_SIZE = 5_000_000; // 5MB
+export { MAX_FILE_SIZE };
 
-function invalidYamlFrontmatterError(parsed: ReturnType<typeof parseMarkdown>): string | null {
-  const yamlError = parsed.errors?.find((error) => error.code === 'YAML_PARSE');
-  if (!yamlError) return null;
-  const detail = yamlError.message.replace(/^YAML parse failed:\s*/, '').trim();
-  return `Invalid YAML frontmatter: ${detail}. Quote scalar values that contain ": " or fix the frontmatter block.`;
-}
+/** #5988: the slug-conflict hold text: the path and its derived slug, never the declared frontmatter value. */
+export const slugConflictHoldMessage = (relativePath: string, expectedSlug: string): string =>
+  `The frontmatter slug of ${relativePath} does not match its path-derived slug "${expectedSlug}". Remove the frontmatter "slug:" line or move the file.`;
 
 /**
  * #4588: refresh `pages.source_path` on the import SKIP path. A row whose slug
@@ -202,6 +213,14 @@ async function refreshSourcePath(engine: BrainEngine, slug: string, sourceId: st
   } catch { /* bookkeeping only — never fail the import over it */ }
 }
 
+/** #6188 (E8): `importFromContent`'s fence options. */
+interface ImportFenceOptions {
+  /** A residual fence refuses typed (`coordinated`) or is stored with a warning (`lenient`, default); a fixable one is normalized. */
+  fences?: 'coordinated' | 'lenient';
+  /** The caller's fence verdict for these exact bytes, `fences.normalize` settled (null: the fences compile); skips a second scan. */
+  fenceScreen?: FenceScreen | null;
+}
+
 /**
  * Import content from a string. Core pipeline:
  * parse -> hash -> transaction(version + putPage + tags + chunks + beforeCommit).
@@ -223,6 +242,10 @@ export async function importFromContent(
   opts: {
     /** Coordinator seam: prepare without publishing, then commit under its guarded transaction. */
     prepare?: (prepared: import('./persistence/prepared-import.ts').PreparedContentImport) => Promise<ImportResult>;
+    /** #5984, with `prepare`: the coordinator proves the base revision under its page guard, and the caller seals the text projection and checks the read-back (`contentHash`) from its own read after apply; apply skips all three. */
+    coordinated?: boolean;
+    /** With `coordinated`: the caller's own read of this page (deleted rows included) just before, reused as the import base. */
+    existingSnapshot?: import('./page-state/types.ts').PageSnapshot | null;
     /** Internal canonical metadata, after protected-body overlays and before hashing. */
     prepareFrontmatter?: (page: ParsedPage) => void;
     noEmbed?: boolean;
@@ -279,20 +302,20 @@ export async function importFromContent(
     source_kind?: string | null;
     source_uri?: string | null;
     ingested_via?: string | null;
-    /**
-     * v0.42 (#1699 trust boundary). When `true` (untrusted caller — remote MCP
-     * put_page), gate-owned frontmatter markers (`quarantine`, `content_flag`,
-     * `embed_skip`) are STRIPPED from the incoming content before the content-
-     * sanity gate runs, so only the gate itself can set them. Without this, a
-     * write-scoped OAuth client could `put_page` clean content carrying a
-     * hand-crafted `quarantine` marker to hide arbitrary pages from search, or
-     * a `content_flag.detail` to inject text into the agent-trusted warning
-     * channel. `put_page` passes `ctx.remote !== false` (fail-closed: anything
-     * not strictly local is untrusted, matching the v0.26.9 F7b posture).
-     * Local/trusted callers (sync, capture, dream, `quarantine clear/scan`)
-     * leave it unset → markers preserved (the gate + CLI own them).
-     */
+    /** Wave B: who stages a segmented body (the journaled request's principal); unset: the local maintenance principal, kind `import`. */
+    segmentedOwner?: SegmentedStagingOwner;
+    /** Wave B: a segmented body an earlier preparation of this write staged (`PreparedContentImport.segmented`), reused when its inputs are unchanged. */
+    reuseSegments?: SegmentedImport;
+    /** Untrusted caller (remote MCP put_page: `ctx.remote !== false`); drives the remote fence merge and hidden rows. */
     remote?: boolean;
+    /**
+     * #1699/#6259: gate-owned markers (`quarantine`, `content_flag`, `embed_skip`,
+     * `atoms_scan_hash`, `quarantine_override`) are stripped from incoming content
+     * unless an owner-tier path (owner sync/import, reindex, file repair,
+     * reconcile, cycle derivers, `quarantine clear/scan`) sets this
+     * (`stripGateOwnedMarkers`, import-screen.ts). Local put_page does not.
+     */
+    preserveGateMarkers?: boolean;
     /**
      * Threaded to `tx.putPage` as its empty-overwrite escape hatch (the
      * engine refuses to blank a non-empty body otherwise). Only two callers
@@ -302,9 +325,13 @@ export async function importFromContent(
      * and reindex leave it unset so the guard stays armed.
      */
     allowEmptyOverwrite?: boolean;
+    /** With no writeGate, the tier that decides whether a preserved `quarantine_override` is kept (owner tier only; present but unreadable strips it). */
+    overrideTier?: unknown;
+    /** #5575: the caller's trust tier and origin for this write; absent skips the write gate (owner paths). */
+    writeGate?: WriteGateInput;
     beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>;
     onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void;
-  } = {},
+  } & ImportFenceOptions = {},
 ): Promise<ImportResult> {
   // Normalize BEFORE any tx write: putPage lowercases via validateSlug but
   // upsertChunks used to query by the caller's raw slug, so a mixed-case slug
@@ -321,23 +348,11 @@ export async function importFromContent(
   // Reject oversized payloads before any parsing, chunking, or embedding happens.
   // Uses Buffer.byteLength to count UTF-8 bytes the same way disk size would,
   // so the network path behaves identically to the file path.
-  const byteLength = Buffer.byteLength(content, 'utf-8');
-  if (byteLength > MAX_FILE_SIZE) {
-    return {
-      slug,
-      status: 'skipped',
-      chunks: 0,
-      error: `Content too large (${byteLength} bytes, max ${MAX_FILE_SIZE}). Split the content into smaller files or remove large embedded assets.`,
-    };
+  const screen = screenImportContent({ content, path: slug + '.md', ...(opts.activePack ? { activePack: opts.activePack } : {}), ...(opts.fenceScreen === undefined ? { fences: opts.fences ?? 'lenient' } : {}) });
+  if (screen.status === 'refused') {
+    return { slug, status: screen.refusal.code === 'file_too_large' ? 'skipped' : 'error', chunks: 0, error: screen.refusal.message, refusal: screen.refusal, skip_reason: screen.refusal.code };
   }
-  const parsed = parseMarkdown(content, slug + '.md', {
-    validate: true,
-    ...(opts.activePack ? { activePack: opts.activePack } : {}),
-  });
-  const frontmatterError = invalidYamlFrontmatterError(parsed);
-  if (frontmatterError) {
-    return { slug, status: 'error', chunks: 0, error: frontmatterError };
-  }
+  const parsed = (screen as { parsed: ParsedMarkdown }).parsed;
   if (!opts.prepare) await assertUnmanagedCanonicalWriter(engine, 'direct content import');
   // Canonicalize only free-prose fields before protected-fence parsing, hidden
   // row merging, hashing and indexing. Frontmatter identities stay untouched.
@@ -345,25 +360,8 @@ export async function importFromContent(
   parsed.compiled_truth = sanitizeText(parsed.compiled_truth);
   parsed.timeline = sanitizeText(parsed.timeline);
 
-  // v0.42 (#1699 trust boundary): strip gate-owned markers from UNTRUSTED
-  // input. parseMarkdown preserves every frontmatter key except type/title/
-  // tags/slug, so a remote MCP put_page (ctx.remote !== false, threaded as
-  // opts.remote) could otherwise plant `quarantine` (hide a page from search +
-  // suppress chunks) or `content_flag.detail` (inject text into the agent's
-  // trusted "this looks odd" channel) on clean content. Only the content-
-  // sanity gate (below) and trusted local CLIs may set these. Fail-closed:
-  // strip whenever opts.remote === true.
-  if (opts.remote === true && parsed.frontmatter) {
-    delete parsed.frontmatter[QUARANTINE_KEY];
-    delete parsed.frontmatter[CONTENT_FLAG_KEY];
-    delete parsed.frontmatter[EMBED_SKIP_KEY];
-    // #1699 part 2: the extract_atoms completion marker is phase-owned. A
-    // remote writer planting a matching marker would suppress atom mining
-    // for the page (a silent extraction bypass); planting a stale one is
-    // harmless but still not the caller's to set. Trusted local sync/export
-    // round-trips (remote unset/false) preserve it.
-    delete parsed.frontmatter[ATOMS_SCAN_HASH_KEY];
-  }
+  // #1699/#6259 trust boundary: only the gate and owner-tier paths keep gate-owned markers (import-screen.ts).
+  stripGateOwnedMarkers(parsed, opts);
 
   // Vendor-neutral guardrail seam (observe-only, fail-open). Runs AFTER
   // parseMarkdown and the size guard, BEFORE content-sanity, hash compute,
@@ -385,177 +383,9 @@ export async function importFromContent(
     },
   });
 
-  // v0.41 content-sanity gate. Runs AFTER parseMarkdown so the assessor
-  // sees the parsed body (compiled_truth + timeline), title, and
-  // frontmatter; runs BEFORE the hash compute so a soft-block that
-  // mutates frontmatter (sets `embed_skip`) reaches the existing hash
-  // calculation and the page write doesn't short-circuit on hash equality.
-  //
-  // Three outcomes:
-  //   - kill-switch active (`content_sanity.disabled === true` /
-  //     `GBRAIN_NO_SANITY=1`) → assess + audit with bypass flag, emit
-  //     loud stderr per offending ingest, but let everything through.
-  //   - hard-block (junk pattern OR operator literal) → THROW
-  //     ContentSanityBlockError. Existing exception flow at every
-  //     wrapper site (import.ts errors counter, put_page MCP envelope,
-  //     sync.ts:929 failure record) fires correctly through this single
-  //     throw point. classifyErrorCode picks up the PAGE_JUNK_PATTERN
-  //     prefix in the error message and groups in sync-failures.jsonl.
-  //   - soft-block (oversize WITHOUT junk-pattern hit) → mutate
-  //     frontmatter to embed `embed_skip` marker. Existing chunking
-  //     block guards on `isEmbedSkipped(frontmatter)` so chunks stays
-  //     empty; the existing `tx.deleteChunks` at the empty-chunks
-  //     branch fires to purge old chunks (D9 transition invariant).
-  //
-  // Effective config: env > file > DB > defaults. The DB-plane lift
-  // adds ~4 SQL round-trips per import (one per content_sanity.* key);
-  // acceptable for the per-page cost since the gate runs at most once
-  // per ingest. Power-users with 10K-file syncs who care about this
-  // overhead can set the keys via env vars instead and skip the DB read.
-  // Content-quality gate disposition flags (issue #1699), threaded onto
-  // the ImportResult so callers (sync reporting, tests) see what happened.
-  let pageQuarantined = false;
-  let pageFlagged = false;
-  let pageFlagReason: 'markup_heavy' | 'oversized' | undefined;
-  {
-    const baseCfg = loadConfig();
-    let effectiveCfg = baseCfg;
-    try {
-      // loadConfigWithEngine merges DB-plane content_sanity.* on top
-      // of file/env. Wrapped in try/catch so a transient engine error
-      // doesn't kill the import — the gate falls back to file/env
-      // values (which include defaults via the assessor itself).
-      effectiveCfg = await loadConfigWithEngine(engine, baseCfg);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[gbrain] content-sanity: DB config lift failed (${msg}); falling back to file/env\n`);
-    }
-    const cs = effectiveCfg?.content_sanity ?? {};
-    // GBRAIN_NO_SANITY=1 fast-path: loadConfig() returns null when
-    // there's no `~/.gbrain/config.json` AND no DATABASE_URL env var
-    // (e.g., fresh PGLite-only setups, hermetic tests). The merged
-    // content_sanity block never carries `disabled` in that case. Read
-    // the kill-switch env directly so it works regardless of whether
-    // any other config plumbing fired. Same direct-env-check pattern
-    // applies to the patterns_enabled flip below.
-    const sanityDisabled =
-      cs.disabled === true || process.env.GBRAIN_NO_SANITY === '1';
-    const extra_literals =
-      cs.junk_patterns_enabled !== false && !sanityDisabled ? loadOperatorLiterals() : [];
-    // Disposition for the high-confidence junk path: quarantine (hide) by
-    // default, or reject (throw → sync-failure) when the operator opts in.
-    const junkDisposition: 'quarantine' | 'reject' =
-      cs.junk_disposition === 'reject' ? 'reject' : 'quarantine';
-    const sanityResult = assessContentSanity({
-      compiled_truth: parsed.compiled_truth,
-      timeline: parsed.timeline ?? '',
-      title: parsed.title,
-      bytes_warn: cs.bytes_warn,
-      bytes_block: cs.bytes_block,
-      max_markup_ratio: cs.max_markup_ratio,
-      prose_check_enabled: cs.prose_check_enabled,
-      page_kind: parsed.type,
-      extra_literals,
-      // #4702 `content_sanity.disabled_patterns`: turn off individual
-      // built-in junk patterns without junk_patterns_enabled (all patterns)
-      // or the kill-switch (which also drops the size gates). Defensive
-      // Array.isArray: the file plane is hand-edited JSON.
-      disabled_patterns: Array.isArray(cs.disabled_patterns)
-        ? cs.disabled_patterns
-        : undefined,
-    });
-
-    if (sanityDisabled) {
-      // Kill-switch active: loud stderr per offending ingest. Operator
-      // explicitly opted into the bypass and gets noisy feedback every
-      // time it fires so they remember the gate is off. Audit as a
-      // bypass (page lands regardless).
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-        bypass: true,
-      });
-      if (sanityResult.shouldQuarantine || sanityResult.shouldFlag) {
-        process.stderr.write(
-          `[gbrain] content-sanity bypass (GBRAIN_NO_SANITY=1): ${slug} — ${sanityResult.reason_messages.join('; ')}\n`,
-        );
-      }
-    } else if (sanityResult.shouldQuarantine) {
-      // High-confidence junk (Cloudflare/CAPTCHA pattern or operator
-      // literal). The detail names which fired.
-      const detail = [
-        ...sanityResult.junk_pattern_matches,
-        ...sanityResult.literal_substring_matches,
-      ].join(', ');
-      const reason = sanityResult.junk_pattern_matches.length > 0
-        ? 'junk_pattern'
-        : 'literal_substring';
-      if (junkDisposition === 'reject') {
-        // Operator opted into hard-block. Throw with PAGE_QUARANTINE so
-        // classifyErrorCode bins it. Existing exception flow at every
-        // wrapper site (import errors counter, put_page MCP envelope,
-        // sync failure record) fires through this single throw point.
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-          disposition: 'reject',
-        });
-        throw new ContentSanityBlockError(sanityResult);
-      }
-      // Default: quarantine (hide). Page lands with the marker, writes
-      // zero chunks (chunking guard below widens to isQuarantined), is
-      // excluded from search via QUARANTINE_FILTER_FRAGMENT, reviewable
-      // via get_page / `gbrain quarantine list`.
-      parsed.frontmatter[QUARANTINE_KEY] = buildQuarantineMarker(reason, detail, {
-        bytes: sanityResult.bytes,
-      });
-      pageQuarantined = true;
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-        disposition: 'quarantine',
-      });
-      process.stderr.write(
-        `[gbrain] content-sanity quarantine: ${slug} — ${detail} (hidden from search, reviewable via 'gbrain quarantine list')\n`,
-      );
-    } else if (sanityResult.shouldFlag) {
-      // Fuzzy markup-heavy OR oversize. The page stays usable; the agent
-      // gets warned (Garry's paradigm — "this is odd, you decide").
-      const flagReason = sanityResult.flag_reason!; // non-null when shouldFlag
-      const flagDetail = sanityResult.reason_messages.join('; ');
-      parsed.frontmatter[CONTENT_FLAG_KEY] = buildContentFlagMarker(flagReason, flagDetail, {
-        ...(sanityResult.markup_ratio !== null ? { markup_ratio: sanityResult.markup_ratio } : {}),
-        bytes: sanityResult.bytes,
-      });
-      pageFlagged = true;
-      pageFlagReason = flagReason;
-      if (flagReason === 'oversized') {
-        // Oversize also skips embedding (existing embed_skip marker). The
-        // chunking guard below honors it; tx.deleteChunks purges old chunks.
-        parsed.frontmatter[EMBED_SKIP_KEY] = buildEmbedSkipMarker(sanityResult.bytes);
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-          disposition: 'soft_block',
-        });
-        // #3893 (reimplemented from @y2688): console.warn, not bare stderr —
-        // soft_block silently drops embedding, and console-level warns are
-        // what operator log hooks and collectors can observe.
-        console.warn(
-          `[gbrain] content-sanity flag (oversized): ${slug} (${sanityResult.bytes} bytes) — page lands, embedding skipped, agent warned`,
-        );
-      } else {
-        // markup_heavy: page ingests NORMALLY (keeps chunks, embeds). The
-        // content_flag marker rides along for the agent warning.
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-          disposition: 'flag',
-        });
-        process.stderr.write(
-          `[gbrain] content-sanity flag (markup_heavy): ${slug} (ratio ${sanityResult.markup_ratio?.toFixed(2)}) — stays searchable, agent warned\n`,
-        );
-      }
-    } else if (sanityResult.reasons.includes('oversize_warn')) {
-      // Warn tier: page lands normally; lint surface picks up too.
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-        disposition: 'warn',
-      });
-      process.stderr.write(
-        `[gbrain] content-sanity warn: ${slug} (${sanityResult.bytes} bytes) — exceeds warn threshold, consider splitting\n`,
-      );
-    }
-  }
+  // Content-sanity (#1699) and write-gate (#5575) disposition before the hash (import-screen.ts).
+  const disposition = await settleContentDisposition(engine, parsed, { slug, sourceId, stripped: opts.preserveGateMarkers !== true, ...(opts.writeGate ? { writeGate: opts.writeGate } : {}) });
+  const { quarantined: pageQuarantined, flagged: pageFlagged, flagReason: pageFlagReason } = disposition;
 
   // v0.39.3.0 CV8 — DB content_hash excludes timestamp-bearing frontmatter
   // keys so identical body content from `gbrain capture` (which stamps
@@ -587,8 +417,8 @@ export async function importFromContent(
   // engine.putPage defaults to 'default' when sourceId is unset, so the read
   // mirrors that default instead of matching the slug in ANY source (the
   // unscoped-check/scoped-write bug class).
-  const existingSnapshot = opts.prepare ? await engine.readPageSnapshot(slug, { sourceId: sourceId ?? 'default', includeDeleted: true }) : null;
-  const existing = opts.prepare ? existingSnapshot?.page ?? null : await engine.getPage(slug, { sourceId: sourceId ?? 'default', includeDeleted: true });
+  const existingSnapshot = !opts.prepare ? null : await materializedSnapshot(engine, opts.coordinated && opts.existingSnapshot !== undefined ? opts.existingSnapshot : await engine.readPageSnapshot(slug, { sourceId: sourceId ?? 'default', includeDeleted: true }));
+  const existing = opts.prepare ? existingSnapshot?.page ?? null : await materializedPage(engine, await engine.getPage(slug, { sourceId: sourceId ?? 'default', includeDeleted: true }));
   if (existing) stabilizeSafetyAssessments(parsed.frontmatter, existing.frontmatter);
 
   const collisionOwner = collidingSlugOwner(existing, slug, opts.sourceRoot, opts.sourcePath);
@@ -616,13 +446,17 @@ export async function importFromContent(
   // write-back arrives missing those rows as well. Each column merges
   // against its own existing counterpart (fences don't migrate between
   // columns here; splitBody keeps them where the caller wrote them).
+  // #6188 (E7): Tier 1 in place before the hidden-row merge and withdrawal preservation; the hash covers the normalized body.
+  const fences = await applyImportFences({ engine, sourceId: sourceId ?? 'default', slug, mode: opts.fences ?? 'lenient', screened: opts.fenceScreen, screen, parsed, activePack: opts.activePack, remote: opts.remote === true, existing });
+  if (fences.refused) return fences.refused;
   if (opts.remote === true && existing) {
-    parsed.compiled_truth = mergeHiddenFactRowsIntoBody(slug, parsed.compiled_truth, existing.compiled_truth);
-    parsed.timeline = mergeHiddenFactRowsIntoBody(slug, parsed.timeline, existing.timeline);
+    const stored = fenceBody(existing);
+    parsed.compiled_truth = mergeHiddenFactRowsIntoBody(slug, parsed.compiled_truth, stored.compiled_truth);
+    parsed.timeline = mergeHiddenFactRowsIntoBody(slug, parsed.timeline, stored.timeline);
   }
   const { assertPreparedFactWithdrawals, preserveWithdrawnFenceRows } = await import('./facts/withdrawal.ts');
-  parsed.compiled_truth = await preserveWithdrawnFenceRows(engine, sourceId ?? 'default', parsed.compiled_truth, slug);
-  parsed.timeline = await preserveWithdrawnFenceRows(engine, sourceId ?? 'default', parsed.timeline, slug);
+  parsed.compiled_truth = (await preserveWithdrawnFenceRows(engine, sourceId ?? 'default', parsed.compiled_truth, slug)).trim();
+  parsed.timeline = (await preserveWithdrawnFenceRows(engine, sourceId ?? 'default', parsed.timeline, slug)).trim();
 
   // Preserve curated types and completed unification receipts.
   const unifiedType = resolveUnifiedImportType({
@@ -632,6 +466,7 @@ export async function importFromContent(
   [parsed.type, parsed.frontmatter] = [unifiedType.type, unifiedType.frontmatter];
   const { preservedUnifiedType } = unifiedType;
 
+  resolveParsedSubtype(parsed, existing);
   let typeWarning: ImportResult['type_warning'];
   if (parsed.typeExplicit === true && opts.activePack && !preservedUnifiedType) {
     const cls = classifyStoredType(parsed.type, opts.activePack);
@@ -651,6 +486,7 @@ export async function importFromContent(
   // formula (byte-parity pinned by test/content-hash-parity-3694.test.ts).
   // Sort tags in place first to preserve the pre-#3694 downstream behavior
   // (parsedPage.tags was sorted by the old inline `.sort()` mutation).
+  const suppliedTrustMarker = parsed.frontmatter.trust_tier; // CEO-21: the no-op check also reads the caller's own marker
   if (opts.prepare) opts.prepareFrontmatter?.(parsed);
   parsed.tags.sort();
   const hash = contentHash({
@@ -673,50 +509,56 @@ export async function importFromContent(
 
   const originUri = fileOriginUri(existing?.source_uri, opts.sourceRoot, opts.sourcePath);
   const persistUnchanged = async (refreshBody = false) => {
-    await engine.transaction(async tx => {
+    await maintenanceTransaction(engine, async tx => {
       await assertImportBase(tx, slug, sourceId ?? 'default', existing);
       if (refreshBody) await tx.refreshPageBody(slug, sourceId ?? 'default', parsed.compiled_truth, parsed.timeline || '', hash);
       await refreshSourcePath(tx, slug, sourceId, opts.sourcePath, existing, originUri);
-      if (opts.beforeCommit) await verifyPageReadable(tx, slug, hash, sourceId, 'importFromContent');
+      if (opts.beforeCommit) await verifyPageReadable(tx, slug, refreshBody ? hash : existing?.content_hash ?? hash, sourceId, 'importFromContent');
       await opts.beforeCommit?.(tx, slug);
     });
   };
 
   // Rebuild stale projections without granting --force-rechunk's external-ID dedup override.
   const needsProjectionRebuild = !opts.prepare && existing && existing.text_projection_revision !== existing.knowledge_revision;
-  if (existing?.content_hash === hash && !existing.deleted_at && !opts.forceRechunk && !needsProjectionRebuild && (!opts.prepare || sameCanonicalImport(existingSnapshot, parsedPage))) {
-    // #5050: unchanged content chunked before the safe-chunk fence is re-sealed
-    // projection-only; the canonical write stays a no-op.
-    const reseal = await projectionBelowSafeFence(engine, existing.id);
-    if (opts.prepare) {
-      const result: ImportResult = { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
-      return opts.prepare({ slug, parsedPage, observedRevision: (existing as typeof existing & { knowledge_revision?: string }).knowledge_revision ?? null,
-        noop: true, result, validate: async () => {},
-        apply: async tx => { if (reseal) await queuePageProjection(tx, sourceId ?? 'default', slug, 'safe_chunk_reseal'); } });
-    }
-    await persistUnchanged();
-    const resealed = reseal ? await resealSafeChunks(engine, slug, sourceId ?? 'default') : null;
-    return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}), ...(resealed ? { resealed } : {}) };
-  }
-
+  const embedSkipChanged = !!existing && isEmbedSkipped(existing.frontmatter) !== isEmbedSkipped(parsed.frontmatter);
   // #3694 one-time reconcile: a row written by the PRE-fix putPage formula
   // carries the legacy hash. When the parsed file matches that legacy hash,
   // the content is unchanged — stamp the canonical hash via the narrow
   // refreshPageBody UPDATE (no chunk churn, no re-embed, no version snapshot)
-  // and skip. The next import then hits the fast path above.
-  if (existing && !existing.deleted_at && !opts.prepare && !opts.forceRechunk && !needsProjectionRebuild && typeof engine.refreshPageBody === 'function') {
-    const legacyHash = contentHashLegacy({
+  // and skip. The next import then hits the fast path below.
+  const legacyHashMatch = !!existing && !existing.deleted_at && !opts.prepare && !opts.forceRechunk && !needsProjectionRebuild && !embedSkipChanged
+    && typeof engine.refreshPageBody === 'function' && existing.content_hash === contentHashLegacy({
       title: parsed.title,
       type: parsed.type,
       compiled_truth: parsed.compiled_truth,
       timeline: parsed.timeline,
       frontmatter: parsed.frontmatter,
     });
-    if (existing.content_hash === legacyHash) {
-      await persistUnchanged(true);
-      const resealed = await projectionBelowSafeFence(engine, existing.id) ? await resealSafeChunks(engine, slug, sourceId ?? 'default') : null;
-      return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}), ...(resealed ? { resealed } : {}) };
+  const unchangedAs = async (page: ParsedPage) => !!existing && !existing.deleted_at && !opts.forceRechunk && !needsProjectionRebuild && !embedSkipChanged
+    && !trustMarkerChanged(existing.frontmatter, page.frontmatter) && (existing.content_hash === hash
+      ? !opts.prepare || sameCanonicalImport(existingSnapshot, page)
+      : !legacyHashMatch && await sameContentAnyKeyOrder(engine, existing, existingSnapshot?.tags ?? null, page, sourceId ?? 'default'));
+  const unchanged = await unchangedAs(parsedPage) || (suppliedTrustMarker !== parsed.frontmatter.trust_tier
+    && await unchangedAs({ ...parsedPage, frontmatter: suppliedTrustMarkerView(parsed.frontmatter, suppliedTrustMarker) }));
+  if (existing && unchanged) {
+    // #5050: unchanged content chunked before the safe-chunk fence is re-sealed
+    // projection-only; the canonical write stays a no-op.
+    const reseal = await projectionBelowSafeFence(engine, existing.id);
+    if (opts.prepare) {
+      const result: ImportResult = { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}), ...fences.fields };
+      return opts.prepare({ slug, parsedPage, observedRevision: (existing as typeof existing & { knowledge_revision?: string }).knowledge_revision ?? null,
+        noop: true, result, validate: async () => {},
+        apply: async tx => { if (reseal) await queuePageProjection(tx, sourceId ?? 'default', slug, 'safe_chunk_reseal'); } });
     }
+    await persistUnchanged();
+    const resealed = reseal ? await resealSafeChunks(engine, slug, sourceId ?? 'default') : null;
+    return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}), ...(resealed ? { resealed } : {}), ...fences.fields };
+  }
+
+  if (existing && legacyHashMatch) {
+    await persistUnchanged(true);
+    const resealed = await projectionBelowSafeFence(engine, existing.id) ? await resealSafeChunks(engine, slug, sourceId ?? 'default') : null;
+    return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}), ...(resealed ? { resealed } : {}), ...fences.fields };
   }
 
   // Identity dedup (#1309): move, skip a true duplicate, or index both.
@@ -728,7 +570,7 @@ export async function importFromContent(
     body: { title: parsed.title, compiled_truth: parsed.compiled_truth, timeline: parsed.timeline || '' },
   });
   if (identity.kind === 'move' && !existing && !opts.prepare
-    && await engine.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' }) > 0) {
+    && await maintenanceTransaction(engine, tx => tx.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' })) > 0) {
     process.stderr.write(
       `[import] ${opts.sourcePath} carries frontmatter.id=${fmIdStr} from moved file ${identity.dupSourcePath}; ` +
       `renamed ${identity.dupSlug} -> ${slug} in source ${sourceId ?? 'default'}.\n`
@@ -737,7 +579,7 @@ export async function importFromContent(
   }
   if (identity.kind === 'duplicate') {
     if (opts.prepare) {
-      const result: ImportResult = { slug: identity.dupSlug, status: 'skipped', chunks: 0, parsedPage };
+      const result: ImportResult = { slug: identity.dupSlug, status: 'skipped', chunks: 0, parsedPage, ...fences.fields };
       return opts.prepare({ slug: identity.dupSlug, parsedPage, observedRevision: (existing as (typeof existing & { knowledge_revision?: string }) | null)?.knowledge_revision ?? null,
         noop: true, result, validate: async () => {}, apply: async () => {} });
     }
@@ -746,7 +588,7 @@ export async function importFromContent(
       `(frontmatter.id=${fmIdStr}) in source ${sourceId ?? 'default'}. ` +
       `Pass --force-rechunk to override.\n`
     );
-    return { slug: identity.dupSlug, status: 'skipped', chunks: 0, parsedPage };
+    return { slug: identity.dupSlug, status: 'skipped', chunks: 0, parsedPage, ...fences.fields };
   }
   if (identity.kind === 'shared_id') {
     process.stderr.write(
@@ -762,7 +604,9 @@ export async function importFromContent(
 
   // Preserve the importer projection (including fenced code and zero-chunk
   // dispositions) in the provider-free path used by background rebuilds too.
-  const chunks = await prepareMarkdownChunks(parsed);
+  const bodyBytes = Buffer.byteLength(parsed.compiled_truth, 'utf-8') + Buffer.byteLength(parsed.timeline ?? '', 'utf-8');
+  const storage = await stringWriteStorage(engine, bodyBytes, bodyStorageOf(existing));
+  const chunks = storage.storage === 'segmented' ? [] : await prepareFenceAwareMarkdownChunks(engine, sourceId ?? 'default', slug, parsed);
 
   // Embedding failures propagate unless onPostCommitEmbedding lets the caller
   // report enrichment separately from the already-persisted content.
@@ -783,6 +627,10 @@ export async function importFromContent(
   // #3885: the real source row applies (a stored `sources set-cr-mode`); the
   // inline path demotes per_chunk_synopsis to the free title tier.
   const { mode: effectiveCRMode, corpusGeneration } = await resolveImportContextualMode(engine, sourceId ?? 'default', parsed.frontmatter, opts.prepare !== undefined);
+  // Wave B: a body staged as segments publishes with the generation flip instead of putPage and the chunk replacement.
+  const segmented = storage.policy && storage.storage === 'segmented' ? await stageSegmentedImport(engine, { slug, sourceId: sourceId ?? 'default', existing,
+    page: parsedPage, policy: storage.policy, owner: opts.segmentedOwner, reuse: opts.reuseSegments, baseRevision: (existing as { knowledge_revision?: string } | null)?.knowledge_revision ?? null,
+    chunking: { quarantined: pageQuarantined, corpusGeneration, tier: effectiveCRMode === 'title' ? 'title' : 'none' } }) : null;
 
   // A13: an edit re-embeds only chunks whose embedding input changed. A stored
   // vector is reused for a chunk with the same source and text when its
@@ -791,34 +639,25 @@ export async function importFromContent(
   // recorded before provenance existed, when the input is the raw chunk text
   // under the same model. The old index must be sealed and neither body may
   // hold protected fences, so no reused vector can carry a private sibling.
-  const reused = new Set<number>();
-  if (existing && !existing.deleted_at && !opts.noEmbed && !opts.forceRechunk && !opts.prepare && !opts.onPostCommitEmbedding && chunks.length > 0
-    && !hasProtectedBody(`${existing.compiled_truth}\n${existing.timeline ?? ''}`) && !hasProtectedBody(`${parsed.compiled_truth}\n${parsed.timeline ?? ''}`)) {
-    const target = await embeddingWriteTarget(engine);
-    const provenance = embeddingInputContext(target, parsed.title, corpusGeneration, chunks);
-    const tier = effectiveCRMode === 'title' ? 'title' : 'none';
-    const recorded = new Map((await engine.executeRaw<{ chunk_index: number; embedding_input_hash: string | null }>(
-      `SELECT c.chunk_index, c.embedding_input_hash FROM content_chunks c JOIN pages p ON p.id = c.page_id
-        WHERE p.source_id = $1 AND p.slug = $2`, [sourceId ?? 'default', slug])).map(row => [Number(row.chunk_index), row.embedding_input_hash]));
-    // Reuse is keyed on chunk source + text, so a stored chunk's current-input
-    // hash is the hash its matching new chunk would record.
-    const stored = (await engine.getChunks(slug, { sourceId: sourceId ?? 'default', includeEmbedding: true, requireSafeChunks: true }))
-      .filter(chunk => {
-        const hash = recorded.get(chunk.chunk_index);
-        return hash == null ? tier === 'none' && chunk.model === target.provenanceModel : hash === embeddingInputHash(provenance, tier, chunk);
-      });
-    for (const [i, matched] of planEmbeddingReuse(stored, chunks, c => `${c.chunk_source}\0${c.chunk_text}`).reuse) {
-      chunks[i].embedding = matched.embedding as Float32Array;
-      chunks[i].token_count = matched.token_count ?? undefined;
-      if (matched.model) chunks[i].model = matched.model;
-      reused.add(i);
-    }
-  }
+  // A prepared (persistence) import defers embedding to its effect worker, so
+  // it reuses inside its publication transaction, under the page guard, from
+  // the chunks it is about to replace; only the chunks left without a vector
+  // reach the provider.
+  // A large or segmented page (the hysteresis band too) commits with NULL vectors; the stale
+  // sweep embeds it under the per-page cap and the sampled junk check, so no provider call holds the write.
+  const noEmbed = opts.noEmbed || isEmbedSkipped(parsed.frontmatter);
+  const largePage = isLargePageBytes(bodyBytes) || segmented !== null;
+  const postCommitEmbedding = largePage ? undefined : opts.onPostCommitEmbedding;
+  const reusable = !!existing && !existing.deleted_at && !opts.forceRechunk && !postCommitEmbedding && chunks.length > 0 && bodyStorageOf(existing) !== 'segmented'
+    && !(opts.prepare && modeRequiresSynopsis(effectiveCRMode)) && !hasProtectedBody(`${existing.compiled_truth}\n${existing.timeline ?? ''}`) && !hasProtectedBody(`${parsed.compiled_truth}\n${parsed.timeline ?? ''}`);
+  const reuseCtx = { slug, sourceId: sourceId ?? 'default', title: parsed.title, corpusGeneration, tier: effectiveCRMode === 'title' ? 'title' as const : 'none' as const };
+  const reuseStoredVectors = (exec: BrainEngine, into: ChunkInput[], keepUnembedded = false) => reuseStoredChunkVectors(exec, into, { ...reuseCtx, prepared: !!opts.prepare, keepUnembedded });
+  const reused = reusable && !noEmbed && !opts.prepare ? await reuseStoredVectors(engine, chunks) : new Map<number, number | null>();
 
   let embeddingPartial: EmbeddingZeroNormError | undefined;
   const embedChunks = async () => {
     const pending = chunks.map((_, i) => i).filter(i => !reused.has(i));
-    if (opts.noEmbed || pending.length === 0) return;
+    if (noEmbed || pending.length === 0) return;
     const prefix =
       modeRequiresWrapper(effectiveCRMode) && !modeRequiresSynopsis(effectiveCRMode)
         ? buildContextualPrefix(parsed.title, null)
@@ -839,8 +678,8 @@ export async function importFromContent(
   // commit with NULL vectors and no embedding signature, and the stale sweep
   // (`gbrain embed --stale`, sync's embed pass, the cycle) embeds them once
   // the provider recovers.
-  let embeddingDeferred = false;
-  if (!opts.onPostCommitEmbedding) {
+  let embeddingDeferred = largePage && !noEmbed && (chunks.length > 0 || (segmented !== null && !pageQuarantined));
+  if (!opts.onPostCommitEmbedding && !largePage) {
     try {
       await embedChunks();
       if (embeddingPartial) {
@@ -863,12 +702,11 @@ export async function importFromContent(
   // for single-source callers.
   const txOpts = { sourceId: sourceId ?? 'default' };
   let persistedProjection: ProjectionSnapshot | null = null;
-  const timeZone = await loadBrainTimeZone(engine);
-  const applyPrepared = async (tx: BrainEngine) => {
-    await assertImportBase(tx, slug, txOpts.sourceId, existing);
-    await assertPreparedFactWithdrawals(tx, txOpts.sourceId, parsed.compiled_truth, parsed.timeline || '', slug);
-    if (existing) await tx.createVersion(slug, txOpts);
-
+  const [timeZone, mentionPolicy] = await Promise.all([loadBrainTimeZone(engine), readMentionPolicy(engine).catch(() => null)]);
+  const applyPrepared = async (tx: BrainEngine, preimage?: PageSnapshot | null) => {
+    if (!opts.coordinated) await assertImportBase(tx, slug, txOpts.sourceId, existing, reused.size > 0);
+    // #5984: the canonical writes go out in two pipelined waves of mutually independent statements; the
+    // second depends on the first (the page row and its id, the old chunks gone). A failure rolls back the caller's transaction.
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
     // Filename comes from importFromFile path (basename) or the slug tail
     // (put_page MCP op fallback). An undated page falls back to a stable
@@ -887,87 +725,102 @@ export async function importFromContent(
       createdAt: fallbackCreatedAt({ existing, fileTimes: opts.fileTimes, now: nowDate }),
     });
 
-    await tx.putPage(slug, {
-      type: parsed.type,
-      title: parsed.title,
-      compiled_truth: parsed.compiled_truth,
-      timeline: parsed.timeline || '',
-      frontmatter: parsed.frontmatter,
-      content_hash: hash,
-      effective_date: effectiveDate,
-      effective_date_source: effectiveDateSource,
-      import_filename: filenameForChain,
-      // Preserve the repo-relative path for sync's delete/rename handling.
-      source_path: opts.sourcePath ?? null,
-      // v0.39.3.0 provenance write-through (WARN-8). Engine layer applies
-      // COALESCE-preserve UPDATE so omitting these on a later put_page
-      // doesn't erase the original ingestion's audit trail.
-      source_kind: opts.source_kind ?? null,
-      source_uri: opts.source_uri ?? originUri,
-      ingested_via: opts.ingested_via ?? null,
-      // ingested_at is server-stamped at the engine layer when any
-      // provenance write fires; never client-controlled.
-      // Empty-overwrite escape hatch only when the caller vouched (file
-      // import / explicit allow_empty); otherwise the engine guard stays on.
-    }, opts.allowEmptyOverwrite === true ? { ...txOpts, allowEmptyOverwrite: true } : txOpts);
-
-    // v0.40.3.0: stamp the contextual retrieval state columns alongside
-    // the page write. updatePageContextualRetrievalState is a narrow
-    // UPDATE that runs after putPage's INSERT/UPDATE so the row exists.
-    // Deferred embedders reproduce it: the prepared outbox installs only
-    // under CAS, and --no-embed drains read it back. Every chunk row is
-    // replaced below, so no older vector survives under this stamp.
-    // This stamp certifies no vector: embedding_signature stays deferred.
-    await tx.updatePageContextualRetrievalState(
-      slug,
-      sourceId ?? 'default',
-      effectiveCRMode,
-      corpusGeneration,
-    );
-
-    // Tag reconciliation (A14): frontmatter tags carry tag_source='frontmatter'.
-    // A frontmatter-owned row whose tag left the frontmatter is deleted; rows
-    // explicit adds own ('added': add_tag, enrichment, the code importer) and
-    // legacy NULL rows are never deleted here (#1621: reindex must not wipe
-    // enrichment). A legacy row still in the frontmatter is adopted. Prepared
-    // (managed) imports keep the add-only union their canonical file renders.
-    if (!opts.prepare) {
-      await tx.executeRaw(`DELETE FROM tags t USING pages p WHERE p.id = t.page_id AND p.source_id = $1 AND p.slug = $2
-        AND t.tag_source = 'frontmatter' AND NOT (t.tag = ANY($3::text[]))`, [txOpts.sourceId, slug, parsed.tags]);
-    }
-    for (const tag of parsed.tags) {
-      await tx.addTag(slug, tag, opts.prepare ? txOpts : { ...txOpts, tagSource: 'frontmatter' });
-    }
-
-    // Replace every derived row atomically. Only vectors the A13 reuse gate
-    // above admitted carry over; a new seal otherwise inherits nothing from an
-    // older index, whose contextual vector may have included a private sibling.
-    await tx.deleteChunks(slug, txOpts);
-    if (chunks.length > 0) {
-      const embeddingColumn = await stampEmbeddingInputs(tx, chunks, null,
-        { title: parsed.title, tier: effectiveCRMode === 'title' ? 'title' : 'none', corpusGeneration });
-      await tx.upsertChunks(slug, chunks, embeddingColumn ? { ...txOpts, embeddingColumn } : txOpts);
-      // v0.41.31: stamp embedding provenance when this import actually
-      // embedded (not --no-embed), so a later model/dims swap is detectable
-      // as stale via embed --stale. The deferred/backfill + per-slug embed
-      // paths stamp too; this covers the inline import/sync path.
-      if (!opts.noEmbed && !opts.onPostCommitEmbedding && !embeddingDeferred) {
-        // D9: signature is null when the gateway is unconfigured — skip the
-        // stamp (a wrong signature is worse than none).
-        const importSig = currentEmbeddingSignature();
-        if (importSig) {
-          await tx.setPageEmbeddingSignature(slug, { sourceId, signature: importSig });
+    const demote = !segmented && bodyStorageOf(existing) === 'segmented';
+    // Before the page write: an unpinned version reads the page itself, a demoted one references the generation it retires.
+    if (existing && (!preimage || demote)) await tx.createVersion(slug, preimage ? { ...txOpts, preimage } : txOpts);
+    if (demote) await demoteSegmentedPage(tx, Number(existing!.id));
+    // Every import keeps each stored row that is identical to its new chunk and
+    // writes only the rest, so an edit rewrites only the chunks it changed. The
+    // reuse is re-read here, under the page lock, so a kept row is one this
+    // transaction sees; --no-embed and deferred-embed imports keep vectors too.
+    const fresh = reusable ? chunks.map(chunk => ({ ...chunk })) : chunks;
+    const kept = new Map([...(fresh !== chunks ? await reuseStoredVectors(tx, fresh, true) : [])].filter(([, id]) => id !== null));
+    const keptIds = [...kept.values()];
+    let written: Page | undefined;
+    await pipelined(tx, [
+      () => assertPreparedFactWithdrawals(tx, txOpts.sourceId, parsed.compiled_truth, parsed.timeline || '', slug),
+      async () => { if (existing && preimage && !demote) await tx.createVersion(slug, { ...txOpts, preimage }); },
+      async () => {
+        if (segmented) return segmented.apply(tx, { type: parsed.type, title: parsed.title, frontmatter: parsed.frontmatter, page_kind: 'markdown',
+          effective_date: effectiveDate, effective_date_source: effectiveDateSource, import_filename: filenameForChain, source_path: opts.sourcePath ?? null,
+          source_kind: opts.source_kind ?? null, source_uri: opts.source_uri ?? originUri, ingested_via: opts.ingested_via ?? null }, { mode: effectiveCRMode, corpusGeneration });
+        written = await tx.putPage(slug, {
+          type: parsed.type,
+          title: parsed.title,
+          compiled_truth: parsed.compiled_truth,
+          timeline: parsed.timeline || '',
+          frontmatter: parsed.frontmatter,
+          content_hash: hash,
+          effective_date: effectiveDate,
+          effective_date_source: effectiveDateSource,
+          import_filename: filenameForChain,
+          // Preserve the repo-relative path for sync's delete/rename handling.
+          source_path: opts.sourcePath ?? null,
+          // v0.39.3.0 provenance write-through (WARN-8). Engine layer applies
+          // COALESCE-preserve UPDATE so omitting these on a later put_page
+          // doesn't erase the original ingestion's audit trail.
+          source_kind: opts.source_kind ?? null,
+          source_uri: opts.source_uri ?? originUri,
+          ingested_via: opts.ingested_via ?? null,
+          // ingested_at is server-stamped at the engine layer when any
+          // provenance write fires; never client-controlled.
+          // Empty-overwrite escape hatch only when the caller vouched (file
+          // import / explicit allow_empty); otherwise the engine guard stays on.
+        }, { ...txOpts, ...(opts.allowEmptyOverwrite === true ? { allowEmptyOverwrite: true } : {}), inline: true,
+          ...(effectiveCRMode !== 'none' ? { contextualRetrieval: { mode: effectiveCRMode, corpusGeneration } } : {}) });
+        // v0.40.3.0: the contextual retrieval state is stamped with the page write (the `none` tier's
+        // stamp, which also clears tier vectors, follows it). Deferred embedders reproduce it; every
+        // chunk row is replaced below. This stamp certifies no vector: embedding_signature stays deferred.
+        if (effectiveCRMode === 'none') await tx.updatePageContextualRetrievalState(slug, sourceId ?? 'default', effectiveCRMode, corpusGeneration);
+      },
+      // Replace every derived row atomically. Only vectors the A13 reuse gate above admitted carry over; a new
+      // seal otherwise inherits nothing from an older index, whose contextual vector may have included a private sibling.
+      async () => segmented ? undefined : keptIds.length ? tx.executeRaw(`DELETE FROM content_chunks WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = $2)
+        AND NOT (id = ANY($3::int[]))`, [slug, txOpts.sourceId, keptIds]) : tx.deleteChunks(slug, txOpts),
+      // Alias projection and readback share the page commit. A later writer can
+      // no longer turn a successful import into a postcommit verification error.
+      () => writePageAliases(tx, slug, sourceId ?? 'default', parsed, opts.activePack, mentionPolicy),
+    ]);
+    const pageId = segmented?.applied ? segmented.applied.pageId : written && written.deleted_at == null ? written.id : undefined;
+    const deferSeal = opts.coordinated === true && pageId !== undefined && !segmented;
+    await pipelined(tx, [
+      async () => {
+        // Tag reconciliation (A14): frontmatter tags carry tag_source='frontmatter'.
+        // A frontmatter-owned row whose tag left the frontmatter is deleted; rows
+        // explicit adds own ('added': add_tag, enrichment, the code importer) and
+        // legacy NULL rows are never deleted here (#1621: reindex must not wipe
+        // enrichment). A legacy row still in the frontmatter is adopted. Prepared
+        // (managed) imports keep the add-only union their canonical file renders.
+        if (!opts.prepare) await tx.executeRaw(`DELETE FROM tags t USING pages p WHERE p.id = t.page_id AND p.source_id = $1 AND p.slug = $2
+          AND t.tag_source = 'frontmatter' AND NOT (t.tag = ANY($3::text[]))`, [txOpts.sourceId, slug, parsed.tags]);
+        if (pageId !== undefined) return addPageTags(tx, Number(pageId), parsed.tags, opts.prepare ? undefined : 'frontmatter');
+        for (const tag of parsed.tags) await tx.addTag(slug, tag, opts.prepare ? txOpts : { ...txOpts, tagSource: 'frontmatter' });
+      },
+      async () => {
+        if (chunks.length > 0) {
+          const embeddingColumn = await stampEmbeddingInputs(tx, fresh, null,
+            { title: parsed.title, tier: effectiveCRMode === 'title' ? 'title' : 'none', corpusGeneration });
+          await tx.upsertChunks(slug, kept.size ? fresh.filter((_, i) => !kept.has(i)) : fresh, { ...txOpts, ...(embeddingColumn ? { embeddingColumn } : {}), sealChunkerVersion: MARKDOWN_CHUNKER_VERSION,
+            ...(pageId !== undefined ? { pageId: Number(pageId) } : {}), ...(deferSeal ? { deferSeal: true as const } : {}) });
+          // v0.41.31: stamp embedding provenance when this import actually
+          // embedded (not --no-embed), so a later model/dims swap is detectable
+          // as stale via embed --stale. The deferred/backfill + per-slug embed
+          // paths stamp too; this covers the inline import/sync path.
+          if (!noEmbed && !postCommitEmbedding && !embeddingDeferred) {
+            // D9: signature is null when the gateway is unconfigured — skip the
+            // stamp (a wrong signature is worse than none).
+            const importSig = currentEmbeddingSignature();
+            if (importSig) await tx.setPageEmbeddingSignature(slug, { sourceId, signature: importSig });
+          }
+        } else {
+          // Seal only the completed, full-body sanitized replacement (the upsert above seals its own); a
+          // body-only write or a failed transaction must never certify old stored fragments.
+          if (!deferSeal && !segmented) await tx.executeRaw('UPDATE pages SET chunker_version = $1 WHERE source_id = $2 AND slug = $3', [MARKDOWN_CHUNKER_VERSION, txOpts.sourceId, slug]);
         }
-      }
-    } else {
-      // Content is empty — delete stale chunks so they don't ghost in search results
-      await tx.deleteChunks(slug, txOpts);
-    }
-    // Seal only the completed, full-body sanitized replacement. A body-only
-    // write or a failed transaction must never certify old stored fragments.
-    await tx.executeRaw('UPDATE pages SET chunker_version = $1 WHERE source_id = $2 AND slug = $3',
-      [MARKDOWN_CHUNKER_VERSION, txOpts.sourceId, slug]);
-    await sealPageTextProjection(tx, slug, txOpts.sourceId);
+      },
+    ]);
+    if (!opts.coordinated && !segmented) await sealPageTextProjection(tx, slug, txOpts.sourceId);
+    if (!opts.coordinated && segmented?.applied?.complete) await sealSegmentedPage(tx, segmented.applied.pageId);
 
     // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
     // (e.g. 'src/core/sync.ts:42'), create bidirectional edges to the code
@@ -1005,25 +858,26 @@ export async function importFromContent(
         ));
       } catch { /* same reason — silent skip */ }
     }
-    // Alias projection and readback share the page commit. A later writer can
-    // no longer turn a successful import into a postcommit verification error.
-    await tx.setPageAliases(slug, sourceId ?? 'default', normalizeAliasList(parsed.frontmatter.aliases));
-    await verifyPageReadable(tx, slug, hash, sourceId, 'importFromContent');
+    if (!opts.coordinated) await verifyPageReadable(tx, slug, hash, sourceId, 'importFromContent');
     await opts.beforeCommit?.(tx, slug);
-    if (opts.onPostCommitEmbedding && !opts.noEmbed && chunks.length > 0) {
+    await disposition.persistReceipt(tx, { existed: !!existing });
+    if (postCommitEmbedding && !noEmbed && chunks.length > 0) {
       // Capture the complete installed projection before releasing the page
       // guard. Deferred provider results cannot replace newer text or chunks.
       persistedProjection = await readProjectionSnapshot(tx, slug, txOpts.sourceId);
     }
+    if (segmented?.applied) return { pageId, sealed: !opts.coordinated && segmented.applied.complete, segmented: { complete: segmented.applied.complete } };
+    return { pageId, sealed: !opts.coordinated && !opts.beforeCommit, ...(deferSeal ? { chunkerSeal: MARKDOWN_CHUNKER_VERSION } : {}) };
   };
   if (opts.prepare) return opts.prepare({
     slug, parsedPage, observedRevision: (existing as (typeof existing & { knowledge_revision?: string }) | null)?.knowledge_revision ?? null,
-    noop: false, result: { slug, status: 'imported', chunks: chunks.length, parsedPage,
-      ...(pageQuarantined ? { quarantined: true } : {}), ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}) },
+    noop: false, contentHash: hash, result: { slug, status: 'imported', chunks: segmented ? segmented.prepared.rows.chunks : chunks.length, parsedPage,
+      ...(pageQuarantined ? { quarantined: true } : {}), ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}), ...(disposition.gate ? { gate: disposition.gate } : {}), ...fences.fields },
     validate: tx => assertPreparedFactWithdrawals(tx, txOpts.sourceId, parsed.compiled_truth, parsed.timeline || '', slug),
-    apply: applyPrepared,
+    apply: applyPrepared, ...(segmented ? { afterCommit: segmented.afterCommit, segmented } : {}),
   });
-  await engine.transaction(applyPrepared).catch(async (err: unknown) => {
+  await maintenanceTransaction(engine, applyPrepared, writeTrustOfGate(opts.writeGate)).catch(async (err: unknown) => {
+    await abortSegmentedStaging(engine, segmented?.prepared);
     // #4287: name the dimension-mismatch rollback instead of letting the bare
     // pgvector message ("expected N dimensions, not M") surface with no code,
     // no consequence and no fix. S2: name the registry-ACTIVE column the
@@ -1039,16 +893,17 @@ export async function importFromContent(
     }
     throw decorateEmbeddingDimError(err, slug, activeColName);
   });
+  await segmented?.afterCommit(engine);
 
 
-  if (opts.onPostCommitEmbedding && !opts.noEmbed && chunks.length > 0) {
-    opts.onPostCommitEmbedding(async () => {
+  if (postCommitEmbedding && !noEmbed && chunks.length > 0) {
+    postCommitEmbedding(async () => {
       try {
         if (!persistedProjection) return { status: 'superseded' };
         const signature = currentEmbeddingSignature();
         await embedChunks();
         const installed = await installPageEmbeddings(engine, persistedProjection, chunks, embeddingPartial ? undefined : signature ?? undefined);
-        return { status: installed ? 'embedded' : 'superseded' };
+        return { status: installed.complete ? 'embedded' : 'superseded' };
       } catch {
         return { status: 'failed', error: 'Page content was saved, but embedding failed. Check the embedding provider and database on the brain host, then run gbrain embed --stale --source <source-id>.' };
       }
@@ -1058,12 +913,12 @@ export async function importFromContent(
   return {
     slug,
     status: 'imported',
-    chunks: chunks.length,
+    chunks: segmented ? segmented.prepared.rows.chunks : chunks.length,
     parsedPage,
     ...(pageQuarantined ? { quarantined: true } : {}),
     ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}),
     ...(typeWarning ? { type_warning: typeWarning } : {}),
-    ...(embeddingDeferred ? { embedding_deferred: true } : {}),
+    ...(embeddingDeferred ? { embedding_deferred: true } : {}), ...fences.fields,
   };
 }
 
@@ -1078,14 +933,16 @@ export async function importFromContent(
  * This is the write-then-verify guard on the sync/write path: a write is not
  * "done" until it is readable back.
  */
-async function verifyPageReadable(
+export async function verifyPageReadable(
   engine: BrainEngine,
   slug: string,
   expectedHash: string,
   sourceId: string | undefined,
   caller: string,
+  /** The caller's own read of the live page after the write (null: not found); read here when omitted. */
+  read?: Pick<Page, 'content_hash'> | null,
 ): Promise<void> {
-  const readBack = await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
+  const readBack = read !== undefined ? read : await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
   if (!readBack) {
     // Log to ingest_log before throwing so the failure is durable and
     // agent-inspectable, not just a transient stderr message.
@@ -1154,6 +1011,8 @@ export async function importFromFile(
     activePack?: ProjectionAwareTypePack;
     /** Git first-commit date of the file (opt-in, see git-first-commit.ts); an undated page's fallback anchor. */
     firstCommitAt?: Date;
+    /** Wave B: the segmented-storage policy, read once per command; with the switch on, a Markdown file over the single-string ceiling imports streamed. Absent: it refuses as before. */
+    bodyPolicy?: PageBodyPolicy;
   } = {},
 ): Promise<ImportResult> {
   // Defense-in-depth: reject symlinks before reading content.
@@ -1163,8 +1022,12 @@ export async function importFromFile(
   }
 
   const stat = statSync(filePath);
-  if (stat.size > MAX_FILE_SIZE) {
-    return { slug: relativePath, status: 'skipped', chunks: 0, error: `File too large (${stat.size} bytes)` };
+  const maxBytes = importSizeLimit(relativePath);
+  if (stat.size > maxBytes) {
+    const policy = opts.bodyPolicy;
+    if (policy?.segmented && !isCodeFilePath(relativePath) && stat.size <= policy.maxBytes) return (await import('./page-body/streamed-import.ts')).importStreamedMarkdownFile(engine, filePath, relativePath, opts, stat, policy);
+    return { slug: relativePath, status: 'skipped', chunks: 0, error: `File too large (${stat.size} bytes)`,
+      refusal: { code: 'file_too_large', message: `File too large (${stat.size} bytes, max ${maxBytes}).` }, skip_reason: 'file_too_large' };
   }
 
   let content = readSourceFileSync(filePath, 'utf-8').replace(/^\uFEFF/, ''); // #4798: a BOM is encoding noise, not content
@@ -1199,15 +1062,12 @@ export async function importFromFile(
   }
 
   const preInferenceParsed = parseMarkdown(content, relativePath, { validate: true });
-  const preInferenceFrontmatterError = invalidYamlFrontmatterError(preInferenceParsed);
-  if (preInferenceFrontmatterError) {
-    return {
-      slug: slugifyPath(relativePath),
-      status: 'skipped',
-      chunks: 0,
-      error: preInferenceFrontmatterError,
-    };
+  const preInferenceHold = classifyImportHold(preInferenceParsed);
+  if (preInferenceHold) {
+    return { slug: slugifyPath(relativePath), status: 'skipped', chunks: 0, error: preInferenceHold.message, refusal: preInferenceHold, skip_reason: 'invalid_frontmatter' };
   }
+  const recovery = { quoted: !!preInferenceParsed.errors?.some(e => e.code === 'YAML_PARSE' && e.recoverable),
+    comment_value: !!preInferenceParsed.warnings?.some(w => w.code === 'FRONTMATTER_COMMENT_VALUE') };
 
   // v0.22.8 — Frontmatter inference: if the file has no frontmatter and
   // inference is enabled, synthesize it from the filesystem path + content.
@@ -1227,7 +1087,7 @@ export async function importFromFile(
     validate: true,
     ...(opts.activePack ? { activePack: opts.activePack } : {}),
   });
-  const frontmatterError = invalidYamlFrontmatterError(parsed);
+  const frontmatterHold = classifyImportHold(parsed);
 
   // Enforce path-authoritative slug. parseMarkdown prefers frontmatter.slug over
   // the path-derived slug, so a mismatch here means the frontmatter is trying
@@ -1246,14 +1106,7 @@ export async function importFromFile(
   let fallbackReason: 'path slugified empty' | 'normalization-equivalent identity restore' =
     'path slugified empty';
 
-  if (frontmatterError) {
-    return {
-      slug: expectedSlug,
-      status: 'skipped',
-      chunks: 0,
-      error: frontmatterError,
-    };
-  }
+  if (frontmatterHold) return { slug: expectedSlug, status: 'skipped', chunks: 0, error: frontmatterHold.message, refusal: frontmatterHold, skip_reason: 'invalid_frontmatter' };
 
   if (expectedSlug === '') {
     if (parsed.slug && parsed.slug.length > 0) {
@@ -1298,10 +1151,13 @@ export async function importFromFile(
         error:
           `Frontmatter slug "${parsed.slug}" does not match path-derived slug "${expectedSlug}" ` +
           `(from ${relativePath}). Remove the frontmatter "slug:" line or move the file.`,
+        refusal: { code: 'frontmatter_slug_conflict', key: 'slug', message: slugConflictHoldMessage(relativePath, expectedSlug) }, skip_reason: 'frontmatter_slug_conflict',
       };
     }
   }
 
+  const suffixHold = usedFrontmatterFallback ? await suffixedFrontmatterSlugHold(engine, opts.sourceId, relativePath, resolvedSlug) : null;
+  if (suffixHold) return { slug: expectedSlug, status: 'skipped', chunks: 0, error: suffixHold.message, refusal: suffixHold, skip_reason: suffixHold.code };
   // Emit the dual-channel audit entry AFTER we know we're not going to
   // short-circuit, so we don't log noise for failed imports.
   if (usedFrontmatterFallback) {
@@ -1314,8 +1170,8 @@ export async function importFromFile(
   // precedence in computeEffectiveDate. e.g. `daily/2024-03-15.md` →
   // filename `2024-03-15`.
   const fileBasename = basename(relativePath, '.md');
-  return importFromContent(engine, resolvedSlug, content, {
-    ...opts,
+  const imported = await importFromContent(engine, resolvedSlug, content, {
+    ...opts, preserveGateMarkers: true, writeGate: await ownerSourceGateInput(engine, opts.sourceId ?? 'default', parsed.frontmatter),
     filename: fileBasename,
     sourcePath: relativePath,
     // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- walks up from the caller's own file path by the depth of its own relative path to recover the import root; import-identity confines every probe under that root
@@ -1325,6 +1181,7 @@ export async function importFromFile(
     // deliberate clear, so it passes putPage's empty-overwrite guard.
     allowEmptyOverwrite: true,
   });
+  return imported.status === 'imported' && (recovery.quoted || recovery.comment_value) ? { ...imported, frontmatter_recovery: recovery } : imported;
 }
 
 /**
@@ -1369,8 +1226,8 @@ export async function importCodeFile(
   const storageContent = sanitizeText(content.replaceAll('\0', '\\0'));
 
   const byteLength = Buffer.byteLength(content, 'utf-8');
-  if (byteLength > MAX_FILE_SIZE) {
-    return { slug, status: 'skipped', chunks: 0, error: `Code file too large (${byteLength} bytes)` };
+  if (byteLength > CODE_FILE_MAX_BYTES) {
+    return { slug, status: 'skipped', chunks: 0, error: `Code file too large (${byteLength} bytes)`, refusal: { code: 'file_too_large', message: `Code file too large (${byteLength} bytes)` }, skip_reason: 'file_too_large' };
   }
 
   // Vendor-neutral guardrail seam (observe-only, fail-open). Runs AFTER the
@@ -1390,9 +1247,12 @@ export async function importCodeFile(
   });
 
   // Hash for idempotency. CHUNKER_VERSION is folded in so chunker shape
-  // changes across releases force clean re-chunks without a forced re-import.
+  // changes across releases force clean re-chunks without a forced re-import;
+  // a language's grammar revision is folded in for that language only, so a
+  // grammar swap re-chunks its own files and leaves every other hash alone.
+  const grammarRevision = GRAMMAR_REVISIONS[lang as SupportedCodeLanguage];
   const hash = createHash('sha256')
-    .update(JSON.stringify({ title, type: 'code', content, lang, chunker_version: CHUNKER_VERSION }))
+    .update(JSON.stringify({ title, type: 'code', content, lang, chunker_version: CHUNKER_VERSION, ...(grammarRevision ? { grammar_revision: grammarRevision } : {}) }))
     .digest('hex');
 
   // Scoped to the exact (source_id, slug) row the writes below target —
@@ -1533,17 +1393,15 @@ export async function importCodeFile(
       [MARKDOWN_CHUNKER_VERSION, txOpts.sourceId, slug]);
     await sealPageTextProjection(tx, slug, txOpts.sourceId);
     if (opts.prepare) await installCodeChunkEdges(tx, slug, txOpts.sourceId, code);
+    // Read-back inside the transaction, as the markdown path does (#6011): a page is not written until it reads back,
+    // and a concurrent writer that commits after this transaction can no longer fail an import that committed.
+    else await verifyPageReadable(tx, slug, hash, sourceId, 'importCodeFile');
   };
   if (opts.prepare) {
     const result: ImportResult = { slug, status: 'imported', chunks: chunks.length };
     return opts.prepare({ slug, parsedPage, observedRevision: existing?.knowledge_revision ?? null, noop: false, result, validate: async () => {}, apply });
   }
-  await engine.transaction(apply);
-
-  // Post-write read-back verification.
-  // Same guard as the markdown path: a code page write is not "done" until
-  // it is readable back via getPage.
-  await verifyPageReadable(engine, slug, hash, sourceId, 'importCodeFile');
+  await maintenanceTransaction(engine, apply);
 
   // v0.20.0 Cathedral II Layer 5 (A1): extracted call-site edges persist
   // in code_edges_symbol (unresolved — we don't attempt within-file target
@@ -1586,32 +1444,7 @@ export async function importCodeFile(
         };
       });
 
-      const edgeInputs: import('./types.ts').CodeEdgeInput[] = [];
-      for (const e of extractedEdges) {
-        const idx = findChunkForOffset(e.callSiteByteOffset, storageContent, rangeList);
-        if (idx == null) continue;
-        const from = rangeList[idx]!;
-        if (!from.id || !from.symbol_name_qualified) continue;
-        edgeInputs.push({
-          from_chunk_id: from.id,
-          to_chunk_id: null,
-          from_symbol_qualified: from.symbol_name_qualified,
-          to_symbol_qualified: e.toSymbol,
-          edge_type: e.edgeType,
-          // Stamp the source: getCallersOf/getCalleesOf add
-          // `AND source_id = <scoped>` whenever a worktree pin / --source is
-          // in play, and a NULL here never matches that filter — so every
-          // scoped call-graph query silently returned 0 rows on
-          // multi-source brains even though the edges existed. The fallback
-          // is 'default', NOT null: an unscoped import lands its pages under
-          // the schema default (pages.source_id DEFAULT 'default'), so a
-          // NULL-stamped edge would be invisible to the matching scoped
-          // query getCallersOf(sym, { sourceId: 'default' }) — the same bug
-          // through the other door.
-          source_id: edgeSourceId,
-        });
-      }
-
+      const edgeInputs = mapCodeEdges(extractedEdges, storageContent, rangeList, edgeSourceId);
       if (edgeInputs.length > 0) {
         await engine.addCodeEdges(edgeInputs);
       }
@@ -1688,7 +1521,7 @@ export async function withImportTransaction(
   engine: BrainEngine,
   spec: ImportTransactionSpec,
 ): Promise<void> {
-  await engine.transaction(tx => applyImportTransaction(tx, spec));
+  await maintenanceTransaction(engine, tx => applyImportTransaction(tx, spec));
 }
 
 async function applyImportTransaction(tx: BrainEngine, spec: ImportTransactionSpec): Promise<void> {
@@ -2073,6 +1906,8 @@ export async function importImageFile(
       if (opts.prepare) return opts.prepare({ slug: imageSlug, observedRevision: existing.knowledge_revision ?? null, noop: true,
         result: { slug: imageSlug, status: 'skipped', chunks: 0 }, validate: async () => {}, apply: async () => {} });
       await engine.transaction(tx => assertImportBase(tx, imageSlug, sourceOpts.sourceId, existing));
+      // #6529: an unchanged, complete image still records its origin (#4588's skip-path heal for images).
+      await refreshSourcePath(engine, imageSlug, sourceOpts.sourceId, relativePath, existing, null);
       return { slug: imageSlug, status: 'skipped', chunks: 0 };
     }
   }
@@ -2126,8 +1961,6 @@ export async function importImageFile(
 
   const filename = basename(relativePath);
   const frontmatter: Record<string, unknown> = {
-    type: 'image',
-    title: filename,
     mime_type: decoded.mime,
     bytes: buf.byteLength,
     ...exif,
@@ -2207,7 +2040,7 @@ export async function importImageFile(
 
 let warnedBrainTimeZone = false;
 /** `brain.timezone` (IANA) for offset-less frontmatter datetimes; unset or invalid reads them as UTC. */
-async function loadBrainTimeZone(engine: BrainEngine): Promise<string | undefined> {
+export async function loadBrainTimeZone(engine: BrainEngine): Promise<string | undefined> {
   const configured = (await engine.getConfig('brain.timezone').catch(() => null))?.trim();
   if (!configured || isValidTimeZone(configured)) return configured || undefined;
   if (!warnedBrainTimeZone) process.stderr.write(`[import] invalid brain.timezone "${configured}"; reading naive datetimes as UTC\n`);

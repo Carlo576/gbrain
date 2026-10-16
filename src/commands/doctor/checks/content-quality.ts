@@ -12,6 +12,7 @@ import { startHeartbeat } from '../../../core/progress.ts';
 import { checkUnverifiedExtractions } from './extraction-sync.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
+import { agentFix, checkError, doctorVerify } from '../check-fix.ts';
 
 async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
   const { args, progress } = ctx;
@@ -49,14 +50,9 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
   const fullContentAudit = args.includes('--content-audit');
   progress.heartbeat('oversized_pages');
   try {
-    // Read effective bytes_block from the cached effectiveCfg loaded
-    // earlier in this doctor run if available; otherwise default.
-    // (We re-read here per-check to avoid threading config through
-    // every check — bytes_block is read once per doctor run via
-    // loadConfig which caches in module-level config layer.)
-    const { loadConfig: _loadCfg } = await import('../../../core/config.ts');
-    const _cfg = _loadCfg();
-    const bytesBlock = _cfg?.content_sanity?.bytes_block ?? 500_000;
+    // #6526: the write gate's bytes_block (the DB config plane over file and env),
+    // so a `gbrain config set content_sanity.bytes_block N` reaches this check too.
+    const bytesBlock = await (await import('../../../core/import-screen.ts')).effectiveBytesBlock(engine);
     // #1871: engine.executeRaw, not the dead-on-PGLite postgres singleton.
     const rows = await engine.executeRaw<{ slug: string; source_id: string; bytes: number }>(
       `SELECT p.slug, p.source_id,
@@ -69,7 +65,21 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
        LIMIT 100`,
       [bytesBlock],
     );
-    if (rows.length === 0) {
+    // Pages an older gbrain stored chunkless for size that now fit under the block: the free backfill re-indexes them.
+    const [skipped] = await engine.executeRaw<{ n: number }>(`SELECT COUNT(*)::int AS n FROM pages p
+       WHERE p.deleted_at IS NULL AND p.frontmatter->'embed_skip'->>'reason' = 'oversized'
+         AND (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, ''))) <= $1`, [bytesBlock]);
+    const backfillable = Number(skipped?.n ?? 0);
+    if (backfillable > 0) {
+      checks.push({
+        name: 'oversized_pages',
+        status: 'warn',
+        message: `${backfillable} page(s) were stored without chunks by an older gbrain because of their size, and now fit under the ${bytesBlock}-byte bytes_block. `
+          + 'They are invisible to search until re-indexed. Fix: gbrain reindex --oversized (free, CPU only; pages over 1 MiB then wait for embedding approval).',
+        fix: agentFix(['gbrain', 'reindex', '--oversized'], 'Re-chunks the size-skipped pages so keyword search finds them; it calls no paid provider and holds large pages for embedding approval.',
+          'oversized_pages', { docs: 'docs/guides/memory-boundaries.md#large-pages-upgrade' }),
+      });
+    } else if (rows.length === 0) {
       checks.push({
         name: 'oversized_pages',
         status: 'ok',
@@ -83,7 +93,8 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
       checks.push({
         name: 'oversized_pages',
         status: 'warn',
-        message: `${rows.length} page(s) exceed ${bytesBlock}-byte block threshold. Top: ${top}. New ingests with the same shape get frontmatter.embed_skip set automatically; existing oversized pages can be split or accepted as non-embeddable.`,
+        message: `${rows.length} page(s) exceed the ${bytesBlock}-byte content_sanity.bytes_block. Top: ${top}. A page over the block is stored without chunks on its next write. `
+          + 'Raise content_sanity.bytes_block (up to the 24 MiB page ceiling) to make them searchable, or exclude them from the source.',
       });
     }
   } catch (err) {
@@ -93,6 +104,34 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
       status: 'ok',
       message: `Skipped (${msg})`,
     });
+  }
+
+  progress.heartbeat('partial_embedding');
+  try {
+    const { listBudgetLimitedPages } = await import('../../../core/page-embedding-budget.ts');
+    const limited = await listBudgetLimitedPages(engine, { limit: 100 });
+    if (limited.length === 0) {
+      checks.push({ name: 'partial_embedding', status: 'ok', message: 'No large page is held or capped by embed.max_usd_per_page.' });
+    } else {
+      const sources = [...new Set(limited.map(row => row.source_id))];
+      const sample = limited.slice(0, 3).map(row => `${row.slug} (${row.state}${row.reason ? `: ${row.reason}` : ''}, ${row.pending_chunks} chunk(s) without a vector)`).join('; ');
+      const approve = limited.length === 1
+        ? ['gbrain', 'embed', '--slugs', limited[0]!.slug, '--source', limited[0]!.source_id, '--max-usd', '<N>']
+        : ['gbrain', 'embed', '--held', ...(sources.length === 1 ? ['--source', sources[0]!] : []), '--max-usd', '<N>'];
+      checks.push({
+        name: 'partial_embedding',
+        status: 'warn',
+        message: `${limited.length} large page(s) are keyword-searchable but partially embedded: the per-page cap stopped them or they wait for approval. ${sample}. `
+          + `Preview the cost with gbrain embed --held --dry-run; with the user's approval: ${approve.join(' ')}`,
+        fix: { argv: approve, consent: ['paid', 'egress'], actor: 'agent', ask_user: true,
+          inputs: [{ name: 'N', how: 'The dollar amount the user approves per page, after seeing the cost from preview_argv.' }],
+          preview_argv: ['gbrain', 'embed', '--held', ...(sources.length === 1 ? ['--source', sources[0]!] : []), '--dry-run'],
+          why: 'Embedding the rest calls the paid embedding provider; the approved amount raises each page\'s cap (the lowest cap still wins).',
+          verify: doctorVerify('partial_embedding'), requires_exclusive: false, docs: 'docs/guides/memory-boundaries.md#large-pages' },
+      });
+    }
+  } catch (err) {
+    checks.push(checkError('partial_embedding', 'read the per-page embedding budget', err));
   }
 
   progress.heartbeat('scraper_junk_pages');
@@ -271,7 +310,7 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
 
 export const contentSanityEntry: DoctorEntry = {
   name: 'oversized_pages',
-  emits: ['oversized_pages', 'scraper_junk_pages', 'content_sanity_audit_recent'],
+  emits: ['oversized_pages', 'partial_embedding', 'scraper_junk_pages', 'content_sanity_audit_recent'],
   run: runContentSanity,
 };
 
@@ -311,7 +350,7 @@ async function runQuarantine(ctx: DoctorContext): Promise<Check[]> {
       status: n > 0 ? 'warn' : 'ok',
       message:
         (n > 0
-          ? `${n} page(s) quarantined as junk (hidden from search). Review with 'gbrain quarantine list'; clear a false positive with 'gbrain quarantine clear <slug>'.`
+          ? `${n} page(s) quarantined as junk (hidden from search). Review with 'gbrain quarantine list'; clear a false positive with 'gbrain quarantine clear <slug> --force'.`
           : 'No unacknowledged quarantined pages') +
         (acked > 0 ? ` (${acked} acknowledged via health.quarantine.ack_reasons)` : ''),
     });
@@ -394,11 +433,8 @@ async function runFrontmatter(ctx: DoctorContext): Promise<Check[]> {
   //  - Configurable via GBRAIN_DOCTOR_FM_TIMEOUT_MS (default 30000ms).
   progress.heartbeat('frontmatter_integrity');
   const fmHb = startHeartbeat(progress, 'scanning frontmatter…');
-  const fmTimeoutMs = (() => {
-    const raw = process.env.GBRAIN_DOCTOR_FM_TIMEOUT_MS;
-    const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : 30000;
-  })();
+  const { frontmatterScanTimeoutMs, frontmatterRepairableFromReport } = await import('./frontmatter-repairable.ts');
+  const fmTimeoutMs = frontmatterScanTimeoutMs();
   try {
     const { scanBrainSources } = await import('../../../core/brain-writer.ts');
     const fmDeadline = Date.now() + fmTimeoutMs;
@@ -425,6 +461,7 @@ async function runFrontmatter(ctx: DoctorContext): Promise<Check[]> {
       signal: fmAbort,
       deadline: fmDeadline,
       dbPageCountForSource,
+      frontmatterOnly: true,
     });
 
     if (report.total === 0 && !report.partial) {
@@ -468,9 +505,12 @@ async function runFrontmatter(ctx: DoctorContext): Promise<Check[]> {
           .join(', ');
         sourceMessages.push(`${src.source_id}: ${src.total} (${codes})`);
       }
+      const repairHint = 'Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, '
+        + 'such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes';
+      const sourcesWithIssues = report.per_source.filter(src => src.total > 0).map(src => src.source_id);
       const fixHint = report.partial
-        ? `Raise GBRAIN_DOCTOR_FM_TIMEOUT_MS or run \`gbrain frontmatter validate <source>\` directly. Fix issues: \`gbrain frontmatter validate <source> --fix\``
-        : `Fix: gbrain frontmatter validate <source-path> --fix`;
+        ? `Raise GBRAIN_DOCTOR_FM_TIMEOUT_MS or run \`gbrain frontmatter validate <source-path>\` directly. ${repairHint}`
+        : repairHint;
       checks.push({
         name: 'frontmatter_integrity',
         status: 'warn',
@@ -478,19 +518,19 @@ async function runFrontmatter(ctx: DoctorContext): Promise<Check[]> {
           `${report.total} frontmatter issue(s)` +
           (report.partial ? ` (PARTIAL SCAN — timeout after ${fmTimeoutMs / 1000}s)` : '') +
           `. ${sourceMessages.join('; ')}. ${fixHint}`,
+        ...(sourcesWithIssues.length === 1 ? { fix: agentFix(['gbrain', 'repair', 'frontmatter', '--source', sourcesWithIssues[0]!],
+          'Previews the line fix for each file the repair can fix and names the manual fix for the rest; it writes nothing.', 'frontmatter_integrity',
+          { docs: 'docs/guides/repair.md#frontmatter' }) } : {}),
       });
     }
+    checks.push(frontmatterRepairableFromReport(report, fmTimeoutMs));
   } catch (e) {
     // Codex outside-voice D4: the abort path returns cleanly via partial
     // state — this catch is purely for unexpected errors (FS permission,
     // OOM, disk full, etc.). Pre-v0.38.2.0 (PR #1287) had an unreachable
     // abort-classifier branch here; removed because timer-based aborts
     // in a sync walker can't surface as a thrown error anyway.
-    checks.push({
-      name: 'frontmatter_integrity',
-      status: 'warn',
-      message: `Could not scan frontmatter: ${e instanceof Error ? e.message : String(e)}`,
-    });
+    checks.push(checkError('frontmatter_integrity', 'scan frontmatter', e));
   } finally {
     fmHb();
   }
@@ -499,6 +539,6 @@ async function runFrontmatter(ctx: DoctorContext): Promise<Check[]> {
 
 export const frontmatterEntry: DoctorEntry = {
   name: 'frontmatter_integrity',
-  emits: ['frontmatter_integrity'],
+  emits: ['frontmatter_integrity', 'frontmatter_repairable'],
   run: runFrontmatter,
 };

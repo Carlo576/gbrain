@@ -99,7 +99,8 @@ describe('op-layer capture — query', () => {
     expect(row.tool_name).toBe('query');
     expect(row.query).toBe('alice');
     expect(row.remote).toBe(true);
-    expect(row.expand_enabled).toBe(true); // default
+    // The raw `expand` param: unset is null, so replay applies the mode default (GBRA-81 item 1b).
+    expect(row.expand_enabled).toBeNull();
     expect(row.vector_enabled).toBe(false); // OPENAI_API_KEY deleted
     expect(row.job_id).toBeNull();
     expect(row.subagent_id).toBeNull();
@@ -204,8 +205,9 @@ describe('op-layer capture — search', () => {
     expect(await engine.listEvalCandidates()).toHaveLength(0);
   });
 
-  test('explicit source_id overrides ctx.sourceId for search retrieval', async () => {
+  test('explicit source_id overrides ctx.sourceId for trusted local search retrieval', async () => {
     const ctx = makeCtx({
+      remote: false,
       sourceId: 'default',
       config: makeConfig({ capture: false }),
     });

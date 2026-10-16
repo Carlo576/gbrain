@@ -54,13 +54,23 @@ import { join } from 'node:path';
 //     and the contradiction probe still never mutates, so the
 //     auto-supersession.ts:4 invariant is preserved. Deliberate design
 //     change per the #2390 eng review (G1: ontology extends facts).
+//   - facts/proposal-supersede.ts (System One S9) — applies or undoes a
+//     contradiction PROPOSAL only when the user runs `gbrain decide proposals
+//     accept|undo <id>` (local CLI); the sweep and the inline fact write path
+//     never call it, so a probe still never mutates (auto-supersession.ts:4).
+//   - persistence/loop-fact-retirement.ts (#5869) — retires a commitment fact
+//     only when its loop is closed through `loops_close` or `gbrain repair
+//     loop-facts` (expired_at + valid_until with the struck fence row); the
+//     contradiction sweep and probes never call it.
 const VALID_UNTIL_WRITE_ALLOWLIST: ReadonlySet<string> = new Set([
   'src/core/cycle/extract-facts.ts',
   'src/core/cycle/phases/consolidate.ts',
   'src/core/facts/forget.ts',
+  'src/core/facts/proposal-supersede.ts',
   'src/core/facts/withdrawal.ts',
   'src/core/facts/withdrawal-schema.ts',
   'src/core/persistence/canonical-projections.ts',
+  'src/core/persistence/loop-fact-retirement.ts',
   'src/core/persistence/prepared-maintenance.ts',
   'src/core/postgres-engine.ts',
   'src/core/pglite-engine.ts',

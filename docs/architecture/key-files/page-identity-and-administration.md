@@ -15,7 +15,7 @@ records refuse without deleting uncertain state. Regression coverage:
 `test/persistence-admin-recovery.test.ts`, `test/persistence-onboarding.test.ts`,
 `test/persistence-container-preflight.test.ts`.
 
-- `src/core/deep-research-id.ts` — canonical `gbrain-page:v1:` handles encode a
+- `src/core/deep-research-id.ts` — canonical `gbrain-page:v1:` handles encode a An id may carry a read anchor as a third payload element (`{c: chunk_id}` for a search hit past the first chunk, `{w: cursor}` for a fetch continuation); `decodeDeepResearchId` returns the same page key with or without it and `decodeDeepResearchAnchor` returns the anchor.
   JSON pair of source ID and slug in unpadded base64url. The decoder rejects
   malformed or noncanonical encodings rather than treating them as legacy
   slugs. IDs are logical addresses, not credentials, revisions or encrypted
@@ -28,6 +28,7 @@ records refuse without deleting uncertain state. Regression coverage:
   are not substitutes. This protects routine repair from accidental topology
   changes, not against a malicious trusted local administrator. Read the
   [operator procedure](../topologies.md) before changing its preconditions.
+- `src/core/persistence/onboarding.ts` + `legacy-locks.ts` + `physical-root-recovery.ts` — read-only source onboarding states; exact same-host dead-lock cleanup under explicit activation opt-in; and state-bound same-owner root repair using a durable manifest and token-verified temporary stamp. #5914: `inspectPhysicalRootRecovery(root, identity, { relocated })` (`--confirm-relocated-root`) waives only the inode/birth comparison, requires the outside-root reservation and every other field to agree, returns the reservation with the live directory identity and marks the recovery `relocated: true`; `repairPhysicalRoot` then rewrites the reservation through `physical-root-record.ts` `replacePhysicalRootReservation` (compare-and-swap: already-equal is a no-op, anything else refuses with detail `stale_record`) before adopting the stamp. `physical-root-record.ts` also holds `assertPhysicalRootReservation` (native-lock callers that publish nothing: reservation worktree id plus stamp token, no inode), `readRecordedPhysicalRootReservation`, `inspectRelocatedPhysicalRoot` and `relocatePhysicalRoot` (P1.3c: a recorded path that now resolves through a symlink keeps its worktree; the reservation moves under the new `sha256(root)` name and the stamp names the new root). `physical-root.ts` `restampPhysicalRoot` handles a filesystem device id that changed while the owner token, brain, worktree, root, inode and a non-zero birth time still match (macOS can renumber `st_dev` across reboots): under the caller's outside-root native lock, one transaction verifies owner host, brain and host binding and rewrites the recorded self-transfer copies and retained topology staging identities (each only while it still names the old device); after commit the stamp and the reservation's initial device are rewritten and the event is logged, so an interruption between the two leaves a device-only change the next locked acquisition finishes. Ownership markers inside a retained topology clone stage are not re-stamped; an interrupted clone recovery that spans a device renumbering still needs source recovery. `assertPhysicalRoot` stays read-only; zero birth time or any other difference keeps the refusal. `--self-transfer` prepare/accept requires separate fresh reviewed state, preserves original reservation owner evidence and refuses uncertain records. Tests: `test/persistence-onboarding.test.ts`, `test/persistence-admin-recovery.test.ts`, `test/persistence-container-preflight.test.ts`.
 
 `stampDeepResearchIds` uses each result's own source, including query fallback
 and image paths. `fetch` independently applies the current source grant and
@@ -69,3 +70,7 @@ and only a page still at that revision without `validate: false` fails the
 phase. The installed-lifecycle
 test and `test/e2e/grandfather-projection-postgres.test.ts` cover the actual
 upgrade consequence and engine parity respectively.
+
+## Write request ids
+
+- `src/core/persistence/preconditions.ts` — `parseWriteRequestId`, the one place a write op's `request_id` is normalized (F6, Cat 40 Hard): a UUID passes through lowercased, any other id of 1-128 printable ASCII characters maps to its RFC 4122 UUIDv5 under `CLIENT_REQUEST_ID_NAMESPACE` (no operation name, so receipt lookups find a write by the client's string); `clientRequestIdOf` is the string admissions store in `persistence_requests.client_request_id` (v238, outside the intent digest, kept by compaction) and receipts echo as `client_request_id`. Administration writer/deactivation ids keep strict UUID checks. `remember(items)` derives child ids from the root string as sent (`childRequestId`). Tests: `test/persistence-client-request-id.test.ts`, `test/e2e/persistence-client-request-id-postgres.test.ts`.

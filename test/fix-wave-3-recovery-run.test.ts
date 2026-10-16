@@ -23,10 +23,12 @@ import type { WriteRequest } from '../src/core/persistence/model.ts';
 import { parseGoogleSourceConfig, runGoogleSync } from '../src/core/google/google-source.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { admitWrite } from '../src/core/persistence/journal.ts';
+import { withAdmissionOrigin } from '../src/core/persistence/admission-origin.ts';
 import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
 import { migrateConnectorCheckpoints } from '../src/core/persistence/connector-checkpoint-migration.ts';
 import { readConnectorSourceStatuses } from '../src/core/persistence/connector-status.ts';
 import { runRemediate, runRemediationPlan } from '../src/commands/doctor/remediate.ts';
+import { approvedRemediateArgs } from './helpers/remediate-approval.ts';
 import { postUpgradeRecoveryBanner } from '../src/commands/doctor/upgrade-banner.ts';
 import { capture } from './helpers/wave-scenarios.ts';
 import { waveBrain } from './helpers/wave-fixture.ts';
@@ -66,7 +68,8 @@ for (const backend of testBackends()) test(`${backend}: post-upgrade to a clean 
   const databaseUrl = backend === 'postgres' ? process.env.DATABASE_URL : undefined;
   await waveBrain(async ({ engine }) => {
     await withEnv({ CONNECTOR_TEST_TOKEN: 'synthetic-local-fixture' }, async () => {
-      const connector = await rewalkingConnector(engine);
+      // Pre-upgrade history, written before the background pause line existed (#6696); the fixture's ids sit past it.
+      const connector = await withAdmissionOrigin('interactive', () => rewalkingConnector(engine));
       // A page imported before every import recorded its contextual mode.
       await engine.executeRaw("UPDATE content_chunks SET embedding=$1::text::vector WHERE page_id=(SELECT id FROM pages WHERE source_id='default' AND slug='notes/base')", [VECTOR]);
       await engine.executeRaw("UPDATE pages SET contextual_retrieval_mode=NULL WHERE source_id='default' AND slug='notes/base'");
@@ -80,7 +83,7 @@ for (const backend of testBackends()) test(`${backend}: post-upgrade to a clean 
       expect(banner).not.toContain('--yes');
       expect(banner).not.toContain('--apply');
 
-      const run = await capture(() => runRemediate(engine, ['--remediate', '--yes', '--include-repairs', '--no-embed', '--max-usd', '1', '--json']));
+      const run = await capture(async () => runRemediate(engine, await approvedRemediateArgs(engine, ['--remediate', '--yes', '--include-repairs', '--no-embed', '--max-usd', '1', '--json'])));
       commands.push('gbrain doctor --remediate --yes --include-repairs --no-embed --max-usd 1');
       const body = JSON.parse(run.out);
       expect(body.repairs.map((r: { kind: string; status: string }) => [r.kind, r.status])).toEqual([

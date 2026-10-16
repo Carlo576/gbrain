@@ -16,6 +16,7 @@ import { submitPageMutation } from '../../src/core/persistence/page-mutations.ts
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { declarePersistenceProtocol } from '../../src/core/persistence/protocol.ts';
 import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
+import { TEST_WRITE_ATTRIBUTION } from './write-attribution.ts';
 import { CLAUDE_CLI_CWD_PREFIX } from '../../src/core/ai/providers/claude-cli-scratch.ts';
 import { managedBrain, type ManagedBrain } from './managed-brain.ts';
 import { withEnv } from './with-env.ts';
@@ -23,7 +24,7 @@ import { withEnv } from './with-env.ts';
 export type WaveFindingKind = 'timeline' | 'visibility' | 'safe_index' | 'capacity' | 'parked' | 'self_capture' | 'stale_embedding' | 'old_writer';
 export const ALL_WAVE_FINDINGS: WaveFindingKind[] = ['timeline', 'visibility', 'safe_index', 'capacity', 'parked', 'self_capture', 'stale_embedding', 'old_writer'];
 
-export const put = (ctx: OperationContext, slug: string, body: string, type = 'note', extra = '') => submitPageMutation(ctx, { operation: 'put_page',
+export const put = (ctx: OperationContext, slug: string, body: string, type = 'note', extra = '') => submitPageMutation({ ...ctx, admissionOrigin: 'interactive' }, { operation: 'put_page',
   params: { slug, request_id: randomUUID(), content: `---\ntype: ${type}\ntitle: ${slug}\n${extra}---\n\n${body}\n` } });
 
 async function protocol(engine: BrainEngine, sql: string, params: unknown[] = []) {
@@ -39,17 +40,17 @@ export async function seedWaveFindings(brain: ManagedBrain, home: string, kinds:
   if (kinds.includes('timeline')) {
     await put(ctx, 'notes/history', 'Body with history.');
     await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(
-      `INSERT INTO timeline_entries(page_id,date,source,summary,detail) SELECT id,'2026-07-01','legacy','A database-only event','' FROM pages WHERE source_id='default' AND slug='notes/history'`)));
+      `INSERT INTO timeline_entries(page_id,date,source,summary,detail) SELECT id,'2026-07-01','legacy','A database-only event','' FROM pages WHERE source_id='default' AND slug='notes/history'`), TEST_WRITE_ATTRIBUTION));
   }
   if (kinds.includes('visibility')) await put(ctx, 'atoms/unstamped', 'An extracted atom with no visibility.', 'atom');
   if (kinds.includes('safe_index')) {
     await put(ctx, 'notes/unsealed', 'A page chunked before the safe-chunk fence.');
     await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(
-      "UPDATE pages SET chunker_version=3 WHERE source_id='default' AND slug='notes/unsealed'")));
+      "UPDATE pages SET chunker_version=3 WHERE source_id='default' AND slug='notes/unsealed'"), TEST_WRITE_ATTRIBUTION));
   }
   await disposePersistenceConsumer(engine);
   if (kinds.includes('capacity')) {
-    // 85% of a principal's permanent request ids, with room left under the 90% stop for the repairs.
+    // 85% of a principal's permanent request ids: past the 80% background pause line (#6696), with room left for the seeding writes and the approved repairs, which are interactive.
     await engine.setConfig('persistence.limits.principal_lifetime_ids', '1000');
     await protocol(engine, "UPDATE persistence_counters SET lifetime_ids=850 WHERE key LIKE 'principal:%'");
   }

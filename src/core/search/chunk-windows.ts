@@ -12,6 +12,7 @@
  * sealed pages and anchor the hits in that text.
  */
 import type { PageReadScope } from '../types.ts';
+import type { FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 
 export interface ChunkWindowRequest {
   page_id: number;
@@ -27,6 +28,9 @@ export interface ChunkWindowChunk {
   chunk_index: number;
   chunk_text: string;
   chunk_source: string;
+  /** Large pages: the chunk's UTF-8 byte span in its source's read projection, when recorded. */
+  projected_byte_start?: number | null;
+  projected_byte_end?: number | null;
 }
 
 export interface ChunkWindowPage {
@@ -47,6 +51,8 @@ export interface ChunkWindowPage {
   chunks: ChunkWindowChunk[];
   /** True when the row cap stopped before every requested row was read. */
   row_limited: boolean;
+  /** #5575 ENG-1: the page's fence overlay, attached by evidence delivery before it builds the page document. */
+  fenceOverlay?: FenceChunkOverlay;
 }
 
 export interface ChunkWindowOpts extends PageReadScope {
@@ -61,7 +67,8 @@ export function mapChunkWindowRows(rows: Record<string, unknown>[], maxRows: num
   const pages = new Map<number, ChunkWindowPage & { prio: number }>();
   const chunkRows = rows
     .filter(r => r.kind === 'chunk')
-    .map(r => ({ page_id: Number(r.page_id), id: Number(r.chunk_id), chunk_index: Number(r.chunk_index), chunk_text: String(r.chunk_text ?? ''), chunk_source: String(r.chunk_source), prio: Number(r.prio) }))
+    .map(r => ({ page_id: Number(r.page_id), id: Number(r.chunk_id), chunk_index: Number(r.chunk_index), chunk_text: String(r.chunk_text ?? ''), chunk_source: String(r.chunk_source), prio: Number(r.prio),
+      projected_byte_start: r.projected_byte_start == null ? null : Number(r.projected_byte_start), projected_byte_end: r.projected_byte_end == null ? null : Number(r.projected_byte_end) }))
     .sort((a, b) => a.prio - b.prio || a.page_id - b.page_id || a.chunk_index - b.chunk_index);
   for (const r of rows) {
     if (r.kind !== 'page') continue;
@@ -82,7 +89,8 @@ export function mapChunkWindowRows(rows: Record<string, unknown>[], maxRows: num
   }
   const limited = chunkRows.length > maxRows;
   const kept = limited ? chunkRows.slice(0, maxRows) : chunkRows;
-  for (const c of kept) pages.get(c.page_id)?.chunks.push({ id: c.id, chunk_index: c.chunk_index, chunk_text: c.chunk_text, chunk_source: c.chunk_source });
+  for (const c of kept) pages.get(c.page_id)?.chunks.push({ id: c.id, chunk_index: c.chunk_index, chunk_text: c.chunk_text, chunk_source: c.chunk_source,
+    ...(c.projected_byte_start != null && c.projected_byte_end != null ? { projected_byte_start: c.projected_byte_start, projected_byte_end: c.projected_byte_end } : {}) });
   if (limited) {
     const cutoff = chunkRows[maxRows];
     for (const p of pages.values()) {

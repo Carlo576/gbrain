@@ -1447,7 +1447,7 @@ async function runExtractAndEmbed(
       const sub = await submitEmbedBackfill(deps.engine, deps.sourceId, { reason: 'github_sync_defer' });
       if (sub.status === 'submitted') {
         process.stderr.write(`[github] large sync (${totalChanges} pages); embeds deferred to embed-backfill job ${sub.jobId} — or ${drainHint}\n`);
-      } else if (sub.status === 'cooldown' || sub.status === 'spend_capped' || sub.status === 'no_worker_surface') {
+      } else if (sub.status === 'cooldown' || sub.status === 'spend_capped' || sub.status === 'no_worker_surface' || sub.status === 'stalled') {
         process.stderr.write(`[github] large sync (${totalChanges} pages); embed-backfill not queued (${sub.status}) — ${drainHint}\n`);
       } else { sub satisfies never; }
     } catch (err) {
@@ -1483,5 +1483,10 @@ function syncResult(
     embedded: summary.embedded,
     pagesAffected: summary.pagesAffected,
     ...(summary.failedFiles > 0 ? { failedFiles: summary.failedFiles } : {}),
+    // #5012: a partial sweep names its real cause and counts what it wrote.
+    ...(summary.status === 'partial' ? {
+      filesImported: summary.added + summary.modified,
+      reason: summary.failedFiles > 0 ? 'connector_item_failures' as const : opts.signal?.aborted ? 'timeout' as const : 'connector_partial' as const,
+    } : {}),
   };
 }

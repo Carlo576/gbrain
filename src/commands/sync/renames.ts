@@ -9,6 +9,10 @@ import { softDeleteSyncPages } from '../../core/company-brain/profile.ts';
 import { serr } from '../../core/console-prefix.ts';
 import { DELETE_BATCH_SIZE } from '../../core/engine-constants.ts';
 import { importFile, isImageFilePath as isImageImportPath, importImageFile } from '../../core/import-file.ts';
+import { maintenanceTransaction } from '../../core/persistence/attribution.ts';
+import type { BrainEngine } from '../../core/engine.ts';
+import { movePageIdReferences, moveSlugBindings, recordRenameAlias } from '../../core/page-state/rename-alias.ts';
+import { renamePageOntoSlug } from './rename-collision.ts';
 import {
   resolveSlugsForRemovedPaths,
   refusedRemovedPathMessage,
@@ -26,10 +30,11 @@ import {
 import type { SyncResult } from '../sync.ts';
 import { trackedSlugIndex, activeSlugsBySourcePath } from './rename-reconcile.ts';
 import type { TrackedSlugIndex } from './rename-reconcile.ts';
+import { clearLegacyHold, holdRefusedImport, holdRenameDestination, noteScreenedImport } from './holds.ts';
 import { partial, noteTypeWarning, markCompleted } from './sync-run.ts';
 import type { SyncPlan, SyncRun, SyncProgress } from './sync-run.ts';
 
-type RenamePlan = Pick<SyncPlan, 'opts' | 'filtered' | 'manifest' | 'lastCommit' | 'pin' | 'gitContextRoot' | 'modePath' | 'syncImportRoot' | 'syncActivePack'>;
+type RenamePlan = Pick<SyncPlan, 'opts' | 'filtered' | 'manifest' | 'lastCommit' | 'pin' | 'gitContextRoot' | 'modePath' | 'syncImportRoot' | 'syncActivePack' | 'holds'>;
 
 type RenameContext = {
   renameOpts: { sourceId: string } | undefined;
@@ -201,7 +206,7 @@ async function applyRename(
   to: string,
 ): Promise<SyncResult | undefined> {
   const { engine, failedFiles, succeededPaths, pagesAffected, deletedSlugs } = run;
-  const { opts, gitContextRoot, syncImportRoot, syncActivePack } = plan;
+  const { opts, gitContextRoot, syncImportRoot, syncActivePack, holds } = plan;
   const { renameOpts, fromSlugByPath, noEmbed } = ctx;
   // v0.41.13.0 (T2 / D-V4-2): per-iteration abort check. Renames call
   // importFile() at line 1173-style sites which can be slow on big files;
@@ -227,46 +232,40 @@ async function applyRename(
     : await resolveRemovedPathSlug(engine, from, DEFAULT_SOURCE_ID, serr);
   // The new path doesn't yet have a row, so resolve from path only.
   const newSlug = resolveSlugForPath(to);
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- `to` is a git-diff rename path; the joined path is read only after the same isPathSafe(filePath, gitContextRoot) realpath containment check the import below applies
+  const filePath = join(syncImportRoot, to);
+  // #5988 (E13): a destination the import would refuse is screened before the
+  // old page's slug or origin moves; it is held and the old page stays whole.
+  if (isPathSafe(filePath, gitContextRoot) && await holdRenameDestination(engine, holds, { from, to, filePath, oldSlug, activePack: syncActivePack })) {
+    await markCompleted(run, to);
+    progress.tick(1, newSlug);
+    return undefined;
+  }
   // #3056: the cheap rename is OBSERVED, not assumed. A zero-row UPDATE
   // doesn't throw, and a thrown collision used to be swallowed by an
   // empty catch — both fell through to importFile, which created/updated
-  // the row at the new path while the old row stayed behind live. Both
-  // shapes now fall through to the reconcile below.
+  // the row at the new path while the old row stayed behind live.
+  // #5431 (W14 P1.8): the unique violation is classified instead. A
+  // tombstone destination is merged (the tombstone re-keyed purge-style,
+  // the page moves with its id), a live destination falls through to the
+  // reconcile below, and any other error fails the file without a
+  // checkpoint. `source_path` is repaired inside the rename transaction
+  // (#3583 gate13: the cheap rename never rewrote it, the unchanged-content
+  // reimport writes nothing, and the full-sync purge read the stale path as
+  // a removed file and deleted the LIVE renamed page). The scope is the one
+  // updateSlug uses: no sourceId means the DEFAULT source, never every
+  // source (gate 14).
   let renameApplied = false;
   if (oldSlug !== undefined) {
     try {
-      renameApplied = (await engine.updateSlug(oldSlug, newSlug, renameOpts)) > 0;
-    } catch {
-      // Destination slug occupied or invalid — treat as add; the
-      // reconcile below removes the stale old row once the destination
-      // materialized.
+      renameApplied = await renamePageOntoSlug(engine, { sourceId: renameOpts?.sourceId ?? DEFAULT_SOURCE_ID, oldSlug, newSlug, to }) === 'renamed';
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      failedFiles.push({ path: to, error: `rename ${from} -> ${to} failed before any row moved: ${msg}` });
+      serr(`  [sync] rename ${sanitizePathForDisplay(from)} -> ${sanitizePathForDisplay(to)} failed: ${msg}`);
+      progress.tick(1, newSlug);
+      return undefined;
     }
-  }
-  if (renameApplied) {
-    // #3583 gate13: the cheap rename moves the ROW but updateSlug never
-    // rewrites source_path — and the unchanged-content reimport below is
-    // a no-write skip, so the stale bookkeeping survived indefinitely
-    // and the full-sync purge later read it as "source file removed"
-    // and hard-deleted the LIVE renamed page. Repair the bookkeeping at
-    // the moment the rename lands. Best-effort, and nothing downstream
-    // covers a miss: rows renamed BEFORE this repair — and rows whose
-    // repair query fails — keep the stale path and stay exposed to the
-    // full-sync purge exactly as they are on master. That exposure is
-    // pre-existing (verified against the merge base) and out of scope
-    // here; this repair stops the shape being manufactured going
-    // forward.
-    try {
-      // Scope EXACTLY the way updateSlug scoped the move it repairs:
-      // no sourceId means the DEFAULT source, never every source — an
-      // unqualified UPDATE rewrote a matching (slug, source_path) row
-      // in ANOTHER source, and that source's later fallback reconcile
-      // probed the rewritten path, found nothing, and advanced without
-      // its rename sentinel (gate 14).
-      await engine.executeRaw(
-        `UPDATE pages SET source_path = $1 WHERE source_id = $2 AND slug = $3 AND source_path = $4`,
-        [to, opts.sourceId ?? DEFAULT_SOURCE_ID, newSlug, from],
-      );
-    } catch { /* bookkeeping only — never fail the rename over it */ }
   }
   // Reimport at new path (picks up content changes). Wrapped to match the
   // deletes/adds loops: a malformed renamed file is recorded to failedFiles
@@ -280,8 +279,6 @@ async function applyRename(
   // source) was remapped scope-relative; the join base moves with it.
   // NAV-1 TOCTOU: refuse a destination that realpath-resolves outside the
   // repo (committed symlink pointing out).
-  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- `to` is a git-diff rename path from the synced repo (repo content can be hostile), but the joined path is used ONLY inside the isPathSafe(filePath, gitContextRoot) realpath containment check on the next line — a path escaping the repo root (dot-dot or committed symlink) is refused before any read
-  const filePath = join(syncImportRoot, to);
   let importResult: Awaited<ReturnType<typeof importFile>> | undefined;
   // #2683 residual: a failed destination import (status 'error' OR a
   // throw) must not checkpoint `to` — the resume filter would skip the
@@ -296,7 +293,9 @@ async function applyRename(
         : await importFile(engine, filePath, to, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack });
       importResult = result;
       noteTypeWarning(run, result.type_warning);
-      if (result.status === 'imported') run.chunksCreated += result.chunks;
+      noteScreenedImport(holds, to, result);
+      if (await holdRefusedImport(engine, holds, to, filePath, result)) importResult = undefined;
+      else if (result.status === 'imported') run.chunksCreated += result.chunks;
       else if (result.status === 'skipped' && result.skip_reason === 'malformed_path') {
         // Informational skip — a bracket/control-char filename can never
         // import; counting it as a failure would gate the bookmark forever.
@@ -317,9 +316,13 @@ async function applyRename(
         failedFiles.push({ path: to, error: String((result as { error?: string }).error ?? 'import error') });
       }
     } catch (e: unknown) {
-      importErrored = true;
-      failedFiles.push({ path: to, error: e instanceof Error ? e.message : String(e) });
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!await holdRefusedImport(engine, holds, to, filePath, { status: 'error', error: msg })) {
+        importErrored = true;
+        failedFiles.push({ path: to, error: msg });
+      }
     }
+    if (!importErrored && importResult) await clearLegacyHold(engine, holds, to);
   }
   const reconcileFailed = await reconcileRenameFallback(run, plan, ctx, from, to, newSlug, renameApplied, importResult);
   // Converged (cheap rename, clean reconcile, or nothing to reconcile):
@@ -340,6 +343,25 @@ async function applyRename(
   if (!reconcileFailed && !importErrored) await markCompleted(run, to);
   progress.tick(1, newSlug);
   return undefined;
+}
+
+/**
+ * #5431: the stale old row's identity follows the page to the row now live at
+ * `newSlug`, in one transaction: `old -> new` is recorded as a slug alias so
+ * `[[old]]` keeps resolving, slug-keyed rows (facts, withdrawals, declared
+ * aliases) move, and page-id-keyed rows (edges, timeline, versions) move with
+ * duplicates on their unique keys dropped from the stale side.
+ */
+async function carryRenameIdentity(engine: BrainEngine, sourceId: string, staleSlug: string, newSlug: string): Promise<void> {
+  const rows = await engine.executeRaw<{ slug: string; id: number | string }>(
+    'SELECT slug, id FROM pages WHERE source_id = $1 AND slug = ANY($2::text[])', [sourceId, [staleSlug, newSlug]]);
+  const from = rows.find(r => r.slug === staleSlug), to = rows.find(r => r.slug === newSlug);
+  if (!from || !to || from.id === to.id) return;
+  await maintenanceTransaction(engine, async tx => {
+    await recordRenameAlias(tx, sourceId, staleSlug, newSlug);
+    await moveSlugBindings(tx, sourceId, staleSlug, newSlug);
+    await movePageIdReferences(tx, Number(from.id), Number(to.id));
+  });
 }
 
 /**
@@ -486,6 +508,11 @@ async function reconcileRenameFallback(
           // silently assumed safe.
           for (const s of staleSlugs) {
             staleSlug = s;
+            // #5431: the stale row is the renamed page's old identity; its
+            // edges, timeline and versions move to the row that materialized
+            // at the destination (deduplicated on the links key) before the
+            // row itself is soft-deleted.
+            await carryRenameIdentity(engine, opts.sourceId ?? DEFAULT_SOURCE_ID, s, newSlug);
             // #4587: soft-delete the stale claimant (72h recovery) —
             // candidates come from activeSlugsBySourcePath, so every s
             // is an ACTIVE row and the flip always applies. Same scope

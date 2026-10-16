@@ -112,6 +112,14 @@ One page per conversation. Date-prefixed slugs make origin tracing sortable
 and feed the recency ranking; the frontmatter `date:` drives the page's
 `effective_date` (used by `--since`/`--until` filters).
 
+**Don't split a conversation for size.** One page per conversation is fine up
+to the 24 MiB page ceiling: it is chunked and keyword-searchable at any size
+under it, and a page over 1 MiB embeds after the write. Don't write `-p2`,
+`-p3` part pages to get under a size limit. Only a conversation over 24 MiB
+needs more than one page. If an MCP transport refuses a large page, import the
+file on the brain host instead (Step 4). Limits and costs:
+`docs/guides/memory-boundaries.md#large-pages`.
+
 **Slug collisions are real — disambiguate deterministically.** Untitled threads
 share a title ("New chat"), and several conversations can land on the same day,
 so `YYYY-MM-DD-new-chat` collides across threads. `put_page` has no
@@ -231,7 +239,8 @@ read — fix the converter and regenerate, don't hand-patch individual pages.
 # Preview: segmentation + counts, no DB writes
 gbrain extract-conversation-facts --types conversation --dry-run --limit 5
 
-# Real run, cost-capped; use --background for large archives
+# Real run (paid, cost-capped): only after the user agrees to the cap;
+# use --background for large archives
 gbrain extract-conversation-facts --types conversation --max-cost-usd 5
 ```
 
@@ -345,6 +354,15 @@ Evolution:
 - YYYY-MM-DD — <one-line development> (conversations/...)
 - YYYY-MM-DD — <one-line development> (conversations/...)
 ```
+
+## When it fails
+
+Follow the [agent operator protocol](../conventions/agent-operator-protocol.md) for any gbrain error `code`, exit code, `[AGENT]` block or notice block. Specific to this skill:
+
+- `gbrain extract-conversation-facts` stops at its cost cap (exit 11): run the printed `resume_command`; it skips pages already done. Raise `--max-cost-usd` only after the user agrees.
+- Under an explicit cap it refuses with `no_pricing`: the user must agree to register the model price; the brain host's operator runs `gbrain pricing set <model> --input <usd-per-1M> --output <usd-per-1M>`.
+- `gbrain transcripts ingest` writes nothing: check the path the converter actually writes to before re-running; an empty import is silent, so verify page counts.
+- A "did we discuss X?" search is empty with a degraded notice: that is not proof it was never discussed; say the search was keyword-only.
 
 ## Anti-Patterns
 

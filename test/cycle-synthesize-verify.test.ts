@@ -23,6 +23,7 @@ import { toCorpusText } from '../src/core/transcripts/claude-code-jsonl.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { renderMaterializedBullet } from '../src/core/persistence/canonical-projections.ts';
+import { cpuMs } from './helpers/cpu-time.ts';
 
 function grounded(content: string) {
   const { norm, map } = normalizeForGrounding(content);
@@ -404,6 +405,9 @@ describe('normalizeForGrounding — multi-code-unit case folding (security-revie
       '  leading and trailing   ',
       'plain ascii already normalized',
       '',
+      'run `gbrain doctor` to check the **sync** step',  // #6258: inline markup is skipped on both paths
+      '用户: **重要发现**:gbrain ~~old~~ ~5 my_var ```code```',
+      '[**Ana**](people/ana) said *this*',
     ];
     for (const c of cases) {
       expect(normForGrounding(c)).toBe(normalizeForGrounding(c).norm);
@@ -419,10 +423,10 @@ describe('groundQuote — CPU bounds (performance-review regression)', () => {
     const transcript = ('routine words about scheduling and lunch orders and build status. '.repeat(5000));
     const t = grounded(transcript);
     const fabricated = 'entirely novel strategic manifesto sentence '.repeat(80); // ~3.5K chars > cap
-    const started = Date.now();
-    const g = groundQuote(fabricated, t);
+    let g!: ReturnType<typeof groundQuote>;
+    const ms = cpuMs(() => { g = groundQuote(fabricated, t); });
     expect(g.status).toBe('none');
-    expect(Date.now() - started).toBeLessThan(1000);
+    expect(ms).toBeLessThan(1000);
   });
 });
 

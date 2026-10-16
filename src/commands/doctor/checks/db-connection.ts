@@ -1,6 +1,7 @@
 /**
  * Database reachability: the PGLite data-dir diagnosis and scratch-store probe
- * that run when the connect failed, the connection check itself (live, or
+ * that run when the connect failed, the near-backup-cap size warning on a
+ * healthy PGLite brain (#6649), the connection check itself (live, or
  * synthesized when there is no engine), and the two early stops that end the
  * run before the DB checks.
  *
@@ -10,14 +11,20 @@
  * src/commands/doctor/registry.ts and src/core/doctor-categories.ts.
  */
 
-import { loadConfig, gbrainPath } from '../../../core/config.ts';
+import { loadConfig, gbrainPath, configPath, getDbUrlSource, type DbUrlSource } from '../../../core/config.ts';
+import type { Action } from '../../../core/agent-output.ts';
+import { agentFix, doctorVerify } from '../check-fix.ts';
+import { exclusiveFix, liveServeOwner } from '../../../core/exclusive-fix.ts';
 import { startHeartbeat } from '../../../core/progress.ts';
 import { checkPgliteScratchProbe } from './core-health.ts';
 import { computePgliteDataDirCheck } from './pglite-worker.ts';
+import { BACKUP_ARCHIVE_MAX_BYTES } from '../../../core/backup/archive.ts';
+import { BACKUP_SIZE_WARN_RATIO, PHYSICAL_COPY_RUNBOOK, estimatedTarBytes, formatGiB, physicalCopyFix } from '../../../core/backup/preflight.ts';
 import type { Check } from '../../doctor.ts';
 import { classifyPgAccessError } from '../../../core/pg-access-classify.ts';
 import { dbRepairRecurrenceCheck } from './engine-fit.ts';
 import { STOP_DOCTOR, connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
+import { DoctorBudgetError, budgetUnknownCheck } from '../budget.ts';
 
 async function runPgliteDataDir(ctx: DoctorContext): Promise<Check[]> {
   const { args, engine, fastMode, progress } = ctx;
@@ -59,6 +66,17 @@ async function runPgliteDataDir(ctx: DoctorContext): Promise<Check[]> {
       }
     }
 
+    // #6649: a healthy PGLite brain nearing the backup-archive cap is warned before `gbrain backup create` refuses.
+    if (engine && !fastMode && cfgForProbe?.engine === 'pglite' && cfgForProbe.database_path) {
+      try {
+        const { resolve } = await import('node:path');
+        const sizeCheck = backupSizeCheck(resolve(cfgForProbe.database_path));
+        if (sizeCheck) checks.push(sizeCheck);
+      } catch {
+        // Best-effort: an unreadable data dir must not stop doctor.
+      }
+    }
+
     const dirExplainsFailure = dirVerdict === 'locked' || dirVerdict === 'missing';
     if (probeRequested || (pgliteInitFailed && !dirExplainsFailure)) {
       progress.start('doctor.pglite_probe');
@@ -82,6 +100,26 @@ async function runPgliteDataDir(ctx: DoctorContext): Promise<Check[]> {
     }
   }
   return checks;
+}
+
+/**
+ * #6649: `pglite_data_dir` warns once the data dir's estimated archive size
+ * passes BACKUP_SIZE_WARN_RATIO of the 8 GiB backup cap, naming
+ * `backup_too_large` and the physical-copy runbook. Null below the ratio.
+ * `estimatedBytes` is injectable so tests need not write gigabytes.
+ */
+export function backupSizeCheck(dataDir: string, estimatedBytes?: number): Check | null {
+  const bytes = estimatedBytes ?? estimatedTarBytes(dataDir);
+  if (bytes < BACKUP_ARCHIVE_MAX_BYTES * BACKUP_SIZE_WARN_RATIO) return null;
+  const over = bytes > BACKUP_ARCHIVE_MAX_BYTES;
+  return {
+    name: 'pglite_data_dir',
+    status: 'warn',
+    message: `backup_too_large: this PGLite brain needs about ${formatGiB(bytes)} in a backup archive, ${over ? 'over' : 'near'} the ${formatGiB(BACKUP_ARCHIVE_MAX_BYTES)} cap, ` +
+      `so \`gbrain backup create\` ${over ? 'refuses it' : 'will refuse it soon'}. Plan a quiesced physical copy (${PHYSICAL_COPY_RUNBOOK}).`,
+    details: { code: 'backup_too_large', data_dir: dataDir, estimated_bytes: bytes, limit_bytes: BACKUP_ARCHIVE_MAX_BYTES, over_limit: over },
+    fix: physicalCopyFix(),
+  };
 }
 
 export const pgliteDataDirEntry: DoctorEntry = {
@@ -134,14 +172,46 @@ async function pgbouncerPrepareCheck(): Promise<Check | null> {
  * makeRemediationStep: that lane feeds `--remediate`, whose Minion jobs need
  * the very DB that's down (db-repair is the engine-free applier here).
  */
-function classifiedConnectionCheck(e: unknown): Check {
+function classifiedConnectionCheck(e: unknown, dbSource?: DbUrlSource): Check {
+  // A7: a live `gbrain serve` owns this PGLite brain (usually an agent session's stdio serve).
+  // The brain is not broken; doctor needs it to itself: stop that serve, then re-run doctor.
+  const owner = liveServeOwner(e);
+  if (owner) {
+    return {
+      name: 'connection', status: 'warn', readiness_state: 'unknown',
+      message: `${e instanceof Error ? e.message : String(e)} The database checks did not run.`,
+      details: { reason: 'live_serve', lock_owner_pid: owner.pid, lock_owner_transport: owner.transport },
+      fix: exclusiveFix(agentFix(['gbrain', 'doctor', '--json'], 'Runs the database checks once doctor has the brain to itself.', 'connection',
+        { requires_exclusive: true }), owner),
+    };
+  }
   const d = classifyPgAccessError(e, { url: loadConfig()?.database_url ?? null });
+  const source = describeUrlSource(dbSource ?? getDbUrlSource());
   return {
     name: 'connection',
     status: 'fail',
-    message: d.message,
-    details: { reason: d.reason, transient: d.transient, fix_hint: `${d.remediation} Run: gbrain db-repair` },
+    message: source ? `${d.message} (database URL from ${source})` : d.message,
+    details: { reason: d.reason, transient: d.transient, fix_hint: `${d.remediation} Run: gbrain db-repair`, ...(source ? { url_source: source } : {}) },
+    readiness_state: 'unknown',
+    fix: dbRepairFix(d.remediation),
   };
+}
+
+/**
+ * E10: where the database URL came from, in words an agent can act on: the
+ * environment variable, or the key in the config file under GBRAIN_HOME.
+ */
+export function describeUrlSource(source: DbUrlSource | undefined): string | null {
+  if (source === 'env:GBRAIN_DATABASE_URL') return 'the GBRAIN_DATABASE_URL environment variable';
+  if (source === 'env:DATABASE_URL') return 'the DATABASE_URL environment variable';
+  if (source === 'config-file') return `database_url in ${configPath()}`;
+  if (source === 'config-file-path') return `database_path in ${configPath()}`;
+  return null;
+}
+
+function dbRepairFix(why: string): Action {
+  return agentFix(['gbrain', 'db-repair'], `${why} \`gbrain db-repair\` diagnoses the database URL and access without changing anything (it prints the --yes command for a safe fix).`, 'connection',
+    { docs: 'docs/ENGINES.md#engine-detection-and-access-repair' });
 }
 
 async function runOfflineConnection(ctx: DoctorContext): Promise<Check[]> {
@@ -154,20 +224,32 @@ async function runOfflineConnection(ctx: DoctorContext): Promise<Check[]> {
     // whether a URL exists (env or config-file) — the caller simply
     // skipped the connection. When null, there really is no config
     // anywhere.
-    if (!fastMode && dbSource && connectError !== undefined) {
+    if (connectError instanceof DoctorBudgetError) {
+      // #6696 B1: the connect was still pending at the run's deadline: unknown, not an outage.
+      checks.push(budgetUnknownCheck('connection', connectError.elapsedMs, ctx.deadline?.budgetMs ?? connectError.elapsedMs));
+    } else if (!fastMode && dbSource && connectError !== undefined) {
       // 2c-bis: a REAL connect failure — synthesize the classified check so
       // `checks[name=="connection"]` exists in every failure shape.
-      checks.push(classifiedConnectionCheck(connectError));
+      checks.push(classifiedConnectionCheck(connectError, dbSource));
     } else {
       let msg: string;
       if (fastMode && dbSource) {
         msg = `Skipping DB checks (--fast mode, URL present from ${dbSource})`;
       } else if (!fastMode && dbSource) {
-        msg = `Could not connect to configured DB (URL from ${dbSource}); filesystem checks only`;
+        msg = `Could not connect to configured DB (URL from ${dbSource}: ${describeUrlSource(dbSource)}); filesystem checks only`;
       } else {
-        msg = 'No database configured (filesystem checks only). Set GBRAIN_DATABASE_URL or run `gbrain init`.';
+        msg = `No database configured (filesystem checks only; no URL in the environment or in ${configPath()}). Set GBRAIN_DATABASE_URL or run \`gbrain init\`.`;
       }
-      checks.push({ name: 'connection', status: 'warn', message: msg });
+      checks.push({
+        name: 'connection', status: 'warn', message: msg, readiness_state: 'unknown',
+        ...(fastMode && dbSource
+          ? { fix: agentFix(['gbrain', 'doctor', '--json'], 'Runs the database checks --fast skipped.', 'connection') }
+          : dbSource
+            ? { fix: dbRepairFix('The configured database did not accept the connection.') }
+            : { fix: { argv: ['gbrain', 'init', '--pglite'], consent: [], actor: 'agent', requires_exclusive: false, verify: doctorVerify('connection'),
+              why: 'No brain is configured on this machine; init creates a local PGLite brain (keyless unless the user adds a provider key).',
+              user_message: 'There is no gbrain brain on this machine yet. Shall I create a local one?' } as Action }),
+      });
     }
     // URL-only + engine-free checks still run on a dead DB — that is the
     // point of them.
@@ -224,9 +306,19 @@ async function runConnection(ctx: DoctorContext): Promise<Check[]> {
   // 3. Connection
   progress.heartbeat('connection');
   try {
-    const stats = await engine.getStats();
-    checks.push({ name: 'connection', status: 'ok', message: `Connected, ${stats.page_count} pages` });
+    // #6696 B1: the ops tier proves the round trip only; the page count is a full count the deadline does not afford.
+    if (ctx.tier === 'ops') {
+      await engine.executeRaw('SELECT 1 AS ok');
+      checks.push({ name: 'connection', status: 'ok', message: 'Connected (ops tier: page count not read).' });
+    } else {
+      const stats = await engine.getStats();
+      checks.push({ name: 'connection', status: 'ok', message: `Connected, ${stats.page_count} pages` });
+    }
   } catch (e: unknown) {
+    // A round trip the ops deadline ended (a saturated pool, a blocked server) is unknown, not a classified outage.
+    const deadlineAt = ctx.deadline?.deadlineAt;
+    if (e instanceof DoctorBudgetError) throw e;
+    if (ctx.tier === 'ops' && deadlineAt != null && Date.now() >= deadlineAt) throw new DoctorBudgetError(Date.now() - ctx.deadline!.startedAt);
     // db-availability loop (2c): classified + redacted, with the fix hint.
     checks.push(classifiedConnectionCheck(e));
     progress.finish();

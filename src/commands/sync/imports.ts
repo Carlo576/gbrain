@@ -25,11 +25,15 @@ import {
 import { isPathSafe } from '../../core/sync-git.ts';
 import { resolveStallAbortSeconds, composeAbortSignals } from '../../core/sync-reconcile.ts';
 import { sanitizePathForDisplay } from '../../core/sync.ts';
+import { isWindowsColonTarget } from '../../core/persistence/native-file-target.ts';
+import { ERROR_CATALOGUE } from '../../core/error-catalogue.ts';
+import { enginePoolStats } from '../../core/postgres-engine/pool-stats.ts';
 import type { SyncOpts, SyncResult } from '../sync.ts';
+import { clearLegacyHold, holdRefusedImport, noteScreenedImport, type LegacyHolds } from './holds.ts';
 import { partial, markCompleted, noteTypeWarning, maybeYield } from './sync-run.ts';
 import type { SyncPlan, SyncProgress, SyncRun } from './sync-run.ts';
 
-type ImportPlan = Pick<SyncPlan, 'opts' | 'filtered' | 'lastCommit' | 'pin' | 'company' | 'gitContextRoot' | 'syncImportRoot' | 'syncActivePack'>;
+type ImportPlan = Pick<SyncPlan, 'opts' | 'filtered' | 'lastCommit' | 'pin' | 'company' | 'gitContextRoot' | 'syncImportRoot' | 'syncActivePack' | 'holds'>;
 
 type ImportContext = {
   opts: SyncOpts;
@@ -41,6 +45,7 @@ type ImportContext = {
   pacer: DbPacer;
   progressAt: { last: number };
   progress: SyncProgress;
+  holds: LegacyHolds | null;
 };
 
 /** The add/modify drain. Returns a partial result when the run aborts. */
@@ -51,7 +56,7 @@ export async function runImportsPhase(
   noEmbed: boolean,
 ): Promise<SyncResult | undefined> {
   const { engine, completed } = run;
-  const { filtered, company, gitContextRoot, syncImportRoot, syncActivePack } = plan;
+  const { filtered, company, gitContextRoot, syncImportRoot, syncActivePack, holds } = plan;
   let { opts } = plan;
   // Process adds and modifies.
   //
@@ -72,6 +77,8 @@ export async function runImportsPhase(
   // future maintainers know to thread additional failure surfaces through
   // the same array.
   const addsAndMods = [...filtered.added, ...filtered.modified];
+  // #5988: held files due for a re-screen join the drain though Git did not touch them.
+  addsAndMods.push(...(holds?.rescreen ?? []));
 
   // Sort newest-first so date-prefixed brain paths get embedded before older
   // ones. See src/core/sort-newest-first.ts for the policy.
@@ -87,6 +94,8 @@ export async function runImportsPhase(
 
   if (importsToDo.length > 0) {
     progress.start('sync.imports', importsToDo.length);
+    // #6366 (P4.7): the pool's state as the drain starts, so a later hang report carries it next to the stall line.
+    serr(`[sync] imports start: ${importsToDo.length} file(s), concurrency ${effectiveConcurrency}${poolLine(engine)}`);
 
     // Core import logic shared by serial and parallel paths.
     // Paths from git diff are relative to gitContextRoot; under #4342's
@@ -98,7 +107,7 @@ export async function runImportsPhase(
     opts = watchdog.opts;
     const { stallTimer, progressAt } = watchdog;
 
-    const ctx: ImportContext = { opts, company, gitContextRoot, syncRepoPath, syncActivePack, noEmbed, pacer, progressAt, progress };
+    const ctx: ImportContext = { opts, company, gitContextRoot, syncRepoPath, syncActivePack, noEmbed, pacer, progressAt, progress, holds };
     const aborted = await drainImports(run, plan, ctx, importsToDo, effectiveConcurrency, runParallel, stallTimer);
     if (aborted) return aborted;
 
@@ -225,7 +234,7 @@ function startStallWatchdog(
     stallTimer = setInterval(() => {
       if (Date.now() - progressAt.last >= stallMs) {
         serr(
-          `[sync] no import progress for ${stallSeconds}s — aborting (stall watchdog). ` +
+          `[sync] no import progress for ${stallSeconds}s — aborting (stall watchdog)${poolLine(run.engine)}. ` +
           `The per-source lock will release; the next 'gbrain sync' resumes from the checkpoint.`,
         );
         run.stallAborted = true;
@@ -239,12 +248,28 @@ function startStallWatchdog(
   return { opts, stallTimer, progressAt };
 }
 
+/** #6366: ` · pool max=<n> checked_out=<n> waiters=<n>` for an engine that reports a pool (Postgres), empty otherwise. */
+export function poolLine(engine: unknown): string {
+  const pool = enginePoolStats(engine);
+  return pool ? ` · pool max=${pool.max} checked_out=${pool.checked_out} waiters=${pool.waiters}` : '';
+}
+
 /** Core import logic shared by the serial and parallel paths. */
 async function importOnePath(run: SyncRun, ctx: ImportContext, eng: BrainEngine, path: string): Promise<void> {
   const { failedFiles, succeededPaths, pagesAffected, deletedSlugs } = run;
-  const { opts, company, gitContextRoot, syncRepoPath, syncActivePack, noEmbed, pacer, progressAt, progress } = ctx;
+  const { opts, company, gitContextRoot, syncRepoPath, syncActivePack, noEmbed, pacer, progressAt, progress, holds } = ctx;
   // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- `path` is a git-diff path from the synced repo (repo content can be hostile), but the joined path is checked by isPathSafe(filePath, gitContextRoot) realpath containment below before any read
   const filePath = join(syncRepoPath, path);
+  // #5032: Windows cannot store ':' in a file name (it names an alternate data
+  // stream), so the file cannot be in this checkout; a named per-file refusal
+  // instead of the silent "deleted after the pin" skip below.
+  if (isWindowsColonTarget(path)) {
+    failedFiles.push({ path, error: `colon_slug_windows_write_through: ${path} has a ':' in its name, which Windows cannot store. `
+      + `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync${opts.sourceId ? ` --source ${opts.sourceId}` : ''} (${ERROR_CATALOGUE.colon_slug_windows_write_through.docs}).` });
+    progressAt.last = Date.now();
+    progress.tick(1, `skip:${path}`);
+    return;
+  }
   if (!company && !existsSync(filePath)) {
     // v0.42.x (#1794, Codex #3): the diff is against the PINNED target, but
     // importFile reads the live working tree. A file added in lastCommit..pin
@@ -263,6 +288,7 @@ async function importOnePath(run: SyncRun, ctx: ImportContext, eng: BrainEngine,
     // its row so it can't age doctor to a permanent FAIL. (This covers the
     // net-zero add-then-delete range where the path isn't in filtered.deleted.)
     succeededPaths.push(path);
+    await clearLegacyHold(eng, holds, path);
     progressAt.last = Date.now(); // #1950: forward progress → reset stall watchdog
     progress.tick(1, `skip:${path}`);
     return;
@@ -309,7 +335,12 @@ async function importOnePath(run: SyncRun, ctx: ImportContext, eng: BrainEngine,
         ? importImageFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId })
         : company ? importCompanyBrainFile(eng, filePath, opts.sourceId!) : importFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack }));
     noteTypeWarning(run, result.type_warning);
-    if (result.status === 'imported') {
+    noteScreenedImport(holds, path, result);
+    if (await holdRefusedImport(eng, holds, path, filePath, result)) {
+      // #5988: a content refusal is held, not failed: out of failedFiles and
+      // the auto-skip streak, so it never gates the bookmark.
+      await markCompleted(run, path);
+    } else if (result.status === 'imported') {
       run.chunksCreated += result.chunks;
       pagesAffected.push(result.slug);
       deletedSlugs.delete(result.slug); // #1284: deleted-then-re-added in the same run → embeddable again
@@ -320,6 +351,7 @@ async function importOnePath(run: SyncRun, ctx: ImportContext, eng: BrainEngine,
       // persist. partial() reports this so cron operators see how
       // much actually landed before --timeout fired.
       run.filesImported++;
+      await clearLegacyHold(eng, holds, path);
       // v0.42.x (#1794): checkpoint this path so a kill banks it.
       await markCompleted(run, path);
     } else if (result.status === 'skipped' && result.skip_reason === 'malformed_path') {
@@ -340,12 +372,17 @@ async function importOnePath(run: SyncRun, ctx: ImportContext, eng: BrainEngine,
       // status 'skipped' with no error == content_hash short-circuit
       // (already imported, unchanged). It IS done for checkpoint purposes,
       // so mark it completed (matches import-checkpoint's posture).
+      await clearLegacyHold(eng, holds, path);
       await markCompleted(run, path);
     }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    serr(`  Warning: skipped ${path}: ${msg}`);
-    failedFiles.push({ path, error: msg });
+    if (await holdRefusedImport(eng, holds, path, filePath, { status: 'error', error: msg })) {
+      await markCompleted(run, path);
+    } else {
+      serr(`  Warning: skipped ${path}: ${msg}`);
+      failedFiles.push({ path, error: msg });
+    }
   } finally {
     permit.release();
   }
@@ -395,7 +432,7 @@ async function drainImports(
         }
       } else {
         const { PostgresEngine } = await import('../../core/postgres-engine.ts');
-        const { resolvePoolSize } = await import('../../core/db.ts');
+        const { connectWithRetry, resolvePoolSize } = await import('../../core/db.ts');
         const workerPoolSize = Math.min(2, resolvePoolSize(2));
         const workerCount = Math.min(effectiveConcurrency, importsToDo.length);
         const databaseUrl = config.database_url;
@@ -411,7 +448,7 @@ async function drainImports(
           // already-connected engines on any one failure.
           for (let i = 0; i < workerCount; i++) {
             const eng = new PostgresEngine();
-            await eng.connect({ database_url: databaseUrl, poolSize: workerPoolSize });
+            await connectWithRetry(eng, { database_url: databaseUrl, poolSize: workerPoolSize }, { retryConnectTimeout: true });
             workerEngines.push(eng);
           }
 

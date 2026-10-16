@@ -12,7 +12,7 @@
  *
  * Lane: serial. Run: `bash scripts/run-serial-tests.sh test/fresh-install-pglite.serial.test.ts`. Moved from test/e2e/
  * by the 2026-09 lane-move pilot (PGLite-only, no DATABASE_URL); see
- * docs/TESTING.md "Lane-move pilot".
+ * docs/test-audit/2026-09-29/implementation/lane-pilot.md.
  */
 
 import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, test } from 'bun:test';
@@ -144,13 +144,13 @@ describe('E2E: fresh gbrain init --pglite → import → embed works end-to-end'
       const colDim = await readContentChunksEmbeddingDim(engine);
       expect(colDim.exists).toBe(true);
       expect(colDim.dims).toBe(NEW_INSTALL_DEFAULT_EMBEDDING_DIMENSIONS);
-      // v0.48.2: the mode-bundle default IS voyage:rerank-2.5 — a Voyage-keyed
+      // v0.48.2: the mode-bundle default IS voyage:rerank-3-lite — a Voyage-keyed
       // init writes NO explicit row; the RESOLVED reranker is the default.
       expect(await engine.getConfig('search.reranker.model')).toBeNull();
       {
         const { loadSearchModeConfig, resolveSearchMode } = await import('../src/core/search/mode.ts');
         const knobs = resolveSearchMode(await loadSearchModeConfig(engine));
-        expect(knobs.reranker_model).toBe('voyage:rerank-2.5');
+        expect(knobs.reranker_model).toBe('voyage:rerank-3-lite');
         // (reranker_enabled follows the picked mode — non-TTY init may auto-select a
         // reranker-off bundle; the point here is that no explicit row was written)
         expect(await engine.getConfig('search.reranker.enabled')).toBeNull();
@@ -295,13 +295,13 @@ describe('E2E: fresh gbrain init --pglite → import → embed works end-to-end'
       const engine = new PGLiteEngine();
       await engine.connect({ database_path: cfg.database_path, engine: 'pglite' });
       try {
-        // v0.48.2: the mode-bundle default IS voyage:rerank-2.5 — a Voyage-keyed
+        // v0.48.2: the mode-bundle default IS voyage:rerank-3-lite — a Voyage-keyed
         // init writes NO explicit row; the RESOLVED reranker is the default.
         expect(await engine.getConfig('search.reranker.model')).toBeNull();
         {
           const { loadSearchModeConfig, resolveSearchMode } = await import('../src/core/search/mode.ts');
           const knobs = resolveSearchMode(await loadSearchModeConfig(engine));
-          expect(knobs.reranker_model).toBe('voyage:rerank-2.5');
+          expect(knobs.reranker_model).toBe('voyage:rerank-3-lite');
           // (reranker_enabled follows the picked mode — non-TTY init may auto-select a
           // reranker-off bundle; the point here is that no explicit row was written)
           expect(await engine.getConfig('search.reranker.enabled')).toBeNull();

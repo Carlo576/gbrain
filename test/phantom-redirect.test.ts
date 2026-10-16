@@ -580,7 +580,7 @@ describe('runExtractFacts — phantom-redirect integration', () => {
     });
   });
 
-  test('round 2 P1: legacy-row guard fires BEFORE phantom-redirect pass', async () => {
+  test('round 2 P1 (#6650): the legacy-row guard holds only the phantom that owns legacy rows', async () => {
     await withTempDirs(async ({ brainDir }) => {
       // #2763: the guard only gates on rows the v0_32_2 Phase B backfill
       // could actually fence, which requires the source's local_path — set
@@ -593,9 +593,10 @@ describe('runExtractFacts — phantom-redirect integration', () => {
         // Seed a legacy v0.31 fact row (row_num NULL, entity_slug NOT NULL).
         // `source` is NOT NULL in the schema; the v0.31 path always set it.
         // #2484: the guard only gates on rows whose entity_slug resolves to a
-        // LIVE page (genuine backfill candidates), so seed the backing page too.
+        // LIVE page, so seed the backing page too. #5299: the phase fences a
+        // row whose canonical file exists, so the page has no file here and the
+        // row stays unfenced, which is what gates.
         await putPage('people/legacy', '# legacy\n', { type: 'person' });
-        writeMd(brainDir, 'people/legacy', '# legacy\n');
         await engine.executeRaw(
           `INSERT INTO facts (source_id, entity_slug, fact, kind, valid_from, source)
            VALUES ('default', 'people/legacy', 'Legacy claim', 'fact', '2020-01-01'::date, 'legacy-import')`,
@@ -606,11 +607,24 @@ describe('runExtractFacts — phantom-redirect integration', () => {
         await putPage('alice', STUB_BODY);
         writeMd(brainDir, 'alice', STUB_BODY);
 
+        // #6650: a phantom that owns a legacy row would strand it, so it is held.
+        await putPage('bob', STUB_BODY);
+        writeMd(brainDir, 'bob', STUB_BODY);
+        await putPage('people/bob-example', '# bob-example\n', { type: 'person' });
+        writeMd(brainDir, 'people/bob-example', '# bob-example\n');
+        await engine.executeRaw(
+          `INSERT INTO facts (source_id, entity_slug, fact, kind, valid_from, source)
+           VALUES ('default', 'bob', '   ', 'fact', '2020-01-01'::date, 'legacy-import')`,
+        );
+
         const result = await runExtractFacts(engine, { sourceId: 'default', brainDir });
         expect(result.guardTriggered).toBe(true);
-        expect(result.phantomsRedirected).toBe(0);
-        // Phantom .md still on disk (pass skipped)
-        expect(mdExists(brainDir, 'alice')).toBe(true);
+        // A legacy row on another page no longer stops the pass for the source (#6650).
+        expect(result.phantomsRedirected).toBe(1);
+        expect(mdExists(brainDir, 'alice')).toBe(false);
+        // The phantom that owns a legacy row is held: its file and row stay.
+        expect(mdExists(brainDir, 'bob')).toBe(true);
+        expect(await engine.executeRaw(`SELECT 1 FROM facts WHERE entity_slug = 'bob' AND row_num IS NULL AND expired_at IS NULL`)).toHaveLength(1);
       } finally {
         await engine.executeRaw(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
       }

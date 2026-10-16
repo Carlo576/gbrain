@@ -27,11 +27,12 @@ export const REMOTE_PRIVATE_PAGES_KEY = 'search.remote_private_pages';
 /**
  * #5525 — extracted atoms and synthesized concept pages are derived from
  * other pages or from private transcripts, so a missing `visibility` field on
- * them means "origin unknown", not "world". They fail closed; every other page
- * keeps the documented default (absent visibility is world).
+ * them means "origin unknown", not "world". Pinned-question pages (`type:
+ * question`) are owner-private. They fail closed; every other page keeps the
+ * documented default (absent visibility is world).
  */
 function derivedPageSql(pageAlias: string): string {
-  return `(${pageAlias}.type = 'atom' OR (${pageAlias}.type = 'concept' AND ${pageAlias}.frontmatter->>'synthesized_by' IS NOT NULL))`;
+  return `(${pageAlias}.type IN ('atom', 'question') OR (${pageAlias}.type = 'concept' AND ${pageAlias}.frontmatter->>'synthesized_by' IS NOT NULL))`;
 }
 
 /**
@@ -44,16 +45,51 @@ function derivedPageSql(pageAlias: string): string {
  */
 export function privatePagesFilterFragment(pageAlias: string): string {
   return `(${privateSnapshotFilterFragment(pageAlias)}
-    AND NOT ${derivedOriginPrivateSql(pageAlias)})`;
+    AND NOT ${derivedOriginPrivateSql(pageAlias)}
+    AND NOT ${declaredLineagePrivateSql(pageAlias)})`;
+}
+
+/**
+ * `privatePagesFilterFragment` with a cheap first test: a page with no
+ * `visibility` or `derived_from` key whose type is not atom, concept or event
+ * is visible by every rule above, so only the remaining pages run the full
+ * check. For scans over thousands of candidate pages (an entity's referrers).
+ */
+export function privatePagesFilterFragmentFast(pageAlias: string): string {
+  return `((${pageAlias}.frontmatter->'visibility' IS NULL AND ${pageAlias}.frontmatter->'derived_from' IS NULL
+      AND ${pageAlias}.type NOT IN ('atom', 'concept', 'event'))
+    OR ${privatePagesFilterFragment(pageAlias)})`;
+}
+
+/**
+ * Declared lineage: a page whose frontmatter `derived_from` names a page (one
+ * slug or a list, `.md` optional) that is explicitly `visibility: private` in
+ * the same source is private too, whatever its own field says. Summaries,
+ * digests and reports written from finance-only or other private material
+ * therefore stay behind the same boundary as their inputs. Only an explicitly
+ * private input propagates; a missing input does not hide the page.
+ */
+function declaredLineagePrivateSql(p: string): string {
+  return `(CASE WHEN jsonb_typeof(${p}.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS (
+    SELECT 1 FROM pages declared_origin
+    WHERE declared_origin.source_id = ${p}.source_id
+      AND declared_origin.frontmatter->>'visibility' = 'private'
+      AND declared_origin.slug = ANY(ARRAY(
+        SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text(
+          CASE WHEN jsonb_typeof(${p}.frontmatter->'derived_from') = 'array' THEN ${p}.frontmatter->'derived_from'
+            ELSE jsonb_build_array(${p}.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)`;
 }
 
 /**
  * The same rule on a row's own `type`/`frontmatter` only, for snapshots such
  * as `page_versions` that have no page identity to follow to an origin. Callers
- * pair it with privatePagesFilterFragment on the live page.
+ * pair it with privatePagesFilterFragment on the live page. A page carrying the
+ * `pinned_question` marker is private whatever its `visibility` says (pinned
+ * questions are owner-private, src/core/questions/pages.ts).
  */
 export function privateSnapshotFilterFragment(alias: string): string {
-  return `COALESCE(${alias}.frontmatter->>'visibility', CASE WHEN ${derivedPageSql(alias)} THEN 'private' ELSE 'world' END) <> 'private'`;
+  return `(COALESCE(${alias}.frontmatter->>'visibility', CASE WHEN ${derivedPageSql(alias)} THEN 'private' ELSE 'world' END) <> 'private'
+    AND NOT COALESCE(${alias}.frontmatter ? 'pinned_question', false))`;
 }
 
 /**
@@ -73,7 +109,22 @@ function derivedOriginPrivateSql(p: string): string {
         AND derived_input_link.link_type = 'synthesized_from'
         AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private'
           OR ${privateOrigin('derived_input', 'derived_input_origin')}))
+    WHEN ${p}.type = 'event' AND ${p}.frontmatter->>'captured_via' LIKE 'life-chronicle:%' THEN ${chronicleOriginNotVisibleSql(p)}
     ELSE false END)`;
+}
+
+/**
+ * #5876 (C4a/E7) — a Life Chronicle event is private whenever the meeting,
+ * conversation or calendar page it was extracted from (`event.depth`, same
+ * source) is private by its own field or its declared lineage, and fails
+ * closed when that origin is missing (renamed or purged). Covers events
+ * written before the rule existed, at read time.
+ */
+function chronicleOriginNotVisibleSql(p: string): string {
+  return `NOT EXISTS (SELECT 1 FROM pages chronicle_origin WHERE chronicle_origin.source_id = ${p}.source_id
+      AND chronicle_origin.slug = ${p}.frontmatter->'event'->>'depth'
+      AND ${privateSnapshotFilterFragment('chronicle_origin')}
+      AND NOT ${declaredLineagePrivateSql('chronicle_origin')})`;
 }
 
 export type Visibility = 'private' | 'world';
@@ -135,7 +186,8 @@ export function privateProvenanceFilterFragment(factAlias: string): string {
 export function isPrivatePage(page: { type?: string | null; frontmatter?: unknown }): boolean {
   const frontmatter = typeof page.frontmatter === 'object' && page.frontmatter !== null
     ? page.frontmatter as Record<string, unknown> : {};
-  const derived = page.type === 'atom' || (page.type === 'concept' && frontmatter.synthesized_by != null);
+  if (frontmatter.pinned_question != null) return true;
+  const derived = page.type === 'atom' || page.type === 'question' || (page.type === 'concept' && frontmatter.synthesized_by != null);
   return (frontmatter.visibility ?? (derived ? 'private' : 'world')) === 'private';
 }
 

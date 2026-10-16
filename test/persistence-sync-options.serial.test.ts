@@ -132,28 +132,27 @@ check('noSchemaPack bypasses the configured pack and noExtract queues no optiona
   });
 });
 
+// #6712 PR 1: a changed-option resume no longer refuses `invalid_params`; it inherits the cursor's opt-outs (reported in
+// `inherited_options`) and still never rewrites accepted work.
 check('interrupted options survive resume and changed-option retries cannot rewrite accepted work', async engine => {
   const f = await fixture(engine, 2);
   const first = await performManagedSync(engine, f.opts, { maxPages: 1, maxMs: 1000 });
   expect(first).toMatchObject({ status: 'partial', filesImported: 1 });
-  const before = await cursor(engine, f.id);
   const requests = await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE source_id=$1', [f.id]);
-  for (const key of ['noEmbed', 'noSchemaPack', 'noExtract'] as const) {
-    await expect(performManagedSync(engine, { ...f.opts, [key]: false })).rejects.toMatchObject({ code: 'invalid_params' });
-    expect(await cursor(engine, f.id)).toEqual(before);
-    expect(await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual(requests);
-  }
-  expect(await performManagedSync(engine, f.opts)).toMatchObject({ status: 'first_sync', runId: first.runId, filesImported: 2 });
+  const resumed = await performManagedSync(engine, { ...f.opts, noEmbed: false, noSchemaPack: false, noExtract: false });
+  expect(resumed).toMatchObject({ status: 'first_sync', runId: first.runId, filesImported: 2 });
+  expect([...(resumed.inherited_options ?? [])].sort()).toEqual(['noEmbed', 'noExtract', 'noSchemaPack']);
+  expect(await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE id=ANY($1::uuid[])', [requests.map(row => (row as { id: string }).id)])).toEqual(requests);
   expect((await cursor(engine, f.id)).value.processingOptions).toEqual({ noEmbed: true, noSchemaPack: true, noExtract: true });
   expect(await engine.executeRaw("SELECT kind FROM persistence_effects WHERE source_id=$1 AND kind IN ('embedding','facts-backstop')", [f.id])).toEqual([]);
   const retry = await fixture(engine, 2);
   const interrupted = await performManagedSync(engine, retry.opts, { maxPages: 1, maxMs: 1000 });
   const original = await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE source_id=$1 ORDER BY id', [retry.id]);
-  await expect(performManagedSync(engine, { ...retry.opts, noSchemaPack: false })).rejects.toMatchObject({ code: 'invalid_params' });
+  // Without a failure (the refusal used to record one) `--retry-failed` has nothing to rediscover: it resumes the
+  // interrupted run with the cursor's opt-outs.
   const rediscovered = await performManagedSync(engine, { ...retry.opts, noSchemaPack: false, retryFailed: true });
-  expect(rediscovered.status).toBe('first_sync');
-  expect(rediscovered.runId).not.toBe(interrupted.runId);
-  expect((await cursor(engine, retry.id)).value.processingOptions.noSchemaPack).toBe(false);
+  expect(rediscovered).toMatchObject({ status: 'first_sync', runId: interrupted.runId, inherited_options: ['noSchemaPack'] });
+  expect((await cursor(engine, retry.id)).value.processingOptions.noSchemaPack).toBe(true);
   expect(await engine.executeRaw('SELECT id,intent FROM persistence_requests WHERE id=ANY($1::uuid[]) ORDER BY id', [original.map(row => row.id)])).toEqual(original);
 });
 
@@ -223,8 +222,10 @@ check('inherited cancellation and a released filesystem context never enter the 
 
 check('old inactive sync intents and managed bypass options remain refused', async engine => {
   const f = await fixture(engine);
-  for (const change of [{ noPull: false }, { includeGitignored: true }, { skipFailed: true }]) {
-    await expect(performManagedSync(engine, { ...f.opts, ...change })).rejects.toMatchObject({ code: 'writer_coordinator_required' });
+  await expect(performManagedSync(engine, { ...f.opts, noPull: false })).rejects.toMatchObject({ code: 'writer_coordinator_required' });
+  // #6696 C2: the managed bypass flags refuse by name, before anything runs.
+  for (const [change, flag] of [[{ includeGitignored: true }, '--include-gitignored'], [{ skipFailed: true }, '--skip-failed']] as const) {
+    await expect(performManagedSync(engine, { ...f.opts, ...change })).rejects.toMatchObject({ code: 'managed_sync_flag_refused', detail: flag });
   }
   await engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)");
@@ -302,8 +303,8 @@ test('fresh processes resume persisted pending opt-outs under the original reque
         const resumed = await child('resume');
         expect(resumed.pid).not.toBe(process.pid);
         expect(resumed.before).toEqual(frozen!);
-        expect(resumed.changedOptions).toEqual({ code: 'invalid_params' });
-        expect(resumed.afterChangedOptions).toEqual(frozen!);
+        expect(resumed.changedOptions).toEqual({ inherited: noEmbed ? ['noEmbed'] : [] });
+        expect(resumed.afterChangedOptions).toEqual(resumed.after);
         expect(resumed.result).toMatchObject({ status: 'first_sync', runId: pending!.runId, added: 1, filesImported: 1 });
         expect(resumed.after).toHaveLength(2);
         expect(resumed.after[0]).toEqual({ ...frozen![0], state: 'committed' });
@@ -588,11 +589,13 @@ async function syncState(engine: BrainEngine, sourceId: string) {
 
 type SyncBarrier = 'discovery' | 'discovery-commit' | 'foreground' | 'freeze' | 'freeze-commit' | 'request-lookup' | 'admission-commit';
 function matchesSyncBarrier(boundary: SyncBarrier, sql: string, params: unknown[] | undefined, transactional: boolean): boolean {
-  if (boundary === 'discovery') return sql.startsWith('SELECT slug,source_path FROM pages WHERE source_id=');
+  if (boundary === 'discovery') return sql.startsWith('SELECT slug,source_path,id FROM pages WHERE source_id=');
   if (boundary === 'foreground') return sql.includes("NOT(COALESCE(intent->>'kind','') LIKE 'managed_sync_%') LIMIT 1");
-  if (boundary === 'freeze') return sql.startsWith('SELECT id,slug,source_path FROM pages WHERE source_id=') && !transactional;
+  if (boundary === 'freeze') return sql.startsWith('SELECT id,slug,source_path,deleted_at FROM pages WHERE source_id=') && !transactional;
   if (boundary === 'request-lookup') return sql.startsWith('SELECT') && sql.includes('FROM persistence_requests') && sql.includes('request_id=') && !transactional;
   if (boundary === 'admission-commit') return sql.includes('UPDATE persistence_counters SET outstanding_count=outstanding_count+1');
+  // A won cursor swap is the saved cursor (#5984 feeder, no read-back): the freeze transaction's last statement is its manifest touch.
+  if (boundary === 'freeze-commit') return transactional && sql === 'UPDATE op_checkpoints SET updated_at=now() WHERE op=$1 AND fingerprint=$2' && params?.[0] === 'managed-sync-manifest';
   return transactional && sql === 'SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2' && params?.[0] === 'managed-sync';
 }
 
@@ -684,7 +687,10 @@ for (const boundary of ['retry-discovery', 'retry-commit', 'missing-manifest', '
   if (boundary !== 'completed-cleanup') {
     writeFileSync(join(f.root, 'records/example-0.md'), '---\ntitle: [broken\n---\nSynthetic invalid document.\n');
     f.git.commitAll('Add synthetic failed import');
-    expect(await performSync(engine, f.opts)).toMatchObject({ status: 'blocked_by_failures' });
+    // #5988: sync holds unreadable YAML by default; sync.holds=fail keeps the failed receipt this retry path needs.
+    await engine.setConfig('sync.holds', 'fail');
+    try { expect(await performSync(engine, f.opts)).toMatchObject({ status: 'blocked_by_failures' }); }
+    finally { await engine.unsetConfig('sync.holds'); }
     writeFileSync(join(f.root, 'records/example-0.md'), body);
     f.git.commitAll('Repair synthetic failed import');
   } else expect(await performSync(engine, f.opts)).toMatchObject({ status: 'first_sync', added: 1 });
@@ -696,7 +702,7 @@ for (const boundary of ['retry-discovery', 'retry-commit', 'missing-manifest', '
   let observed = false;
   engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
     const rows = await execute.call(this, sql, params);
-    if (!observed && (boundary === 'retry-discovery' ? sql.startsWith('SELECT slug,source_path FROM pages WHERE source_id=')
+    if (!observed && (boundary === 'retry-discovery' ? sql.startsWith('SELECT slug,source_path,id FROM pages WHERE source_id=')
       : boundary === 'completed-cleanup' ? sql.startsWith('DELETE FROM op_checkpoints WHERE op=$1')
       : this !== engine && sql === 'SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2' && params?.[0] === 'managed-sync')) {
       observed = true; abort.abort();

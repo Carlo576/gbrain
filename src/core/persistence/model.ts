@@ -18,6 +18,8 @@ export interface WriteAuthority {
   slugPrefixes: string[] | null;
   delegatedPrefixes?: string[] | null;
   delegated?: boolean;
+  /** Minions job that accepted an OAuth-delegated write; a live `job` grant re-derives only that job's namespace from it. */
+  delegatedJobId?: number;
   takesHolders?: string[] | null;
   /** Actual holders touched by a published take mutation; retained after intent compaction. */
   takeHoldersUsed?: string[];
@@ -82,9 +84,19 @@ export interface WriteRequest {
   outcome: Record<string, unknown> | null;
   error_code: string | null;
   error_message: string | null;
+  /** #5974 structured failure (publication-failure.ts); receipts expose only its public view. */
+  error_detail?: Record<string, unknown> | null;
   blocked_reason: string | null;
+  /** F6: the non-UUID request_id the client sent (request_id is its UUIDv5); outside the intent digest, kept through compaction. */
+  client_request_id?: string | null;
   compacted: boolean;
   publication_started: boolean;
+  /** #6278 (v220): preparations cut off by a deadline or an expired `preparing` claim; reset by a commit. Absent on rows read before the migration. */
+  /** #6176 (v217): the owner's claim-phase stamp (claim-phase.ts), read back by `claimStateOf`; absent on rows read before the migration. */
+  claim_phase?: unknown;
+  preparation_attempts?: number;
+  /** #6278: on a row the claim statements return: the stamp the previous claim left (its last recorded step). Never stored. */
+  previous_claim_phase?: unknown;
   created_at: Date | string;
   updated_at: Date | string;
   completed_at: Date | string | null;
@@ -102,12 +114,16 @@ export interface JournalLimits {
  * (the reported autopilot workload) runs at least one year: lifetime IDs last
  * about 417 days; receipt bytes hold a 30-day window of 16 KiB reservations
  * plus about 4 KiB retained per compacted receipt for about 590 days.
+ * Outstanding intent per principal holds two page-ceiling writes
+ * (page-size-policy.ts, 24 MiB each, JSON-escaped) plus headroom, so one
+ * large write never refuses another from the same principal.
  */
 export const DEFAULT_JOURNAL_LIMITS: Readonly<JournalLimits> = Object.freeze({
   principalOutstanding: 100, brainOutstanding: 1000,
-  principalIntentBytes: 32 * 1024 ** 2, brainIntentBytes: 256 * 1024 ** 2,
-  principalLifetimeIds: 250_000, brainLifetimeIds: 1_000_000,
-  principalTerminalBytes: 1536 * 1024 ** 2, brainTerminalBytes: 8 * 1024 ** 3,
+  principalIntentBytes: 64 * 1024 ** 2, brainIntentBytes: 256 * 1024 ** 2,
+  // #6696 (A2): sized for 5,000 admissions a day for a year (docs/guides/concurrent-writes.md#growth-model).
+  principalLifetimeIds: 2_000_000, brainLifetimeIds: 8_000_000,
+  principalTerminalBytes: 16 * 1024 ** 3, brainTerminalBytes: 64 * 1024 ** 3,
   brainRecoveryBytes: 1024 ** 3, worktreeRecoveryBytes: 256 * 1024 ** 2,
 });
 export type SqlEngine = Pick<BrainEngine, 'executeRaw'>;

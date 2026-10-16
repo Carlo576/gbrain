@@ -115,11 +115,93 @@ behave as you'd expect — every page appears in search.
 
 Flip later with `gbrain sources federate <id>` / `unfederate <id>`.
 
+### Explicit reads from a bound agent connection
+
+An agent connection started with `GBRAIN_SOURCE=<id>` (or inside a
+directory pinned by `.gbrain-source`) is bound to that source. Its
+unqualified reads stay on the bound source. It may still name another
+source in an explicit `source_id` read (`search`, `query`, `get_page`,
+`list_pages`, `resolve_slugs`, `recall`, `get_links`, `get_backlinks`,
+`traverse_graph`) when that source is
+`federated=true`; the result holds only the named source's rows. Writes
+still go to the bound source only.
+
+| Refusal hint | Why | Fix (on the brain host) |
+|--------------|-----|-------------------------|
+| `<id> is not federated` | The named source is not federated. | `gbrain sources federate <id>`, or start the connection without the binding. |
+| `<id> opted out of federation` | The named source was unfederated. | `gbrain sources federate <id>` if it should be readable from other sources. |
+| `<bound> opted out of federation …, so it reads no other source` | The bound source itself is isolated (`federated=false`), so it never reads another source. | `gbrain sources federate <bound>`, or start the connection without the binding. |
+| `Your token is not granted <id>` | An HTTP token or OAuth client whose grant does not include the source. | `gbrain auth rescope-client <client_id> --federated-read <ids>` for an OAuth client; `gbrain auth rescope-token <name> --sources <ids>` for a legacy bearer token. |
+
+`search_by_image`, `open_loops` and the code-intel tools keep their stricter
+rule: an explicit `source_id` must be inside the connection's own source or
+grant.
+
+### Links, backlinks and the graph across sources
+
+`gbrain links`, `gbrain backlinks` and `gbrain graph` (MCP: `get_links`,
+`get_backlinks`, `traverse_graph`) read the same sources as `search` for the
+same caller:
+
+| Caller | Unqualified read | `--source <id>` / `--source-id <id>` | `--all-sources` |
+|--------|------------------|--------------------------------------|-----------------|
+| Local CLI, source not pinned | Every federated source: one read per source, merged | That source | Every source |
+| Local CLI, pinned by `--source`, `GBRAIN_SOURCE` or `.gbrain-source` | The pinned source | That source | Every source |
+| Remote agent with no source grant | Every federated source | A federated source | Every federated source |
+| Remote agent with a grant | Its granted sources (never wider) | A granted source | Its granted sources |
+
+```bash
+gbrain backlinks companies/acme-example                     # resolved scope
+gbrain backlinks companies/acme-example --source business   # one source
+gbrain links people/alice-example --all-sources --json      # every source
+gbrain graph people/alice-example --depth 2 --all-sources
+```
+
+`get_links` keeps working as an alias of `links`. Passing `--source` together
+with `--source-id` or `--all-sources` is an error. A source that does not exist
+or is archived answers `unknown_source`; a remote agent naming a source outside
+its grant or federated set gets `permission_denied` with the fix, even when that
+source is archived. Private pages stay hidden from remote agents exactly as in
+`search`.
+
+Graph output carries source ids: each `gbrain graph` node has `source_id`, and
+each edge returned to agents has `from_source_id` / `to_source_id`. The same slug
+in two sources is two nodes or two edges.
+
+When a local unqualified read finds nothing but the page has links in a source
+outside the read (a non-federated source), the CLI prints the per-source counts
+and the exact rerun command on stderr, for example
+`gbrain backlinks companies/acme-example --source priv`; stdout stays the empty
+result and `--json` prints no hint. Remote agents never get this hint, so a
+source they cannot read stays indistinguishable from an empty one.
+
+On a thin-client install the link commands send an ambient `GBRAIN_SOURCE` or
+`.gbrain-source` binding as `source_id`, so they are narrowed the same way
+`search` is. An empty narrowed result says which binding scoped it and prints
+the `--all-sources` rerun command. If the brain host is older and ignores
+`source_id` or `--all-sources`, the command fails with "the brain host does not
+support … upgrade the host" instead of printing an unscoped result. Hosts that
+predate unknown-parameter warnings cannot be detected; upgrade the host first.
+
+**Say to your agent:** *"Show me everything that links to acme-example across my sources."*
+
+**Say to your agent:** *"Which pages does alice-example link to in the business source only?"*
+
 ## Commands
 
 The most-used subcommands (run `gbrain sources --help` for the full,
 always-current reference — it also covers `status`, `current`,
-`set-cr-mode`, and the `push`/`pull` durability surface):
+`set-cr-mode`, and the `push`/`pull` durability surface).
+
+Changing the contextual retrieval mode, per source with `gbrain sources
+set-cr-mode <id> <mode>` or brain-wide with `gbrain config set
+search.contextual_retrieval <mode>`, does not restamp existing pages: each
+keeps the mode recorded when it was imported, and the new mode applies to
+pages imported from then on. Both commands print this after the write, with
+`gbrain repair contextual-mode [--source <id>] --apply` for pages that have no
+recorded mode (preview it first without `--apply`; see
+[repair](repair.md)).
+
 
 ```
 gbrain sources add <id> --path <p> [--name <n>] [--federated|--no-federated] [--force]
@@ -148,7 +230,74 @@ gbrain sources attach <id>     Write .gbrain-source in CWD (like kubectl context
 gbrain sources detach          Remove .gbrain-source from CWD.
 gbrain sources federate <id>
 gbrain sources unfederate <id>
+gbrain sources mirror-readonly <id>
+gbrain sources mirror-writable <id>
+gbrain sources refresh <id> [--dry-run] [--resume|--abandon]   Managed brains: fast-forward the checkout and sync.
+gbrain sources set-strategy <id> <markdown|code|auto>
 ```
+
+### Read-only mirror sources
+
+A source whose Git remote is the source of truth (a code or docs repository
+you keep current from upstream) can be marked a read-only mirror:
+
+```bash
+gbrain sources mirror-readonly <id>
+```
+
+On a managed brain, sync then imports canonical metadata (a default title,
+type, tags kept in the brain) into the database only and never writes a file
+back into that checkout, so `git status` stays clean and the next fast-forward
+pull succeeds. A page write into the source (`put_page`, a timeline entry, a
+maintenance write) is stored database-only too; its receipt says
+`storage: "database_only"` with `write_through.skipped: "mirror_read_only"`.
+`gbrain sources list --json` shows `mirror_read_only` per source. Undo it with
+`gbrain sources mirror-writable <id>`; files are written again from the next
+write on, except for pages created while the source was a mirror: those have
+no file in the checkout and stay database-only. Git effects of a mirror's
+writes (for example a `forget`) complete as skipped. The flag is off by default.
+
+A managed brain never pulls inside a cycle. Advance a managed checkout with
+one command on its owner host:
+
+```bash
+gbrain sources refresh <id>
+```
+
+It refuses new writes to every source that shares the checkout until queued
+ones finish, fast-forwards it with `git merge --ff-only`, then syncs each of
+those sources without pulling. Sources bound to one checkout (for example
+`notes/` and `docs/` of the same repository) are refreshed together, because a
+merge rewrites files of all of them. `--dry-run` previews the incoming commit;
+refusals are listed under
+[worktree refresh refusals](write-refusals.md#worktree-refresh-refusals). A
+brain that is not managed keeps pulling inside `gbrain sync --source <id>`.
+
+The autopilot cycle syncs the checkout as it is and reports
+`upstream_refresh: "skipped_managed"`; `gbrain doctor` (`sync_freshness`) says
+"upstream unknown" when the checkout was not fetched in the last 24 hours. See
+[`managed_pull_skipped`](write-refusals.md#managed_pull_skipped).
+
+### Code sources: persist the sync strategy
+
+Every sync of a source (`sync --all`, autopilot, the dream cycle, the MCP
+`sync` op) uses the strategy stored on the source when the call names none.
+Unset, that is `markdown`, which imports only Markdown and deletes the page of
+a code file that changes. Record `code` (code only) or `auto` (Markdown and
+code) once for a code repository:
+
+```bash
+gbrain sources set-strategy api code
+gbrain sync --source api --full   # re-classify files unchanged since the last sync
+```
+
+`gbrain sources list --json` shows `strategy` per source (`null` when unset).
+An explicit `gbrain sync --strategy` still wins for that run. A source with an
+unfinished managed sync run refuses the change (`sync_run_unfinished`) until
+the run finishes (`gbrain sync --source <id> --no-pull` resumes it) or is
+retired ([managed sync orphans](repair.md#managed-sync-orphans)): that run's
+frozen manifest was classified under the old strategy. Connector sources
+(GitHub, Google) materialize Markdown and take no strategy.
 
 ## The git requirement for --path sources
 
@@ -163,7 +312,7 @@ Fix it with:
 
 ```bash
 git -C <path> init
-git -C <path> add -A
+git -C <path> add -A   # gbrain-allow-shared-tree-git: first commit of a brand-new repo nobody else writes yet
 git -C <path> commit -m "initial import"
 gbrain sources add <id> --path <path>
 ```
@@ -213,7 +362,7 @@ stored file paths, called its **slug-root mode**:
 
 The mode is decided once, by the first real sync or the first coordinated page
 write (such as `put_page`) that records a new file path, and pinned in the
-source's configuration. A few older write paths, such as saved brainstorm
+source's configuration. A few write paths, such as saved brainstorm
 ideas, follow an existing pin but do not set one. Every later sync,
 write and reader obeys the pin, so an existing brain never has its slugs
 renamed. `gbrain sync --dry-run` works out the mode without pinning it. A
@@ -232,11 +381,10 @@ can refuse that file with a slug/origin mismatch; there, add new pages as
 files in the checkout and sync them. Pages that already have a stored path
 keep writing to that file.
 
-**Older stored paths.** Before v0.60.5.0, write-through recorded
-Git-root-style paths (`notes/people/alice-example.md`) for pages in
-`source-root` sources, which made the next sync fail. Sync now accepts that
-older form when the rest of the path names the same page, and rewrites it on
-the next import. No command is needed.
+**Older stored paths.** Releases before v0.60.5.0 recorded Git-root-style
+paths (`notes/people/alice-example.md`) for pages in `source-root` sources.
+Sync accepts that form when the rest of the path names the same page, and
+rewrites it on the next import. No command is needed.
 
 **`ambiguous_source_path`.** If both readings of an old stored path exist as
 files, for example `~/vault/notes/people/alice-example.md` and
@@ -288,7 +436,12 @@ without writing anything"* — your agent runs `gbrain sync --dry-run`.
 This hardening path applies to unmanaged worktrees. After activating managed
 writers, Git effects belong to the persistence outbox; generated legacy push
 helpers refuse to run rather than bypass that ownership boundary. See the
-[concurrent-write guide](concurrent-writes.md).
+[concurrent-write guide](concurrent-writes.md). On a managed root the owner
+commits and pushes page writes (`gbrain sources writer git-durability <source>
+--enable`), files that are not pages are committed with plain git and ride the
+owner's next push, the checkout is never pulled or rebased, and the durability
+block below is regenerated in its managed form by that verb; see
+[files that are not pages](../architecture/topologies.md#files-that-are-not-pages).
 
 A long-lived agent that writes to a knowledge-wiki git repo needs three
 things to never lose work: pull before it edits, push every write, and not
@@ -316,17 +469,34 @@ gbrain sources unharden wiki
 
 What hardening guarantees:
 
-- **Pull-first, conflict-safe.** Every pull is a divergence-safe rebase. A
-  dirty working tree is skipped (your in-progress edits are never touched); a
-  rebase conflict is aborted cleanly and flagged for attention, never left
-  half-applied.
+- **Pull-first, safe in a shared checkout.** Nothing rebases or stashes the
+  working tree. A pull fetches, then, under the checkout's writer lock,
+  fast-forwards, or for a diverged branch merges the remote commits in memory
+  into a merge commit (`gbrain: merge origin/<branch> into <branch>`) and
+  fast-forwards to it. A real conflict changes nothing and is flagged for
+  attention ([conflicts](shared-checkout-git.md#conflicts)). `gbrain sources
+  pull`, which the unattended 30-minute cron runs, keeps its conservative
+  rule: a checkout with any local edit is skipped (`skipped_dirty`), so it
+  never moves files under a writer, and a checkout whose writer lock is busy
+  is skipped until the next run. An explicit `scripts/brain-commit-push.sh --pull`
+  (or `gbrain git commit-push --pull`) advances a dirty checkout unless a
+  dirty file is one the pull must change; then it changes nothing and its
+  notice names the files. `gbrain sources set-pull-strategy <id> <rebase|merge>`
+  is still accepted and recorded, but both strategies now integrate by merge,
+  because the shared tree is never rebased.
 - **Push is never deferred.** `scripts/brain-commit-push.sh "<msg>" <path>`
-  commits and pushes, and refuses to report success without a successful push
-  or confirmation that the exact destination branch at every effective origin
-  push URL contains the attempted commit. A rejected push can still succeed when another process
-  already pushed that commit; a stale local tracking ref is not confirmation.
-  The post-commit hook is a best-effort background fallback; the helper is
-  the guarantee.
+  delegates to `gbrain git commit-push`: it takes the checkout's writer lock,
+  commits only the named paths, merges a rejected push in memory, and refuses
+  to report success without a push the remote accepted. Other agents'
+  uncommitted files are never staged, stashed or touched. The post-commit
+  hook is a best-effort background fallback (it only publishes, never pulls);
+  the helper is the guarantee. Outcomes and what to do on each:
+  [shared-checkout git](shared-checkout-git.md#outcomes).
+- **One writer at a time per checkout.** Harden also sets
+  `rebase.autoStash=false`, `merge.autoStash=false` and `pull.ff=only` in the
+  checkout's local git config, so a stray `git pull` refuses instead of
+  autostashing. Host daemons that commit the same checkout join through the
+  [lock contract](shared-checkout-git.md#lock-contract).
 - **No silent staleness.** A 30-minute background pull keeps an idle session
   current. It runs DB-free, so it never contends with a live brain for the
   PGLite single-writer lock.

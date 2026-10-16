@@ -35,6 +35,7 @@
     "countStaleChunks#signature+sourceId": {
       "raw": 1
     },
+    "countStaleFrontmatterKeyPages#default": {},
     "countStalePagesForExtraction#attendance-blocked+sourceId": {},
     "countStalePagesForExtraction#attendance-exclude": {},
     "countStalePagesForExtraction#default": {},
@@ -64,6 +65,7 @@
     "findCandidateDuplicates#default": {},
     "findCandidateDuplicates#embedding": {},
     "findDuplicatePage#default": {},
+    "findDuplicatePages#default": {},
     "findOntologyConflicts#default": {},
     "findOntologyConflicts#sourceIds+excludePrivate": {},
     "findOrphanPages#default": {},
@@ -83,10 +85,18 @@
     "getCalibrationCurve#default": {},
     "getCalibrationCurve#sourceId": {},
     "getCalleesOf#bareFallback": {},
+    "getCalleesOf#chunkId": {},
     "getCalleesOf#default": {},
     "getCalleesOf#sourceId": {},
+    "getCallersOf#chunkId": {},
     "getCallersOf#default": {},
     "getCallersOf#sourceId": {},
+    "getChunkPage#default": {
+      "raw": 1
+    },
+    "getChunkPage#sourceIds+excludePrivate": {
+      "raw": 1
+    },
     "getChunkWindows#default": {},
     "getChunkWindows#scopedPrivateSafe": {},
     "getChunks#default": {
@@ -154,6 +164,8 @@
     "getTimelineForDate#week+sourceId": {},
     "getVersions#default": {},
     "getVersions#excludePrivate": {},
+    "getVersions#limit": {},
+    "getVersions#metadataOnly": {},
     "getVersions#sourceId": {},
     "getVersions#sourceIds": {},
     "insertFact#default": {},
@@ -187,6 +199,12 @@
     "listCorpusSample#seed": {
       "tx": 1
     },
+    "listEmbeddingStateRows#default": {
+      "raw": 1
+    },
+    "listEmbeddingStateRows#sourceIds": {
+      "raw": 1
+    },
     "listEnrichCandidates#default": {},
     "listEnrichCandidates#sourceId": {},
     "listEnrichCandidates#sourceIds+reenrich": {},
@@ -194,6 +212,9 @@
     "listFactsByEntity#default": {},
     "listFactsBySession#allFilters": {},
     "listFactsBySession#default": {},
+    "listFactsKeyset#default": {},
+    "listFactsKeyset#keyset": {},
+    "listFactsKeyset#strictTime": {},
     "listFactsSince#allFilters": {},
     "listFactsSince#default": {},
     "listFilesForPage#default": {},
@@ -233,6 +254,7 @@
     "listStaleChunks#updated_desc+sourceId+cursor": {
       "raw": 1
     },
+    "listStaleFrontmatterKeyPages#default": {},
     "listStalePagesForExtraction#afterPageId+versionTs+sourceId": {},
     "listStalePagesForExtraction#default": {},
     "listStaleTakes#default": {},
@@ -267,8 +289,18 @@
       "raw": 4,
       "tx": 1
     },
+    "readEmbeddingStateCounts#full": {
+      "raw": 1
+    },
+    "readEmbeddingStateCounts#full+sourceIds": {
+      "raw": 1
+    },
+    "readEmbeddingStateCounts#ops": {
+      "raw": 1
+    },
     "readPageSnapshot#default": {},
     "readPageSnapshot#sourceId": {},
+    "readPageSnapshotsBatch#default": {},
     "refreshPageBody#default": {},
     "removeLink#default": {},
     "removeLink#linkSource": {},
@@ -282,7 +314,11 @@
       "tx": 1
     },
     "replaceDerivedLinks#default": {
-      "raw": 11,
+      "raw": 12,
+      "tx": 1
+    },
+    "replaceDerivedLinksBatch#default": {
+      "raw": 12,
       "tx": 1
     },
     "resolveSlugWithAlias#default": {},
@@ -300,15 +336,19 @@
     "revertToVersion#default": {},
     "revertToVersion#sourceId": {},
     "searchKeyword#cjk": {
+      "raw": 3,
       "tx": 1
     },
     "searchKeyword#cjk+sourceIds+detailLow": {
+      "raw": 3,
       "tx": 1
     },
     "searchKeywordChunks#cjk": {
+      "raw": 1,
       "tx": 1
     },
     "searchKeywordChunks#cjk+sourceId": {
+      "raw": 1,
       "tx": 1
     },
     "searchTakes#default": {},
@@ -331,6 +371,7 @@
     "softDeletePage#default": {},
     "softDeletePage#sourceId": {},
     "softDeletePages#default": {},
+    "stripStaleFrontmatterKeys#default": {},
     "sumStaleChunkChars#default": {
       "raw": 1
     },

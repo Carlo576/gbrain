@@ -1,16 +1,19 @@
 import { isAbsolute } from 'node:path';
 import type { SyncOpts } from '../../commands/sync.ts';
-import { OperationError } from '../ops/contract.ts';
+import { opError } from '../ops/contract.ts';
+import { SYNC_PROCESSING_KEYS } from './sync-authority.ts';
+import { WIRE_SKEW_WINDOWS } from '../wire-skew.ts';
 
 export const SYNC_BOOLEAN_FLAGS = {
   '--full':'full','--dry-run':'dryRun','--no-pull':'noPull','--no-embed':'noEmbed','--no-extract':'noExtract',
   '--no-schema-pack':'noSchemaPack','--retry-failed':'retryFailed','--skip-failed':'skipFailed',
-  '--include-gitignored':'includeGitignored','--working-tree':'workingTree','--reset-checkpoint':'resetCheckpoint',
+  '--include-gitignored':'includeGitignored','--working-tree':'workingTree','--reset-checkpoint':'resetCheckpoint','--no-bulk':'noBulk',
 } as const;
 export const SYNC_VALUE_FLAGS = { '--source':'sourceId','--repo':'repoPath','--src-subpath':'srcSubpath','--strategy':'strategy',
   '--exclude':'exclude','--include-hidden':'includeHidden' } as const;
 export interface SyncWireParams { options: SyncOpts; cwd: string; timeoutSeconds: number; }
-const invalid = () => new OperationError('invalid_params','Invalid or unsupported local sync options.');
+const invalid = () => opError('invalid_params','Invalid or unsupported local sync options.',
+  'Run gbrain sync from the CLI (gbrain sync --help lists its flags); it builds the options this owner lane accepts.');
 export function validateSyncWireParams(value: Record<string,unknown>): SyncWireParams {
   if (Object.keys(value).some(k=>!['options','cwd','timeoutSeconds'].includes(k)) || typeof value.cwd!=='string' ||
       !isAbsolute(value.cwd) || value.cwd.length>32768 || value.cwd.includes('\0') || typeof value.timeoutSeconds!=='number' ||
@@ -23,9 +26,12 @@ export function validateSyncWireParams(value: Record<string,unknown>): SyncWireP
     else if(stringFields.has(key)) { if(typeof item!=='string'||!item||item.length>32768||item.includes('\0'))throw invalid(); }
     else if(['exclude','includeHidden'].includes(key)) {
       if(!Array.isArray(item)||item.length>256||item.some(v=>typeof v!=='string'||!v||v.length>4096||v.includes('\0')))throw invalid();
+    } else if(key===WIRE_SKEW_WINDOWS.explicitProcessing.field) {
+      // #6712 PR 1: accepted from an older client and ignored until the window in wire-skew.ts closes.
+      if(!Array.isArray(item)||new Set(item).size!==item.length||item.some(v=>!(SYNC_PROCESSING_KEYS as readonly unknown[]).includes(v)))throw invalid();
     } else throw invalid();
   }
-  const options=value.options as SyncOpts;
+  const { [WIRE_SKEW_WINDOWS.explicitProcessing.field]: _ignored, ...options } = value.options as SyncOpts & Record<string, unknown>;
   if(options.strategy&&!['markdown','code','auto'].includes(options.strategy))throw invalid();
   return {options:{...options},cwd:value.cwd,timeoutSeconds:value.timeoutSeconds};
 }

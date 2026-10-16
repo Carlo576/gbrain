@@ -49,6 +49,11 @@ export async function assertRetainedEmbeddingRebuildability(tx: BrainEngine, dim
     if (!Array.isArray(factColumns) || factColumns.length !== 1 || typeof factColumns[0].type !== 'string') throw new Error('Unknown fact schema');
     const factWidth = Number(factColumns[0].type.match(/^(?:vector|halfvec)\((\d+)\)$/)?.[1]);
     if (!Number.isSafeInteger(factWidth) || factWidth <= 0) throw new Error('Unknown fact dimensions');
+    const takeColumns = await tx.executeRaw<{ type: string }>(`SELECT format_type(atttypid,atttypmod) AS type
+      FROM pg_attribute WHERE attrelid='takes'::regclass AND attname='embedding' AND attnum>0 AND NOT attisdropped`);
+    if (!Array.isArray(takeColumns) || takeColumns.length !== 1 || typeof takeColumns[0].type !== 'string') throw new Error('Unknown take schema');
+    const takeWidth = Number(takeColumns[0].type.match(/^(?:vector|halfvec)\((\d+)\)$/)?.[1]);
+    if (!Number.isSafeInteger(takeWidth) || takeWidth <= 0) throw new Error('Unknown take dimensions');
     const schemaRebuild = model === undefined || width !== dimensions;
     const unavailablePage = `(s.archived IS DISTINCT FROM false OR p.deleted_at IS NOT NULL
       OR COALESCE(p.frontmatter,'{}'::jsonb) ? 'embed_skip'
@@ -70,15 +75,19 @@ export async function assertRetainedEmbeddingRebuildability(tx: BrainEngine, dim
         LEFT JOIN sources s ON s.id=p.source_id
         WHERE $8::boolean AND t.embedding IS NOT NULL AND t.active AND t.superseded_by IS NULL AND ${unavailablePage}) AS takes`,
     [['markdown', 'code'], [...AUDIT_ROW_SOURCES], schemaRebuild, model ?? '', dimensions, `${model ?? ''}:${dimensions}`,
-      schemaRebuild || factWidth !== dimensions || clearCompanions, clearCompanions]);
+      schemaRebuild || factWidth !== dimensions || clearCompanions, schemaRebuild || takeWidth !== dimensions || clearCompanions]);
     if (!row || (['pages', 'facts', 'takes'] as const).some(key => !Number.isSafeInteger(row[key]) || row[key] < 0)) {
       throw new Error('Unknown retained-vector census');
     }
     counts = row;
     if (model !== undefined) archivedWork = await countArchivedEmbeddingWork(tx,
       { signature: `${model}:${dimensions}`, includeNullSignature: true, includeUnsealed: true }, activeExists ? active : null);
-  } catch {
-    throw new Error('retained_vector_check_failed: Cannot determine whether retained vectors can be rebuilt; migration mutations refused. Inspect the selected brain and database/schema access before retrying.');
+  } catch (error) {
+    // #6587: a deadlock is retryable by the caller (withMigrationLeaseTransaction); keep it recognizable.
+    if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '40P01') throw error;
+    // The message stays content-free (a data error can quote stored text); the SQLSTATE names the class.
+    const code = typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : null;
+    throw new Error(`retained_vector_check_failed: Cannot determine whether retained vectors can be rebuilt; migration mutations refused.${code ? ` Database error SQLSTATE ${code}.` : ''} Inspect the selected brain and database/schema access before retrying.`, { cause: error });
   }
   if (counts.pages + counts.facts + counts.takes + archivedWork > 0) {
     throw new Error(`retained_vectors_blocked: ${counts.pages} page chunk(s), ${counts.facts} fact(s), ${counts.takes} take(s) cannot be rebuilt by this migration; ${archivedWork} archived page(s) have blocked embedding work. No invalidation is permitted. Inspect the blockers: archived sources require deliberate gbrain sources restore <id>; embed_skip, importer-only media, and deleted pages require an explicit retention/recovery decision. No source or page is restored automatically. See docs/guides/embedding-migration.md#recovery.`);

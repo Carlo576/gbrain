@@ -56,13 +56,7 @@ async function runSupervisor(ctx: DoctorContext): Promise<Check[]> {
     const dbLockCheckSkippedUnderFast = fastMode && !pidfileRunning && !engine;
 
     const rawSupervisorEvents = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
-    // `health.supervisor.ack_crashes` (JSON array of exact worker_exited
-    // timestamps, DB config plane) records crashes the operator reviewed and
-    // explained — e.g. an upgrade protocol-boundary exit where the stale
-    // worker self-terminated and the respawned worker stayed healthy. Acked
-    // exits drop out of the crash count but stay in the audit log and are
-    // reported in the message; a crash at any other ts still warns. Same
-    // contract as the other health.* acknowledgments.
+    // Reviewed crashes stay in the audit log but leave the warning count.
     let ackCrashTs = new Set<string>();
     try {
       const rawAck = engine ? await engine.getConfig('health.supervisor.ack_crashes') : null;
@@ -177,7 +171,7 @@ async function runSupervisor(ctx: DoctorContext): Promise<Check[]> {
       const pidFilePath = typeof lastStarted.pid_file === 'string' && lastStarted.pid_file.length > 0
         ? lastStarted.pid_file
         : DEFAULT_PID_FILE;
-      const localPid = readSupervisorPid(pidFilePath).pid;
+      const { pid: localPid, host: pidfileHost } = readSupervisorPid(pidFilePath);
       const localHost = hostname();
 
       // Read the DB singleton lock holder for this queue.
@@ -195,8 +189,23 @@ async function runSupervisor(ctx: DoctorContext): Promise<Check[]> {
         lockHolderPid: lock?.holder_pid ?? null,
         localHost,
         localPid,
+        pidfileHost: pidfileHost ?? null,
       });
-      if (verdict === 'mismatch') {
+      const hostLabelDiffers = lock !== null && lock.holder_host !== localHost;
+      if (verdict === 'mismatch' && lock!.holder_pid === localPid && hostLabelDiffers) {
+        // PR #6463: the same pid under a different host label, and an older supervisor's PID file records no host to settle it.
+        checks.push({
+          name: 'supervisor_singleton',
+          status: 'warn',
+          message:
+            `Queue '${queue}' singleton lock is held by ${lock!.holder_host}:${lock!.holder_pid}, and the local pidfile names the same pid ` +
+            `${localPid} on this machine, whose hostname is now ${localHost}. Either this machine's hostname changed since the supervisor ` +
+            `started (a restart records the new label and clears this), or a supervisor on another machine holds this queue. ` +
+            `Check with gbrain jobs supervisor status; stop the extra one only if there are two: gbrain jobs supervisor stop (effective cap here: ${rssStr}).`,
+          details: { queue, lock_holder: `${lock!.holder_host}:${lock!.holder_pid}`, local: `${localHost}:${localPid}`, same_pid_host_label_differs: true,
+            effective_max_rss_mb: effectiveMaxRss },
+        });
+      } else if (verdict === 'mismatch') {
         checks.push({
           name: 'supervisor_singleton',
           status: 'warn',
@@ -211,8 +220,9 @@ async function runSupervisor(ctx: DoctorContext): Promise<Check[]> {
         checks.push({
           name: 'supervisor_singleton',
           status: 'ok',
-          message: `Single supervisor on queue '${queue}' (holder=${lock!.holder_host}:${lock!.holder_pid}, max_rss=${rssStr}).`,
-          details: { queue, effective_max_rss_mb: effectiveMaxRss },
+          message: `Single supervisor on queue '${queue}' (holder=${lock!.holder_host}:${lock!.holder_pid}, max_rss=${rssStr}).`
+            + (hostLabelDiffers ? ` The machine's hostname changed from ${lock!.holder_host} to ${localHost} since the lock was acquired; a restart records the new one.` : ''),
+          details: { queue, effective_max_rss_mb: effectiveMaxRss, ...(hostLabelDiffers ? { host_label_drift: true, lock_holder_host: lock!.holder_host, local_host: localHost } : {}) },
         });
       }
     }

@@ -1,6 +1,5 @@
 import { withConnectorSync, rethrowConnectorWriteError, pendingConnectorResult, type ManagedConnectorSync } from '../persistence/connector-sync.ts';
 import { resolveGoogleAccount } from '../persistence/connector-account.ts';
-import { connectorRender } from '../connectors/connector-text.ts';
 import { ConnectorHoldSession, connectorHoldsResult } from '../connectors/connector-hold-session.ts';
 import { carryLegacyFailCounts } from '../connectors/item-holds.ts';
 /**
@@ -29,8 +28,8 @@ import { carryLegacyFailCounts } from '../connectors/item-holds.ts';
  * sources.config, which stores only the account pointer.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { chmodSync, existsSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
@@ -41,7 +40,12 @@ import { credentialId, openVault, type CredentialEntry, type CredentialVault } f
 import { createProgress, startHeartbeat } from '../progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../cli-options.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
-import { atomicWriteFileSync } from '../atomic-write.ts';
+import { atomicWriteFileSync, mkdirPrivate } from '../atomic-write.ts';
+import { importRendered, myAddressSet, type ActivePack, type GoogleSyncDeps, type GoogleSyncSummary } from './sweep-shared.ts';
+export { myAddressSet } from './sweep-shared.ts';
+import { sweepCalendar, sweepContacts } from './people-calendar-sweep.ts';
+import { applyLoopDetection, enqueueLoopsExtraction, resolveSweepExclusion } from './loops-enqueue.ts';
+import { NO_EXCLUSION } from './loops-exclusion.ts';
 import {
   CalendarClient,
   GmailClient,
@@ -49,23 +53,16 @@ import {
   PeopleClient,
   type FetchImpl,
 } from './google-clients.ts';
-import {
-  calendarRelPath,
-  personSlugFromContact,
-  renderCalendarEventPage,
-  renderPersonPage,
-  renderThreadPage,
-  threadRelPath,
-} from './google-render.ts';
+import { renderThreadPage, threadRelPath } from './google-render.ts';
 import {
   ALL_GOOGLE_SERVICES,
-  DEFAULT_CALENDAR_ID,
   type GmailThreadData,
   type GoogleService,
   type GoogleSourceConfig,
   type GoogleSourceState,
 } from './types.ts';
 import { LOOPS_EXTRACT_WINDOW_DAYS, loopExtractionEligibility } from './loops-extract.ts';
+import { recordGraceVerdict, recordWithheldVerdict, runLoopsCatchup, seedGraceBackfill, seedLoopRechecks, settleDueGraceHolds, type LoopsEnqueueReport } from './loop-catchup.ts';
 
 export type { GoogleSourceConfig } from './types.ts';
 export { runGoogleAttachmentBackfill } from './attachment-backfill.ts';
@@ -94,6 +91,7 @@ function emptyState(): GoogleSourceState {
     gmail_newest_ms: null,
     calendar_sync_token: null,
     calendar_id: null,
+    calendar_horizon_ms: null,
     contacts_sync_token: null,
     last_full_at: null,
   };
@@ -109,353 +107,54 @@ export function readGoogleState(dir: string): GoogleSourceState {
     // A CORRUPT existing state file is not a fresh install: silently
     // returning emptyState() would re-run the entire backfill with zero
     // diagnostic. Quarantine for forensics and say so loudly.
+    const quarantine = `${file}.corrupt`;
+    let failure: { step: 'chmod' | 'rename'; path: string; error: unknown } | null = null;
     try {
-      renameSync(file, `${file}.corrupt`);
-    } catch { /* best-effort */ }
+      chmodSync(file, 0o600);
+    } catch (error) {
+      failure = { step: 'chmod', path: file, error };
+    }
+    try {
+      renameSync(file, quarantine);
+      if (failure) failure.path = quarantine;
+    } catch (error) {
+      failure ??= { step: 'rename', path: file, error };
+    }
     process.stderr.write(
       `[google] state file ${file} was corrupt (${e instanceof Error ? e.message : String(e)}); ` +
         `quarantined to .corrupt — cursors reset, the next sync re-anchors and resumes.\n`,
     );
+    if (failure) {
+      process.stderr.write(
+        `[google] could not secure the quarantined state file ${failure.path}: ${failure.step} failed ` +
+          `(${failure.error instanceof Error ? failure.error.message : String(failure.error)}). ` +
+          `It may be readable by other local users; run chmod 600 ${failure.path} or delete it.\n`,
+      );
+    }
     return emptyState();
   }
 }
 
 function writeGoogleState(dir: string, state: GoogleSourceState): void {
-  mkdirSync(dir, { recursive: true });
+  mkdirPrivate(dir);
   // Atomic (tmp+fsync+rename): this file is written once per backfill batch;
   // a torn write would silently reset every cursor (full re-backfill).
-  atomicWriteFileSync(googleStateFile(dir), JSON.stringify(state, null, 2));
-}
-
-/** The "my addresses" identity set: account + Gmail sendAs aliases. */
-export function myAddressSet(entry: CredentialEntry): Set<string> {
-  const out = new Set<string>();
-  if (entry.meta.account) out.add(entry.meta.account.toLowerCase());
-  for (const a of entry.meta.sendas_aliases ?? []) out.add(a.toLowerCase());
-  return out;
+  // 0600 is reasserted on every write, so a legacy 0644 file tightens.
+  atomicWriteFileSync(googleStateFile(dir), JSON.stringify(state, null, 2), { mode: 0o600 });
 }
 
 // ── Sync runner ──────────────────────────────────────────────────────────────
-
-interface GoogleSyncSummary {
-  /** 'up_to_date'/'first_sync' are computed on the SyncResult, never here. */
-  status: 'synced' | 'partial';
-  added: number;
-  modified: number;
-  deleted: number;
-  chunksCreated: number;
-  embedded: number;
-  pagesAffected: string[];
-  threadsSeen: number;
-  attachmentInspection: Record<string, number>;
-  /**
-   * Why each in-window thread was or was not sent to the extractor, keyed by
-   * the machine reason from loopExtractionEligibility. Counts only — no
-   * addresses, subjects or body text — so a sweep can be audited for
-   * over-filtering without leaking mail content into logs.
-   */
-  extractEligibility: Record<string, number>;
-  failedFiles: number;
-}
-
-interface GoogleSyncDeps {
-  managed: ManagedConnectorSync | null;
-  engine: BrainEngine;
-  sourceId: string;
-  cfg: GoogleSourceConfig;
-  opts: SyncOpts;
-  entry: CredentialEntry;
-  log: (msg: string) => void;
-  /** Threads whose newest message falls in the recent window — LLM
-   *  extraction candidates, enqueued (capped) after the sweep. */
-  extractCandidates: Array<{ slug: string; threadId: string; newestMs: number }>;
-}
-
-type ActivePack = { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> } | undefined;
 
 async function saveGoogleState(deps: GoogleSyncDeps, state: GoogleSourceState): Promise<void> {
   if (deps.managed) await deps.managed.saveState(state);
   else writeGoogleState(deps.cfg.dir, state);
 }
 
-function assertContained(dir: string, path: string): void {
-  if (!isWriteTargetContained(path, dir)) {
-    throw new Error(`Path escapes managed dir: "${path}"`);
-  }
-}
-
-async function importRendered(
-  deps: GoogleSyncDeps,
-  relPath: string,
-  markdown: string,
-  activePack: ActivePack,
-  summary: GoogleSyncSummary,
-  countedSlugs: Set<string>,
-  identity: Record<string, string | readonly string[]> = {},
-): Promise<string> {
-  markdown = connectorRender(markdown, { path: relPath, account: deps.cfg.account, ...identity });
-  if (deps.managed) {
-    const result = await deps.managed.importMarkdown(relPath, markdown);
-    if (result.status === 'imported') {
-      summary.pagesAffected.push(result.slug);
-      summary.chunksCreated += result.chunks;
-      if (!countedSlugs.has(result.slug)) {
-        if (result.created) summary.added++; else summary.modified++;
-        countedSlugs.add(result.slug);
-      }
-    }
-    return result.slug;
-  }
-  const filePath = join(deps.cfg.dir, relPath);
-  assertContained(deps.cfg.dir, filePath);
-  mkdirSync(dirname(filePath), { recursive: true });
-  const before = existsSync(filePath);
-  // Temp-write → import → rename: a failed import never destroys the
-  // previously-good page (github-source pattern).
-  const tmpPath = `${filePath}.tmp`;
-  writeFileSync(tmpPath, markdown, 'utf-8');
-  try {
-    const { importFile } = await import('../import-file.ts');
-    const result = await importFile(deps.engine, tmpPath, relPath, {
-      noEmbed: true, // embeds handled by the size gate below, like sync
-      sourceId: deps.sourceId,
-      ...(activePack ? { activePack } : {}),
-    });
-    if (result.status === 'error' || result.error) {
-      throw new Error(result.error ?? `Import failed for ${relPath}`);
-    }
-    renameSync(tmpPath, filePath);
-    if (result.status === 'imported') {
-      summary.pagesAffected.push(result.slug);
-      summary.chunksCreated += result.chunks;
-      if (!countedSlugs.has(result.slug)) {
-        if (before) summary.modified++;
-        else summary.added++;
-        countedSlugs.add(result.slug);
-      }
-    }
-    return result.slug;
-  } finally {
-    rmSync(tmpPath, { force: true });
-  }
-}
-
-async function deletePageByRelPath(
-  deps: GoogleSyncDeps,
-  relPath: string,
-  summary: GoogleSyncSummary,
-): Promise<void> {
-  const rows = await deps.engine.executeRaw<{ slug: string }>(
-    `SELECT slug FROM pages WHERE source_id = $1 AND source_path = $2 AND deleted_at IS NULL`,
-    [deps.sourceId, relPath],
-  );
-  if (deps.managed) {
-    for (const row of rows) if (await deps.managed.delete(row.slug, relPath)) summary.deleted++;
-    return;
-  }
-  if (rows.length > 0) {
-    await deps.engine.deletePages(rows.map((r) => r.slug), { sourceId: deps.sourceId });
-    summary.deleted += rows.length;
-  }
-  // Same containment guard as the write path: a hostile/corrupt DB path
-  // carrying `../` must never unlink outside the managed dir.
-  const target = join(deps.cfg.dir, relPath);
-  if (isWriteTargetContained(target, deps.cfg.dir)) rmSync(target, { force: true });
-}
-
-// ── Contacts sweep ───────────────────────────────────────────────────────────
-
-async function sweepContacts(
-  deps: GoogleSyncDeps,
-  people: PeopleClient,
-  state: GoogleSourceState,
-  activePack: ActivePack,
-  summary: GoogleSyncSummary,
-  countedSlugs: Set<string>,
-): Promise<void> {
-  let result;
-  try {
-    result = await people.listConnections({
-      syncToken: deps.opts.full ? null : state.contacts_sync_token,
-      ...(deps.opts.signal ? { signal: deps.opts.signal } : {}),
-    });
-  } catch (e) {
-    if (e instanceof GoogleCursorExpiredError) {
-      deps.log('[google] contacts syncToken expired; full re-list');
-      state.contacts_sync_token = null;
-      result = await people.listConnections({ syncToken: null, ...(deps.opts.signal ? { signal: deps.opts.signal } : {}) });
-    } else {
-      throw e;
-    }
-  }
-  // Ownership is keyed on google_contact_id, not path alone: a page owned by
-  // a DIFFERENT contact (name collision — two "John Smith"s) must neither be
-  // rewritten nor deleted; the colliding contact gets a disambiguated slug.
-  const ownerOf = async (relPath: string): Promise<string | null> => {
-    if (deps.managed) {
-      const page = await deps.managed.page(relPath.replace(/\.md$/, ''));
-      if (!page) return null;
-      return typeof page.frontmatter.google_contact_id === 'string' ? page.frontmatter.google_contact_id : 'hand-authored';
-    }
-    const filePath = join(deps.cfg.dir, relPath);
-    if (!existsSync(filePath)) return null;
-    const m = readFileSync(filePath, 'utf-8').match(/^google_contact_id:\s*"([^"]+)"/m);
-    return m ? m[1] : 'hand-authored';
-  };
-  for (const c of result.contacts) {
-    if (deps.opts.signal?.aborted) return;
-    // DB lookup by contact id FIRST: deletion tombstones typically carry only
-    // resourceName + deleted (no names/emails — slug derivation yields null),
-    // and a renamed contact's current name derives a DIFFERENT slug than the
-    // page it owns. Both cases need the id-keyed path (mirror of the calendar
-    // sweep's event_id keying).
-    const existingPath = await contactPageRelPathByContactId(deps, c.resourceName);
-    if (c.deleted) {
-      if (existingPath && await ownerOf(existingPath) === c.resourceName) {
-        await deletePageByRelPath(deps, existingPath, summary);
-      } else {
-        // Page not (yet) in the DB — fall back to slug candidates, guarded
-        // by file ownership. Delete only the page THIS contact owns.
-        for (const slug of [personSlugFromContact(c, false), personSlugFromContact(c, true)]) {
-          if (slug && await ownerOf(`${slug}.md`) === c.resourceName) {
-            await deletePageByRelPath(deps, `${slug}.md`, summary);
-          }
-        }
-      }
-      continue;
-    }
-    const baseSlug = personSlugFromContact(c);
-    if (!baseSlug) continue;
-    const baseOwner = await ownerOf(`${baseSlug}.md`);
-    const collides = baseOwner !== null && baseOwner !== 'hand-authored' && baseOwner !== c.resourceName;
-    const rendered = renderPersonPage(c, collides);
-    if (!rendered) continue;
-    const owner = await ownerOf(rendered.relPath);
-    if (owner === 'hand-authored') {
-      deps.log(`[google] skipping hand-authored ${rendered.relPath}`);
-      continue;
-    }
-    // Rename: this contact previously rendered elsewhere — remove the page it
-    // owned there, or the old slug lives on as a stale orphan.
-    if (existingPath && existingPath !== rendered.relPath && await ownerOf(existingPath) === c.resourceName) {
-      await deletePageByRelPath(deps, existingPath, summary);
-    }
-    await importRendered(deps, rendered.relPath, rendered.markdown, activePack, summary, countedSlugs);
-  }
-  // Cursor commits only after the whole sweep succeeded.
-  if (result.nextSyncToken) state.contacts_sync_token = result.nextSyncToken;
-}
-
-// ── Calendar sweep ───────────────────────────────────────────────────────────
-
-/** Existing calendar page's source_path for an event id, or null. */
-/** Existing person page's source_path for a google contact id, or null. */
-async function contactPageRelPathByContactId(
-  deps: GoogleSyncDeps,
-  resourceName: string,
-): Promise<string | null> {
-  try {
-    const rows = await deps.engine.executeRaw<{ source_path: string | null }>(
-      `SELECT source_path FROM pages
-       WHERE source_id = $1 AND deleted_at IS NULL AND slug LIKE 'people/%'
-         AND frontmatter->>'google_contact_id' = $2
-       LIMIT 1`,
-      [deps.sourceId, resourceName],
-    );
-    return rows[0]?.source_path ?? null;
-  } catch (error) {
-    if (deps.managed) throw error;
-    return null;
-  }
-}
-
-async function calendarPageRelPathByEventId(
-  deps: GoogleSyncDeps,
-  eventId: string,
-): Promise<string | null> {
-  try {
-    const rows = await deps.engine.executeRaw<{ source_path: string | null }>(
-      `SELECT source_path FROM pages
-       WHERE source_id = $1 AND deleted_at IS NULL AND slug LIKE 'calendar/%'
-         AND frontmatter->>'event_id' = $2
-       LIMIT 1`,
-      [deps.sourceId, eventId],
-    );
-    return rows[0]?.source_path ?? null;
-  } catch (error) {
-    if (deps.managed) throw error;
-    return null;
-  }
-}
-
-
-
-async function sweepCalendar(
-  deps: GoogleSyncDeps,
-  calendar: CalendarClient,
-  state: GoogleSourceState,
-  activePack: ActivePack,
-  summary: GoogleSyncSummary,
-  countedSlugs: Set<string>,
-): Promise<void> {
-  const now = Date.now();
-  const windowOpts = {
-    timeMinIso: new Date(now - deps.cfg.historyDays * 86_400_000).toISOString(),
-    timeMaxIso: new Date(now + 60 * 86_400_000).toISOString(),
-  };
-  // The stored token is bound to the calendar it was minted for (legacy state
-  // without calendar_id predates secondary calendars, so it was primary's).
-  // A re-pointed source starts a fresh window; pairing the NEW calendar with
-  // the OLD cursor would silently import a foreign delta.
-  const tokenCalendarId = state.calendar_id ?? DEFAULT_CALENDAR_ID;
-  if (state.calendar_sync_token && tokenCalendarId !== deps.cfg.calendarId) {
-    deps.log(
-      `[google] calendar changed (${tokenCalendarId} → ${deps.cfg.calendarId}); discarding its sync token, windowed re-list`,
-    );
-    state.calendar_sync_token = null;
-  }
-  let result;
-  try {
-    result = await calendar.listEvents(deps.cfg.account, {
-      calendarId: deps.cfg.calendarId,
-      ...(deps.opts.full || !state.calendar_sync_token ? windowOpts : { syncToken: state.calendar_sync_token }),
-      ...(deps.opts.signal ? { signal: deps.opts.signal } : {}),
-    });
-  } catch (e) {
-    if (e instanceof GoogleCursorExpiredError) {
-      deps.log('[google] calendar syncToken expired; windowed re-list');
-      state.calendar_sync_token = null;
-      result = await calendar.listEvents(deps.cfg.account, {
-        calendarId: deps.cfg.calendarId,
-        ...windowOpts,
-        ...(deps.opts.signal ? { signal: deps.opts.signal } : {}),
-      });
-    } else {
-      throw e;
-    }
-  }
-  for (const ev of result.events) {
-    if (deps.opts.signal?.aborted) return;
-    // The page path derives from MUTABLE fields (start date, summary) while
-    // identity is the immutable event id — look up the existing page by
-    // frontmatter event_id so reschedules move (old page deleted) and
-    // cancelled skeletons (id + status only, per the Calendar API) still
-    // find their page instead of computing a 1970 ghost path.
-    const existingPath = await calendarPageRelPathByEventId(deps, ev.id);
-    const rendered = renderCalendarEventPage(ev);
-    if (!rendered) {
-      await deletePageByRelPath(deps, existingPath ?? calendarRelPath(ev), summary);
-      continue;
-    }
-    if (existingPath && existingPath !== rendered.relPath) {
-      await deletePageByRelPath(deps, existingPath, summary); // rescheduled → moved
-    }
-    await importRendered(deps, rendered.relPath, rendered.markdown, activePack, summary, countedSlugs);
-  }
-  if (result.nextSyncToken) {
-    state.calendar_sync_token = result.nextSyncToken;
-    state.calendar_id = deps.cfg.calendarId;
-  }
+/** #5867/#5868 state a partial managed run still publishes (E20): never the Gmail cursor. */
+function loopRecoveryState(state: GoogleSourceState): Record<string, unknown> {
+  const fields = { loop_grace_holds: state.loop_grace_holds, loop_grace_backfill_done: state.loop_grace_backfill_done, loops_catchup: state.loops_catchup,
+    loop_withheld_senders: state.loop_withheld_senders, loop_automated_backfill_done: state.loop_automated_backfill_done, calendar_unreadable: state.calendar_unreadable };
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
 }
 
 // ── Gmail sweep ──────────────────────────────────────────────────────────────
@@ -486,7 +185,11 @@ async function processThread(
     const state = message.attachmentInspection?.state ?? 'not_inspected';
     summary.attachmentInspection[state] = (summary.attachmentInspection[state] ?? 0) + 1;
   }
-  await applyLoopDetection(deps, thread, slug);
+  deps.processedThreads.add(thread.threadId);
+  const verdict = await applyLoopDetection(deps, thread, slug);
+  if (verdict && deps.loopState) recordGraceVerdict(deps.loopState, thread, verdict, slug, myAddressSet(deps.entry), deps.log, deps.exclusion);
+  if (verdict && deps.loopState) recordWithheldVerdict(deps.loopState, verdict);
+  if (verdict?.withheld) summary.loopsWithheld[verdict.withheld.reason] = (summary.loopsWithheld[verdict.withheld.reason] ?? 0) + 1;
   // LLM extraction candidates: trickle + the bounded recent window only —
   // the deep historical backfill is never extracted (spend honesty, F9).
   const newestMs = thread.messages[thread.messages.length - 1]?.internalDateMs ?? 0;
@@ -495,7 +198,7 @@ async function processThread(
     // Structural eligibility, not "everything recent": bulk mail the owner
     // never joined would otherwise both pay for model calls AND crowd real
     // threads out of the sweep.
-    const verdict = loopExtractionEligibility(thread, myAddressSet(deps.entry));
+    const verdict = loopExtractionEligibility(thread, myAddressSet(deps.entry), deps.exclusion);
     summary.extractEligibility[verdict.reason] =
       (summary.extractEligibility[verdict.reason] ?? 0) + 1;
     if (verdict.eligible) {
@@ -503,113 +206,6 @@ async function processThread(
     }
   }
   return thread;
-}
-
-/** Enqueue loops_extract jobs for every eligible candidate in this sweep. */
-async function enqueueLoopsExtraction(deps: GoogleSyncDeps): Promise<void> {
-  if (deps.extractCandidates.length === 0) return;
-  try {
-    const { isLoopsExtractionEnabled, LOOPS_EXTRACT_JOB, LOOPS_EXTRACT_ENQUEUE_CEILING } = await import('./loops-extract.ts');
-    if (!(await isLoopsExtractionEnabled(deps.engine))) return;
-    // No chat provider (keyless install, outage) → enqueue NOTHING. A job the
-    // handler cannot run would fail-and-die and burn its revision-keyed
-    // idempotency slot for nothing; the eligible threads stay unconsumed and
-    // re-candidate on their next touch or on `sync --full` once a provider is
-    // configured. One line per sweep names the reason — never silent.
-    const { isAvailable } = await import('../ai/gateway.ts');
-    if (!isAvailable('chat')) {
-      deps.log(
-        `[google] loops_extract: chat provider unavailable (no configured chat model / API key) — ` +
-          `skipped enqueue of ${deps.extractCandidates.length} eligible thread(s); they are queued on ` +
-          `their next touch (or \`gbrain sync --source ${deps.sourceId} --full\`) once a provider is configured`,
-      );
-      return;
-    }
-    const { MinionQueue } = await import('../minions/queue.ts');
-    const queue = new MinionQueue(deps.engine);
-    // EVERY eligible candidate is enqueued (up to a generous safety ceiling).
-    // The queue is the backlog; the worker's concurrency is the rate limit.
-    //
-    // This used to keep only the newest LOOPS_EXTRACT_MAX_PER_SWEEP and log
-    // the rest as "deferring … (they re-candidate on next touch)". That was
-    // silent data loss, not deferral: a thread only re-candidates when the
-    // thread CHANGES, so a dropped thread that nobody writes to again was
-    // never extracted at all. `maxWaiting` was a second, subtler leak — the
-    // queue evaluates it AFTER the idempotency-key lookup, so a brand-new key
-    // could be coalesced onto some unrelated thread's waiting job and return
-    // a row its own payload was never registered against.
-    //
-    // Newest first only orders the enqueue, so the freshest threads reach the
-    // worker first. The ceiling (10x the old cap) is a spend backstop for
-    // pathological sweeps — and it is a WAITING-DEPTH budget, not just a
-    // per-sweep count: with a stalled worker, repeated pathological sweeps
-    // would otherwise stack another ceiling's worth of waiting jobs each.
-    // Jobs already waiting shrink this sweep's budget; overflow is a
-    // DEFERRAL (the backlog still covers older revisions, and a deferred
-    // thread re-candidates on its next touch), logged loudly either way.
-    //
-    // The depth is PER SOURCE (payload `sourceId`, the key this enqueue
-    // writes): a brain-wide count let one Google account's stalled backlog
-    // pin every other source's budget at 0 forever.
-    const ordered = [...deps.extractCandidates].sort((a, b) => b.newestMs - a.newestMs);
-    // Depth = every PENDING row, not just 'waiting': during a provider outage
-    // each claimed job fails and parks as 'delayed' (retry backoff), and rows
-    // in flight are 'active'. Counting 'waiting' alone read ~0 mid-outage and
-    // let every sweep stack another ceiling's worth of jobs on the backlog.
-    let waitingDepth = 0;
-    try {
-      const rows = await deps.engine.executeRaw<{ n: string }>(
-        `SELECT count(*)::text AS n FROM minion_jobs
-          WHERE name = $1 AND status IN ('waiting', 'delayed', 'active') AND data->>'sourceId' = $2`,
-        [LOOPS_EXTRACT_JOB, deps.sourceId],
-      );
-      waitingDepth = parseInt(rows[0]?.n ?? '0', 10) || 0;
-    } catch {
-      // Fail-open: a missing table / transient error must never block enqueue.
-    }
-    const budget = Math.max(0, LOOPS_EXTRACT_ENQUEUE_CEILING - waitingDepth);
-    const picked = ordered.slice(0, budget);
-    const dropped = ordered.length - picked.length;
-    if (dropped > 0) {
-      deps.log(
-        `[google] loops_extract enqueue budget (ceiling ${LOOPS_EXTRACT_ENQUEUE_CEILING}, ` +
-          `${waitingDepth} already pending): enqueuing ${picked.length}, ` +
-          `deferring ${dropped} oldest eligible thread(s) — a deferred thread is next ` +
-          `enqueued when it changes, so a persistent backlog needs worker attention`,
-      );
-    }
-    for (const c of picked) {
-      await queue.add(
-        LOOPS_EXTRACT_JOB,
-        { slug: c.slug, sourceId: deps.sourceId, threadId: c.threadId },
-        {
-          priority: 5,
-          // Page-revision keyed: a re-sweep of an unchanged thread is a no-op,
-          // and this is now the ONLY dedupe mechanism in play (no maxWaiting —
-          // its cap-hit coalesce loses brand-new keys, see above).
-          idempotency_key: `loops:${deps.sourceId}:${c.slug}:${c.newestMs}`,
-        },
-      );
-    }
-    deps.log(`[google] loops_extract: enqueued ${picked.length} eligible thread(s)`);
-  } catch (e) {
-    deps.log(`[google] loops_extract enqueue failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-/** Loop detection hook — wired to loop-detect.ts (Phase 4); tolerant when absent. */
-async function applyLoopDetection(
-  deps: GoogleSyncDeps,
-  thread: GmailThreadData,
-  pageSlug: string,
-): Promise<void> {
-  try {
-    const { applyThreadLoopVerdict } = await import('./loop-detect.ts');
-    await applyThreadLoopVerdict(deps.engine, deps.sourceId, thread, myAddressSet(deps.entry), pageSlug);
-  } catch (e) {
-    // Detection must never fail a sync; it re-runs on the next touch.
-    deps.log(`[google] loop detection failed for ${thread.threadId}: ${e instanceof Error ? e.message : String(e)}`);
-  }
 }
 
 /**
@@ -656,7 +252,6 @@ interface GmailSweep {
   activePack: ActivePack;
   summary: GoogleSyncSummary;
   countedSlugs: Set<string>;
-  progressTick: (note: string) => void;
   holds: ConnectorHoldSession;
 }
 
@@ -670,7 +265,7 @@ type ThreadOutcome = { kind: 'landed'; newestMs: number } | { kind: 'gone' | 'sk
  */
 async function attemptThread(g: GmailSweep, tid: string, version: string | null): Promise<ThreadOutcome> {
   if (!g.holds.shouldAttempt(tid, version)) {
-    g.progressTick(`thread ${tid} held`);
+    g.deps.tick(`thread ${tid} held`);
     return { kind: 'skipped' };
   }
   const seen: { thread?: GmailThreadData } = {};
@@ -679,7 +274,7 @@ async function attemptThread(g: GmailSweep, tid: string, version: string | null)
     g.holds.succeed(tid);
     const newestMs = thread?.messages[thread.messages.length - 1]?.internalDateMs ?? 0;
     if (newestMs > (g.state.gmail_newest_ms ?? 0)) g.state.gmail_newest_ms = newestMs;
-    g.progressTick(`thread ${tid}`);
+    g.deps.tick(`thread ${tid}`);
     return { kind: 'landed', newestMs };
   } catch (e) {
     if (e instanceof GoogleCursorExpiredError && e.status === 404) {
@@ -688,7 +283,7 @@ async function attemptThread(g: GmailSweep, tid: string, version: string | null)
       // page it left behind.
       g.holds.drop(tid);
       g.deps.log(`[google] thread ${tid} vanished (404); skipping`);
-      g.progressTick(`thread ${tid} gone`);
+      g.deps.tick(`thread ${tid} gone`);
       return { kind: 'gone' };
     }
     const wasHeld = g.holds.isHeld(tid);
@@ -820,6 +415,7 @@ async function sweepGmail(g: GmailSweep, onCurrent?: () => Promise<void>): Promi
     if (deps.opts.signal?.aborted) return false;
     await attemptThread(g, tid, null);
   }
+  if (await settleGraceHolds(g, cutoffMs) === 'aborted') return false;
   const isCurrent = (): boolean => {
     if (delta !== 'done' || state.gmail_gap_floor_ms != null) return false;
     if (state.gmail_backfill_done) return true;
@@ -842,6 +438,39 @@ async function sweepGmail(g: GmailSweep, onCurrent?: () => Promise<void>): Promi
     }
   }
   return isCurrent();
+}
+
+/**
+ * #5868: seeds the one-shot grace backfill, then settles due grace holds.
+ * A re-fetch goes straight through processThread (never the item holds), so
+ * a failed grace re-fetch keeps the grace hold and is not an item failure.
+ */
+async function settleGraceHolds(g: GmailSweep, cutoffMs: number): Promise<'aborted' | void> {
+  const { deps, state } = g;
+  try {
+    await seedGraceBackfill(deps.engine, deps.sourceId, state, deps.log);
+    deps.graceBackfillSeeded = true;
+  } catch (e) {
+    deps.log(`[google] loop grace backfill failed (retried next sweep): ${e instanceof Error ? e.message : String(e)}`);
+  }
+  try {
+    await seedLoopRechecks(deps.engine, deps.sourceId, state, deps.log, Date.now(), state.gmail_backfill_done ? null : cutoffMs);
+  } catch (e) {
+    deps.log(`[google] loop re-check seeding failed (retried next sweep): ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const settled = await settleDueGraceHolds({ engine: deps.engine, sourceId: deps.sourceId, state, log: deps.log, signal: deps.opts.signal,
+    exclusion: deps.exclusion, processed: deps.processedThreads, refetch: async (tid) => {
+      try {
+        await processThread(deps, g.gmail, tid, g.activePack, g.summary, g.countedSlugs);
+        return 'ok';
+      } catch (e) {
+        if (e instanceof GoogleCursorExpiredError && e.status === 404) return 'gone';
+        if (deps.managed) rethrowConnectorWriteError(e);
+        deps.log(`[google] grace re-check of thread ${tid} failed (kept for the next sweep): ${e instanceof Error ? e.message : String(e)}`);
+        return 'failed';
+      }
+    } });
+  if (settled === 'aborted') return 'aborted';
 }
 
 /** Opens (or widens) the gap window `[after, floor)` that the floor walk drains newest→oldest. */
@@ -1107,7 +736,9 @@ async function runGoogleSyncInner(engine: BrainEngine, sourceId: string, cfg: Go
   const gmail = new GmailClient(...clientArgs);
   const calendar = new CalendarClient(...clientArgs);
   const people = new PeopleClient(...clientArgs);
-  const deps: GoogleSyncDeps = { engine, sourceId, cfg, opts, entry, log, extractCandidates: [], managed };
+  const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
+  const tick = (note: string): void => progress.tick(1, note);
+  const deps: GoogleSyncDeps = { engine, sourceId, cfg, opts, entry, log, tick, exclusion: NO_EXCLUSION, extractCandidates: [], managed, processedThreads: new Set() };
 
   const summary: GoogleSyncSummary = {
     status: 'synced',
@@ -1120,6 +751,7 @@ async function runGoogleSyncInner(engine: BrainEngine, sourceId: string, cfg: Go
     threadsSeen: 0,
     attachmentInspection: {},
     extractEligibility: {},
+    loopsWithheld: {},
     failedFiles: 0,
   };
   const countedSlugs = new Set<string>();
@@ -1159,15 +791,14 @@ async function runGoogleSyncInner(engine: BrainEngine, sourceId: string, cfg: Go
   }
 
   const state = managed ? managed.state(emptyState()) : readGoogleState(cfg.dir);
+  deps.loopState = state;
   const firstRun = !state.gmail_backfill_done && state.gmail_history_id === null;
   // Fix wave 4: the Gmail poison ledger is read once and carried into the item holds.
   const holds = await ConnectorHoldSession.open(engine, sourceId, managed, emptyState() as unknown as Record<string, unknown>,
     carryLegacyFailCounts(state.item_holds, state.gmail_fail_counts, (id) => id, new Date().toISOString()), { full: opts.full });
   state.item_holds = holds.holds.initial();
   delete state.gmail_fail_counts;
-  const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   progress.start('sync.google_materialize');
-  const tick = (note: string): void => progress.tick(1, note);
 
   try {
     const serviceErrors: string[] = [];
@@ -1206,10 +837,11 @@ async function runGoogleSyncInner(engine: BrainEngine, sourceId: string, cfg: Go
     if (activeServices.includes('gmail')) {
       const stop = startHeartbeat(progress, 'gmail sweep');
       try {
+        deps.exclusion = await resolveSweepExclusion(deps, gmail);
         // sweepGmail reports thread-level failures via its return value —
         // they exit through normal returns, not throws, and stamping
         // last_sync_at over them would blind the staleness gate (H1).
-        gmailSweepOk = await sweepGmail({ deps, gmail, state, activePack, summary, countedSlugs, progressTick: tick, holds }, async () => {
+        gmailSweepOk = await sweepGmail({ deps, gmail, state, activePack, summary, countedSlugs, holds }, async () => {
           // #5581: current mail is complete but the backfill is not: bank freshness now, while the managed lease can still write.
           if (managed && summary.status !== 'partial' && !opts.signal?.aborted) {
             await managed.saveState(state, true, new Date(state.gmail_newest_ms ?? Date.now()).toISOString());
@@ -1232,21 +864,42 @@ async function runGoogleSyncInner(engine: BrainEngine, sourceId: string, cfg: Go
     if (opts.signal?.aborted) summary.status = 'partial';
     if (opts.full && summary.status === 'synced') state.last_full_at = new Date().toISOString();
 
+    // #5867 managed-only 30-day catch-up and the #5868 one-shot backfill marker; never on an aborted sweep.
+    let catchup: LoopsEnqueueReport | null = null;
+    if (activeServices.includes('gmail') && !opts.signal?.aborted) {
+      if (deps.graceBackfillSeeded) state.loop_grace_backfill_done = true;
+      if (managed) {
+        try {
+          catchup = await runLoopsCatchup({ engine, sourceId, state, log, signal: opts.signal, myAddresses: myAddressSet(entry),
+            exclusion: deps.exclusion, inFlight: new Set(deps.extractCandidates.map(c => c.slug)),
+            fetchThread: async (tid) => {
+              try { return await gmail.getThread(tid, cfg.account, opts.signal ? { signal: opts.signal } : {}); }
+              catch (e) { if (e instanceof GoogleCursorExpiredError && e.status === 404) return null; throw e; }
+            } });
+        } catch (e) {
+          log(`[google] loops catch-up failed (retried next sweep): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
     // Per-service cursors were advanced in-place only on success; persist.
     // Throws connector_holds_exhausted before any save, so the cursor stays.
     state.item_holds = holds.finish();
     if (managed) {
       if (summary.status !== 'partial' && gmailSweepOk) await managed.saveState(state, true, new Date(state.gmail_newest_ms ?? Date.now()).toISOString());
-      // A partial run keeps the cursor its mid-run checkpoints committed and publishes only changed holds.
-      else if (!opts.signal?.aborted) await managed.publishHolds(emptyState() as unknown as Record<string, unknown>, state.item_holds);
+      // A partial run keeps the cursor its mid-run checkpoints committed and publishes changed holds plus the loop recovery state (#5867/#5868).
+      else if (!opts.signal?.aborted) await managed.publishHolds(emptyState() as unknown as Record<string, unknown>, state.item_holds, loopRecoveryState(state));
     } else writeGoogleState(cfg.dir, state);
     await holds.complete();
     // An aborted run (wall-clock budget, serve-delegation timeout) skips the
     // extract/embed/extraction tails — the deferred backfill machinery picks
     // them up on the next full run instead of overshooting the budget.
+    let loopsEnqueue: LoopsEnqueueReport | undefined;
     if (!opts.signal?.aborted) {
       await runExtractAndEmbed(deps, summary);
-      if (!managed || !opts.noExtract) await enqueueLoopsExtraction(deps);
+      const enqueued = await enqueueLoopsExtraction(deps);
+      loopsEnqueue = catchup ? { enqueued: enqueued.enqueued + catchup.enqueued, deferred: enqueued.deferred + catchup.deferred,
+        skipped_reason: enqueued.skipped_reason } : enqueued;
       // Auditable per-reason counts (loopExtractionEligibility) — no
       // addresses, subjects or body text ever reach the log.
       if (Object.keys(summary.extractEligibility).length > 0) {
@@ -1255,6 +908,9 @@ async function runGoogleSyncInner(engine: BrainEngine, sourceId: string, cfg: Go
             .map(([k, v]) => `${k}=${v}`)
             .join(' ')}`,
         );
+      }
+      if (Object.keys(summary.loopsWithheld).length > 0) {
+        log(`[google] reply-owed loops withheld: ${Object.entries(summary.loopsWithheld).map(([k, v]) => `${k}=${v}`).join(' ')}`);
       }
     }
 
@@ -1301,6 +957,7 @@ async function runGoogleSyncInner(engine: BrainEngine, sourceId: string, cfg: Go
       embedded: summary.embedded,
       pagesAffected: summary.pagesAffected,
       ...(summary.failedFiles > 0 ? { failedFiles: summary.failedFiles } : {}),
+      ...(loopsEnqueue ? { loops_enqueue: loopsEnqueue } : {}),
       ...connectorHoldsResult(sourceId, holds.summary()),
     };
   } finally {

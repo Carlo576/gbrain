@@ -1,5 +1,5 @@
 import type { BrainEngine } from '../core/engine.ts';
-import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { setCliExitVerdict, writeJsonDocument } from '../core/cli-force-exit.ts';
 import { getIdleBlockers } from '../core/migrate.ts';
 import { parseFlags as parseSkillsDirFlags, resolveSkillsDir } from './check-resolvable.ts';
 import { createProgress } from '../core/progress.ts';
@@ -95,7 +95,6 @@ export {
   checkCyclePhaseScope,
 } from './doctor/checks/routing-federation.ts';
 export {
-  checkChatFallbackChainInert,
   checkSearchMode,
   checkEvalDrift,
   checkEmbeddingEnvOverride,
@@ -136,9 +135,14 @@ export {
   buildMemoryVerbsCheck,
   buildRetrievalReflexCheck,
 } from './doctor/checks/verbs-reflex.ts';
-import type { DoctorContext } from './doctor/context.ts';
-import { runDoctorRegistry } from './doctor/registry.ts';
-export interface Check {
+import type { DoctorContext, DoctorTier } from './doctor/context.ts';
+import { doctorRunSummary, parseDoctorTier, startDoctorDeadline, tierFields, type DoctorDeadline, type DoctorRunSummary } from './doctor/budget.ts';
+export { doctorRunSummary, type DoctorRunSummary } from './doctor/budget.ts';
+import { runDoctorRegistry, parseOnlyChecks } from './doctor/registry.ts';
+import { finalizeCheckFixes, fixLine, unknownScoreCategories, type CheckAgentFields } from './doctor/check-fix.ts';
+import { throttleDoctorHeartbeat } from './doctor/heartbeat.ts';
+import type { RenderContext } from '../core/agent-output.ts';
+export interface Check extends CheckAgentFields {
   name: string;
   status: 'ok' | 'warn' | 'fail';
   message: string;
@@ -171,6 +175,8 @@ export interface Check {
    * Source of truth: `src/core/doctor-categories.ts`.
    */
   category?: CheckCategory;
+  /** #6696 B1: wall time of the registry entry that produced this check. */
+  elapsed_ms?: number;
 }
 
 /**
@@ -231,6 +237,16 @@ export interface DoctorReport {
    */
   engine?: 'postgres' | 'pglite';
   db_url_source?: DbUrlSource | null;
+  /** E2: capabilities off by choice that bound what this brain can do (e.g. `embeddings_disabled`). Additive. */
+  capped_by?: string[];
+  /** E10: category scores that are not evidence because their checks did not run (e.g. `brain` when the DB was unreachable). */
+  unknown_scores?: Array<'brain'>;
+  /** #6696 B1, only with `--tier` / `--budget-ms`: the tier, whether every check is known, the unknown ones, wall time, budget (null: none). */
+  tier?: DoctorTier;
+  complete?: boolean;
+  unknown_sections?: string[];
+  elapsed_ms?: number;
+  budget_ms?: number | null;
 }
 
 function _penaltyScore(checks: Check[]): number {
@@ -258,11 +274,12 @@ function _penaltyScore(checks: Check[]): number {
  */
 export function computeDoctorReport(
   checks: Check[],
-  extras?: { engine?: 'postgres' | 'pglite'; db_url_source?: DbUrlSource | null },
+  extras?: { engine?: 'postgres' | 'pglite'; db_url_source?: DbUrlSource | null; render?: RenderContext; run?: DoctorRunSummary },
 ): DoctorReport {
-  const tagged = checks.map((c) =>
+  const tagged = finalizeCheckFixes(checks, extras?.render).map((c) =>
     c.category ? c : { ...c, category: categorizeCheck(c.name) },
   );
+  const capped_by = tagged.some((c) => c.name === 'embeddings' && c.readiness_state === 'disabled_by_choice') ? ['embeddings_disabled'] : [];
 
   const hasFail = tagged.some((c) => c.status === 'fail');
   const hasWarn = tagged.some((c) => c.status === 'warn');
@@ -289,6 +306,9 @@ export function computeDoctorReport(
     top_issues: rankIssues(tagged),
     ...(extras?.engine ? { engine: extras.engine } : {}),
     ...(extras?.db_url_source !== undefined ? { db_url_source: extras.db_url_source } : {}),
+    ...(capped_by.length ? { capped_by } : {}),
+    ...(unknownScoreCategories(tagged).length ? { unknown_scores: unknownScoreCategories(tagged) } : {}),
+    ...(extras?.run ? tierFields(tagged, extras.run) : {}),
   };
 }
 
@@ -372,6 +392,9 @@ export async function buildChecks(
   // `connection` check — without it, a total outage produced NO connection
   // entry at all, which is exactly the field smoke-test branches on.
   connectError?: unknown,
+  // #6696: the run's deadline (started by the CLI before connecting) and a remote caller's readable sources.
+  deadline: DoctorDeadline = startDoctorDeadline(args),
+  remoteScope: { sourceIds?: string[] } = {},
 ): Promise<Check[]> {
   const jsonOutput = args.includes('--json');
   const fastMode = args.includes('--fast');
@@ -400,7 +423,7 @@ export async function buildChecks(
   // Progress reporter. `--json` is doctor's machine-readable output, so plain
   // progress must not leak to stderr unless the caller explicitly asks for
   // structured progress with --progress-json.
-  const progress = createProgress(doctorProgressOptions(jsonOutput));
+  const progress = throttleDoctorHeartbeat(createProgress(doctorProgressOptions(jsonOutput)));
 
   // --- Filesystem checks (always run, no DB needed) ---
 
@@ -445,6 +468,10 @@ export async function buildChecks(
     autoFixReport: null,
     schemaVersion: 0,
     connectionFailed: false,
+    only: parseOnlyChecks(args),
+    tier: parseDoctorTier(args),
+    deadline,
+    ...(remoteScope.sourceIds ? { sourceIds: remoteScope.sourceIds } : {}),
   };
 
   return runDoctorRegistry(ctx);
@@ -474,6 +501,7 @@ export async function runDoctor(
   // db-availability loop: the connect error from the CLI's dead-DB fallback,
   // threaded to buildChecks for the synthesized `connection` check (2c-bis).
   connectError?: unknown,
+  deadline: DoctorDeadline = startDoctorDeadline(args),
 ) {
   const jsonOutput = args.includes('--json');
   const locksMode = args.includes('--locks');
@@ -486,11 +514,13 @@ export async function runDoctor(
     return;
   }
 
-  const checks = await buildChecks(engine, args, dbSource, connectError);
-  const hasFail = outputResults(checks, jsonOutput, { engine: engine?.kind, db_url_source: dbSource ?? null });
+  if (args.includes('--probe') && !(await (await import('./doctor/probe-consent.ts')).authorizeProviderProbe(engine, args, jsonOutput))) return;
+  const checks = await buildChecks(engine, args, dbSource, connectError, deadline);
+  const run = doctorRunSummary(args, deadline);
+  const hasFail = outputResults(checks, jsonOutput, { engine: engine?.kind, db_url_source: dbSource ?? null, run });
 
-  // Features teaser (non-JSON, non-failing only)
-  if (!jsonOutput && !hasFail && engine) {
+  // Features teaser (non-JSON, non-failing only; never under the ops deadline)
+  if (!jsonOutput && !hasFail && engine && run?.tier !== 'ops') {
     try {
       const { featuresTeaserForDoctor } = await import('./features.ts');
       const teaser = await featuresTeaserForDoctor(engine);
@@ -519,7 +549,7 @@ export function doctorProgressOptions(jsonOutput: boolean) {
 function outputResults(
   checks: Check[],
   json: boolean,
-  extras?: { engine?: 'postgres' | 'pglite'; db_url_source?: DbUrlSource | null },
+  extras?: { engine?: 'postgres' | 'pglite'; db_url_source?: DbUrlSource | null; run?: DoctorRunSummary },
 ): boolean {
   // v0.41.19.0 — render goes through computeDoctorReport so the human
   // output, JSON output, and remote MCP envelope all share one shape.
@@ -529,7 +559,7 @@ function outputResults(
   const score = report.health_score;
 
   if (json) {
-    console.log(JSON.stringify(report));
+    void writeJsonDocument(JSON.stringify(report)); // D2: the one --json document
     return hasFail;
   }
 
@@ -546,7 +576,7 @@ function outputResults(
     for (const issue of shown) {
       const icon = issue.status === 'fail' ? 'FAIL' : 'WARN';
       const dn = issue.downstream_of ? ` (likely downstream of ${issue.downstream_of})` : '';
-      console.log(`  [${icon}] ${issue.name}${dn} → ${issue.fix}`);
+      console.log(`  [${icon}] ${issue.name}${dn} → ${fixLine(issue.action) ?? issue.fix}`);
     }
     if (topIssues.length > shown.length) {
       console.log(`  +${topIssues.length - shown.length} more — see full list below`);
@@ -555,8 +585,10 @@ function outputResults(
   }
 
   for (const c of report.checks) {
-    const icon = c.status === 'ok' ? 'OK' : c.status === 'warn' ? 'WARN' : 'FAIL';
+    const icon = c.status === 'ok' ? (c.severity === 'info' ? 'INFO' : 'OK') : c.status === 'warn' ? 'WARN' : 'FAIL';
     console.log(`  [${icon}] ${c.name}: ${c.message}`);
+    const fix = c.status === 'ok' ? null : fixLine(c.fix);
+    if (fix) console.log(`    Fix: ${fix}`);
     if (c.issues) {
       for (const issue of c.issues) {
         console.log(`    → ${issue.type.toUpperCase()}: ${issue.skill}`);
@@ -576,11 +608,12 @@ function outputResults(
     : null;
 
   console.log('');
-  console.log(`Brain checks:  ${report.brain_checks_score}/100  (category penalty)`);
+  console.log(`Brain checks:  ${report.unknown_scores?.includes('brain') ? 'unknown (database checks did not run)' : `${report.brain_checks_score}/100  (category penalty)`}`);
   console.log(`Skill checks:  ${report.category_scores.skill}/100`);
   console.log(`Ops checks:    ${report.category_scores.ops}/100`);
   console.log(`Meta checks:   ${report.category_scores.meta}/100`);
   if (brainScoreLine) console.log(brainScoreLine);
+  if (report.tier) console.log(`Tier: ${report.tier}, ${report.complete ? 'complete' : `incomplete (unknown: ${report.unknown_sections!.join(', ')})`}, ${report.elapsed_ms} ms${report.budget_ms ? ` of ${report.budget_ms} ms` : ''}`);
   console.log('');
 
   if (hasFail) {
@@ -607,7 +640,7 @@ function outputResults(
 async function runLocksCheck(engine: BrainEngine | null, jsonOutput: boolean): Promise<void> {
   if (!engine) {
     if (jsonOutput) {
-      console.log(JSON.stringify({ status: 'unavailable', reason: 'no_engine' }));
+      void writeJsonDocument(JSON.stringify({ status: 'unavailable', reason: 'no_engine' }));
     } else {
       console.log('gbrain doctor --locks requires a database connection. Configure a URL and retry.');
     }
@@ -616,7 +649,7 @@ async function runLocksCheck(engine: BrainEngine | null, jsonOutput: boolean): P
 
   if (engine.kind !== 'postgres') {
     if (jsonOutput) {
-      console.log(JSON.stringify({ status: 'not_applicable', engine: engine.kind }));
+      void writeJsonDocument(JSON.stringify({ status: 'not_applicable', engine: engine.kind }));
     } else {
       console.log(`gbrain doctor --locks is Postgres-only. Current engine: ${engine.kind}. No blockers possible (no connection pool).`);
     }
@@ -626,7 +659,7 @@ async function runLocksCheck(engine: BrainEngine | null, jsonOutput: boolean): P
   const blockers = await getIdleBlockers(engine);
 
   if (jsonOutput) {
-    console.log(JSON.stringify({ status: blockers.length === 0 ? 'ok' : 'blockers_found', blockers }, null, 2));
+    void writeJsonDocument(JSON.stringify({ status: blockers.length === 0 ? 'ok' : 'blockers_found', blockers }, null, 2));
     if (blockers.length > 0) process.exit(1);
     return;
   }
