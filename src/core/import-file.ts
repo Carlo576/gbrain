@@ -248,6 +248,8 @@ export async function importFromContent(
     existingSnapshot?: import('./page-state/types.ts').PageSnapshot | null;
     /** Internal canonical metadata, after protected-body overlays and before hashing. */
     prepareFrontmatter?: (page: ParsedPage) => void;
+    /** File imports apply pack retype rules; explicit page writes keep their vocabulary. */
+    canonicalizeNewType?: boolean;
     noEmbed?: boolean;
     sourceId?: string;
     /**
@@ -462,6 +464,7 @@ export async function importFromContent(
   const unifiedType = resolveUnifiedImportType({
     parsedType: parsed.type, typeExplicit: parsed.typeExplicit === true,
     parsedFrontmatter: parsed.frontmatter, activePack: opts.activePack, existing,
+    canonicalizeNewType: opts.canonicalizeNewType,
   });
   [parsed.type, parsed.frontmatter] = [unifiedType.type, unifiedType.frontmatter];
   const { preservedUnifiedType } = unifiedType;

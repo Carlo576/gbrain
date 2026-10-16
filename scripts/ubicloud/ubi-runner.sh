@@ -198,7 +198,7 @@ cmd_usage() {
       vms[o]++; cpu[o] += n; total += n; count++ }
     END {
       printf "%-14s %4s %6s\n", "OWNER", "VMS", "VCPUS"
-      for (o in cpu) printf "%-14s %4d %6d%s\n", o, vms[o], cpu[o], o == me ? "  (you)" : "" | "sort -k3,3nr"
+      for (o in cpu) printf "%-14s %4d %6d%s\n", o, vms[o], cpu[o], (o == me ? "  (you)" : "") | "sort -k3,3nr"
       close("sort -k3,3nr")
       printf "%-14s %4d %6d\n", "total", count, total
     }'
@@ -391,7 +391,9 @@ cmd_pack() {
         | while IFS= read -r -d '' f; do
             if { [ -e "$f" ] || [ -L "$f" ]; } && [ "$f" != .git ]; then printf '%s\0' "$f"; fi
           done \
-        | tar --null -T - "${git_from[@]}" -czf -
+        | tar -cf "$tmp/checkout.tar" --null -T -
+      tar -rf "$tmp/checkout.tar" "${git_from[@]}"
+      gzip -c "$tmp/checkout.tar"
     )
     rm -rf "$tmp"
   else

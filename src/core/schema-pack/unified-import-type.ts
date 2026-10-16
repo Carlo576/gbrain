@@ -28,6 +28,7 @@ export interface ProjectionAwareTypePack {
 export interface UnifiedImportTypeInput<T extends string> {
   parsedType: T;
   typeExplicit: boolean;
+  canonicalizeNewType?: boolean;
   parsedFrontmatter: Record<string, unknown>;
   activePack?: ProjectionAwareTypePack;
   existing?: { type: T; frontmatter?: Record<string, unknown> | null } | null;
@@ -129,7 +130,7 @@ export function resolveUnifiedImportType<T extends string>(
       };
     }
   }
-  const canonicalized = canonicalizeFromPack(input);
+  const canonicalized = input.canonicalizeNewType === false ? null : canonicalizeFromPack(input);
   if (canonicalized) return canonicalized;
   if (!input.typeExplicit && input.existing) {
     return { type: input.existing.type, frontmatter: input.parsedFrontmatter, preservedUnifiedType: false };

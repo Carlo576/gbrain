@@ -7,7 +7,7 @@
  * registry maximum.
  */
 import { describe, expect, test } from 'bun:test';
-import { expectSchemaLatestMatchesRegistry, normalizeDoctorText, type GbrainRun } from './helpers/doctor-json-golden.ts';
+import { doctorJsonNormalizer, expectSchemaLatestMatchesRegistry, normalizeDoctorText, type GbrainRun } from './helpers/doctor-json-golden.ts';
 import { MIGRATIONS } from '../src/core/schema-migrations/registry.generated.ts';
 
 const LATEST = Math.max(...MIGRATIONS.map((m) => m.version));
@@ -31,4 +31,15 @@ describe('doctor golden <latest> placeholder', () => {
     expect(() => expectSchemaLatestMatchesRegistry(run(`Version ${LATEST - 1}, latest is ${LATEST}.`))).toThrow(/Fix: {2}bun run build:schema-migrations/);
     expect(() => expectSchemaLatestMatchesRegistry({ ...run(''), json: null })).toThrow(/no schema_version check/);
   });
+});
+
+
+test('terminal byte workload normalization keeps capacity policy and other resources visible', () => {
+  const normalize = (patch: Record<string, unknown>) => doctorJsonNormalizer().apply({ ...run(''),
+    json: { resource: 'terminal_bytes', used: 120, per_day_7d: 80, max_day_7d: 80, net_per_day_7d: 40,
+      limit: 1000, status: 'ok', ...patch } });
+  expect(normalize({ used: 180 })).toEqual(normalize({}));
+  expect(normalize({ limit: 900 })).not.toEqual(normalize({}));
+  expect(normalize({ status: 'warn' })).not.toEqual(normalize({}));
+  expect(normalize({ resource: 'lifetime_ids', used: 180 })).not.toEqual(normalize({ resource: 'lifetime_ids' }));
 });

@@ -1,3 +1,4 @@
+import { hasCaseSensitiveTempFs } from './helpers/case-sensitive-fs.ts';
 /**
  * `gbrain sources reconcile` for a database-only page that collides with a
  * canonical file at its slug-derived path (fix wave 3, Lane D; the #5254
@@ -244,7 +245,7 @@ test('a marked page adopts a file whose name differs from its slug only by case,
   });
 }, 180_000);
 
-test('two case variants and no exact spelling refuse slug_path_ambiguous and change nothing', async () => {
+test.skipIf(!hasCaseSensitiveTempFs())('two case variants and no exact spelling refuse slug_path_ambiguous and change nothing [requires case-sensitive fixture filesystem]', async () => {
   await withEnv({ GBRAIN_HOME: home, OPENAI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
     for (const engine of engines) {
       const f = await collision(engine);

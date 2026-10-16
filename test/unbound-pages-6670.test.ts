@@ -1,3 +1,4 @@
+import { hasCaseSensitiveTempFs } from './helpers/case-sensitive-fs.ts';
 /**
  * #6670: `slugDerivedOrigin` only built `<slug>.md`, so a page whose file is
  * `HEARTBEAT.md` (the importer lowercases it into page `heartbeat`) pointed at
@@ -26,12 +27,12 @@ test('a file that differs from its slug only by case is the origin, with its on-
   expect(slugDerivedOrigin(dir, 'notes/daily/standup', 'source-root')).toEqual({ path: join(dir, 'Notes/Daily/Standup.md'), sourcePath: 'Notes/Daily/Standup.md' });
 });
 
-test('an exactly spelled file wins over a case variant, as the importer keeps <slug>.md on a collision', () => {
+test.skipIf(!hasCaseSensitiveTempFs())('an exactly spelled file wins over a case variant, as the importer keeps <slug>.md on a collision [requires case-sensitive fixture filesystem]', () => {
   const dir = root(['heartbeat.md', 'HEARTBEAT.md']);
   expect(slugDerivedOrigin(dir, 'heartbeat', 'source-root')).toEqual({ path: join(dir, 'heartbeat.md'), sourcePath: 'heartbeat.md' });
 });
 
-test('several case variants and no exact spelling refuse slug_path_ambiguous naming each', () => {
+test.skipIf(!hasCaseSensitiveTempFs())('several case variants and no exact spelling refuse slug_path_ambiguous naming each [requires case-sensitive fixture filesystem]', () => {
   const dir = root(['HEARTBEAT.md', 'Heartbeat.md']);
   let error: { code?: string; detail?: string; suggestion?: string } | undefined;
   try { slugDerivedOrigin(dir, 'heartbeat', 'source-root'); } catch (caught) { error = caught as typeof error; }

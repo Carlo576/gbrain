@@ -546,7 +546,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
   const lean = options.coordinated === true && !targetDeleted && row.operation !== 'restore_page' && !versionTags;
   enterClaimStep(clock, 'import_content', undefined, 'db');
   const result = await importFromContent(engine, row.slug, content, {
-    ...source, noEmbed: true, remote: row.authority.remote, activePack, fences: projected ? 'coordinated' : 'lenient', coordinated: lean,
+    ...source, noEmbed: true, canonicalizeNewType: false, remote: row.authority.remote, activePack, fences: projected ? 'coordinated' : 'lenient', coordinated: lean,
     segmentedOwner: { kind: row.operation === 'edit_page' ? 'edit' : 'put', principalKind: row.principal_kind, principalId: row.principal_id, baseRevision: observedRevision },
     ...(lean ? { existingSnapshot: snapshot } : {}),
     // #6259: only owner-tier intents keep gate-owned markers; an ordinary put_page, local or remote, has them stripped.

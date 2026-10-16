@@ -225,6 +225,23 @@ const GIT_BIN = Bun.which('git');
 // util-linux `script` gives the wrapper a real pty so process.stdin.isTTY is
 // true — the only way to exercise the tty (ignore-only) SIGINT branch faithfully.
 const SCRIPT_BIN = Bun.which('script');
+// BSD script rejects Bun's socketpair stdin. Give it a real pipe, forwarding
+// terminal input in a daemon thread; script still owns the real PTY/session.
+const BSD_SCRIPT_BRIDGE = `import os, subprocess, sys, threading
+p = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE)
+def forward():
+  try:
+    while True:
+      data = os.read(0, 4096)
+      if not data: break
+      p.stdin.write(data); p.stdin.flush()
+  except (BrokenPipeError, OSError): pass
+threading.Thread(target=forward, daemon=True).start()
+sys.exit(p.wait())`;
+const scriptArgs = (cmd: string): string[] => process.platform === 'darwin'
+  ? ['python3', '-c', BSD_SCRIPT_BRIDGE, SCRIPT_BIN!, '-qe', '/dev/null', '/bin/sh', '-c', cmd]
+  : [SCRIPT_BIN!, '-qec', cmd, '/dev/null'];
+
 /**
  * The command line handed to `script -c`. `script` runs it through `$SHELL`
  * (falling back to /bin/sh — hermeticEnv sets no SHELL), and the pty delivers
@@ -445,13 +462,19 @@ describe('a cwd .env cannot reach the programs gbrain spawns (sanitized re-run)'
       ].join('\n'),
     });
     const cmd = ptyCommand(`${process.execPath} ${entry} --preflight`); // exec'd: see ptyCommand
-    const proc = Bun.spawn([SCRIPT_BIN!, '-qec', cmd, '/dev/null'], {
+    const proc = Bun.spawn(scriptArgs(cmd), {
       cwd: dir, env: hermeticEnv(dir), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
     });
-    const drain = (async () => { for await (const _ of proc.stdout) { /* mux pty output */ } })();
+    let ptyOutput = '';
+    const drain = (async () => { for await (const chunk of proc.stdout) ptyOutput += new TextDecoder().decode(chunk); })();
+    const ptyErrors = new Response(proc.stderr).text();
     const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* exited */ } }, CHILD_KILL_AFTER_MS);
     try {
-      await waitReady(ready);
+      await waitReady(ready).catch(async error => {
+        proc.kill('SIGKILL');
+        await drain;
+        throw new Error(`${error.message}: ${ptyOutput} ${await ptyErrors}`);
+      });
       proc.stdin!.write('\x03'); // terminal Ctrl-C → pty → the foreground group
       proc.stdin!.flush();
       const code = await proc.exited;
@@ -512,13 +535,19 @@ describe('a cwd .env cannot reach the programs gbrain spawns (sanitized re-run)'
     const out = join(dir, 'wrapper.out');
     const err = join(dir, 'wrapper.err');
     const cmd = ptyCommand(`${process.execPath} ${entry} --preflight`, ` </dev/null >${out} 2>${err}`); // exec'd: see ptyCommand
-    const proc = Bun.spawn([SCRIPT_BIN!, '-qec', cmd, '/dev/null'], {
+    const proc = Bun.spawn(scriptArgs(cmd), {
       cwd: dir, env: hermeticEnv(dir), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
     });
-    const drain = (async () => { for await (const _ of proc.stdout) { /* mux pty output */ } })();
+    let ptyOutput = '';
+    const drain = (async () => { for await (const chunk of proc.stdout) ptyOutput += new TextDecoder().decode(chunk); })();
+    const ptyErrors = new Response(proc.stderr).text();
     const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* exited */ } }, CHILD_KILL_AFTER_MS);
     try {
-      await waitReady(ready);
+      await waitReady(ready).catch(async error => {
+        proc.kill('SIGKILL');
+        await drain;
+        throw new Error(`${error.message}: ${ptyOutput} ${await ptyErrors}`);
+      });
       proc.stdin!.write('\x03'); // terminal Ctrl-C → pty → the foreground group (wrapper AND re-run)
       proc.stdin!.flush();
       const code = await proc.exited;

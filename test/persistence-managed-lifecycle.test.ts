@@ -1,3 +1,4 @@
+import { hasCaseSensitiveTempFs } from './helpers/case-sensitive-fs.ts';
 /**
  * Managed-path lifecycle regressions found by the gbrain-evals lifecycle
  * experiment: slug collisions, renames (identity, inbound links, old-slug
@@ -149,7 +150,7 @@ test('a file that replaces its vanished origin at the same slug takes over the p
   }
 }), 180_000);
 
-test('two new files whose paths differ only by case are refused rather than guessed', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+test.skipIf(!hasCaseSensitiveTempFs())('two new files whose paths differ only by case are refused rather than guessed [requires case-sensitive fixture filesystem]', async () => withEnv({ GBRAIN_HOME: home }, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'notes/Case.md': note('Upper', 'Upper case spelling.'), 'notes/case.md': note('Lower', 'Lower case spelling.') });
     await expect(performManagedSync(engine, { sourceId: f.id, noPull: true })).rejects.toMatchObject({ code: 'page_identity_changed' });

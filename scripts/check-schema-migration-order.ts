@@ -23,15 +23,15 @@ import { pad, RegistryError, scanMigrations } from './build-schema-migrations.ts
 const REPO = process.env.GBRAIN_GUARD_ROOT ? resolve(process.env.GBRAIN_GUARD_ROOT) : resolve(import.meta.dir, '..');
 const SEE = 'See:  docs/TESTING.md#schema-migration-registry';
 
-function git(args: string[]): { ok: boolean; out: string } {
-  const r = spawnSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 28 });
+function git(args: string[], root = REPO): { ok: boolean; out: string } {
+  const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 1 << 28 });
   return { ok: r.status === 0, out: r.stdout ?? '' };
 }
 
 /** version -> name on the base ref. */
-export function baseMigrations(ref: string): Map<number, string> {
+export function baseMigrations(ref: string, root = REPO): Map<number, string> {
   const out = new Map<number, string>();
-  const dir = git(['ls-tree', '--name-only', `${ref}:src/core/schema-migrations`]);
+  const dir = git(['ls-tree', '--name-only', `${ref}:src/core/schema-migrations`], root);
   if (dir.ok) {
     for (const f of dir.out.split('\n')) {
       const m = /^v(\d{3,})-([a-z0-9-]+)\.ts$/.exec(f);
@@ -39,7 +39,7 @@ export function baseMigrations(ref: string): Map<number, string> {
     }
     if (out.size > 0) return out;
   }
-  const migrate = git(['show', `${ref}:src/core/migrate.ts`]);
+  const migrate = git(['show', `${ref}:src/core/migrate.ts`], root);
   if (!migrate.ok) throw new Error(`cannot read src/core/migrate.ts at ${ref}`);
   const sf = ts.createSourceFile('migrate.ts', migrate.out, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const visit = (node: ts.Node): void => {

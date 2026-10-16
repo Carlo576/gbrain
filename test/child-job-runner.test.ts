@@ -249,7 +249,7 @@ describe('runJobInChild (real children)', () => {
     await expect(p).rejects.toBeInstanceOf(ChildWorkerShutdownError);
   }, TEST_TIMEOUT_MS);
 
-  test('UnrecoverableError outcome during worker shutdown dead-letters as usual (W9F item 6, Decision 7)', async () => {
+  test('UnrecoverableError during shutdown dead-letters only with supported group-stop proof', async () => {
     // A deterministic failure that coincides with a deploy must not be handed
     // back for a second (possibly paid) run with its real error lost.
     const harness = makeHarness(
@@ -267,8 +267,14 @@ describe('runJobInChild (real children)', () => {
     await ready.wait();
     shutdown.abort(new Error('worker-shutdown'));
     const err = await p.then(() => null, (e: unknown) => e);
-    expect(err).toBeInstanceOf(UnrecoverableError);
-    expect((err as Error).message).toBe('invalid params: slug is required');
+    if (process.platform === 'linux') {
+      expect(err).toBeInstanceOf(UnrecoverableError);
+      expect((err as Error).message).toBe('invalid params: slug is required');
+    } else {
+      // A direct child exit alone cannot prove its descendants stopped.
+      expect(err).toBeInstanceOf(ChildWorkerShutdownError);
+      expect((err as ChildWorkerShutdownError).executionStopped).toBe(false);
+    }
   }, TEST_TIMEOUT_MS);
 
   test('watchdog drain (BOTH signals aborted, non-per-job reason) → shutdown class, not a burned attempt (adversarial P3)', async () => {

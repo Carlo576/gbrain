@@ -42,7 +42,19 @@ async function nestedTickDuring<T>(work: () => Promise<T>[]): Promise<T[]> {
   try {
     return await Promise.all(work());
   } finally {
-    await Promise.all([nestedTick.promise, ...children.map(child => child.exited)]);
+    await within(1000, nestedTick.promise);
+    expect(nested, 'the event-loss callback must run').toBe(true);
+    const deadline = performance.now() + 1000;
+    let running: number[];
+    do {
+      running = children.filter(child => {
+        const result = Bun.spawnSync(['ps', '-o', 'stat=', '-p', String(child.pid)], { stdout: 'pipe', stderr: 'ignore' });
+        const state = result.stdout.toString().trim();
+        return state !== '' && !state.startsWith('Z');
+      }).map(child => child.pid);
+      if (running.length) await Bun.sleep(10);
+    } while (running.length && performance.now() < deadline);
+    expect(running, 'all event-loss fixture children must have stopped').toEqual([]);
   }
 }
 

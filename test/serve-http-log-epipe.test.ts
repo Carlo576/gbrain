@@ -33,8 +33,8 @@ installCleanupSignalHandlers(${JSON.stringify(argv)});
 let n = 0;
 setInterval(() => {
   n++;
-  console.log('request log ' + n);
-  console.error('request err ' + n);
+  process.stdout.write('request log ' + n + '\\n');
+  process.stderr.write('request err ' + n + '\\n');
   appendFileSync(${JSON.stringify(marker)}, n + '\\n');
 }, 50);
 `);

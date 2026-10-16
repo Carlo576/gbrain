@@ -110,8 +110,12 @@ describe("teardown waits for in-flight creates", () => {
   // where the trap fails to parse and the shell exits 2 without running it.
   // BASH_ENV turns on xtrace with a PS4 whose first $(...) sends the runner
   // SIGTERM, so the second is always parsed with that trap pending.
+  // This PS4 injection relies on Bash 5's nested command-substitution tracing.
+  // Bash 3.2's tracer itself aborts before the signal/EXIT handlers can run.
+  // Ordinary signal/create/teardown cases above remain native on every shell.
+  const bashMajor = Number(Bun.spawnSync(['bash', '-c', 'printf %s "$BASH_VERSINFO"']).stdout.toString());
   for (const args of [["up"], ["run", "--", "true"]]) {
-    it(`${args[0]}: a SIGTERM that lands while bash parses a $(...) still destroys the VM and exits 130`, async () => {
+    it.skipIf(bashMajor < 5)(`${args[0]}: a SIGTERM that lands while bash parses a $(...) still destroys the VM and exits 130 [Bash 5 tracing]`, async () => {
       const api = serve();
       const bashEnv = join(dir, "bash-env");
       writeFileSync(bashEnv, `PS4='$([ "$BASH_SUBSHELL" = 1 ] && [ -e "$PROBE_DIR/go" ] && mkdir "$PROBE_DIR/fired" 2>/dev/null && kill -TERM $$)$(:)+ '\nset -x\n`);
@@ -119,8 +123,9 @@ describe("teardown waits for in-flight creates", () => {
       const output = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
       const name = (await waitForEvent(api, /^created /)).split(" ")[1]!;
       writeFileSync(join(dir, "go"), "");
-      expect(await proc.exited).toBe(130);
-      await output;
+      const code = await proc.exited;
+      const [, stderr] = await output;
+      expect(code, stderr).toBe(130);
       expect(existsSync(join(dir, "fired"))).toBe(true);
       expect(api.events.slice(-2)).toEqual([`destroy ${name}`, `removed ${name}`]);
       expect(api.vms.size).toBe(0);

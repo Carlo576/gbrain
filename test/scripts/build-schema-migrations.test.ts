@@ -174,12 +174,20 @@ describe('generator diagnostics (FAIL/Why/Fix/See)', () => {
 });
 
 describe('out-of-order landing check', () => {
-  test('reads the base ref versions (pre-W3 base parses migrate.ts literals)', () => {
-    const r = spawnSync('git', ['rev-parse', '--verify', '-q', 'origin/master^{commit}'], { cwd: REPO });
-    if (r.status !== 0) return; // no origin/master in this checkout; the CI verify job fetches it
-    const base = baseMigrations('origin/master');
-    expect(base.size).toBeGreaterThan(150);
-    expect(base.get(2)).toBe('slugify_existing_pages');
+  test('reads exact pre-registry migration literals from a committed base', () => {
+    const root = fixture({});
+    mkdirSync(join(root, 'src/core'), { recursive: true });
+    writeFileSync(join(root, 'src/core/migrate.ts'), `const MIGRATIONS = [
+      { version: 2, name: 'slugify_existing_pages', sql: '' },
+      { version: 114, name: 'last_legacy_migration', sql: '' },
+    ];`);
+    const git = (...args: string[]) => {
+      const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+      if (result.status !== 0) throw new Error(result.stderr);
+    };
+    git('init', '-q'); git('add', 'src/core/migrate.ts');
+    git('-c', 'user.email=fixture@example.com', '-c', 'user.name=fixture', 'commit', '-qm', 'legacy base');
+    expect([...baseMigrations('HEAD', root)]).toEqual([[2, 'slugify_existing_pages'], [114, 'last_legacy_migration']]);
   });
 
   test('a new migration numbered at or below the base latest fails; above passes; a reused version fails', () => {

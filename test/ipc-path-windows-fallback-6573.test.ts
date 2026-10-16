@@ -76,7 +76,7 @@ describe('windowsLocalIpcSocketPath (#6573)', () => {
 
 describe('Windows long PGLite paths end to end, platform forced off Windows (#6573)', () => {
   function brain(depth: number): { home: string; profile: string; dataDir: string } {
-    const root = mkdtempSync(join(tmpdir(), 'gb-6573-'));
+    const root = mkdtempSync(join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'gb-6573-'));
     dirs.push(root);
     const dataDir = join(root, 'd'.repeat(depth), 'brain.pglite');
     mkdirSync(dataDir, { recursive: true });

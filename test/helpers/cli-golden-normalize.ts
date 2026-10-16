@@ -39,7 +39,8 @@ export function scrubVersion(text: string): string {
 export function scrubCliText(text: string, home?: string, opts: { durations?: boolean } = {}): string {
   const roots: Record<string, string> = home ? { '<home>': home } : {};
   const base = scrubTimestamps(scrubPaths(scrubAnsi(text), roots));
-  return scrubVersion(scrubUuids(opts.durations ? scrubDurations(base) : base));
+  return scrubVersion(scrubUuids(opts.durations ? scrubDurations(base) : base))
+    .replace(/(OAuth discovery network error: )ECONNREFUSED: (?=Unable to connect\.)/g, '$1');
 }
 
 export function lines(text: string): string[] {

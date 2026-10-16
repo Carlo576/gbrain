@@ -77,7 +77,7 @@ describe('extension files load on first use (GBRA-92)', () => {
       writeFileSync(join(dir, 'real.so'), 'x');
       symlinkSync('real.so', join(dir, 'alias.so'));
       const tarball = join(dir, 'bundle.tar.gz');
-      expect(Bun.spawnSync(['tar', '-czf', tarball, '-C', dir, 'real.so', 'alias.so']).exitCode).toBe(0);
+      expect(Bun.spawnSync(['tar', '--format=ustar', '-czf', tarball, '-C', dir, 'real.so', 'alias.so']).exitCode).toBe(0);
       expect(() => readExtensionFiles(tarball)).toThrow(/Unsupported entry type '2' for alias\.so/);
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -180,13 +180,22 @@ export function expectSchemaLatestMatchesRegistry(run: GbrainRun): void {
 }
 
 /** `doctor-json-v1` with optional extra literal/regex replacements (e.g. a Postgres URL). */
+export function normalizeTerminalByteWorkload(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeTerminalByteWorkload);
+  if (!value || typeof value !== 'object') return value;
+  const row = value as Record<string, unknown>;
+  const derived = new Set(['used', 'max_day_7d', 'net_per_day_7d', 'per_day_7d']);
+  return Object.fromEntries(Object.entries(row).map(([key, item]) => [key,
+    row.resource === 'terminal_bytes' && derived.has(key) ? '<path-dependent-bytes>' : normalizeTerminalByteWorkload(item)]));
+}
+
 export function doctorJsonNormalizer(extra: Array<[RegExp | string, string]> = [], name = 'doctor-json-v1') {
   return defineNormalizer<GbrainRun>(name, (run) => {
     const fn = (s: string) => normalizeDoctorText(s, run.roots, extra);
     return {
       args: run.args.map(fn),
       exit_code: run.exitCode,
-      report: run.json === null ? null : mapStrings(scrubKeys(run.json, VOLATILE_KEYS), fn),
+      report: run.json === null ? null : mapStrings(scrubKeys(normalizeTerminalByteWorkload(run.json), VOLATILE_KEYS), fn),
       stdout: run.json === null ? fn(run.stdout).split('\n').filter(Boolean) : '<json>',
       stderr: fn(run.stderr).split('\n').filter(Boolean),
     };
