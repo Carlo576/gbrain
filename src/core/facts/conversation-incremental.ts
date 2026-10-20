@@ -20,8 +20,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
 import { deriveDateContext, parseConversation } from '../conversation-parser/parse.ts';
 import { writeDerivedFacts } from '../persistence/derived-facts.ts';
-import { reservationCostUsd } from '../budget/reservation-cost.ts';
-import { reservePageSpend, spendGrant } from '../page-embedding-budget.ts';
+import { estimateChatCallUsd, reservePageSpend, spendGrant } from '../page-embedding-budget.ts';
 import { setExtractionReceipt } from '../extraction-watermark.ts';
 import { planSegmentDerivations, segmentDerivationContextHash, sourceWindowFor, sourceWindowKey, type SegmentDerivationInput,
   type SegmentDerivationRow, type SourceWindow } from '../page-body/derivations.ts';
@@ -39,11 +38,6 @@ import { getFactsExtractionMaxTokens, resolveFactsExtractionModel } from './extr
 const KIND = 'conversation_facts';
 /** Bump when the windowing or the row output changes shape: every occurrence is extracted again once. */
 export const CONVERSATION_FACTS_DERIVATION_VERSION = 1;
-/** Rough characters per token for a reservation estimate, and the system prompt and header overhead per call. */
-const CHARS_PER_TOKEN = 4;
-const PROMPT_OVERHEAD_TOKENS = 1500;
-/** Per-1M-token rates for a model without a price: the reservation must still bound the spend. */
-const UNPRICED_CHAT_RATE = { input: 15, output: 75 };
 
 /** The run counters this pass moves (a subset of ExtractConversationFactsResult). */
 export interface SegmentedConversationCounters {
@@ -93,12 +87,6 @@ async function occurrenceWindows(engine: BrainEngine, body: SegmentedBody, occur
     const rendered = renderSegmentForExtraction(pageTitle, seg);
     return { seg, text: rendered, window: sourceWindowFor(occurrence.row.occurrenceId, ordinal, rendered) };
   });
-}
-
-/** What one extractor call may cost at most: the prompt estimate plus the full output ceiling. */
-function windowEstimateUsd(model: string, text: string, maxTokens: number): number {
-  const input = Math.ceil(text.length / CHARS_PER_TOKEN) + PROMPT_OVERHEAD_TOKENS;
-  return reservationCostUsd(model, 'chat', input, maxTokens) ?? (input * UNPRICED_CHAT_RATE.input + maxTokens * UNPRICED_CHAT_RATE.output) / 1_000_000;
 }
 
 /**
@@ -160,7 +148,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
       if (run.segmentLimit > 0 && extractedWindows >= run.segmentLimit) { stop = 'segment_limit'; break; }
       if (run.signal?.aborted) throw new Error('aborted');
       if (run.dryRun) { extractedWindows++; continue; }
-      const decision = await reservePageSpend(engine, page, `facts:${model}`, windowEstimateUsd(model, w.text, maxTokens));
+      const decision = await reservePageSpend(engine, page, `facts:${model}`, estimateChatCallUsd(model, w.text.length, maxTokens));
       if (decision.kind === 'refused') { stop = 'cap_reached'; break; }
       const out = await spendGrant(decision.kind === 'grant' ? decision.grant : undefined,
         () => extractConversationWindow(run, page, w.seg, w.text, 0, entityHints));

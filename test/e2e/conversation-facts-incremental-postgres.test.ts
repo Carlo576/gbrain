@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, describe } from 'bun:test';
 import { openAppendBrain, type AppendBrain } from '../helpers/append-brain.ts';
-import { defineConversationFactsIncrementalCases } from '../helpers/conversation-facts-incremental-cases.ts';
+import { defineConversationFactsIncrementalCases, defineSegmentedBackstopCases } from '../helpers/conversation-facts-incremental-cases.ts';
 import { hasDatabase } from './helpers.ts';
 
 (hasDatabase() ? describe : describe.skip)('conversation facts incremental [postgres]', () => {
@@ -13,4 +13,5 @@ import { hasDatabase } from './helpers.ts';
   beforeAll(async () => { brain = await openAppendBrain('postgres'); }, 120_000);
   afterAll(async () => { await brain.close(); }, 120_000);
   defineConversationFactsIncrementalCases({ getBrain: () => brain });
+  defineSegmentedBackstopCases({ getBrain: () => brain });
 });

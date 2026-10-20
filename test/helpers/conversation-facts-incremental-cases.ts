@@ -20,6 +20,11 @@ import { runExtractConversationFactsCore } from '../../src/commands/extract-conv
 import { parseSourceWindow, sourceWindowKey, type SourceWindow } from '../../src/core/page-body/derivations.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import type { AppendBrain } from './append-brain.ts';
+import { runFactsBackstop } from '../../src/core/facts/backstop.ts';
+import { lineWindows } from '../../src/core/facts/backstop-segments.ts';
+import { MAX_TURN_TEXT_CHARS } from '../../src/core/facts/extract.ts';
+import { truthLead } from '../../src/core/page-body/segment-blocks.ts';
+import { __setChatTransportForTests, type ChatOpts, type ChatResult } from '../../src/core/ai/gateway.ts';
 
 const SPEAKERS = ['Alice Example', 'Bob Example', 'Carol Example'];
 const WORDS = ['launch', 'pricing', 'budget', 'roadmap', 'hiring', 'review', 'contract', 'latency', 'onboarding', 'forecast', 'retention', 'deploy'];
@@ -198,5 +203,87 @@ ${chatDays(100, 3, 1)}`;
       .toEqual({ repeats: 0, total: done.keys.length, states: ['done'], facts: done.keys.length, unanchored: 0 });
     expect(first.calls.length).toBeLessThan(done.keys.length);
     await engine.setConfig('facts.extraction_model', '');
+  }, 600_000);
+}
+
+/**
+ * The facts backstop over a segmented page (wave-b spec 8.2 "Facts backstop"): an import extracts every
+ * MAX_TURN_TEXT_CHARS window of every occurrence once; an append (by a remote writer) extracts only the windows no run
+ * extracted before (the new text plus the window it grew), never the page again; an unchanged page extracts nothing;
+ * a cap the first window does not fit refuses before any call. Fake chat transport, counted by prompt.
+ */
+export function defineSegmentedBackstopCases(opts: { getBrain: () => AppendBrain }): void {
+  const slug = `notes/backstop-segmented-${randomUUID().slice(0, 8)}`;
+  let prompts: string[] = [];
+  let firstPrompts: string[] = [];
+  const pageOf = async (engine: BrainEngine, s: string) => (await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug=$1", [s]))[0]!;
+  const backstop = async (engine: BrainEngine, s: string) => {
+    const page = await pageOf(engine, s);
+    return runFactsBackstop({ slug: s, type: 'note', compiled_truth: await truthLead(engine, Number(page.id), 4096), frontmatter: {}, segmentedPageId: Number(page.id) },
+      { engine, sourceId: 'default', sessionId: null, source: 'mcp:put_page', mode: 'inline' });
+  };
+  const install = () => {
+    prompts = [];
+    __setChatTransportForTests(async (o: ChatOpts): Promise<ChatResult> => {
+      prompts.push(JSON.stringify(o.messages));
+      return { text: '{"facts":[]}', blocks: [], stopReason: 'end', model: 'test:stub', providerId: 'test',
+        usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 } };
+    });
+  };
+
+  test('an import extracts each window of each occurrence once; an unchanged page extracts nothing', async () => {
+    const { engine, seed, body } = opts.getBrain();
+    await engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+    await seed(slug, chatPage('Backstop', chatDays(400, 100, 5)).replace('type: conversation', 'type: note'));
+    const page = await pageOf(engine, slug);
+    const truth = Buffer.from((await body(slug)).truth, 'utf8');
+    const manifest = await engine.readManifest(Number(page.id));
+    const expected = manifest.flatMap(row => lineWindows(truth.subarray(row.byteStart, row.byteStart + row.byteLen).toString('utf8'), MAX_TURN_TEXT_CHARS));
+    install();
+    try {
+      await backstop(engine, slug);
+      firstPrompts = prompts;
+      const rows = await engine.readSegmentDerivations(Number(page.id), { kind: 'facts_backstop' });
+      expect(manifest.length).toBeGreaterThan(2);
+      expect({ calls: prompts.length, distinct: new Set(prompts).size, rows: rows.length, states: [...new Set(rows.map(r => r.state))] })
+        .toEqual({ calls: expected.length, distinct: expected.length, rows: manifest.length, states: ['done'] });
+      install();
+      await backstop(engine, slug);
+      expect(prompts.length).toBe(0);
+    } finally { __setChatTransportForTests(null); }
+  }, 600_000);
+
+  test('an append by a remote writer extracts only the new text\'s windows', async () => {
+    const brain = opts.getBrain();
+    const appended = chatDays(500, 3, 5);
+    expect(await brain.call('append_page', { slug, text: appended, request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
+    install();
+    try {
+      await backstop(brain.engine, slug);
+      expect(prompts.filter(p => firstPrompts.includes(p))).toEqual([]);
+      expect(prompts.length).toBeGreaterThanOrEqual(Math.ceil(appended.length / MAX_TURN_TEXT_CHARS));
+      expect(prompts.length).toBeLessThanOrEqual(Math.ceil(appended.length / MAX_TURN_TEXT_CHARS) + 2);
+      const page = await pageOf(brain.engine, slug);
+      const rows = await brain.engine.readSegmentDerivations(Number(page.id), { kind: 'facts_backstop' });
+      expect({ rows: rows.length, states: [...new Set(rows.map(r => r.state))] }).toEqual({ rows: (await brain.engine.readManifest(Number(page.id))).length, states: ['done'] });
+    } finally { __setChatTransportForTests(null); }
+  }, 600_000);
+
+  test('a cap the newest window does not fit refuses before any call', async () => {
+    const { engine, seed } = opts.getBrain();
+    const capped = `notes/backstop-capped-${randomUUID().slice(0, 8)}`;
+    await seed(capped, chatPage('Backstop capped', chatDays(600, 100, 6)).replace('type: conversation', 'type: note'));
+    await engine.setConfig(PAGE_EMBED_CAP_KEY, '0.000001');
+    install();
+    try {
+      await backstop(engine, capped);
+      const page = await pageOf(engine, capped);
+      const rows = await engine.readSegmentDerivations(Number(page.id), { kind: 'facts_backstop' });
+      expect({ calls: prompts.length, receipts: rows.map(r => r.receipt) })
+        .toEqual({ calls: 0, receipts: [expect.objectContaining({ kind: 'unread_windows', pipeline: 'facts_backstop', reason: 'cap_reached', windows_read: 0 })] });
+    } finally {
+      __setChatTransportForTests(null);
+      await engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+    }
   }, 600_000);
 }
