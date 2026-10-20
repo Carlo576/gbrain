@@ -54,6 +54,7 @@ import { nativeFileTarget } from './native-file-target.ts';
 import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { isLockOpenFailure, type NativeLockHandle } from './native-lock.ts';
 import { planPageEmbedding } from '../page-embedding-budget.ts';
+import { acquirePageEmbeddingLease } from '../page-embedding-lease.ts';
 import { chunkGenerationFilter, chunkManifestReads } from '../search/safe-chunks.ts';
 import { classifyItemFailure, ItemRun } from '../item-failure.ts';
 
@@ -427,6 +428,12 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
   if (isEmbedSkipped(snapshot.page.frontmatter)) { await completeEffect(engine, effect, { embedding: 'skipped', reason: 'embed_skip' }); return; }
   const segmented = await readSegmentedEmbedPage(engine, { id: snapshot.page.id });
   if (segmented) { await embedSegmentedEffect(engine, config, effect, snapshot, segmented, signature, opts); return; }
+  // A stale drain or another worker embedding this page finishes first; the projection read below then finds its chunks complete.
+  await using _lease = await acquirePageEmbeddingLease(engine, snapshot.page.id, { signal: opts.signal, whileWaiting: async () => {
+    if (!await renewPersistenceEffectClaim({ executeRaw: engine.executeRawDirect.bind(engine) }, effect)) throw opError('write_claim_lost', 'The embedding claim changed.',
+      `Another worker took over the embedding of ${snapshot.page.slug} in source ${effect.source_id}; this attempt stops without installing vectors and the owning claim finishes it.`,
+      { fix: effectStatusFix(effect) });
+  } });
   const projection = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, signature, opts.embedding?.model);
   const { prepared } = projection;
   let pending = projection.pending;
@@ -547,6 +554,7 @@ async function embedSegmentedEffect(engine: BrainEngine, config: GBrainConfig, e
     { fix: effectStatusFix(effect) });
   const embed = opts.embedding?.embed ?? embedBatch;
   const result = await embedSegmentedPage(engine, page, { signature, signal: opts.signal, occurrenceIds: effect.data.occurrence_ids,
+    whileWaiting: async () => { if (!await renewPersistenceEffectClaim({ executeRaw: engine.executeRawDirect.bind(engine) }, effect)) throw claimLost(); },
     embedFn: (texts, o) => withAIInvocationPreflight(async () => {
       opts.signal?.throwIfAborted();
       if (!await renewPersistenceEffectClaim({ executeRaw: engine.executeRawDirect.bind(engine) }, effect)) throw claimLost();
