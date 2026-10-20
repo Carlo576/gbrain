@@ -1025,6 +1025,8 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; 
   // PR 4 (Wave B incremental derivation, transcripts)
   // PR 4 4b
   { since: 'TBD', text: 'Appending to a long conversation now re-extracts facts only for the new messages.' },
+  { since: 'TBD', text: 'Atom extraction now covers very large pages, and after an append reads only the new text.' },
+  { since: 'TBD', text: 'The per-page spend cap now also covers fact and atom extraction on large pages; doctor lists pages it stopped.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */

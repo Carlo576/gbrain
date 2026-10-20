@@ -25,6 +25,11 @@ import { lineWindows } from '../../src/core/facts/backstop-segments.ts';
 import { MAX_TURN_TEXT_CHARS } from '../../src/core/facts/extract.ts';
 import { truthLead } from '../../src/core/page-body/segment-blocks.ts';
 import { __setChatTransportForTests, type ChatOpts, type ChatResult } from '../../src/core/ai/gateway.ts';
+import { runPhaseExtractAtoms } from '../../src/core/cycle/extract-atoms.ts';
+import { MAX_ATOM_WINDOWS_PER_PAGE_RUN } from '../../src/core/cycle/extract-atoms-segments.ts';
+import { extractionInputTruncatedEntry } from '../../src/commands/doctor/checks/extraction-input.ts';
+import type { DoctorContext } from '../../src/commands/doctor/context.ts';
+import type { Check } from '../../src/commands/doctor.ts';
 
 const SPEAKERS = ['Alice Example', 'Bob Example', 'Carol Example'];
 const WORDS = ['launch', 'pricing', 'budget', 'roadmap', 'hiring', 'review', 'contract', 'latency', 'onboarding', 'forecast', 'retention', 'deploy'];
@@ -285,5 +290,119 @@ export function defineSegmentedBackstopCases(opts: { getBrain: () => AppendBrain
       __setChatTransportForTests(null);
       await engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
     }
+  }, 600_000);
+}
+
+/**
+ * extract_atoms over a segmented page (wave-b spec 8.2 "extract_atoms"): an import extracts every input-cap window of
+ * every occurrence once (one atom per window from the fake model), across runs when a run's window budget stops it; an
+ * append by a remote writer extracts only windows whose text no run extracted before, and once the page settles the
+ * atoms of windows that left the page are retired and every other atom stays; a cap the newest window does not fit
+ * refuses before any call. Fake chat (the phase's _chat seam), counted by prompt.
+ */
+export function defineSegmentedAtomsCases(opts: { getBrain: () => AppendBrain }): void {
+  const slug = `notes/atoms-segmented-${randomUUID().slice(0, 8)}`;
+  const cap = 50_000;
+  let prompts: string[] = [];
+  let calls = 0;
+  let before: string[] = [];
+  const chat = async (o: ChatOpts): Promise<ChatResult> => {
+    prompts.push(o.messages.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n'));
+    const title = `window atom ${++calls}`;
+    const text = JSON.stringify({ atoms: [{ title, atom_type: 'insight', body: `Body for ${title}.`, source_quote: null, lesson: null, concepts: null, virality_score: null, emotional_register: null }] });
+    return { text, blocks: [{ type: 'text', text }], stopReason: 'end', model: 'test:stub', providerId: 'test',
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 } };
+  };
+  /** Runs the phase until a run makes no call; returns the calls made for page S (other pages in the brain are extracted too). */
+  const drain = async (engine: BrainEngine, s: string): Promise<number> => {
+    prompts = [];
+    for (let run = 0; run < 20; run++) {
+      const made = prompts.length;
+      await runPhaseExtractAtoms(engine, { sourceId: 'default', _chat: chat, _transcripts: [] });
+      if (prompts.length === made) break;
+    }
+    prompts = prompts.filter(p => p.includes('Source: ' + s + '\n'));
+    return prompts.length;
+  };
+  const windowsOf = async (brain: AppendBrain, s: string): Promise<string[]> => {
+    const [page] = await brain.engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug=$1", [s]);
+    const truth = Buffer.from((await brain.body(s)).truth, 'utf8');
+    return (await brain.engine.readManifest(Number(page!.id)))
+      .flatMap(row => lineWindows(truth.subarray(row.byteStart, row.byteStart + row.byteLen).toString('utf8'), cap)).filter(w => w.trim());
+  };
+  const atoms = async (engine: BrainEngine, s: string) => engine.executeRaw<{ slug: string; live: boolean }>(
+    `SELECT slug, deleted_at IS NULL AS live FROM pages WHERE source_id='default' AND type='atom' AND frontmatter->>'source_slug'=$1`, [s]);
+  const rowsOf = async (engine: BrainEngine, s: string) => {
+    const [page] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug=$1", [s]);
+    return engine.readSegmentDerivations(Number(page!.id), { kind: 'extract_atoms' });
+  };
+  const digest = (text: string) => createHash('sha256').update(text).digest('hex');
+
+  test('an import extracts every window of every occurrence once, one atom each; a settled page extracts nothing', async () => {
+    const brain = opts.getBrain();
+    await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+    await brain.engine.setConfig('cycle.extract_atoms.max_input_chars', String(cap));
+    await brain.seed(slug, chatPage('Atoms', chatDays(700, 100, 5)).replace('type: conversation', 'type: meeting'));
+    before = await windowsOf(brain, slug);
+    const made = await drain(brain.engine, slug);
+    const rows = await rowsOf(brain.engine, slug);
+    const stored = await atoms(brain.engine, slug);
+    expect(before.length).toBeGreaterThan(MAX_ATOM_WINDOWS_PER_PAGE_RUN);
+    expect({ calls: made, covered: before.filter(w => prompts.filter(p => p.includes(w)).length === 1).length, rows: [...new Set(rows.map(r => r.state))],
+      atoms: stored.filter(a => a.live).length })
+      .toEqual({ calls: before.length, covered: before.length, rows: ['done'], atoms: before.length });
+    expect(await drain(brain.engine, slug)).toBe(0);
+  }, 600_000);
+
+  test('an append by a remote writer extracts only the new windows and retires only the atoms of windows that left the page', async () => {
+    const brain = opts.getBrain();
+    const appended = chatDays(800, 2, 5);
+    expect(await brain.call('append_page', { slug, text: appended, request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
+    const after = await windowsOf(brain, slug);
+    const old = new Set(before.map(digest));
+    const live = new Set(after.map(digest));
+    const fresh = after.filter(w => !old.has(digest(w)));
+    const made = await drain(brain.engine, slug);
+    const stored = await atoms(brain.engine, slug);
+    const recorded = new Set((await rowsOf(brain.engine, slug)).flatMap(r => ((r.output as { windows: { atoms: string[] }[] }).windows).flatMap(w => w.atoms)));
+    expect(fresh.length).toBeLessThanOrEqual(Math.ceil(appended.length / cap) + 2);
+    expect({ calls: made, covered: fresh.every(w => prompts.some(p => p.includes(w))), live: stored.filter(a => a.live).length,
+      retired: stored.filter(a => !a.live).length, recorded: stored.filter(a => a.live).every(a => recorded.has(a.slug)) })
+      .toEqual({ calls: fresh.length, covered: true, live: live.size, retired: [...old].filter(h => !live.has(h)).length, recorded: true });
+  }, 600_000);
+
+  test('a cap the newest window does not fit refuses before any call and records the unread windows', async () => {
+    const brain = opts.getBrain();
+    const capped = `notes/atoms-capped-${randomUUID().slice(0, 8)}`;
+    await brain.seed(capped, chatPage('Atoms capped', chatDays(900, 100, 6)).replace('type: conversation', 'type: meeting'));
+    await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, '0.000001');
+    try {
+      const made = await drain(brain.engine, capped);
+      const rows = await rowsOf(brain.engine, capped);
+      expect({ calls: made, receipts: [...new Set(rows.map(r => JSON.stringify({ state: r.state, reason: (r.receipt as { reason?: string } | null)?.reason ?? null })))] })
+        .toEqual({ calls: 0, receipts: [JSON.stringify({ state: 'partial', reason: 'cap_reached' })] });
+      expect(rows.length).toBeGreaterThan(0);
+    } finally {
+      await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+    }
+  }, 600_000);
+}
+
+/** Doctor's extraction_input_truncated reads page_segment_derivations receipts too (wave-b spec 8.1), not only page_extraction_state. */
+export function defineSegmentReceiptDoctorCases(opts: { getBrain: () => AppendBrain }): void {
+  test('doctor lists a segmented page whose windows the cap left unread, with the per-page cap as the fix', async () => {
+    const { engine, seed } = opts.getBrain();
+    const s = `notes/doctor-unread-${randomUUID().slice(0, 8)}`;
+    await seed(s, chatPage('Doctor unread', chatDays(950, 100, 5)).replace('type: conversation', 'type: note'));
+    const [page] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug=$1", [s]);
+    const [first] = await engine.readManifest(Number(page!.id));
+    await engine.upsertSegmentDerivations([{ pageId: Number(page!.id), kind: 'extract_atoms', occurrenceId: first!.occurrenceId, version: 1,
+      segmentSha256: first!.sha256, contextHash: new Uint8Array(32), state: 'partial', output: { windows: [] },
+      receipt: { kind: 'unread_windows', pipeline: 'extract_atoms', reason: 'cap_reached', windows_read: 0, windows_total: 3 } }]);
+    const check = (await extractionInputTruncatedEntry.run({ engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
+    const groups = (check.details as { groups: Array<{ pipeline: string; kind: string; samples: string[] }> }).groups;
+    expect({ status: check.status, argv: (check as { fix?: { argv: string[] } }).fix?.argv,
+      listed: groups.some(g => g.pipeline === 'extract_atoms' && g.kind === 'unread_windows' && g.samples.includes(`default:${s}`)) })
+      .toEqual({ status: 'warn', argv: ['gbrain', 'config', 'set', PAGE_EMBED_CAP_KEY, '<usd>'], listed: true });
   }, 600_000);
 }
