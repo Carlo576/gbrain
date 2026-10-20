@@ -1388,6 +1388,23 @@ CREATE TABLE IF NOT EXISTS page_body_staging_texts (
 );
 CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_texts (source_id, sha256);
 
+-- Wave B per-segment derivation watermarks (migration v265; src/core/page-body/derivations.ts).
+CREATE TABLE IF NOT EXISTS page_segment_derivations (
+  page_id          INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  pipeline         TEXT    NOT NULL CHECK (pipeline IN ('links','mentions','timeline','fences','conversation_facts','extract_atoms','facts_backstop','synopsis')),
+  occurrence_id    BIGINT  NOT NULL,
+  pipeline_version INTEGER NOT NULL CHECK (pipeline_version >= 0),
+  segment_sha256   BYTEA   NOT NULL CHECK (octet_length(segment_sha256) = 32),
+  context_hash     BYTEA   NOT NULL CHECK (octet_length(context_hash) = 32),
+  state            TEXT    NOT NULL CHECK (state IN ('done','partial','failed','skipped')),
+  output           JSONB,
+  receipt          JSONB,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, pipeline, occurrence_id)
+);
+CREATE INDEX IF NOT EXISTS page_segment_derivations_unsettled ON page_segment_derivations (pipeline, page_id) WHERE state IN ('partial','failed');
+
 
 
 -- Durable concurrent persistence (migration 151).

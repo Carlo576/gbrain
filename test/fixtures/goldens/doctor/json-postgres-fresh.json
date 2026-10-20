@@ -942,7 +942,7 @@
         {
           "category": "ops",
           "elapsed_ms": "<volatile>",
-          "message": "RLS enabled on 151/151 public tables",
+          "message": "RLS enabled on 152/152 public tables",
           "name": "rls",
           "status": "ok"
         },
@@ -956,7 +956,7 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1302 column(s) verified against live schema",
+          "message": "1313 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },

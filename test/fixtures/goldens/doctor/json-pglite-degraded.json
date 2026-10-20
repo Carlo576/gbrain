@@ -913,7 +913,7 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1296 column(s) verified against live schema",
+          "message": "1307 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },

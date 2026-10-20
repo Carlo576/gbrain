@@ -186,6 +186,13 @@
       "page_purges.page_purges_pkey": "p PRIMARY KEY (source_id, content_hash)",
       "page_purges.page_purges_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "page_retrievals.page_retrievals_pkey": "p PRIMARY KEY (page_id)",
+      "page_segment_derivations.page_segment_derivations_context_hash_check": "c CHECK ((octet_length(context_hash) = 32))",
+      "page_segment_derivations.page_segment_derivations_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
+      "page_segment_derivations.page_segment_derivations_pipeline_check": "c CHECK ((pipeline = ANY (ARRAY['links'::text, 'mentions'::text, 'timeline'::text, 'fences'::text, 'conversation_facts'::text, 'extract_atoms'::text, 'facts_backstop'::text, 'synopsis'::text])))",
+      "page_segment_derivations.page_segment_derivations_pipeline_version_check": "c CHECK ((pipeline_version >= 0))",
+      "page_segment_derivations.page_segment_derivations_pkey": "p PRIMARY KEY (page_id, pipeline, occurrence_id)",
+      "page_segment_derivations.page_segment_derivations_segment_sha256_check": "c CHECK ((octet_length(segment_sha256) = 32))",
+      "page_segment_derivations.page_segment_derivations_state_check": "c CHECK ((state = ANY (ARRAY['done'::text, 'partial'::text, 'failed'::text, 'skipped'::text])))",
       "page_segment_texts.page_segment_texts_byte_len_check": "c CHECK (((byte_len >= 1) AND (byte_len <= 1048576)))",
       "page_segment_texts.page_segment_texts_line_count_check": "c CHECK ((line_count >= 0))",
       "page_segment_texts.page_segment_texts_pkey": "p PRIMARY KEY (source_id, sha256)",
@@ -588,6 +595,9 @@
       "page_retrievals": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
+      "page_segment_derivations": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
       "page_segment_texts": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
@@ -952,6 +962,8 @@
       "page_projection_jobs_pkey": "CREATE UNIQUE INDEX page_projection_jobs_pkey ON public.page_projection_jobs USING btree (source_incarnation, slug)",
       "page_purges_pkey": "CREATE UNIQUE INDEX page_purges_pkey ON public.page_purges USING btree (source_id, content_hash)",
       "page_retrievals_pkey": "CREATE UNIQUE INDEX page_retrievals_pkey ON public.page_retrievals USING btree (page_id)",
+      "page_segment_derivations_pkey": "CREATE UNIQUE INDEX page_segment_derivations_pkey ON public.page_segment_derivations USING btree (page_id, pipeline, occurrence_id)",
+      "page_segment_derivations_unsettled": "CREATE INDEX page_segment_derivations_unsettled ON public.page_segment_derivations USING btree (pipeline, page_id) WHERE (state = ANY (ARRAY['partial'::text, 'failed'::text]))",
       "page_segment_texts_pkey": "CREATE UNIQUE INDEX page_segment_texts_pkey ON public.page_segment_texts USING btree (source_id, sha256)",
       "page_versions_pkey": "CREATE UNIQUE INDEX page_versions_pkey ON public.page_versions USING btree (id)",
       "page_view_digests_pkey": "CREATE UNIQUE INDEX page_view_digests_pkey ON public.page_view_digests USING btree (page_id, revision, view, audience)",
@@ -2199,6 +2211,22 @@
         "columns": [
           "1 page_id integer/int4 NOT NULL",
           "2 last_retrieved_at timestamp with time zone/timestamptz NOT NULL"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "page_segment_derivations": {
+        "columns": [
+          "1 page_id integer/int4 NOT NULL",
+          "2 pipeline text/text NOT NULL",
+          "3 occurrence_id bigint/int8 NOT NULL",
+          "4 pipeline_version integer/int4 NOT NULL",
+          "5 segment_sha256 bytea/bytea NOT NULL",
+          "6 context_hash bytea/bytea NOT NULL",
+          "7 state text/text NOT NULL",
+          "8 output jsonb/jsonb NULL",
+          "9 receipt jsonb/jsonb NULL",
+          "10 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "11 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

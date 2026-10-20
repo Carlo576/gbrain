@@ -33,7 +33,8 @@ describe('migrations full-record golden', () => {
     expect(new Set(versions).size).toBe(versions.length);
     const sorted = [...versions].sort((a, b) => a - b);
     const golden = buildMigrationsGolden(MIGRATIONS);
-    expect(golden.gaps).toEqual([17, 18, 19, 100]);
+    // 264: Wave B PR 4's placeholder v265 leaves room for the follow-up wave's v264; release:restamp renumbers it at merge.
+    expect(golden.gaps).toEqual([17, 18, 19, 100, 264]);
     expect(sorted[0]).toBe(2);
     expect(sorted[sorted.length - 1]).toBe(LATEST_VERSION);
   }, 60_000);

@@ -169,8 +169,41 @@ CREATE TABLE IF NOT EXISTS page_body_staging_parts (
 ${PAGE_BODY_STAGING_TEXTS_SQL}`;
 
 /**
+ * The derivation pipelines whose per-segment results page_segment_derivations records (wave-b spec 8.1-8.6, PR 4), and
+ * the states a row can settle in. One list feeds the table's CHECKs and the TS types (page-body/derivations.ts).
+ */
+export const SEGMENT_DERIVATION_KINDS = ['links', 'mentions', 'timeline', 'fences', 'conversation_facts', 'extract_atoms', 'facts_backstop', 'synopsis'] as const;
+export const SEGMENT_DERIVATION_STATES = ['done', 'partial', 'failed', 'skipped'] as const;
+const sqlList = (values: readonly string[]) => values.map(v => `'${v}'`).join(',');
+
+/**
+ * Per-segment derivation watermarks (migration v265): one row per page, pipeline and manifest occurrence, recording
+ * the segment text and the context (`context_hash`: entry state plus the page-level inputs the pipeline reads) it was
+ * derived from, the pipeline version, the outcome and a bounded per-segment output. A pipeline's work on a page is the
+ * live occurrences without a settled row whose segment sha, context hash and version match, found from metadata alone.
+ * Rows of an occurrence that left the live generation are deleted by their pipeline (retireSegmentDerivations); a page
+ * delete cascades. The output holds link context and window anchors, so the table gets the segment tables' RLS posture.
+ */
+export const PAGE_SEGMENT_DERIVATIONS_SQL = `CREATE TABLE IF NOT EXISTS page_segment_derivations (
+  page_id          INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  pipeline         TEXT    NOT NULL CHECK (pipeline IN (${sqlList(SEGMENT_DERIVATION_KINDS)})),
+  occurrence_id    BIGINT  NOT NULL,
+  pipeline_version INTEGER NOT NULL CHECK (pipeline_version >= 0),
+  segment_sha256   BYTEA   NOT NULL CHECK (octet_length(segment_sha256) = 32),
+  context_hash     BYTEA   NOT NULL CHECK (octet_length(context_hash) = 32),
+  state            TEXT    NOT NULL CHECK (state IN (${sqlList(SEGMENT_DERIVATION_STATES)})),
+  output           JSONB,
+  receipt          JSONB,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, pipeline, occurrence_id)
+);
+CREATE INDEX IF NOT EXISTS page_segment_derivations_unsettled ON page_segment_derivations (pipeline, page_id) WHERE state IN ('partial','failed');`;
+
+/**
  * The segment tables hold page text (`page_segment_texts`, `page_body_staging_parts`) or a page's shape and
- * headings (`page_body_manifest`, `page_body_stagings`, `page_view_digests`), so they get the posture of `pages`
+ * headings (`page_body_manifest`, `page_body_stagings`, `page_view_digests`) or derived link context
+ * (`page_segment_derivations`), so they get the posture of `pages`
  * and `content_chunks`: RLS on, re-asserted on every schema replay like the core list in src/schema.sql, so a brain
  * the auto-RLS event trigger (v35) missed, or one where it was dropped or disabled, never serves segment text to a
  * role `pages` returns no rows to. Only under a role that bypasses RLS (else the runtime role would lock itself out),
@@ -178,7 +211,7 @@ ${PAGE_BODY_STAGING_TEXTS_SQL}`;
  * `page_view_digests` is absent while migration v248 runs. Postgres only: PGLite has no role system, and its
  * bootstrap enables RLS on no core table either. Source-scoped policies are operator SQL (docs/ENGINES.md).
  */
-export const PAGE_BODY_RLS_TABLES = ['page_segment_texts', 'page_body_manifest', 'page_body_stagings', 'page_body_staging_parts', 'page_view_digests', 'page_body_staging_texts'] as const;
+export const PAGE_BODY_RLS_TABLES = ['page_segment_texts', 'page_body_manifest', 'page_body_stagings', 'page_body_staging_parts', 'page_view_digests', 'page_body_staging_texts', 'page_segment_derivations'] as const;
 export const PAGE_BODY_RLS_SQL = `DO $rls$
 DECLARE target TEXT;
 BEGIN

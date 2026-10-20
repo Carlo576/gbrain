@@ -2131,12 +2131,31 @@ CREATE TABLE IF NOT EXISTS page_body_staging_texts (
 CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_texts (source_id, sha256);
 -- END GENERATED from src/core/page-body/schema.ts (PAGE_BODY_SCHEMA_SQL)
 
+-- Wave B per-segment derivation watermarks (migration v265; src/core/page-body/derivations.ts).
+-- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_SEGMENT_DERIVATIONS_SQL). Edit that file, then run: bun run build:schema
+CREATE TABLE IF NOT EXISTS page_segment_derivations (
+  page_id          INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  pipeline         TEXT    NOT NULL CHECK (pipeline IN ('links','mentions','timeline','fences','conversation_facts','extract_atoms','facts_backstop','synopsis')),
+  occurrence_id    BIGINT  NOT NULL,
+  pipeline_version INTEGER NOT NULL CHECK (pipeline_version >= 0),
+  segment_sha256   BYTEA   NOT NULL CHECK (octet_length(segment_sha256) = 32),
+  context_hash     BYTEA   NOT NULL CHECK (octet_length(context_hash) = 32),
+  state            TEXT    NOT NULL CHECK (state IN ('done','partial','failed','skipped')),
+  output           JSONB,
+  receipt          JSONB,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, pipeline, occurrence_id)
+);
+CREATE INDEX IF NOT EXISTS page_segment_derivations_unsettled ON page_segment_derivations (pipeline, page_id) WHERE state IN ('partial','failed');
+-- END GENERATED from src/core/page-body/schema.ts (PAGE_SEGMENT_DERIVATIONS_SQL)
+
 -- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_BODY_RLS_SQL). Edit that file, then run: bun run build:schema
 DO \$rls\$
 DECLARE target TEXT;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
-    FOREACH target IN ARRAY ARRAY['page_segment_texts','page_body_manifest','page_body_stagings','page_body_staging_parts','page_view_digests','page_body_staging_texts'] LOOP
+    FOREACH target IN ARRAY ARRAY['page_segment_texts','page_body_manifest','page_body_stagings','page_body_staging_parts','page_view_digests','page_body_staging_texts','page_segment_derivations'] LOOP
       IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE n.nspname = current_schema() AND c.relname = target AND c.relkind = 'r' AND NOT c.relrowsecurity) THEN
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', target);

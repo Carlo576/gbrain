@@ -1005,6 +1005,9 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // (absent from PGLITE_SCHEMA_SQL), so no schema-blob forward reference can
   // exist; nullable column only, no index or FK.
   'facts.attributed_to',
+  // migration v265 (Wave B PR 4) — conversation window anchor. Same precedent: the facts table is migration-created,
+  // so no schema-blob forward reference can exist; nullable column plus a CHECK, no index or FK.
+  'facts.source_window',
   // v0.42.56.0 (migration v122, #2390) — Life Chronicle ontology columns.
   // Same precedent as facts.claim_metric et al: the `facts` table itself is
   // migration-created (absent from PGLITE_SCHEMA_SQL), so no schema-blob
