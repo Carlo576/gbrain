@@ -1590,6 +1590,18 @@
           "status": "ok"
         },
         {
+          "category": "ops",
+          "details": {
+            "count": 0,
+            "docs": "docs/guides/google-connect.md#api-access",
+            "sources": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No Google source recorded a disabled API or missing scope at its last sync.",
+          "name": "google_api_access",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "details": {
             "by_source": [],
