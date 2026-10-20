@@ -1028,6 +1028,11 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; 
   { since: 'TBD', text: 'Pages over 1 MiB (stored in segments) now cut a long passage that has to be split at a sentence or line end, so a sentence the old cut split across two chunks is found whole by keyword and vector search. Pages stored before keep serving their chunks: `gbrain reindex --segmented` lists them with the chunk counts that would change and writes nothing; `--apply` re-chunks only the segments that change and keeps the vectors of unchanged chunk texts, and `gbrain embed --stale` embeds the new ones. Nothing re-chunks on upgrade.' },
   // PR 4 4e (Wave B incremental derivation, transcripts). `since` is restamped at the merge slot.
   { since: 'TBD', text: 'New transcript sessions import as one page; existing split sessions stop rewriting every part when a session grows. `gbrain transcripts ingest` writes a session with no part pages as one page up to the page ceiling (`pages.max_bytes` or the content-sanity block line, whichever is lower), at its base slug with the same `<id>-p1` identity; only a message or session over that ceiling continues into `-pN` pages. A session already split into parts keeps them and their grouping. The part count left hashed content (titles read `(part X)`, `transcript_import.of` is gone and `part_bytes` records the part size), so each part is rewritten once on its next import; after that a grown session changes only its last part or adds one. Nothing merges a split session into one page.' },
+  // PR 4 (Wave B incremental derivation, transcripts)
+  // PR 4 4b
+  { since: 'TBD', text: 'Appending to a long conversation now re-extracts facts only for the new messages.' },
+  { since: 'TBD', text: 'Atom extraction now covers very large pages, and after an append reads only the new text.' },
+  { since: 'TBD', text: 'The per-page spend cap now also covers fact and atom extraction on large pages; doctor lists pages it stopped.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */
