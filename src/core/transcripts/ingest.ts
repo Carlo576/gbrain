@@ -10,7 +10,13 @@
  *   detect → adapter.parse (AsyncGenerator, per-session) → since/limit
  *   filters → redactSession (fail-closed) → renderSessionParts →
  *   importFromContent per part (embed OFF unless opted in) →
- *   putRawData(baseSlug) → stale-part reconciliation (delete part > of).
+ *   putRawData(baseSlug) → stale-part reconciliation (delete parts past the
+ *   rendered count).
+ *
+ * Layout (Wave B): the stored pages decide how a session renders
+ * (`storedTranscriptLayout`). A session with no split pages is one page
+ * under the page ceiling; a session already split keeps its parts and their
+ * grouping. Nothing merges a split session implicitly.
  *
  * Error taxonomy:
  *   - per-FILE: unreadable / unknown format / symlink → counted, run continues.
@@ -50,13 +56,20 @@ import type { FileDiagnostics, ParsedSession, TranscriptAdapter, TranscriptForma
 import { detectAdapter, type DetectResult } from './detect.ts';
 import {
   loadImportRedactionPatterns,
+  PAGE_CEILING_FILL,
+  PART_TARGET_BYTES,
   redactSession,
   renderPartContent,
   renderSessionParts,
+  transcriptPartId,
   type RedactedSession,
   type RenderedPart,
   type RenderSessionResult,
+  type TranscriptLayout,
 } from './render.ts';
+import { readPageBodyPolicy } from '../page-body/limits.ts';
+import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
+import { effectiveBytesBlock } from '../import-screen.ts';
 import { RECONCILE_SAFETY_KEYS } from '../persistence/reconcile-safety.ts';
 import { ATOMS_SCAN_HASH_KEY } from '../utils.ts';
 
@@ -232,6 +245,9 @@ export async function runTranscriptsIngest(
   const redactionPatterns = loadImportRedactionPatterns(opts.userPatternsPath);
   const coordinator = !opts.dryRun && opts.context && await managedPersistenceEnabled(engine) ? opts.context : null;
   const items = new ItemRun('transcripts.ingest_session');
+  // Read with the first session that renders. A dry run reads nothing from the brain: it plans every session as a
+  // new one-page session at the default ceiling.
+  let pageCeiling: number | undefined;
 
   const total = opts.paths.length;
   let done = 0;
@@ -326,7 +342,12 @@ export async function runTranscriptsIngest(
           });
           outcome.redactions = redacted.redactionCount;
           outcome.imperatives = redacted.imperativesFlagged;
-          const rendered = renderSessionParts(redacted, { sourcePath: path });
+          pageCeiling ??= opts.dryRun ? Math.floor(PAGE_MAX_BYTES * PAGE_CEILING_FILL) : await transcriptPageCeiling(engine);
+          const stored = opts.dryRun
+            ? { layout: 'single' as const, partTargetBytes: pageCeiling, existingSlug: null }
+            : await storedTranscriptLayout(engine, opts.sourceId ?? 'default', session.meta, pageCeiling);
+          const rendered = renderSessionParts(redacted, { sourcePath: path, layout: stored.layout, partTargetBytes: stored.partTargetBytes });
+          if (stored.existingSlug) adoptExistingBaseSlug(rendered, stored.existingSlug);
           outcome.baseSlug = rendered.baseSlug;
           outcome.parts = rendered.parts.length;
 
@@ -335,7 +356,7 @@ export async function runTranscriptsIngest(
             result.pages.planned += rendered.parts.length;
             // #4762: a planned session is new work too, so the --limit gate
             // above truncates the preview like the real run. A dry run cannot
-            // see hash-skips (no engine reads), so `--dry-run --limit N` shows
+            // see hash-skips or a stored split layout (no engine reads), so `--dry-run --limit N` shows
             // the first N eligible sessions — an upper bound on what the write
             // path would import.
             newWorkSessions++;
@@ -400,9 +421,8 @@ async function importSession(engine: BrainEngine, opts: TranscriptsIngestOpts, r
   // EXISTING page under a different slug (same session id, changed
   // title or corrected start date) — raw-data writes and stale-part
   // reconciliation must follow the page that actually exists, or
-  // every re-run aborts on a nonexistent slug.
-  await adoptExistingBaseSlug(engine, opts.sourceId ?? 'default', rendered);
-  outcome.baseSlug = rendered.baseSlug;
+  // every re-run aborts on a nonexistent slug. The caller adopted the
+  // stored slug (storedTranscriptLayout read it).
   let resolvedBaseSlug = rendered.baseSlug;
   for (const part of rendered.parts) {
     let r: { slug: string; status: 'imported' | 'skipped' | 'error' };
@@ -488,9 +508,11 @@ async function importSession(engine: BrainEngine, opts: TranscriptsIngestOpts, r
     }
   }
 
-  // Stale-part reconciliation: a session that shrank or re-split
-  // leaves higher-numbered part pages behind — delete them, or a
-  // stale part stays searchable forever. ENUMERATED via one SQL
+  // Stale-part reconciliation: a session whose content shrank leaves
+  // higher-numbered part pages behind — delete them, or a stale part
+  // stays searchable forever. It never merges a split session: the
+  // layout came from the stored pages, so a split session renders as
+  // parts at its stored part size and growth never lowers their count. ENUMERATED via one SQL
   // query (never a sequential probe: a crash mid-delete leaves
   // holes that a first-miss or bounded-miss probe walks past) and
   // run on EVERY pass including all-skipped re-runs, because a
@@ -624,14 +646,52 @@ async function preserveForeignFrontmatter(engine: BrainEngine, sourceId: string,
 
 const RE_DERIVED_KEYS = new Set([...RECONCILE_SAFETY_KEYS, ATOMS_SCAN_HASH_KEY]);
 
-async function adoptExistingBaseSlug(engine: BrainEngine, sourceId: string, rendered: RenderSessionResult): Promise<void> {
-  const [existing] = await engine.executeRaw<{ slug: string }>(
-    `SELECT slug FROM pages WHERE source_id = $1 AND deleted_at IS NULL AND frontmatter->>'id' = $2 ORDER BY id LIMIT 1`,
-    [sourceId, rendered.parts[0].frontmatterId],
+function adoptExistingBaseSlug(rendered: RenderSessionResult, existingSlug: string): void {
+  if (existingSlug === rendered.baseSlug) return;
+  rendered.baseSlug = existingSlug;
+  for (const part of rendered.parts) part.slug = part.part === 1 ? existingSlug : `${existingSlug}-p${part.part}`;
+}
+
+/**
+ * The body bytes a single-layout session may fill: the page ceiling
+ * (`pages.max_bytes`, or the inline ceiling while segmented storage is off)
+ * or the content-sanity block line, whichever is lower (a page over the block
+ * line would land with embedding skipped), times PAGE_CEILING_FILL for the
+ * frontmatter. Read once per run.
+ */
+async function transcriptPageCeiling(engine: BrainEngine): Promise<number> {
+  const [policy, block] = await Promise.all([readPageBodyPolicy(engine), effectiveBytesBlock(engine)]);
+  return Math.floor(Math.min(policy.maxBytes, block) * PAGE_CEILING_FILL);
+}
+
+/**
+ * How a session renders, from what is stored (one query by the part 1 and
+ * part 2 identities, which also finds part 1's slug for adoption). The
+ * session is split when part 2 is live, or part 1 is live without
+ * `of <= 1` (a legacy `of > 1`, or a split part 1 that no longer carries
+ * `of`); it then keeps the part size its parts carry (`part_bytes`, else
+ * the pre-Wave-B PART_TARGET_BYTES). Otherwise it is one page under the page
+ * ceiling. A split session is never re-rendered as one page.
+ */
+async function storedTranscriptLayout(engine: BrainEngine, sourceId: string, meta: ParsedSession['meta'], pageCeiling: number):
+  Promise<{ layout: TranscriptLayout; partTargetBytes: number; existingSlug: string | null }> {
+  const [first, second] = [transcriptPartId(meta, 1), transcriptPartId(meta, 2)];
+  const rows = await engine.executeRaw<{ slug: string; fid: string; ti: unknown }>(
+    `SELECT slug, frontmatter->>'id' AS fid, frontmatter->'transcript_import' AS ti FROM pages
+     WHERE source_id = $1 AND deleted_at IS NULL AND frontmatter->>'id' IN ($2, $3) ORDER BY pages.id`,
+    [sourceId, first, second],
   );
-  if (!existing || existing.slug === rendered.baseSlug) return;
-  rendered.baseSlug = existing.slug;
-  for (const part of rendered.parts) part.slug = part.part === 1 ? existing.slug : `${existing.slug}-p${part.part}`;
+  const importMeta = (row: { ti: unknown } | undefined) => {
+    const ti = typeof row?.ti === 'string' ? JSON.parse(row.ti) : row?.ti;
+    return ti && typeof ti === 'object' ? ti as { of?: unknown; part_bytes?: unknown } : null;
+  };
+  const partOne = rows.find(row => row.fid === first);
+  const partTwo = rows.find(row => row.fid === second);
+  const one = importMeta(partOne);
+  const split = partTwo !== undefined || (one !== null && !(Number(one.of) <= 1));
+  if (!split) return { layout: 'single', partTargetBytes: pageCeiling, existingSlug: partOne?.slug ?? null };
+  const pinned = [one?.part_bytes, importMeta(partTwo)?.part_bytes].find(v => Number.isSafeInteger(v) && (v as number) > 0) as number | undefined;
+  return { layout: 'split', partTargetBytes: pinned ?? PART_TARGET_BYTES, existingSlug: partOne?.slug ?? null };
 }
 
 /** Fold one file's adapter diagnostics into its outcome and the run result (drift, skipped lines, truncation). */
