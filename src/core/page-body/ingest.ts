@@ -30,7 +30,7 @@ import { initialEntryState, readEntryState, timelineEntryState, type EntryState 
 import { ContentHashStream } from './content-hash-stream.ts';
 import { prepareSegmentChunks } from './segment-chunks.ts';
 import { reuseSegmentChunkVectors } from '../import-chunk-reuse.ts';
-import { newFenceChunkBudget } from '../markdown-chunks.ts';
+import { newFenceChunkBudget, type FenceChunkBudget } from '../markdown-chunks.ts';
 import { loadFenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { overlaySegmentText, readBodyLedger, type BodyLedger } from './segment-ledger.ts';
@@ -384,10 +384,12 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
   hold?: SegmentChunkInput[];
   /** Guarded: runs in each batch's transaction before its insert (the projection renews its claim on the page's queue row);
    *  false when the caller lost its claim: that batch inserts nothing and the staging stops. */
-  renew?: (tx: BrainEngine) => Promise<boolean> }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
+  renew?: (tx: BrainEngine) => Promise<boolean>;
+  /** The page's fence-chunk budget when one page is chunked over several calls (the re-chunk, page-body/rechunk.ts); default a new one. */
+  fenceBudget?: FenceChunkBudget }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
   if (input.chunking.quarantined || !input.occurrences.length) return { rows: 0, occurrences: 0, indexes: [] };
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
-  const fenceBudget = newFenceChunkBudget();
+  const fenceBudget = input.fenceBudget ?? newFenceChunkBudget();
   let ledger: BodyLedger | undefined;
   let rows = 0, done = 0;
   const indexes: number[] = [];
