@@ -21,13 +21,22 @@ import { expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { reembedPageWithContextualRetrieval } from '../../src/core/contextual-retrieval-service.ts';
-import { SYNOPSIS_DOC_MAX_CHARS, segmentSynopsisWindows, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
+import { SYNOPSIS_DOC_MAX_CHARS, estimateSynopsisCallUsd, segmentSynopsisWindows, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
 import { embeddingInputHash } from '../../src/core/embedding-input-hash.ts';
 import { embeddingInputContext, embeddingWriteTarget } from '../../src/core/page-state/projections.ts';
-import { segmentSynopsisLead } from '../../src/core/page-body/segment-synopsis.ts';
+import { segmentSynopsisInputHashes, segmentSynopsisLead } from '../../src/core/page-body/segment-synopsis.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import { chunkGenerationFilter } from '../../src/core/search/safe-chunks.ts';
+import { __setEmbedTransportForTests } from '../../src/core/ai/gateway.ts';
+import { embedStalePages } from '../../src/core/embed-stale.ts';
+import { pageEmbeddingLeaseProbe } from '../../src/core/page-embedding-lease.ts';
+import { installSegmentedVectors, readSegmentedEmbedPage } from '../../src/core/page-body/segmented-embedding.ts';
 import type { AppendBrain } from './append-brain.ts';
+import { needlePage, needlePageBody, sealAtOldChunker } from './rechunk-segmented-cases.ts';
+import { runSegmentedRechunk } from '../../src/core/page-body/rechunk.ts';
+import { extractionInputTruncatedEntry } from '../../src/commands/doctor/checks/extraction-input.ts';
+import type { DoctorContext } from '../../src/commands/doctor/context.ts';
+import type { Check } from '../../src/commands/doctor.ts';
 
 const WORDS = ['launch', 'pricing', 'roadmap', 'hiring', 'metrics', 'retention', 'design', 'latency', 'budget', 'customer'];
 const paragraph = (d: number, k: number) =>
@@ -52,9 +61,14 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
   const calls: GeneratePerChunkSynopsisArgs[] = [];
   let segmentReads = 0;
   let refuse: ((args: GeneratePerChunkSynopsisArgs) => boolean) | null = null;
+  let fail: ((args: GeneratePerChunkSynopsisArgs) => GeneratePerChunkSynopsisResult | null) | null = null;
+  let onSynopsis: ((args: GeneratePerChunkSynopsisArgs) => Promise<void>) | null = null;
   const generateSynopsis = async (args: GeneratePerChunkSynopsisArgs): Promise<GeneratePerChunkSynopsisResult> => {
     calls.push(args);
+    await onSynopsis?.(args);
     if (refuse?.(args)) return { kind: 'refusal', detail: 'fixture refusal' };
+    const failed = fail?.(args);
+    if (failed) return failed;
     return { kind: 'success', synopsis: `Synopsis of chunk ${args.chunkIndex}.` };
   };
   const counting = (engine: BrainEngine): BrainEngine => new Proxy(engine, {
@@ -209,6 +223,218 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     reset();
     expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: 0 });
     expect(calls.length).toBe(0);
+  }, 300_000);
+
+  const unitVectors = async (n: number) => {
+    const dims = (await embeddingWriteTarget(opts.getBrain().engine)).column.dimensions;
+    return Array.from({ length: n }, () => Float32Array.from({ length: dims }, (_, j) => (j === 1 ? 1 : 0)));
+  };
+
+  test('race: a title-tier embed in flight on a stamped page with new rows when the synopsis pass starts installs first; the pass waits for the page lease and its install wins', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-race-lease';
+    const { body, count } = days(1_300_000);
+    await brain.seed(slug, page(body));
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis' });
+    const stamped = await pageRow(slug);
+    // The state an append leaves (the page stays stamped per_chunk_synopsis, the new rows have no vector), written
+    // locally so no post-write embedding effect races the fixture.
+    await brain.seed(slug, page(body + day(count + 1)));
+    await brain.engine.executeRaw('UPDATE pages SET contextual_retrieval_mode = $2, corpus_generation = $3 WHERE id = $1', [stamped.id, stamped.mode, stamped.generation]);
+    const pending = (await chunks(slug)).filter(c => c.vector === null);
+    expect(pending.length).toBeGreaterThan(0);
+    reset();
+    let pass: Promise<unknown> | null = null;
+    let contended!: () => void;
+    const waited = new Promise<void>(resolve => { contended = resolve; });
+    pageEmbeddingLeaseProbe.contended = () => contended();
+    let titleTexts = 0;
+    try {
+      const titled = await embedStalePages(brain.engine, [slug], 'default', { embedFn: async texts => {
+        titleTexts += texts.length;
+        if (!pass) { pass = run(slug); await Promise.race([pass, waited]); }
+        return unitVectors(texts.length);
+      } });
+      expect(titled.embedded).toBe(pending.length);
+      expect(await pass).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: pending.length });
+    } finally {
+      pageEmbeddingLeaseProbe.contended = undefined;
+    }
+    expect({ titleTexts, calls: calls.length, synopsisEmbeds: brain.embedded.length })
+      .toEqual({ titleTexts: pending.length, calls: nonCode(pending).length, synopsisEmbeds: pending.length });
+    const after = await chunks(slug);
+    for (const c of after) expect(c.embedding_input_hash).not.toBe(await titleHash(c));
+    expect(after.every(c => c.vector !== null)).toBe(true);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: 0 });
+    expect(calls.length).toBe(0);
+  }, 300_000);
+
+  test('race: a row another writer installed after the synopsis pass read it keeps that install; the stale synopsis install is a no-op and the retry pays for that row and the windows not reached', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-race-cas';
+    await brain.seed(slug, page(days(1_300_000).body));
+    const all = await chunks(slug);
+    const target = all.filter(c => c.chunk_source !== 'fenced_code')[Math.floor(all.length / 2)]!;
+    const engine = brain.engine;
+    reset();
+    onSynopsis = async args => {
+      if (args.chunkIndex !== target.chunk_index) return;
+      onSynopsis = null;
+      const seg = (await readSegmentedEmbedPage(engine, { sourceId: 'default', slug }))!;
+      expect(await installSegmentedVectors(engine, seg, await embeddingWriteTarget(engine), [{ chunk_index: target.chunk_index, chunk_text: target.chunk_text,
+        vector: (await unitVectors(1))[0]!, hash: await titleHash(target), expected: null }])).toBe(1);
+    };
+    expect(await run(slug)).toMatchObject({ kind: 'transient_error', cause: 'db' });
+    const halted = await chunks(slug);
+    expect(halted.find(c => c.chunk_index === target.chunk_index)!.embedding_input_hash).toBe(await titleHash(target));
+    const unreached = halted.filter(c => c.vector === null);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: unreached.length + 1 });
+    expect(calls.map(call => call.chunkIndex).sort((a, b) => a - b)).toEqual([target, ...nonCode(unreached)].map(c => c.chunk_index).sort((a, b) => a - b));
+    const after = await chunks(slug);
+    for (const c of after) expect(c.embedding_input_hash).not.toBe(await titleHash(c));
+    expect(after.every(c => c.vector !== null)).toBe(true);
+  }, 300_000);
+
+  test('lead edit: a write that changes the page lead carries no synopsis vector onto its new rows (every window opens with the new lead)', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-lead-edit';
+    const { body } = days(1_300_000);
+    await brain.seed(slug, page(body));
+    const { id } = await pageRow(slug);
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis' });
+    const before = await chunks(slug);
+    const stampedGeneration = (await pageRow(slug)).generation;
+    const oldLead = await segmentSynopsisLead(brain.engine, { id, slug, source_id: 'default' });
+    const editedLead = LEAD.replace('launch.', 'pilots.');
+    expect(Buffer.byteLength(editedLead)).toBe(Buffer.byteLength(LEAD));
+    await brain.seed(slug, page(body).replace(LEAD, editedLead));
+    const after = await chunks(slug);
+    const occurrences = new Set(before.map(c => c.occurrence_id));
+    const fresh = after.filter(c => !occurrences.has(c.occurrence_id));
+    expect(fresh.length).toBeGreaterThan(1);
+    const newLead = await segmentSynopsisLead(brain.engine, { id, slug, source_id: 'default' });
+    expect(newLead).not.toBe(oldLead);
+    // Under the stored (old) lead, every fresh chunk but the edited one's window would match a retired row's input.
+    const retiredHashes = new Set(before.filter(c => !after.some(a => a.occurrence_id === c.occurrence_id)).map(c => c.embedding_input_hash));
+    const base = embeddingInputContext(await embeddingWriteTarget(brain.engine), TITLE, stampedGeneration, []);
+    const underOld = segmentSynopsisInputHashes(base, oldLead, fresh);
+    expect(fresh.filter(c => retiredHashes.has(underOld.get(c) ?? null)).length).toBeGreaterThan(0);
+    expect(fresh.filter(c => c.vector !== null)).toEqual([]);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: after.length });
+    expect(calls.length).toBe(nonCode(after).length);
+    expect(calls.every(call => call.documentText.startsWith(editedLead))).toBe(true);
+  }, 300_000);
+
+  test('re-chunk: segments settled at the old chunker go unsettled after reindex --segmented --apply; the pass synopsizes every re-chunked row once', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-rechunk';
+    await brain.seed(slug, needlePage(needlePageBody()));
+    const id = await sealAtOldChunker(brain.engine, slug);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis' });
+    expect((await chunks(slug)).every(c => c.vector !== null)).toBe(true);
+    const receipt = await runSegmentedRechunk(brain.engine, { apply: true, slug });
+    expect(receipt.pages).toMatchObject([{ slug, state: 'rechunked' }]);
+    const rechunked = await chunks(slug);
+    const pending = rechunked.filter(c => c.vector === null);
+    expect(pending.length).toBeGreaterThan(0);
+    const segments = new Set(rechunked.map(c => c.occurrence_id)).size;
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: pending.length });
+    expect({ calls: calls.length, embedded: brain.embedded.length, segmentReads }).toEqual({ calls: nonCode(pending).length, embedded: pending.length, segmentReads: segments });
+    const done = await chunks(slug);
+    expect(done.every(c => c.vector !== null)).toBe(true);
+    for (const c of done) expect(c.embedding_input_hash).not.toBe(await titleHash(c));
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: 0 });
+    expect({ calls: calls.length, segmentReads }).toEqual({ calls: 0, segmentReads: 0 });
+    expect((await synopsisRows(id)).every(r => r.state === 'done')).toBe(true);
+  }, 300_000);
+
+  test('doctor: synopsis receipts (a title-tier fallback, a refused reservation) are not extraction truncation and raise no extraction_input_truncated warning', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const fallbackSlug = 'notes/synopsis-doctor-fallback';
+    await brain.seed(fallbackSlug, page(days(1_300_000).body + '\nDoctor fallback fixture.\n'));
+    refuse = args => args.chunkIndex === 0;
+    try {
+      expect(await run(fallbackSlug)).toMatchObject({ kind: 'page_fallback', fallback_kind: 'refusal' });
+    } finally {
+      refuse = null;
+    }
+    const cappedSlug = 'notes/synopsis-doctor-capped';
+    await brain.seed(cappedSlug, page(days(1_300_000).body + '\nDoctor cap fixture.\n'));
+    await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, '0.000001');
+    try {
+      reset();
+      expect(await run(cappedSlug)).toEqual({ kind: 'skipped', reason: 'budget_limited' });
+      expect(calls.length).toBe(0);
+    } finally {
+      await roomyCap();
+    }
+    const receipts = [...await synopsisRows((await pageRow(fallbackSlug)).id), ...await synopsisRows((await pageRow(cappedSlug)).id)].map(r => r.receipt);
+    expect(receipts).toContainEqual({ fallback_kind: 'refusal' });
+    expect(receipts.some(r => (r as { reason?: string } | null)?.reason === 'budget_limited')).toBe(true);
+    const check = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
+    const groups = (check.details as { groups: Array<{ pipeline: string; kind: string }> }).groups;
+    expect(groups.filter(g => g.pipeline === 'synopsis')).toEqual([]);
+    expect(check.status).not.toBe('warn');
+  }, 300_000);
+
+  const ledger = async (pageId: number) => (await opts.getBrain().engine.executeRaw<{ spent: number | string; reserved: number | string }>(
+    'SELECT spent_usd AS spent, reserved_usd AS reserved FROM page_embedding_budget WHERE page_id = $1', [pageId])).map(r => ({ spent: Number(r.spent), reserved: Number(r.reserved) }))[0]!;
+  const callUsd = (calls: readonly GeneratePerChunkSynopsisArgs[]) => calls.reduce((n, c) => n + estimateSynopsisCallUsd(c.model!, c.documentText, c.chunkText, c.maxTokens), 0);
+
+  test('spend: a window whose synopsis fails books only the calls the provider may have billed (a rate-limited call is not), never its embedding', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-spend-synopsis-failure';
+    await brain.seed(slug, page(days(1_300_000).body + '\nSpend fixture one.\n'));
+    const { id } = await pageRow(slug);
+    let limited: GeneratePerChunkSynopsisArgs | null = null;
+    fail = args => { if (limited) return null; limited = args; return { kind: 'rate_limit', detail: 'fixture rate limit' }; };
+    reset();
+    try {
+      expect(await run(slug)).toMatchObject({ kind: 'transient_error', cause: 'rate_limit' });
+    } finally {
+      fail = null;
+    }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(brain.embedded.length).toBe(0);
+    const billed = calls.filter(c => c !== limited);
+    const { spent, reserved } = await ledger(id);
+    expect(reserved).toBeCloseTo(0, 12);
+    expect(spent).toBeCloseTo(callUsd(billed), 12);
+  }, 300_000);
+
+  test('spend: a window whose embedding fails books its synopsis calls and not the embedding', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-spend-embed-failure';
+    await brain.seed(slug, page(days(1_300_000).body + '\nSpend fixture two.\n'));
+    const { id } = await pageRow(slug);
+    const dims = (await embeddingWriteTarget(brain.engine)).column.dimensions;
+    __setEmbedTransportForTests((async () => { throw new Error('fixture embedding outage'); }) as never);
+    reset();
+    try {
+      expect(await run(slug)).toMatchObject({ kind: 'transient_error' });
+    } finally {
+      __setEmbedTransportForTests((async ({ values }: { values: string[] }) => {
+        brain.embedded.push(...values);
+        return { embeddings: values.map(() => Array.from({ length: dims }, (_, j) => (j === 0 ? 1 : 0))), usage: { tokens: values.length } };
+      }) as never);
+    }
+    expect(calls.length).toBeGreaterThan(0);
+    const { spent, reserved } = await ledger(id);
+    expect(reserved).toBeCloseTo(0, 12);
+    expect(spent).toBeCloseTo(callUsd(calls), 12);
   }, 300_000);
 
   test('an inline page keeps the synopsisBodyHash input', async () => {

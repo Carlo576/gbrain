@@ -88,8 +88,10 @@ export async function reuseStoredChunkVectors(
  * unchanged chunk inside a rewritten tail keeps its vector and only new text
  * reaches the provider. Returns how many chunks got one.
  */
-export async function reuseSegmentChunkVectors(exec: BrainEngine, { pageId, retiredOccurrences, chunks, title, corpusGeneration, tier }: {
-  pageId: number; retiredOccurrences: readonly number[]; chunks: SegmentChunkInput[]; title: string; corpusGeneration: string | null; tier: 'title' | 'none' }): Promise<number> {
+export async function reuseSegmentChunkVectors(exec: BrainEngine, { pageId, retiredOccurrences, chunks, title, corpusGeneration, tier, truthLead }: {
+  pageId: number; retiredOccurrences: readonly number[]; chunks: SegmentChunkInput[]; title: string; corpusGeneration: string | null; tier: 'title' | 'none';
+  /** The truth_lead the write stores (a synopsis window opens with it); omitted when the body is unchanged (the stored one). */
+  truthLead?: string }): Promise<number> {
   if (retiredOccurrences.length === 0 || chunks.length === 0) return 0;
   const target = await embeddingWriteTarget(exec);
   const provenance = embeddingInputContext(target, title, corpusGeneration, []);
@@ -107,7 +109,7 @@ export async function reuseSegmentChunkVectors(exec: BrainEngine, { pageId, reti
   // synopsis input (its segment window over the page lead) hashes to the stored row's recorded input.
   const synopsis = mode && modeRequiresSynopsis(mode as CRMode)
     ? segmentSynopsisInputHashes(embeddingInputContext(target, title, rows[0]!.corpus_generation, []),
-      await segmentSynopsisLead(exec, { id: pageId, slug: rows[0]!.slug, source_id: rows[0]!.source_id }), chunks)
+      await segmentSynopsisLead(exec, { id: pageId, slug: rows[0]!.slug, source_id: rows[0]!.source_id }, truthLead), chunks)
     : null;
   const stored = rows.map(row => ({ chunk_text: row.chunk_text, chunk_source: row.chunk_source, embedding: parseEmbedding(row.embedding),
     token_count: row.token_count, model: row.model, embedding_input_hash: row.embedding_input_hash }))

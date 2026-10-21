@@ -70,11 +70,11 @@ import { digest, sha256 } from './persistence/digest.ts';
 import { isLargePageBytes } from './page-size-policy.ts';
 import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { installSegmentedVectors, listLiveEmbedSegments, listSegmentChunkRows, readSegmentedEmbedPage } from './page-body/segmented-embedding.ts';
+import { acquirePageEmbeddingLease } from './page-embedding-lease.ts';
 import { planSegmentDerivations, segmentDerivationContextHash } from './page-body/derivations.ts';
-import { SEGMENTED_CHUNKER_VERSION } from './page-body/segment-chunks.ts';
 import { embeddingInputHash, synopsisDocumentHash, type EmbeddingTier } from './embedding-input-hash.ts';
 import { currentEmbeddingSignature } from './embedding.ts';
-import { estimatePageEmbedUsd, reservePageSpend, spendGrant } from './page-embedding-budget.ts';
+import { estimatePageEmbedUsd, reservePageSpend } from './page-embedding-budget.ts';
 import { segmentSynopsisLead } from './page-body/segment-synopsis.ts';
 
 /**
@@ -496,7 +496,7 @@ export const SYNOPSIS_DERIVATION_VERSION = 1;
  * (synopsisDocumentHash), so a chunk whose recorded input already matches keeps its vector. The pipeline's
  * page_segment_derivations rows (kind synopsis, one per occurrence, output = the window anchors) record each segment
  * done under a context hash over its entry state, the title, the lead's hash, the synopsis model, its output cap, the
- * segmented chunker version, the corpus generation and the write target: a rerun reads no chunk row of a settled
+ * chunker version the page's rows were cut at (so a re-chunk unsettles its segments), the corpus generation and the write target: a rerun reads no chunk row of a settled
  * segment, and an append pays only for the windows of its new segments. Segments run newest first, so a per-page cap
  * spends on the newest text, as the embedding path's grants do.
  *
@@ -536,8 +536,9 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
   const titlePrefix = buildContextualPrefix(page.title, null);
   const embedSignature = currentEmbeddingSignature();
   const lead = await segmentSynopsisLead(engine, page);
+  const [chunked] = await engine.executeRaw<{ chunker_version: number | string | null }>('SELECT chunker_version FROM pages WHERE id = $1', [page.id]);
   const inputs = { title: page.title, lead_sha256: sha256(lead), synopsis_model: synopsisModel, synopsis_max_tokens: synopsisMaxTokens ?? SYNOPSIS_MAX_TOKENS,
-    chunker_version: SEGMENTED_CHUNKER_VERSION, corpus_generation: corpusGeneration,
+    chunker_version: chunked?.chunker_version == null ? null : Number(chunked.chunker_version), corpus_generation: corpusGeneration,
     embedding: { column: target.column.name, model: target.provenanceModel, dimensions: target.column.dimensions } };
   const segments = await listLiveEmbedSegments(engine, page.id);
   const live = segments.map(s => ({ occurrenceId: s.occurrenceId, sha256: s.sha256,
@@ -550,6 +551,7 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
   let embedded = 0;
   let fallbackKind: SynopsisFailureKind | null = null;
   for (const segment of plan.todo) {
+    await using _lease = await acquirePageEmbeddingLease(engine, page.id, { signal: args.abortSignal });
     const anchors: Array<{ first_chunk: number; last_chunk: number; chunks: number; document_sha256: string; tier: EmbeddingTier }> = [];
     let segmentFallback: SynopsisFailureKind | null = null;
     for (const window of segmentSynopsisWindows(await listSegmentChunkRows(engine, page.id, segment.occurrenceId), lead)) {
@@ -566,8 +568,21 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
         await derivation(segment, 'partial', anchors, { reason: 'budget_limited', cap_usd: decision.capUsd, estimate_usd: decision.estimateUsd });
         return { kind: 'skipped', reason: 'budget_limited' };
       }
-      const built = await spendGrant(decision.kind === 'grant' ? decision.grant : undefined, async () => {
-        const synopsized = await synopsisWrappedTexts({ chunks: todo, sourceText: window.document, title: page.title, args, synopsisModel, synopsisMaxTokens });
+      const grant = decision.kind === 'grant' ? decision.grant : undefined;
+      const billed = new Set<SynopsisChunk>();
+      // A window that fails books only the synopsis calls the provider may have billed (never its embedding, which
+      // failed or was not called): the actual amount is reserved beside the estimate, then the estimate is released.
+      // When the actual amount no longer fits the cap the estimate is booked whole, so spend is never under-counted.
+      const bookBilled = async () => {
+        if (!grant) return;
+        const usd = [...billed].reduce((n, c) => n + estimateSynopsisCallUsd(synopsisModel, window.document, c.chunk_text, synopsisMaxTokens), 0);
+        const actual = usd > 0 ? await reservePageSpend(engine, page, `synopsis:${synopsisModel}`, usd) : null;
+        if (actual?.kind === 'refused') return grant.settle({ ok: true });
+        await grant.settle({ ok: false });
+        if (actual?.kind === 'grant') await actual.grant.settle({ ok: true });
+      };
+      const built = await (async () => {
+        const synopsized = await synopsisWrappedTexts({ chunks: todo, sourceText: window.document, title: page.title, args, synopsisModel, synopsisMaxTokens, billed });
         if (!Array.isArray(synopsized) && synopsized.kind !== 'page_level_fallback_requested') return synopsized;
         const tier: EmbeddingTier = Array.isArray(synopsized) ? 'per_chunk_synopsis' : 'title';
         const inputTexts = Array.isArray(synopsized) ? synopsized : todo.map(c => wrapChunkForEmbedding(c.chunk_text, titlePrefix, c.chunk_source));
@@ -576,15 +591,20 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
         } catch (err) {
           return classifyEmbedError(err, err instanceof Error ? err.message : String(err));
         }
+      })().catch(async err => {
+        await bookBilled().catch(() => { /* the reservation's staleness is the backstop */ });
+        throw err;
       });
       if (built.kind !== 'built') {
+        await bookBilled();
         return { kind: built.kind === 'permanent' ? 'permanent_error' : 'transient_error', cause: built.cause, detail: built.detail };
       }
+      await grant?.settle({ ok: true });
       if (built.vectors.length !== todo.length || built.vectors.some(v => !v?.length || !v.every(Number.isFinite))) {
         return { kind: 'transient_error', cause: 'embed', detail: 'Embedding provider returned an incomplete or invalid batch' };
       }
       const installed = await installSegmentedVectors(engine, page, target, todo.map((c, i) => ({ chunk_index: c.chunk_index, chunk_text: c.chunk_text,
-        vector: built.vectors[i]!, hash: embeddingInputHash(built.tier === 'title' ? base : provenance, built.tier, c) })));
+        vector: built.vectors[i]!, hash: embeddingInputHash(built.tier === 'title' ? base : provenance, built.tier, c), expected: c.embedding_input_hash ?? null })));
       if (installed < todo.length) return superseded;
       embedded += installed;
       if (built.fallback) segmentFallback ??= built.fallback;
@@ -717,6 +737,8 @@ async function synopsisWrappedTexts(opts: {
   args: ReembedPageArgs;
   synopsisModel: string;
   synopsisMaxTokens?: number;
+  /** Collects the chunks whose synopsis call the provider may have billed (see SYNOPSIS_UNBILLED). */
+  billed?: Set<SynopsisChunk>;
 }): Promise<string[] | Exclude<Phase1Result, Phase1Success>> {
   const { chunks, args } = opts;
   const wrappedTexts: string[] = new Array(chunks.length);
@@ -744,6 +766,9 @@ async function synopsisWrappedTexts(opts: {
   return wrappedTexts;
 }
 
+/** Synopsis results the provider returns before billing the call: a call that ended with one of these is not booked. */
+const SYNOPSIS_UNBILLED: ReadonlySet<string> = new Set<SynopsisFailureKind>(['auth_failure', 'rate_limit', 'provider_5xx']);
+
 class ChunkSynopsisPhase1Error extends Error {
   constructor(readonly result: Exclude<Phase1Result, Phase1Success>) {
     super(`chunk synopsis failed: ${result.kind}`);
@@ -759,8 +784,9 @@ async function buildWrappedChunkText(opts: {
   synopsisModel: string;
   /** #3883: resolved output-token cap (undefined → page-summary default). */
   synopsisMaxTokens?: number;
+  billed?: Set<SynopsisChunk>;
 }): Promise<string> {
-  const { chunk: c, sourceText, title, args, synopsisModel, synopsisMaxTokens } = opts;
+  const { chunk: c, sourceText, title, args, synopsisModel, synopsisMaxTokens, billed } = opts;
 
   // Code chunks always bypass the wrapper (D20-T4) — pass through.
   if (c.chunk_source === 'fenced_code') {
@@ -788,6 +814,7 @@ async function buildWrappedChunkText(opts: {
       }
       leaseAcquired = true;
     }
+    billed?.add(c);
     synopsisResult = await (args.generateSynopsis ?? generatePerChunkSynopsis)({
       documentText: sourceText,
       chunkText: c.chunk_text,
@@ -810,6 +837,7 @@ async function buildWrappedChunkText(opts: {
     }
   }
 
+  if (SYNOPSIS_UNBILLED.has(synopsisResult.kind)) billed?.delete(c);
   if (synopsisResult.kind === 'success') {
     const prefix = buildContextualPrefix(title, synopsisResult.synopsis);
     return wrapChunkForEmbedding(c.chunk_text, prefix, c.chunk_source);
