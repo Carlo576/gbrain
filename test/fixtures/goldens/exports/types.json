@@ -966,7 +966,8 @@
           "tag?: string | undefined",
           "type?: string | undefined",
           "updatedAfterKeyset?: { updatedAt: string; slug: string; } | undefined",
-          "updated_after?: string | undefined"
+          "updated_after?: string | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "PageFilters"
       },
@@ -1471,7 +1472,8 @@
           "until?: string | undefined",
           "useCache?: boolean | undefined",
           "vectorLegacyGuard?: boolean | undefined",
-          "walkDepth?: number | undefined"
+          "walkDepth?: number | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "SearchOpts"
       },
@@ -2505,6 +2507,7 @@
         "kind": "interface",
         "members": [
           "cacheWriteTtl?: \"5m\" | \"1h\" | undefined",
+          "estimatedInputTokens?: number | undefined",
           "kind: \"embedding\" | \"rerank\" | \"chat\" | \"transcription\" | \"multimodal\" | \"decide\"",
           "maxInputTokens?: number | undefined",
           "maxOutputTokens?: number | undefined",
@@ -2631,6 +2634,13 @@
         "name": "withAIInvocationGuard",
         "signature": [
           "<T>(guard: AIInvocationGuard, run: () => Promise<T>, opts?: { inherit?: boolean; }) => Promise<T>"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "withAIInvocationMeter",
+        "signature": [
+          "<T>(meter: AIInvocationObserver, run: () => Promise<T>) => Promise<T>"
         ]
       },
       {
@@ -6485,6 +6495,7 @@
       {
         "kind": "interface",
         "members": [
+          "cliKeyValue?: boolean | undefined",
           "default?: unknown",
           "description?: string | undefined",
           "enum?: string[] | undefined",
@@ -7962,7 +7973,8 @@
           "until?: string | undefined",
           "useCache?: boolean | undefined",
           "vectorLegacyGuard?: boolean | undefined",
-          "walkDepth?: number | undefined"
+          "walkDepth?: number | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "HybridSearchOpts"
       },
@@ -9237,7 +9249,8 @@
           "tag?: string | undefined",
           "type?: string | undefined",
           "updatedAfterKeyset?: { updatedAt: string; slug: string; } | undefined",
-          "updated_after?: string | undefined"
+          "updated_after?: string | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "PageFilters"
       },
@@ -9492,7 +9505,8 @@
           "until?: string | undefined",
           "useCache?: boolean | undefined",
           "vectorLegacyGuard?: boolean | undefined",
-          "walkDepth?: number | undefined"
+          "walkDepth?: number | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "SearchOpts"
       },
