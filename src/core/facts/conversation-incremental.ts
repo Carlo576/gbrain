@@ -29,8 +29,9 @@
  *     choice; one unpaid read, counted in conversationDetectionWork), pinned on the rows while the occurrences that
  *     recorded it under the same context are mostly unchanged by bytes, or the one the operator chose for this page
  *     version (--grammar; none settles the page as non-extractable); with none detected while some built-in format still
- *     parses a message, the page is held (a detection_ambiguous receipt with each format's count; no call, nothing
- *     published or collected) until it changes or the operator chooses; a page no format parses a message in is not a
+ *     parses a message, the page is held (a detection_ambiguous receipt with each format's count for the page version;
+ *     no call, nothing published or collected; a plain run on the same version reuses it without reading the page)
+ *     until it changes or the operator chooses; a page no format parses a message in is not a
  *     conversation: it settles as non-extractable and its conversation facts are collected; a pinned grammar under which nothing parses is detected
  *     again; a detected grammar under which nothing parses leaves a no_messages receipt and changes nothing;
  *   - reuses every window an earlier run extracted with the same rendered text under the same context (re-anchored
@@ -209,22 +210,25 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     : !opts.redetect && kept.length && 2 * bytesOf(kept) > bytesOf(recorded) ? rowOutput(kept[0]).pattern ?? null : null;
   const pinned = choice === undefined && pattern !== null;
   const detectedBytes = conversationDetectionWork.bytes;
+  const hold = async (grammars: Record<string, number>, checked: boolean) => {
+    if (checked && !run.dryRun) await setExtractionReceipt(engine, page.id, KIND, { kind: 'detection_ambiguous', pipeline: KIND, processed_chars: 0, grammars, version_token: versionToken });
+    result.pages_detection_ambiguous = (result.pages_detection_ambiguous ?? 0) + 1;
+    process.stderr.write(`[extract-conversation-facts] ${page.slug}: held${checked ? '' : ' (unchanged since it was held, nothing read)'}: no format is detected over the page, yet ${Object.entries(grammars).map(([id, n]) => `${id} parses ${n}`).join(', ')} message(s); its facts were kept and nothing was extracted; gbrain extract-conversation-facts --slug ${page.slug} --grammar <format|none> --dry-run previews a choice\n`);
+    return { newestEnd: null };
+  };
+  // A page held at this version stays held without reading it (a --force run checks it again).
+  const heldAt = choice === undefined && !opts.retryFailed && !opts.sinceIso && stored?.kind === 'detection_ambiguous' && stored.version_token === versionToken ? stored.grammars : undefined;
+  if (heldAt && !pattern && from < liveIds.length) return hold(heldAt, false);
   if (choice === undefined && !pattern && from < liveIds.length) pattern = await detectPagePattern(occurrences, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
   if (choice === undefined && !pattern && from < liveIds.length) {
     if (opts.sinceIso) { result.pages_skipped++; return { newestEnd: null }; }
     // No format is detected over the whole page. One that still parses a message here may be the page's (text around a
     // transcript can tip the density test) or a quoted part of it, and guessing has deleted current facts: the page is
-    // held, with no call, nothing published or collected and a detection_ambiguous receipt naming each format's count,
-    // until it changes or the operator chooses its format. A page no format parses a message in is not a transcript: it
+    // held, with no call, nothing published or collected and a detection_ambiguous receipt naming each format's count
+    // for this page version, until it changes or the operator chooses its format. A page no format parses a message in is not a transcript: it
     // settles as non-extractable below and its conversation facts are collected.
     const grammars = await messagesByGrammar(occurrences, { page, gapMinutes: opts.gapMinutes }, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
-    if (Object.keys(grammars).length) {
-      if (!run.dryRun) await setExtractionReceipt(engine, page.id, KIND, { kind: 'detection_ambiguous', pipeline: KIND, processed_chars: 0, grammars });
-      result.pages_detection_ambiguous = (result.pages_detection_ambiguous ?? 0) + 1;
-      process.stderr.write(`[extract-conversation-facts] ${page.slug}: held: no format is detected over the page, yet ${Object.entries(grammars).map(([id, n]) => `${id} parses ${n}`).join(', ')} message(s);`
-        + ` its facts were kept and nothing was extracted; gbrain extract-conversation-facts --slug ${page.slug} --grammar <format|none> --dry-run previews a choice\n`);
-      return { newestEnd: null };
-    }
+    if (Object.keys(grammars).length) return hold(grammars, true);
     from = 0;
   }
   // Earlier windows of the occurrences the stream covers (and of retired ones), reusable by rendered text under the same context.

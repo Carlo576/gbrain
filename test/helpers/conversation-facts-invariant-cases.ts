@@ -254,6 +254,30 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
     expect(out).toEqual(expected);
   }, 600_000);
 
+  test('a held page keeps its hold while its version is unchanged: the next plain run reads no detection byte; a --force run and a changed page check it again', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/held-reuse-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    await brain.seed(slug, chatPage('Was a chat', chatDays(4800, 100, 41)));
+    await extract(brain.engine, slug);
+    const quoted = '**Alice Example** (1:05 PM): the orchard review moved.';
+    await brain.seed(slug, chatPage('Was a chat', `${references(9000)}\n\nA line we quoted:\n\n${quoted}`));
+    expect(await undetected(brain, slug)).toBeNull();
+    const facts = (await factsOf(brain.engine, slug)).map(f => f.id);
+    const run = async (force = false) => {
+      const before = conversationDetectionWork.bytes;
+      const { calls, result } = await extract(brain.engine, slug, { force });
+      return { read: conversationDetectionWork.bytes === before ? 'nothing' : 'the page', calls: calls.length, held: result.pages_detection_ambiguous ?? 0, failed: result.pages_failed,
+        facts: (await factsOf(brain.engine, slug)).map(f => f.id) };
+    };
+    const runs: Record<string, unknown> = { first: await run(), again: await run(), forced: await run(true), afterForce: await run() };
+    await brain.seed(slug, chatPage('Was a chat', `${references(9001)}\n\nA line we quoted:\n\n${quoted}`));
+    runs.changed = await run();
+    runs.afterChange = await run();
+    const held = (read: string) => ({ read, calls: 0, held: 1, failed: 0, facts });
+    expect(runs).toEqual({ first: held('the page'), again: held('nothing'), forced: held('the page'), afterForce: held('nothing'), changed: held('the page'), afterChange: held('nothing') });
+  }, 600_000);
+
   test('R4 (cases B, B-heading): a transcript with reference lines added, before and after they move below a heading, is held every run with its facts kept', async () => {
     const brain = opts.getBrain();
     const slug = `notes/references-${randomUUID().slice(0, 8)}`;

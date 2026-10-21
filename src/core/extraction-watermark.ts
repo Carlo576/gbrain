@@ -63,8 +63,9 @@ export interface InputTruncated {
   prior_facts?: number;
   /** PR 4 (Wave B incremental derivation, transcripts): `detection_ambiguous`: the messages each format that parses any parses over the page. */
   grammars?: Record<string, number>;
-  /** PR 4 (Wave B incremental derivation, transcripts): `grammar_chosen`: the chosen format (null: none, the page is not a transcript) and the page version it holds for. */
+  /** PR 4 (Wave B incremental derivation, transcripts): `grammar_chosen`: the chosen format (null: none, the page is not a transcript). */
   grammar?: string | null;
+  /** PR 4 (Wave B incremental derivation, transcripts): `grammar_chosen`, `detection_ambiguous`: the page version the choice or the hold is for. */
   version_token?: string;
 }
 
