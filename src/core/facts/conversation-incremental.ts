@@ -55,7 +55,7 @@ import { planSegmentDerivations, segmentDerivationContextHash, sourceWindowFor, 
 import { conversationDetectionWork, readConversationOccurrences, readOccurrenceText } from '../page-body/segment-conversation.ts';
 import { emptySaveTimeResolutionCounts, mergeSaveTimeResolutionCounts } from '../entities/resolve-on-save.ts';
 import { conversationEntityHints } from './conversation-entity-hints.ts';
-import { countConversationFacts, countWindowFacts, publishConversationFacts, type ConversationFactRow } from './conversation-publication.ts';
+import { countWindowFacts, publishConversationFacts, type ConversationFactRow } from './conversation-publication.ts';
 import { recordFailedPage } from './conversation-run-status.ts';
 import { detectPagePattern, startsConversationRun, streamConversationWindows } from './conversation-stream.ts';
 import type { ConversationSegment } from './conversation-types.ts';
@@ -177,32 +177,21 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   const bytesOf = (rows: SegmentDerivationRow[]) => rows.reduce((n, row) => n + liveOccurrence.get(row.occurrenceId)!.byteLen, 0);
   let pattern = !opts.redetect && kept.length && 2 * bytesOf(kept) > bytesOf(recorded) ? rowOutput(kept[0]).pattern ?? null : null;
   const pinned = pattern !== null;
+  let recovered = false;
   const detectedBytes = conversationDetectionWork.bytes;
   if (!pattern && from < liveIds.length) pattern = await detectPagePattern(occurrences, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
   if (!pattern && from < liveIds.length) {
     if (opts.sinceIso) { result.pages_skipped++; return { newestEnd: null }; }
-    // No grammar over the whole page. Only a page that holds no window or fact, or that parses no message under the
-    // grammar it was extracted in either, has stopped being a transcript (it settles as non-extractable below and its
-    // facts are collected); one that still does (prose added around the transcript can tip the density test) keeps
-    // everything and settles nothing.
-    const recordedGrammar = prior.map(row => rowOutput(row).pattern).find(Boolean) ?? null;
-    const holds = prior.some(row => rowOutput(row).windows.length > 0) || await countConversationFacts(engine, sourceId, page.slug, { active: true }) > 0;
-    let still = holds && !recordedGrammar ? null : 0;
-    if (holds && recordedGrammar) {
-      still = (await streamConversationWindows(occurrences, 0, liveIds.length, { page, gapMinutes: opts.gapMinutes, pattern: recordedGrammar },
-        i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }), { window() {}, occurrence() {} })).messages;
+    // No grammar over the whole page (text around a transcript can tip the density test). A grammar an earlier run
+    // recorded that still parses a message here is the page's grammar: the run goes on under it, so its windows replace
+    // their exact keys and a settled run collects the rest. Otherwise the page stopped being a transcript: it settles
+    // as non-extractable below and its conversation facts are collected.
+    for (const recordedGrammar of new Set(prior.map(row => rowOutput(row).pattern).filter((p): p is string => !!p))) {
+      const parsed = await streamConversationWindows(occurrences, 0, liveIds.length, { page, gapMinutes: opts.gapMinutes, pattern: recordedGrammar },
+        i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }), { window() {}, occurrence() {} });
+      if (parsed.messages > 0) { pattern = recordedGrammar; recovered = true; break; }
     }
-    if (still !== 0) {
-      await setExtractionReceipt(engine, page.id, KIND, { kind: 'grammar_lost', pipeline: KIND, processed_chars: 0, ...(recordedGrammar ? { pattern: recordedGrammar } : {}),
-        ...(still !== null ? { messages: still } : {}) });
-      const why = recordedGrammar ? `no chat format is detected over the page any more, yet ${still} message(s) still parse as ${recordedGrammar}`
-        : 'no chat format is detected over the page, which holds conversation facts from a run that recorded none';
-      process.stderr.write(`[extract-conversation-facts] ${page.slug}: ${why}; its facts were kept, nothing settled; gbrain doctor lists it\n`);
-      result.pages_failed++;
-      recordFailedPage(result, page.slug, `${why}; facts kept`);
-      return { newestEnd: null };
-    }
-    from = 0;
+    if (!pattern) from = 0;
   }
   // Earlier windows of the occurrences the stream covers (and of retired ones), reusable by rendered text under the same context.
   const reusable = new Map<string, Array<{ occurrenceId: number; record: WindowRecord }>>();
@@ -397,7 +386,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     result.resolution_errors += resolution.resolution_errors;
   }
 
-  if (pattern && from < liveIds.length && parsedMessages === 0) {
+  if (pattern && !recovered && from < liveIds.length && parsedMessages === 0) {
     // A pinned grammar reads nothing here: detect the page's grammar again and start over under it.
     if (pinned) return processSegmentedConversationPage(run, page, { ...opts, redetect: true });
     // The grammar detected over the whole page reads no message from the page: a parser fault. Nothing is published.

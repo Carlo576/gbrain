@@ -37,7 +37,7 @@ export type HeadFallbackReason = 'no_watermark' | 'prefix_changed' | 'version_ch
 /** The durable receipt of an extraction that did not read all of its input. */
 export interface InputTruncated {
   /** PR 4 (Wave B incremental derivation, transcripts): `no_messages`, a segmented conversation page reads as a transcript format over its whole text yet no message parsed under it; the run changed nothing. */
-  kind: 'head' | 'tail_window' | 'skipped_too_large' | 'no_messages' | 'grammar_lost';
+  kind: 'head' | 'tail_window' | 'skipped_too_large' | 'no_messages';
   pipeline: ExtractionPipeline;
   /** Characters the extractor read (0 for a skipped page). */
   processed_chars: number;
@@ -55,13 +55,6 @@ export interface InputTruncated {
    */
   window_rule?: 'no_prior_facts' | 'prior_facts_kept';
   prior_facts?: number;
-  /**
-   * PR 4 (Wave B incremental derivation, transcripts): `grammar_lost`, no chat format is detected over a segmented
-   * conversation page that holds windows or facts, yet `messages` still parse under the format it was extracted in
-   * (`pattern`), or it recorded none; the run changed nothing.
-   */
-  pattern?: string;
-  messages?: number;
 }
 
 export interface StoredWatermark { pipelineVersion: number; bytes: number; sha256: string }
