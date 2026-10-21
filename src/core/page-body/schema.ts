@@ -226,9 +226,11 @@ export function derivationSweepScopeSql(d: string, p: string, pageIds: string): 
 }
 
 /**
- * SQL: the advisory lock key that serializes the note of a page entering a derivation sweep's scope with the end of the
- * source's sweeps. The scope-entry trigger takes it shared in the writer's transaction, and a sweep ends (deletes its
- * record) only under it exclusively, so a note written by a transaction still open is never missed.
+ * SQL: the advisory lock key that serializes a write bringing a row into a derivation sweep's scope with the end of the
+ * source's sweeps. The scope-entry trigger takes it shared in the writer's transaction every time it fires, a sweep
+ * recorded or not, and a sweep ends (deletes its record) only under it taken exclusively without waiting: while such a
+ * writer is open, including one that fired before the sweep was recorded and so left no note, the sweep walks again
+ * instead of ending, and the walk after the writer commits sees its rows.
  */
 export function derivationScopeLockSql(sourceId: string): string {
   return `hashtextextended('gbrain:derivation-scope:' || ${sourceId}, 0)`;
@@ -317,9 +319,6 @@ BEGIN
   ELSE
     src := OLD.source_id;
     page := OLD.page_id;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM page_segment_derivation_purges x WHERE x.source_id = src) THEN
-    RETURN NULL;
   END IF;
   PERFORM pg_advisory_xact_lock_shared(${derivationScopeLockSql('src')});
   INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)

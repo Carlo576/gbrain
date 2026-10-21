@@ -478,8 +478,9 @@ type SweepRecord = { request_id: string; needles: string[]; patterns: string[]; 
  * At the end of the source the first walk (`sweep`) is followed by a `verify` walk, repeated until one deletes nothing;
  * then the pages that entered the scope meanwhile (page_segment_derivation_purge_pages) are walked again (`recheck`)
  * until none are noted, and only then is the record deleted: under the source's scope lock (derivationScopeLockSql),
- * taken without waiting, so a page noted by a transaction still open is checked after it commits; while one is open the
- * record is left for a later call. No batch starts past DERIVATION_SWEEP_LIMITS.totalMs (the lower `inlineMs` for the
+ * taken without waiting. While a write that brings rows into the scope is still open (the trigger holds the lock shared,
+ * also when it fired before the sweep was recorded and left no note), the record goes back to a fresh `verify` walk
+ * for a later call, which sees the writer's rows once it commits. No batch starts past DERIVATION_SWEEP_LIMITS.totalMs (the lower `inlineMs` for the
  * purge's own call, `opts.inline`, so a purge returns `pending` soon after it recorded the sweep); the next call resumes
  * from the cursor. Returns the rows deleted.
  */
@@ -498,6 +499,7 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
     }
     const [lock] = await tx.executeRaw<{ held: boolean }>(`SELECT pg_try_advisory_xact_lock(${derivationScopeLockSql('$1::text')}) AS held`, [sourceId]);
     if (!lock?.held) {
+      await tx.executeRaw(`UPDATE page_segment_derivation_purges SET phase = 'verify', recheck = NULL, ${restart} WHERE request_id=$1::uuid`, [purge.request_id]);
       skip.push(purge.request_id);
       return;
     }
