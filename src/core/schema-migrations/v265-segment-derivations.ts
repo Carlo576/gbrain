@@ -1,5 +1,6 @@
 import type { Migration } from './types.ts';
 import { PAGE_SEGMENT_DERIVATIONS_SQL } from '../page-body/schema.ts';
+import { runMigrationStatement } from './helpers.ts';
 
 // Applied by src/core/migrate.ts on the next initSchema(); see docs/ENGINES.md
 // ("Canonical schema sources") for when schema.sql or a TS fragment also changes.
@@ -21,7 +22,8 @@ import { PAGE_SEGMENT_DERIVATIONS_SQL } from '../page-body/schema.ts';
 // Nothing to backfill. facts_source_window_chk keeps a malformed anchor (a
 // double-encoded JSON string included) out; it is added NOT VALID and
 // validated in its own statement, so no facts scan runs under the exclusive
-// lock of the ALTER. Per-page window reads use the existing
+// lock of the ALTER; that statement gets the same statement budget and bounded
+// lock wait as the migration's SQL (runMigrationStatement). Per-page window reads use the existing
 // (source_id, source_markdown_slug, row_num) index.
 export const v265: Migration = {
   version: 265,
@@ -43,6 +45,6 @@ export const v265: Migration = {
     END $do$;
   `,
   handler: async engine => {
-    await engine.runMigration(265, 'ALTER TABLE facts VALIDATE CONSTRAINT facts_source_window_chk;');
+    await runMigrationStatement(engine, 265, 'ALTER TABLE facts VALIDATE CONSTRAINT facts_source_window_chk;');
   },
 };

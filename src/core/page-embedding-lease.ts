@@ -27,8 +27,11 @@ const LEASE_WAIT_MAX_MS = 1_000;
 /** Test seam: called each time a path finds a page's lease held by another path, before it waits. */
 export const pageEmbeddingLeaseProbe: { contended?: (pageId: number) => void } = {};
 
+/** Every page embedding lease id starts with this; the writer admin fingerprint leaves these rows out (admin-intent.ts). */
+export const PAGE_EMBEDDING_LEASE_PREFIX = 'embed-page:';
+
 export function pageEmbeddingLeaseId(pageId: number): string {
-  return `embed-page:${pageId}`;
+  return `${PAGE_EMBEDDING_LEASE_PREFIX}${pageId}`;
 }
 
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
