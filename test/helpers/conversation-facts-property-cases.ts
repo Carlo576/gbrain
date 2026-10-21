@@ -16,9 +16,13 @@
  *         that count (an earlier context's batch) or none;
  *   (iii) every window a row claims holds exactly the facts the row says, and a settled page holds only current windows.
  * Before a step, the page may also be rewritten to prose that keeps zero to three of its message lines, so no grammar
- * is detected while it still holds facts, then restored; each of the two runs is checked like a step.
+ * is detected while it still holds facts, then restored; each of the two runs is checked like a step. Or it may be
+ * rewritten to another transcript format and run one window, so its rows record two grammars, then lose detection with
+ * a few or about as many of its own message lines kept, then be restored: each run is checked like a step, and the lost
+ * run also holds that competing grammars publish nothing and a settled page records the grammar parsing the most messages.
  * Each step records which paths it exercised (a moved window, a window-specific failure, a window marked failed, a
- * settled collection, a --since run, a cap refusal, a lost grammar on a page holding facts); across the seeds every path must fire at least its floor. Each seed
+ * settled collection, a --since run, a cap refusal, a lost grammar on a page holding facts, a lost grammar on a page
+ * recording two grammars that one dominates or that compete); across the seeds every path must fire at least its floor. Each seed
  * also dooms the windows whose text hash starts with one chosen digit for a span of steps, so windows reach the failure
  * limit and block collection until the final --force run.
  * At the end a healthy unconstrained --force run leaves the same windows and facts as one extraction of the same page on
@@ -34,7 +38,8 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import type { AppendBrain } from './append-brain.ts';
 import { runExtractConversationFactsCore } from '../../src/commands/extract-conversation-facts.ts';
 import { CONVERSATION_FACTS_DERIVATION_VERSION } from '../../src/core/facts/conversation-incremental.ts';
-import { createPatternDetector } from '../../src/core/conversation-parser/parse.ts';
+import { applyPattern, createPatternDetector, deriveDateContext } from '../../src/core/conversation-parser/parse.ts';
+import { BUILTIN_PATTERNS } from '../../src/core/conversation-parser/builtins.ts';
 import { parseSourceWindow, sourceWindowKey, type SourceWindow } from '../../src/core/page-body/derivations.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import { PAGE_DERIVATION_CAP_KEY } from '../../src/core/page-spend.ts';
@@ -143,16 +148,17 @@ async function violations(engine: BrainEngine, slug: string, before: Fact[], o: 
   return { problems, after, fired };
 }
 
-type PropertyPath = 'moved' | 'failed_window' | 'marked_failed' | 'collected' | 'since' | 'cap' | 'grammar_lost';
+type PropertyPath = 'moved' | 'failed_window' | 'marked_failed' | 'collected' | 'since' | 'cap' | 'grammar_lost' | 'grammar_adopted' | 'grammar_refused';
 /**
  * Steps, across every seed, that must exercise each path: the round-5 floors (about half of 193, 165, 46, 133, 28, 21),
- * and half of the 24 steps that lose the grammar on a page holding facts (the 30 seeds now exercise 189, 155, 37, 167,
- * 30, 22, 24).
+ * half of the 24 steps that lose the grammar on a page holding facts, and half of the 12 lost runs on a page recording two
+ * grammars where one dominates and of the 12 where they compete (the 30 seeds now exercise 201, 153, 37, 184, 30, 22,
+ * 24, 12, 12).
  */
-export const PROPERTY_PATH_FLOORS: Record<PropertyPath, number> = { moved: 96, failed_window: 82, marked_failed: 23, collected: 66, since: 14, cap: 10, grammar_lost: 12 };
+export const PROPERTY_PATH_FLOORS: Record<PropertyPath, number> = { moved: 96, failed_window: 82, marked_failed: 23, collected: 66, since: 14, cap: 10, grammar_lost: 12, grammar_adopted: 6, grammar_refused: 6 };
 
 export function defineConversationFactsPropertyCases(opts: { getBrain: () => AppendBrain; getFresh: () => AppendBrain }): void {
-  const firedSteps: Record<PropertyPath, number> = { moved: 0, failed_window: 0, marked_failed: 0, collected: 0, since: 0, cap: 0, grammar_lost: 0 };
+  const firedSteps: Record<PropertyPath, number> = { moved: 0, failed_window: 0, marked_failed: 0, collected: 0, since: 0, cap: 0, grammar_lost: 0, grammar_adopted: 0, grammar_refused: 0 };
   let seedsRun = 0;
   for (let seed = 1; seed <= PROPERTY_SEEDS; seed++) {
     test(`seed ${seed}: ${PROPERTY_STEPS} seeded changes and constrained runs keep the deletion invariant, and the page converges to a fresh extraction`, async () => {
@@ -194,6 +200,58 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
           facts = checked.after;
         }
       };
+      // Its own stream as well, so the steps the other streams draw stay those of a run with no rival grammar.
+      const rival = rng(seed + 104_729);
+      /**
+       * Rewrite the page to a plain-role transcript and run one window of it, so the rows record two grammars; then put
+       * prose before it and keep a few of the page's own message lines (the plain-role grammar dominates) or about as many
+       * as it has turns (the two compete), so no grammar is detected, and run; then restore the page and run. Each run is
+       * checked like a step, and the lost run also against G1: competing grammars publish nothing, a dominant one is the
+       * grammar every row of a settled page records.
+       */
+      const rivalGrammar = async (step: number) => {
+        const truth = (await brain.body(slug)).truth;
+        const own = truth.split('\n').filter(line => line.startsWith('**'));
+        // Long turns, so the page stays above the segmented demotion size while each turn fits one window.
+        const count = 110 + Math.floor(rival() * 60);
+        const plain = Array.from({ length: count }, (_, i) => `${i % 2 ? 'Assistant' : 'User'}: turn ${i} of step ${step} on the ${WORDS[Math.floor(rival() * WORDS.length)]} and the ${WORDS[i % WORDS.length]}. ${'detail '.repeat(700)}`).join('\n');
+        const competing = rival() < 0.5;
+        const keep = Math.min(own.length, competing ? Math.ceil(count * (0.6 + rival())) : Math.floor(rival() * 4));
+        const kept = own.slice(own.length - keep);
+        const prose = Array.from({ length: 12_000 }, (_, i) => `Paragraph ${i} of the notes: ${WORDS[Math.floor(rival() * WORDS.length)]} and ${WORDS[i % WORDS.length]}.`).join('\n\n');
+        for (const phase of ['recorded', 'lost', 'restored'] as const) {
+          await brain.seed(slug, chatPage(title, phase === 'recorded' ? plain : phase === 'lost' ? [prose, plain, ...kept].join('\n\n') : truth));
+          const body = (await brain.body(slug)).truth;
+          const detector = createPatternDetector();
+          detector.push(body);
+          const grammars = [...new Set((await derivations(engine, slug)).rows.map(row => (row.output as { pattern?: string | null }).pattern).filter((p): p is string => !!p))];
+          const lostTwo = phase === 'lost' && detector.finish() === null && facts.length > 0 && grammars.length > 1;
+          const page = (await engine.getPage(slug, { sourceId: 'default' }))!;
+          const parsed = grammars.map(id => ({ id, messages: applyPattern(body, BUILTIN_PATTERNS.find(p => p.id === id)!, deriveDateContext({ page })).length })).sort((a, b) => b.messages - a.messages);
+          const counts = parsed.map(p => p.messages).join(' vs ');
+          const refused = lostTwo && parsed[0]!.messages > 0 && parsed[0]!.messages <= 2 * parsed[1]!.messages;
+          const constraint = phase === 'recorded' ? 'limit' : (['none', 'none', 'abort', 'limit'] as const)[Math.floor(rival() * 4)]!;
+          const o: RunOpts = phase === 'recorded' ? { segmentLimit: 1 } : constraint === 'abort' ? { abortAfter: 1 + Math.floor(rival() * 30) }
+            : constraint === 'limit' ? { segmentLimit: 1 + Math.floor(rival() * 20) } : {};
+          const outcome = await run(engine, slug, o);
+          const checked = await violations(engine, slug, facts, o, outcome);
+          if (refused) {
+            checked.fired.add('grammar_refused');
+            if (outcome.calls !== 0 || outcome.failed !== 1 || checked.after.map(f => f.id).join() !== facts.map(f => f.id).join()) checked.problems.push(`(G1) competing recorded grammars (${counts} messages) published or extracted`);
+          } else if (lostTwo && parsed[0]!.messages > 0) {
+            checked.fired.add('grammar_adopted');
+            const best = parsed[0]!.id;
+            const state = await pageState(engine, slug);
+            const d = await derivations(engine, slug);
+            const live = d.rows.filter(row => d.live.includes(row.occurrenceId)).map(row => (row.output as { pattern?: string | null }).pattern);
+            if (state.settled && live.some(p => p !== best)) checked.problems.push(`(G1) the page settled under ${[...new Set(live)].join()} although ${best} parses the most messages (${counts})`);
+          }
+          log.push(`step ${step} (rival grammar ${phase}, ${count} plain-role turns, ${keep} own line(s) kept, recorded ${grammars.join('+') || 'none'} parsing ${counts || 'nothing'}): ${constraint} ${JSON.stringify(o)} -> ${JSON.stringify(outcome)}, ${checked.after.length} facts; ${[...checked.fired].join(' ') || 'no path'}`);
+          for (const path of checked.fired) firedSteps[path]++;
+          expect({ step, log: log.at(-1), problems: checked.problems.slice(0, 5) }).toEqual({ step, log: log.at(-1), problems: [] });
+          facts = checked.after;
+        }
+      };
       // The windows whose text hash starts with this digit fail in every run of these steps.
       const doomDigit = pick([...'0123456789abcdef']);
       const doomFrom = 1 + Math.floor(next() * (PROPERTY_STEPS - 6));
@@ -209,6 +267,7 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
           const final = step > PROPERTY_STEPS;
           // Never inside the doomed span, whose windows must fail run after run to reach the failure limit.
           if (lost() < 0.08 && !final && !(step >= doomFrom && step < doomFrom + doomSteps)) await loseGrammar(step);
+          if (rival() < 0.06 && !final && !(step >= doomFrom && step < doomFrom + doomSteps)) await rivalGrammar(step);
           const change = final ? 'none' : pick(['none', 'none', 'append', 'append', 'append', 'new-day', 'edit', 'edit', 'insert', 'insert', 'delete', 'oversized',
             'title', 'title', 'visibility', 'model', 'version'] as const);
           if (change === 'append') {

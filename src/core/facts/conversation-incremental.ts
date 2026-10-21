@@ -27,7 +27,9 @@
  *     and in runs, newest run first, so a stop reads only the runs it reached; a page nothing changed on reads nothing;
  *   - parses under the page's grammar: the one detectPagePattern picks over the whole page (the whole-page pass's
  *     choice; one unpaid read, counted in conversationDetectionWork), pinned on the rows while the occurrences that
- *     recorded it under the same context are mostly unchanged by bytes; a page with no grammar is not a conversation: it settles as
+ *     recorded it under the same context are mostly unchanged by bytes; with none detected, the recorded grammar that
+ *     parses the most messages, while it parses more than twice any other recorded grammar (else the page fails and
+ *     nothing is published); a page with no grammar is not a conversation: it settles as
  *     non-extractable and its conversation facts are collected; a pinned grammar under which nothing parses is detected
  *     again; a detected grammar under which nothing parses leaves a no_messages receipt and changes nothing;
  *   - reuses every window an earlier run extracted with the same rendered text under the same context (re-anchored
@@ -182,15 +184,34 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   if (!pattern && from < liveIds.length) pattern = await detectPagePattern(occurrences, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
   if (!pattern && from < liveIds.length) {
     if (opts.sinceIso) { result.pages_skipped++; return { newestEnd: null }; }
-    // No grammar over the whole page (text around a transcript can tip the density test). A grammar an earlier run
-    // recorded that still parses a message here is the page's grammar: the run goes on under it, so its windows replace
-    // their exact keys and a settled run collects the rest. Otherwise the page stopped being a transcript: it settles
-    // as non-extractable below and its conversation facts are collected.
-    for (const recordedGrammar of new Set(prior.map(row => rowOutput(row).pattern).filter((p): p is string => !!p))) {
-      const parsed = await streamConversationWindows(occurrences, 0, liveIds.length, { page, gapMinutes: opts.gapMinutes, pattern: recordedGrammar },
-        i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }), { window() {}, occurrence() {} });
-      if (parsed.messages > 0) { pattern = recordedGrammar; recovered = true; break; }
+    // No grammar over the whole page (text around a transcript can tip the density test). Of the grammars earlier runs
+    // recorded, the one that parses the most messages here (on a tie, the one recorded last) is the page's grammar: the
+    // run goes on under it, so its windows replace their exact keys and a settled run collects the rest. It must parse
+    // more than twice the messages of any other recorded grammar, else the other may be the real one and collecting
+    // would delete its facts: the page fails with nothing published until an edit settles which format it is. When no
+    // recorded grammar parses a message, the page stopped being a transcript: it settles as non-extractable below and
+    // its conversation facts are collected.
+    const lastRecorded = new Map<string, string>();
+    for (const row of prior) {
+      const recordedGrammar = rowOutput(row).pattern;
+      if (recordedGrammar && row.updatedAt > (lastRecorded.get(recordedGrammar) ?? '')) lastRecorded.set(recordedGrammar, row.updatedAt);
     }
+    const candidates: Array<{ grammar: string; messages: number; at: string }> = [];
+    for (const [grammar, at] of lastRecorded) {
+      const parsed = await streamConversationWindows(occurrences, 0, liveIds.length, { page, gapMinutes: opts.gapMinutes, pattern: grammar },
+        i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }), { window() {}, occurrence() {} });
+      candidates.push({ grammar, messages: parsed.messages, at });
+    }
+    candidates.sort((a, b) => b.messages - a.messages || (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+    const [best, rival] = candidates;
+    if (best && rival && best.messages > 0 && best.messages <= 2 * rival.messages) {
+      const why = `no format is detected and its recorded formats compete (${best.grammar}: ${best.messages} messages, ${rival.grammar}: ${rival.messages}); facts kept, nothing settled`;
+      process.stderr.write(`[extract-conversation-facts] ${page.slug}: ${why}\n`);
+      result.pages_failed++;
+      recordFailedPage(result, page.slug, why);
+      return { newestEnd: null };
+    }
+    if (best && best.messages > 0) { pattern = best.grammar; recovered = true; }
     if (!pattern) from = 0;
   }
   // Earlier windows of the occurrences the stream covers (and of retired ones), reusable by rendered text under the same context.
