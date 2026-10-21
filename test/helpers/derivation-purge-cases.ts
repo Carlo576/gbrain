@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { runExtractFacts } from '../../src/core/cycle/extract-facts.ts';
-import { __setBeforeDerivationWriteForTests, segmentDeriveWork } from '../../src/core/page-body/segment-derive.ts';
+import { __setBeforeDerivationWriteForTests, derivationSweepWork, segmentDeriveWork } from '../../src/core/page-body/segment-derive.ts';
 import { incrementalFactsFenceView, segmentedFactsFenceView } from '../../src/core/page-body/segment-facts.ts';
 import { forgetFactInFence } from '../../src/core/facts/forget.ts';
 import { deriveAll, KINDS, liveOccurrences, resetDeriveWork, storedPage } from './derivation-equivalence-cases.ts';
@@ -37,6 +37,26 @@ async function holders(engine: BrainEngine, pageId: number, claim: string): Prom
   return (await engine.executeRaw<{ pipeline: string; occurrence_id: string }>(`SELECT pipeline, occurrence_id::text AS occurrence_id FROM page_segment_derivations
     WHERE page_id=$1 AND (strpos(lower(COALESCE(output::text,'')),$2)>0 OR strpos(lower(COALESCE(receipt::text,'')),$2)>0) ORDER BY pipeline, occurrence_id`,
   [pageId, claim.toLowerCase()])).map(row => ({ pipeline: row.pipeline, occurrence_id: Number(row.occurrence_id) }));
+}
+
+/** A segmented page whose last truth paragraph states `text` next to a link, so its links rows carry it in an excerpt. */
+function prosePage(text: string, seed: number): string {
+  return ['---\ntype: note\ntitle: Prose Example\n---\n\n', prose(1_300_000, seed), `\n\nClosing: met [[people/alice-example]]. ${text}.\n`].join('');
+}
+
+/** Derivation rows of a page whose output or receipt holds `text` byte for byte (no case folding on either side). */
+async function exactHolders(engine: BrainEngine, pageId: number, text: string): Promise<Array<{ pipeline: string; occurrence_id: number }>> {
+  return (await engine.executeRaw<{ pipeline: string; occurrence_id: string }>(`SELECT pipeline, occurrence_id::text AS occurrence_id FROM page_segment_derivations
+    WHERE page_id=$1 AND (strpos(COALESCE(output::text,''),$2)>0 OR strpos(COALESCE(receipt::text,''),$2)>0) ORDER BY pipeline, occurrence_id`,
+  [pageId, text])).map(row => ({ pipeline: row.pipeline, occurrence_id: Number(row.occurrence_id) }));
+}
+
+/** Per page of the source: derivation rows no live segment backs (occurrence retired, page inline or soft-deleted). */
+async function unbackedRows(engine: BrainEngine): Promise<Map<number, number>> {
+  const rows = await engine.executeRaw<{ page_id: number; n: number }>(`SELECT d.page_id, count(*)::int AS n FROM page_segment_derivations d
+    JOIN pages p ON p.id=d.page_id WHERE p.source_id=$1 AND (p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.page_id=d.page_id
+      AND m.occurrence_id=d.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256=d.segment_sha256)) GROUP BY d.page_id`, [SOURCE]);
+  return new Map(rows.map(row => [Number(row.page_id), Number(row.n)]));
 }
 
 export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void {
@@ -151,6 +171,73 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
       expect(after!.body_storage).toBe('inline');
       complete(await purge(id));
       expect(await holders(brain.engine, page.id, claim)).toEqual([]);
+    }, 600_000);
+
+    /**
+     * A page that is not purged retires the occurrence whose links rows carry `planted` (an append replaces its last
+     * segment), so only the purge's derivation sweep can reach those rows.
+     */
+    const retiredHolder = async (slug: string, planted: string, seedNo: number) => {
+      await brain.seed(slug, prosePage(planted, seedNo));
+      const page = await storedPage(brain.engine, slug);
+      await deriveAll(brain.engine, page);
+      const res = await brain.call('append_page', { slug, text: 'Appended note: nothing more.\n', region: 'truth', request_id: randomUUID() });
+      expect(res).toMatchObject({ isError: false });
+      const live = await liveOccurrences(brain.engine, page.id);
+      const held = await exactHolders(brain.engine, page.id, planted);
+      expect(held.length).toBeGreaterThan(0);
+      expect(held.filter(row => live.has(row.occurrence_id))).toEqual([]);
+      return page;
+    };
+
+    const derivationStore = (receipt: Record<string, any>) =>
+      (receipt.stores as Array<{ store: string; status: string; remaining?: number }>).find(s => s.store === 'page_segment_derivations');
+
+    for (const variant of [
+      { name: 'Greek capitals (final sigma)', claim: 'ΤΟ ΚΛΕΙΔΙ ΤΗΣ ΑΠΟΘΗΚΗΣ ΕΙΝΑΙ 2207', planted: 'ΤΟ ΚΛΕΙΔΙ ΤΗΣ ΑΠΟΘΗΚΗΣ ΕΙΝΑΙ 2207', n: 1 },
+      { name: 'Turkish dotted capital I', claim: 'İSTANBUL DEPOSU KODU 6114', planted: 'İSTANBUL DEPOSU KODU 6114', n: 2 },
+      { name: 'other case and spacing', claim: 'Purge Example  lift code is 6610', planted: 'purge example LIFT code is 6610', n: 3 },
+    ]) {
+      test(`a purge deletes a retired row stating the claim in its normalized form: ${variant.name}`, async () => {
+        const holder = await retiredHolder(`notes/normalized-holder-${variant.n}`, variant.planted, 50 + variant.n);
+        const id = await seed(`notes/normalized-purge-${variant.n}`, variant.claim);
+        const receipt = await purge(id);
+        expect({ rows: await exactHolders(brain.engine, holder.id, variant.planted), receipt: derivationStore(receipt)?.status })
+          .toEqual({ rows: [], receipt: 'deleted' });
+        complete(receipt);
+      }, 600_000);
+    }
+
+    test('a purge sweeps only rows of the pages it rewrote and rows no live segment backs, matching whole words', async () => {
+      const claim = 'Plays oboe';
+      const unrelated = await retiredHolder('notes/sweep-unrelated', 'Alice Example plays oboes on weekends', 61);
+      const retired = await retiredHolder('notes/sweep-retired', 'Alice Example PLAYS OBOE', 62);
+      await brain.seed('notes/sweep-live', prosePage(claim, 63));
+      const live = await storedPage(brain.engine, 'notes/sweep-live');
+      await deriveAll(brain.engine, live);
+      const liveHeld = await exactHolders(brain.engine, live.id, claim);
+      expect(liveHeld.length).toBeGreaterThan(0);
+      const id = await seed('notes/sweep-purge', claim);
+      const target = await storedPage(brain.engine, 'notes/sweep-purge');
+      await deriveAll(brain.engine, target);
+      const unbacked = await unbackedRows(brain.engine);
+      const unrelatedRows = (await brain.engine.readSegmentDerivations(unrelated.id)).length;
+      const retiredHeld = (await exactHolders(brain.engine, retired.id, 'Alice Example PLAYS OBOE')).length;
+      expect(unbacked.has(live.id)).toBe(false);
+      derivationSweepWork.length = 0;
+      const receipt = await purge(id);
+      expect(derivationSweepWork.some(w => w.pageId === target.id && w.scanned > 0)).toBe(true);
+      const expected = [...unbacked].filter(([pageId]) => pageId !== target.id).sort((a, b) => a[0] - b[0])
+        .map(([pageId, scanned]) => ({ pageId, scanned, deleted: pageId === retired.id ? retiredHeld : 0 }));
+      expect(derivationSweepWork.filter(w => w.pageId !== target.id)).toEqual(expected);
+      expect(derivationSweepWork.find(w => w.pageId === live.id)).toBeUndefined();
+      expect(expected.find(w => w.pageId === unrelated.id)?.deleted).toBe(0);
+      expect(unbacked.get(unrelated.id)).toBeLessThan(unrelatedRows);
+      expect((await brain.engine.readSegmentDerivations(unrelated.id)).length).toBe(unrelatedRows);
+      expect(await exactHolders(brain.engine, retired.id, 'Alice Example PLAYS OBOE')).toEqual([]);
+      expect(await exactHolders(brain.engine, live.id, claim)).toEqual(liveHeld);
+      expect(derivationStore(receipt)).toMatchObject({ status: 'out_of_scope', reason: 'source_prose', remaining: liveHeld.length });
+      expect((receipt.stores as Array<{ status: string }>).filter(s => s.status === 'incomplete')).toEqual([]);
     }, 600_000);
   });
 }

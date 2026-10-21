@@ -27,6 +27,7 @@ import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from 
 import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
+import { derivationHoldsClaimSql, derivationSweepScopeSql } from '../page-body/segment-derive.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
 import { CARRYING_FIELDS } from '../belief/keys.ts';
@@ -119,6 +120,26 @@ async function segmentTextReport(engine: BrainEngine, sourceId: string, needles:
     ? { store: 'page_segment_texts', status: 'out_of_scope', reason: 'source_prose', remaining: kept.count, removed,
       detail: 'Segments of live pages or retained versions still state the text outside a facts fence; they are listed under pages and page_versions.' }
     : { store: 'page_segment_texts', status: removed ? 'deleted' : 'not_present', removed };
+}
+
+/**
+ * Derivation rows holding the claim, matched and scoped as the purge sweeps them (segment-derive.ts
+ * derivationHoldsClaimSql, derivationSweepScopeSql): a row the sweep covers is a residual (`incomplete`); a row of a
+ * live segment of a page the purge did not rewrite is that page's prose, reported with it.
+ */
+async function derivationTextReport(engine: BrainEngine, sourceId: string, pageIds: readonly number[], claims: readonly string[], removed: number,
+  deadline: number): Promise<StoreReport> {
+  const carrying = `SELECT 1 FROM page_segment_derivations d JOIN pages p ON p.id=d.page_id WHERE p.source_id=$1 AND ${derivationHoldsClaimSql('d', '$2')}`;
+  const params = [sourceId, claims.filter(Boolean), [...pageIds]];
+  const swept = await boundedCount(engine, `${carrying} AND ${derivationSweepScopeSql('d', 'p', '$3')}`, params, deadline);
+  if ('unverified' in swept) return { store: 'page_segment_derivations', status: 'unverified', reason: swept.unverified, removed };
+  if (swept.count) return { store: 'page_segment_derivations', status: 'incomplete', remaining: swept.count, removed };
+  const kept = await boundedCount(engine, `${carrying} AND NOT ${derivationSweepScopeSql('d', 'p', '$3')}`, params, deadline);
+  if ('unverified' in kept) return { store: 'page_segment_derivations', status: 'unverified', reason: kept.unverified, removed };
+  return kept.count
+    ? { store: 'page_segment_derivations', status: 'out_of_scope', reason: 'source_prose', remaining: kept.count, removed,
+      detail: 'Derivations of live segments of pages the purge did not rewrite hold the text their prose still states; they are listed under pages.' }
+    : { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed };
 }
 
 type ProbeResult = { count: number } | { unverified: string };
@@ -446,6 +467,7 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
     detail: `${legacy.n} model-derived page(s) in this source predate derivation edges, so purge cannot tell whether they restate the claim in other words.` });
   if (!dryRun) {
     stores.push(await segmentTextReport(engine, src, [...new Set([claim, escapeFenceCell(claim)])], removed.page_segment_texts ?? 0, deadline));
+    stores.push(await derivationTextReport(engine, src, plan.pages.map(page => page.page_id), [claim, escapeFenceCell(claim)], removed.page_segment_derivations ?? 0, deadline));
     stores.push(...await ledgerReports(engine, src, [claim], input.ledger, deadline));
     stores.push(await effectPayloadReport(engine, src, [claim], deadline, removed.persistence_effects ?? 0));
   }
