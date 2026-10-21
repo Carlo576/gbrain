@@ -181,7 +181,8 @@ const sqlList = (values: readonly string[]) => values.map(v => `'${v}'`).join(',
  * the segment text and the context (`context_hash`: entry state plus the page-level inputs the pipeline reads) it was
  * derived from, the pipeline version, the outcome and a bounded per-segment output. A pipeline's work on a page is the
  * live occurrences without a settled row whose segment sha, context hash and version match, found from metadata alone.
- * Rows of an occurrence that left the live generation are deleted by their pipeline (retireSegmentDerivations); a page
+ * Rows of an occurrence that left the live generation are deleted by their pipeline (retireSegmentDerivations) or by a
+ * fence rewrite; demotion to inline deletes the page's rows, a fact purge every row holding the claim, and a page
  * delete cascades. The output holds link context and window anchors, so the table gets the segment tables' RLS posture.
  *
  * PR 4 (Wave B incremental derivation, transcripts): page_derivation_spend is the per-page lifetime spend ledger of each

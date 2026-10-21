@@ -54,13 +54,7 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
       else queue('facts-backstop', { visibility: await resolveDefaultVisibility(tx) });
     }
     // The links effect is inserted with the others, gated in SQL on auto_link and mcp.remote_auto_links.
-    // Wave B (spec 8.5): on a segmented page it carries the occurrences this write added (live rows with no older row).
-    if (queuesMentionLinks(row, prepared)) {
-      const added = await tx.executeRaw<{ id: string }>(`SELECT m.occurrence_id::text AS id FROM page_body_manifest m JOIN pages p ON p.id=m.page_id
-        WHERE m.page_id=$1 AND p.body_storage='segmented' AND m.gen_from=p.body_generation AND m.gen_to IS NULL AND m.staging_id IS NULL
-          AND NOT EXISTS (SELECT 1 FROM page_body_manifest o WHERE o.page_id=m.page_id AND o.occurrence_id=m.occurrence_id AND o.gen_from<m.gen_from) ORDER BY m.seq`, [snapshot.page.id]);
-      queued.push({ kind: 'links', data: { ...data, ...(prepared?.mentionRange ? { range: prepared.mentionRange } : {}), ...(added.length ? { occurrence_ids: added.map(r => Number(r.id)) } : {}) }, gated: true });
-    }
+    if (queuesMentionLinks(row, prepared)) queued.push({ kind: 'links', data: { ...data, ...(prepared?.mentionRange ? { range: prepared.mentionRange } : {}) }, gated: true });
     // #5876: the Life Chronicle decision is a ledger row, not an effect; the `chronicle` cycle phase executes it.
     await recordChronicleDecision(tx, row, snapshot, outcome);
   }

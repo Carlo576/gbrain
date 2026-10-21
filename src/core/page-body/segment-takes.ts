@@ -12,6 +12,7 @@
 import { indexOfOutsideCode } from '../fence-scan.ts';
 import { parseTakesFence, TAKES_FENCE_BEGIN, TAKES_FENCE_END, type ParseResult } from '../takes-fence.ts';
 import { BLOCK_MAX_BYTES, blockTooLargeError, segmentedPassWork, type BodyBlock } from './segment-blocks.ts';
+import { keyDigest } from './segment-derive.ts';
 
 export interface StreamedTakes {
   parsed: ParseResult;
@@ -73,8 +74,9 @@ export class TakesFenceScan {
 
   /** What the blocks pushed so far hold, for a run's fences row (segment-facts.ts segmentedFenceRuns). */
   summary(): TakesRunSummary {
+    const text = this.fence?.join('');
     return { hasBegin: this.hasBegin, hasMarker: this.hasMarker, endOnly: this.endOnly, nearMiss: this.nearMiss,
-      fence: this.fence ? { text: this.fence.join(''), closed: this.done !== null } : null };
+      fence: text === undefined ? null : { sha: keyDigest(text), closed: this.done !== null, text } };
   }
 }
 
@@ -85,20 +87,22 @@ function reducedTakes(begun: boolean, endOnly: boolean, nearMiss: boolean): stri
 
 /**
  * One run's TakesFenceScan state (a scan started fresh at the run, its blocks pushed with region offsets): the raw marker
- * flags up to the block that closed its first fence, the end-only and near-miss scans before any begin, and that fence.
+ * flags up to the block that closed its first fence, the end-only and near-miss scans before any begin, and that fence:
+ * its digest and whether it closed. Its `text` is held in memory only (a run just scanned, or read again for it) and
+ * never stored on the fences row.
  */
-export interface TakesRunSummary { hasBegin: boolean; hasMarker: boolean; endOnly: boolean; nearMiss: boolean; fence: { text: string; closed: boolean } | null }
+export interface TakesRunSummary { hasBegin: boolean; hasMarker: boolean; endOnly: boolean; nearMiss: boolean; fence: { sha: string; closed: boolean; text?: string } | null }
 
 /**
  * parseTakesFenceBlocks of a region from its runs' summaries, in order; null when a fence a run begins does not close
- * in that run (the caller reads the region whole).
+ * in that run, or its text was not read (the caller reads the region whole).
  */
 export function takesFromRuns(summaries: readonly TakesRunSummary[]): StreamedTakes | null {
   let hasBegin = false, hasMarker = false, endOnly = false, nearMiss = false;
   for (const summary of summaries) {
     hasBegin ||= summary.hasBegin;
     hasMarker ||= summary.hasMarker;
-    if (summary.fence) return summary.fence.closed ? { parsed: parseTakesFence(summary.fence.text), hasBegin, hasMarker } : null;
+    if (summary.fence) return summary.fence.closed && summary.fence.text !== undefined ? { parsed: parseTakesFence(summary.fence.text), hasBegin, hasMarker } : null;
     endOnly ||= summary.endOnly;
     nearMiss ||= summary.nearMiss;
   }

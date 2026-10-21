@@ -38,7 +38,7 @@ import {
   FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence, timelineHasGenuineFactsFenceMarker, type FactsFenceParseResult, type FactsFenceView,
 } from '../facts-fence.ts';
 import { TAKES_FENCE_BEGIN } from '../takes-fence.ts';
-import { commitRuns, derivationScope, planRuns, readRuns, SegmentDerivationRaced, type DerivationScope, type DeriveRun } from './segment-derive.ts';
+import { commitRuns, derivationScope, keyDigest, planRuns, readRuns, SegmentDerivationRaced, segmentDeriveWork, type DerivationScope, type DeriveRun } from './segment-derive.ts';
 import { TakesFenceScan, type TakesRunSummary } from './segment-takes.ts';
 import { BodyScanner } from './body-scan.ts';
 import { readBodyRange } from './read-range.ts';
@@ -113,7 +113,8 @@ export class FactsFenceScan {
 
   /** What the blocks pushed so far hold, for a run's fences row. */
   summary(): FactsRunSummary {
-    return { marker: this.marker, endOnly: this.endOnly, fence: this.fence ? { text: this.fence.join(''), closed: this.parsedText !== null } : null };
+    const text = this.fence?.join('');
+    return { marker: this.marker, endOnly: this.endOnly, fence: text === undefined ? null : { sha: keyDigest(text), closed: this.parsedText !== null, text } };
   }
 }
 
@@ -141,11 +142,18 @@ export async function segmentedFactsFenceView(engine: BrainEngine, page: { id?: 
   return { body: truth.parsed, timeline: timeline.parsed, sections: { body: truth.holds, timeline: timeline.holds }, timelineMarker: timeline.marker };
 }
 
-/** One run's FactsFenceScan state (a scan started fresh at the run): the timeline marker, the end-only scan before any begin, and its first fence. */
-export interface FactsRunSummary { marker: boolean; endOnly: boolean; fence: { text: string; closed: boolean } | null }
+/**
+ * One run's FactsFenceScan state (a scan started fresh at the run): the timeline marker, the end-only scan before any
+ * begin, and its first fence: its digest and whether it closed. Its `text` is held in memory only (a run just scanned,
+ * or read again for it) and never stored on the fences row.
+ */
+export interface FactsRunSummary { marker: boolean; endOnly: boolean; fence: { sha: string; closed: boolean; text?: string } | null }
 
-/** What a run's fences row holds (spec 8.2 facts / takes fences): the facts and takes scans of its blocks. */
+/** What a run's fences row holds (spec 8.2 facts / takes fences): the facts and takes scans of its blocks, fence texts left out. */
 export interface FenceRunOutput { facts: FactsRunSummary; takes: TakesRunSummary }
+
+const withoutText = <F extends { fence: { sha: string; closed: boolean; text?: string } | null }>(summary: F): F =>
+  ({ ...summary, fence: summary.fence && { sha: summary.fence.sha, closed: summary.fence.closed } });
 
 /**
  * Each run of a segmented page with its fences row output, in page order (spec 8.2 facts / takes fences): runs whose
@@ -160,30 +168,62 @@ export async function segmentedFenceRuns(engine: BrainEngine, page: FencePage): 
   return fences.finish();
 }
 
+type FenceScans = Map<number, { facts: FactsFenceScan; takes: TakesFenceScan; at: number; seen: boolean }>;
+const fenceScans = (page: FencePage, runs: readonly DeriveRun[]): FenceScans =>
+  new Map(runs.map(run => [run.index, { facts: new FactsFenceScan(page, run.region), takes: new TakesFenceScan(page), at: 0, seen: false }]));
+const scanOf = (scans: FenceScans) => [...scans].map(([index, scan]) => [index, { facts: scan.facts.summary(), takes: scan.takes.summary() }] as const);
+
+/** Feed one block of a run to that run's scans, in order. */
+const feed = (scans: FenceScans) => (run: DeriveRun | null, block: BodyBlock) => {
+  const scan = run && scans.get(run.index);
+  if (!scan) return;
+  scan.seen = true;
+  scan.facts.push(block.text, run.first && scan.at === 0);
+  scan.takes.push({ text: block.text, at: run.first ? scan.at : Number.MAX_SAFE_INTEGER });
+  scan.at += block.text.length;
+};
+
 /**
  * The fences rows of a scope, for a caller that reads some runs for another kind: `push` the blocks it reads (a due
- * run seen whole is scanned there), then `finish` reads only the due runs still unscanned and stores every scan.
+ * run seen whole is scanned there), then `finish` reads only the due runs still unscanned and stores every scan. A
+ * row keeps a fence's digest, not its text (spec 11): the run holding each region's first closed facts or takes fence
+ * is read again for it when its row is current, and a text whose digest moved throws SegmentDerivationRaced.
  */
 export async function openFenceRuns(engine: BrainEngine, page: FencePage, scope: DerivationScope) {
   const inputs = () => ({ facts: FACTS_FENCE_BEGIN, takes: TAKES_FENCE_BEGIN });
   const plan = await planRuns<FenceRunOutput>(engine, 'fences', scope, inputs);
-  const scans = new Map(plan.todo.map(run => [run.index, { facts: new FactsFenceScan(page, run.region), takes: new TakesFenceScan(page), at: 0, seen: false }]));
-  const push = (run: DeriveRun | null, block: BodyBlock) => {
-    const scan = run && scans.get(run.index);
-    if (!scan) return;
-    scan.seen = true;
-    scan.facts.push(block.text, run.first && scan.at === 0);
-    scan.takes.push({ text: block.text, at: run.first ? scan.at : Number.MAX_SAFE_INTEGER });
-    scan.at += block.text.length;
-  };
+  const scans = fenceScans(page, plan.todo);
+  const push = feed(scans);
   return {
     /** Feed one block a caller read whole with its run's other blocks, in order. */
     push,
     async finish(): Promise<Array<{ run: DeriveRun; output: FenceRunOutput }>> {
       await readRuns(engine, scope, new Set([...scans].filter(([, scan]) => !scan.seen).map(([index]) => index)), push);
-      const outputs = new Map([...scans].map(([index, scan]) => [index, { facts: scan.facts.summary(), takes: scan.takes.summary() }]));
-      await commitRuns(engine, 'fences', scope, outputs, inputs);
-      return scope.runs.map(run => ({ run, output: outputs.get(run.index) ?? plan.current.get(run.index)! }));
+      const outputs = new Map<number, FenceRunOutput>(scanOf(scans));
+      await commitRuns(engine, 'fences', scope, new Map([...outputs].map(([index, o]) => [index, { facts: withoutText(o.facts), takes: withoutText(o.takes) }])), inputs);
+      const runs = scope.runs.map(run => ({ run, output: outputs.get(run.index) ?? plan.current.get(run.index)! }));
+      const holders = new Set<number>();
+      const unread = (fence: FactsRunSummary['fence']) => !!fence?.closed && fence.text === undefined;
+      for (const region of ['truth', 'timeline'] as const) {
+        const own = runs.filter(({ run }) => run.region === region);
+        const facts = own.find(({ output }) => output.facts.fence), takes = own.find(({ output }) => output.takes.fence);
+        if (facts && unread(facts.output.facts.fence)) holders.add(facts.run.index);
+        if (takes && unread(takes.output.takes.fence)) holders.add(takes.run.index);
+      }
+      if (!holders.size) return runs;
+      const again = fenceScans(page, scope.runs.filter(run => holders.has(run.index)));
+      await readRuns(engine, scope, holders, feed(again));
+      segmentDeriveWork.fences.reread += holders.size;
+      const text = <F extends FactsRunSummary | TakesRunSummary>(stored: F, read: F): F => {
+        if (!stored.fence || stored.fence.text !== undefined) return stored;
+        if (read.fence?.sha !== stored.fence.sha) throw new SegmentDerivationRaced(page.slug);
+        return { ...stored, fence: { ...stored.fence, text: read.fence.text } };
+      };
+      for (const [index, read] of scanOf(again)) {
+        const at = runs[index]!;
+        at.output = { facts: text(at.output.facts, read.facts), takes: text(at.output.takes, read.takes) };
+      }
+      return runs;
     },
   };
 }
@@ -195,7 +235,7 @@ export function factsFromRuns(summaries: readonly FactsRunSummary[]): RegionFenc
     marker ||= summary.marker;
     if (parsedText !== null) continue;
     if (summary.fence) {
-      if (!summary.fence.closed) return null;
+      if (!summary.fence.closed || summary.fence.text === undefined) return null;
       parsedText = summary.fence.text;
     } else endOnly ||= summary.endOnly;
   }
