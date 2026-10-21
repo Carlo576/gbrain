@@ -719,8 +719,6 @@ async function synopsisWrappedTexts(opts: {
   args: ReembedPageArgs;
   synopsisModel: string;
   synopsisMaxTokens?: number;
-  /** Collects the chunks whose synopsis call the provider may have billed (see SYNOPSIS_UNBILLED). */
-  billed?: Set<SynopsisChunk>;
 }): Promise<string[] | Exclude<Phase1Result, Phase1Success>> {
   const { chunks, args } = opts;
   const wrappedTexts: string[] = new Array(chunks.length);
@@ -748,9 +746,6 @@ async function synopsisWrappedTexts(opts: {
   return wrappedTexts;
 }
 
-/** Synopsis results the provider returns before billing the call: a call that ended with one of these is not booked. */
-const SYNOPSIS_UNBILLED: ReadonlySet<string> = new Set<SynopsisFailureKind>(['auth_failure', 'rate_limit', 'provider_5xx']);
-
 class ChunkSynopsisPhase1Error extends Error {
   constructor(readonly result: Exclude<Phase1Result, Phase1Success>) {
     super(`chunk synopsis failed: ${result.kind}`);
@@ -766,9 +761,8 @@ async function buildWrappedChunkText(opts: {
   synopsisModel: string;
   /** #3883: resolved output-token cap (undefined → page-summary default). */
   synopsisMaxTokens?: number;
-  billed?: Set<SynopsisChunk>;
 }): Promise<string> {
-  const { chunk: c, sourceText, title, args, synopsisModel, synopsisMaxTokens, billed } = opts;
+  const { chunk: c, sourceText, title, args, synopsisModel, synopsisMaxTokens } = opts;
 
   // Code chunks always bypass the wrapper (D20-T4) — pass through.
   if (c.chunk_source === 'fenced_code') {
@@ -796,7 +790,6 @@ async function buildWrappedChunkText(opts: {
       }
       leaseAcquired = true;
     }
-    billed?.add(c);
     synopsisResult = await (args.generateSynopsis ?? generatePerChunkSynopsis)({
       documentText: sourceText,
       chunkText: c.chunk_text,
@@ -819,7 +812,6 @@ async function buildWrappedChunkText(opts: {
     }
   }
 
-  if (SYNOPSIS_UNBILLED.has(synopsisResult.kind)) billed?.delete(c);
   if (synopsisResult.kind === 'success') {
     const prefix = buildContextualPrefix(title, synopsisResult.synopsis);
     return wrapChunkForEmbedding(c.chunk_text, prefix, c.chunk_source);
