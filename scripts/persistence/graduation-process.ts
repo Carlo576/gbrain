@@ -31,6 +31,8 @@ function childEnv(opts: GbrainOpts): Record<string, string> {
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !PROVIDER_KEYS.test(k)) env[k] = v;
   delete env.DATABASE_URL; delete env.GBRAIN_DATABASE_URL; delete env.GBRAIN_DIRECT_DATABASE_URL; delete env.GBRAIN_REMOTE_CLIENT_SECRET;
   Object.assign(env, { HOME: opts.home, GBRAIN_HOME: opts.home, GBRAIN_SKIP_STARTUP_HOOKS: '1', NO_COLOR: '1' });
+  // Runtime cache files are harness artifacts, not brain writes or credential leaks.
+  env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = '0';
   if (opts.hooks) {
     env.GBRAIN_TEST_GRADUATION_EVENTS = opts.hooks.events;
     env.GBRAIN_TEST_GRADUATION_PAUSE = (opts.hooks.pause ?? []).join(',');

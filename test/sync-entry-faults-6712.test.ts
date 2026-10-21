@@ -33,9 +33,8 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { opError } from '../src/core/ops/contract.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
@@ -46,16 +45,10 @@ import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
 import { readBlockedManagedSyncs } from '../src/core/persistence/sync-blocked.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
+import { hasInvalidUtf8TempFs } from './helpers/case-sensitive-fs.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
-// APFS rejects the malformed filename before sync can inspect it. Keep these
-// two fixtures on filesystems that can represent their input; other faults run everywhere.
-const acceptsInvalidUtf8Names = (() => {
-  const dir = mkdtempSync(join(tmpdir(), 'gbrain-invalid-utf8-probe-'));
-  try { writeFileSync(Buffer.concat([Buffer.from(dir + '/caf'), Buffer.from([0xe9])]), 'probe'); return true; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'EILSEQ') return false; throw error; }
-  finally { rmSync(dir, { recursive: true, force: true }); }
-})();
+const acceptsInvalidUtf8Names = hasInvalidUtf8TempFs();
 
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const commit = (root: string, message: string) => { git(root, 'add', '-A'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', message); };

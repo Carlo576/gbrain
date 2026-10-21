@@ -12,7 +12,7 @@
  * follow-up sync) or scheduled and waiting for that sync (fix: the sync); info
  * when a source has no result, a stale one (older than 7 days) or an
  * incomplete one that found nothing so far. Files sync skips on purpose as
- * folder scaffolding (`index.md` and the other metafile names) that carry a
+ * folder scaffolding (`schema.md` and the other metafile names) that carry a
  * frontmatter `type:` or `title:` are named separately (`metafile_skipped`):
  * renaming one is the user's call, so they never make the check warn and are
  * the info finding only when nothing else is.
@@ -63,8 +63,8 @@ function metafileNote(states: UnindexedState[]): string {
   if (!found.length) return '';
   const count = found.reduce((n, state) => n + state.record!.metafile_skipped, 0);
   const samples = found.flatMap(state => state.record!.metafile_samples.slice(0, 3).map(path => `${state.source_id}:${path}`)).slice(0, 5).join(', ');
-  return `${count} file(s) with a frontmatter type: or title: are named like folder scaffolding (index.md, README.md, schema.md, log.md, RESOLVER.md), which sync skips on purpose (e.g. ${samples}). `
-    + 'To index one, rename it (for example investors/fund-a/index.md -> investors/fund-a.md), commit, then sync.';
+  return `${count} file(s) with a frontmatter type: or title: are named like folder scaffolding (README.md, schema.md, log.md, RESOLVER.md), which sync skips on purpose (e.g. ${samples}). `
+    + 'To index one, rename it (for example investors/fund-a/schema.md -> investors/fund-a.md), commit, then sync.';
 }
 
 async function runUnindexedFiles(ctx: DoctorContext): Promise<Check[]> {
@@ -120,10 +120,10 @@ async function runUnindexedFiles(ctx: DoctorContext): Promise<Check[]> {
       const metafile = first.record!.metafile_skipped ? first.record!.metafile_samples[0] : undefined;
       checks.push(infoCheck('unindexed_files', `Every other committed file of ${states.length} managed Git source(s) is indexed, held or excluded. ${scaffolding}`, 'degraded', {
         argv: await gitFollowUpSync(engine, first.source_id, []), consent: [], actor: 'user', requires_exclusive: false, verify: doctorVerify('unindexed_files'), docs: DOCS,
-        why: metafile ? 'Sync skips index.md and the other scaffolding names on purpose; a file renamed to an ordinary name is imported by the next sync.'
+        why: metafile ? 'Sync skips the configured scaffolding names on purpose; a file renamed to an ordinary name is imported by the next sync.'
           : 'A re-screen cannot import these files as they are; after the rename, delete or restore is committed, the next sync settles them.',
-        user_message: metafile ? `Sync skips files named index.md (and README.md, schema.md, log.md, RESOLVER.md) on purpose, as folder scaffolding, so ${metafile} is not in search. `
-          + 'To index such a file, rename it, for example investors/fund-a/index.md -> investors/fund-a.md, commit, then run this sync.' : blockedNote([first]) }, details));
+        user_message: metafile ? `The last scan skipped ${metafile} as folder scaffolding on purpose, so it is not in search. `
+          + `To index such a file, rename it, for example ${metafile} -> ${metafile.includes('/') ? metafile.replace(/\/[^/]+$/, '.md') : 'overview.md'}, commit, then run this sync.` : blockedNote([first]) }, details));
       return checks;
     }
     checks.push({ name: 'unindexed_files', status: 'ok', details,

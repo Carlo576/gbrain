@@ -1609,6 +1609,15 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'cycle.grade_takes.write_gstack_learnings',
   // Doctor thresholds
   'doctor.brain_score_warn_below',
+  // Existing downstream acknowledgement controls remain configurable.
+  'health.content_sanity.ack_slugs',
+  'health.contradictions.allowed_pairs',
+  'health.duplicates.allowed',
+  'health.flagged.ack_slugs',
+  'health.quarantine.ack_reasons',
+  'health.skill_preconditions.ack',
+  'health.supervisor.ack_crashes',
+
   // #4102: off switch for the propose_takes LLM phase (default ON; the
   // phase ships in the default list). Read by src/core/cycle/propose-takes.ts.
   'cycle.propose_takes.enabled',

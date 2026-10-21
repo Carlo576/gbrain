@@ -34,6 +34,8 @@ import { git, gitRawOutput } from '../../src/core/sync-git.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../../src/core/sync-delta.ts';
 import { confirmRenameIdentities } from '../../src/core/sync-rename-identity.ts';
 import { withEnv } from '../helpers/with-env.ts';
+import { hasInvalidUtf8TempFs } from '../helpers/case-sensitive-fs.ts';
+const invalidUtf8Names = hasInvalidUtf8TempFs();
 import { expectItemFailure, pathologicalArms, renderFix } from './harness.ts';
 import { gitIn, md, observe, withProbeEngine, withProbeRepo, type ProbeRepo } from './s-blockers-fixture.ts';
 
@@ -77,7 +79,7 @@ describe('unsupported_path key, display and fix (no engine)', () => {
     expect(bytePathItemId(CAFE)).toBe(itemId(CAFE));
   });
 
-  test('the rename command in the fix reads the name from printf escapes, so it renames the real file', async () => {
+  test.skipIf(!invalidUtf8Names)('the rename command in the fix reads the name from printf escapes, so it renames the real file', async () => {
     const { bytePathRenameCommand } = await import('../../src/core/sync-byte-paths.ts');
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-byte-rename-'));
     try {
@@ -142,7 +144,7 @@ describe('sync Git reads take no optional lock (GIT_OPTIONAL_LOCKS=0)', () => {
 
 for (const { backend, databaseUrl } of pathologicalArms()) {
   describe(`classic byte-path parsing (${backend})`, () => {
-    test('S-7: a non-UTF-8 name is held unsupported_path/not_utf8 under its encoded key; the sibling imports and the cursor reaches HEAD', async () => {
+    test.skipIf(!invalidUtf8Names)('S-7: a non-UTF-8 name is held unsupported_path/not_utf8 under its encoded key; the sibling imports and the cursor reaches HEAD', async () => {
       await withClassic(databaseUrl, async r => {
         r.write(CAFE, md('latin1')); r.commitAll('odd');
         const obs = await observe(r, 'ok/healthy-1');
@@ -188,7 +190,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       });
     }, 120_000);
 
-    test('S-7: a later commit renaming the file to a valid name imports it and clears the hold', async () => {
+    test.skipIf(!invalidUtf8Names)('S-7: a later commit renaming the file to a valid name imports it and clears the hold', async () => {
       await withClassic(databaseUrl, async r => {
         r.write(CAFE, md('latin1')); r.commitAll('odd');
         await observe(r, 'ok/healthy-1');

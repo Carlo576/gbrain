@@ -125,6 +125,7 @@ export async function prepareGraduationFixture(opts: GraduationFixtureOptions): 
   const env: Record<string, string | undefined> = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PROVIDER_KEYS.test(name)));
   delete env.DATABASE_URL; delete env.GBRAIN_DATABASE_URL;
   env.GBRAIN_HOME = join(dir, 'home');
+  env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = '0';
   env.GBRAIN_NO_SNAPSHOT = '1';
   run([process.execPath, '--no-env-file', import.meta.path, '--build-child', JSON.stringify({ ...normalized(opts), key, dir })],
     { cwd: REPO, env, timeoutMs: opts.timeoutMs ?? 30 * 60_000 });

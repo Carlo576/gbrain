@@ -269,7 +269,7 @@ export function manifestPath(home: string): string {
 
 // ── Older released binaries ───────────────────────────────────────────────────
 
-/** The last `count` release tags at or below this checkout's VERSION, newest first (from origin). */
+/** The last `count` release tags at or below this checkout's VERSION, newest first (from the configured upstream, else origin). */
 /** The first release that knows engine graduation (its intent marker, source row and tombstone). */
 export const FIRST_GRADUATION_RELEASE = '0.60.52.0';
 
@@ -278,10 +278,15 @@ export const FIRST_GRADUATION_RELEASE = '0.60.52.0';
  * marker, the source row or the tombstone. A graduation-aware release refuses where these tests
  * need an unaware writer, so the newest tags at or after FIRST_GRADUATION_RELEASE never qualify.
  */
+function releaseRemote(): string {
+  const upstream = Bun.spawnSync(['git', '-C', REPO, 'remote', 'get-url', 'upstream'], { stdout: 'ignore', stderr: 'ignore' });
+  return upstream.exitCode === 0 ? 'upstream' : 'origin';
+}
+
 export function previousReleaseTags(count = 2): string[] {
   const version = [readFileSync(join(REPO, 'VERSION'), 'utf8').trim(), FIRST_GRADUATION_RELEASE]
     .sort((a, b) => cmpVersion(a.split('.').map(Number), b.split('.').map(Number)))[0]!;
-  const out = Bun.spawnSync(['git', '-C', REPO, 'ls-remote', '--tags', '--refs', 'origin', 'v*'], { stdout: 'pipe', stderr: 'pipe' });
+  const out = Bun.spawnSync(['git', '-C', REPO, 'ls-remote', '--tags', '--refs', releaseRemote(), 'v*'], { stdout: 'pipe', stderr: 'pipe' });
   if (out.exitCode !== 0) throw new Error(`git ls-remote failed: ${out.stderr.toString()}`);
   const parse = (tag: string) => tag.slice(1).split('.').map(Number);
   const cmp = (a: number[], b: number[]) => { for (let i = 0; i < Math.max(a.length, b.length); i++) { const d = (a[i] ?? 0) - (b[i] ?? 0); if (d) return d; } return 0; };
@@ -297,13 +302,13 @@ function cmpVersion(a: number[], b: number[]): number {
 
 /**
  * A compiled binary of an older release, built once per tag into the cache
- * (`GBRAIN_OLDER_RELEASE_DIR`, default ~/.cache/gbrain-older-releases).
+ * (`GBRAIN_OLDER_RELEASE_DIR`, default <repo>/.context/older-releases).
  * `GBRAIN_OLDER_RELEASE_BIN_<tag with dots as underscores>` points at a prebuilt one.
  */
 export function olderReleaseBinary(tag: string): string {
   const preset = process.env[`GBRAIN_OLDER_RELEASE_BIN_${tag.replace(/\./g, '_')}`];
   if (preset) return preset;
-  const cache = process.env.GBRAIN_OLDER_RELEASE_DIR || join(process.env.HOME ?? '/tmp', '.cache', 'gbrain-older-releases');
+  const cache = process.env.GBRAIN_OLDER_RELEASE_DIR || join(REPO, '.context', 'older-releases');
   const tree = join(cache, tag);
   const binary = join(tree, 'bin', 'gbrain');
   if (existsSync(binary)) return binary;
@@ -311,7 +316,7 @@ export function olderReleaseBinary(tag: string): string {
     const r = Bun.spawnSync(argv, { cwd, stdout: 'pipe', stderr: 'pipe' });
     if (r.exitCode !== 0) throw new Error(`${argv.join(' ')}: ${r.stderr.toString().slice(-2000)}`);
   };
-  run(['git', 'fetch', '-q', 'origin', 'tag', tag, '--no-tags']);
+  run(['git', 'fetch', '-q', releaseRemote(), 'tag', tag, '--no-tags']);
   if (!existsSync(tree)) run(['git', 'worktree', 'add', '-q', '--detach', tree, tag]);
   run([process.execPath, 'install', '--frozen-lockfile', '--ignore-scripts'], tree);
   run([process.execPath, 'build', '--compile', '--no-compile-autoload-bunfig', '--outfile', 'bin/gbrain', 'src/cli.ts'], tree);

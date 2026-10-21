@@ -302,7 +302,7 @@ describe('#6785: a window that keeps failing after its model call is capped', ()
     const file = join(dir, 'failing-session.txt');
     await capped(file, Date.UTC(2026, 9, 15, 12));
     const { buildMemoryWritebackCheck } = await import('../src/commands/doctor/checks/memory-writeback.ts');
-    const check = await withEnv({ GBRAIN_HOME: home }, () => buildMemoryWritebackCheck(engine));
+    const check = await withEnv({ GBRAIN_HOME: home, CODEX_HOME: join(home, '.codex'), CLAUDE_CONFIG_DIR: join(home, '.claude') }, () => buildMemoryWritebackCheck(engine));
     expect(check.status).toBe('warn');
     expect(check.message).toContain('gbrain sweep --retry-failed --apply');
     const fix = (check as { fix?: { argv: string[]; consent: string[] } }).fix;

@@ -174,17 +174,17 @@ test('a file whose path slug belongs to a database-only page is not indexed: it 
 test('a titled file named like folder scaffolding is reported as metafile_skipped, never scheduled, and only an info finding with a user fix', () => each(async engine => {
   const s = await source(engine, { 'notes/a.md': note('A') });
   await s.sync();
-  await s.legacy({ 'investors/fund-a/index.md': '---\ntitle: Fund A\ntype: company\n---\nA synthetic fund overview.\n', 'notes/README.md': 'Plain scaffolding, no frontmatter.\n' });
+  await s.legacy({ 'investors/fund-a/schema.md': '---\ntitle: Fund A\ntype: company\n---\nA synthetic fund overview.\n', 'notes/README.md': 'Plain scaffolding, no frontmatter.\n' });
   const scan = await findUnindexedFiles(engine, s.id);
-  expect(scan).toMatchObject({ complete: true, scanned: 1, unindexed: 0, metafile_skipped: 1, metafile_samples: ['investors/fund-a/index.md'] });
+  expect(scan).toMatchObject({ complete: true, scanned: 1, unindexed: 0, metafile_skipped: 1, metafile_samples: ['investors/fund-a/schema.md'] });
   const receipt = await retryUnindexed(engine, s.id);
   expect(receipt).toMatchObject({ scheduled: 0, items: [], unindexed: { metafile_skipped: 1 }, next_action: `No unindexed files for ${s.id}.` });
   expect(await readGitHoldRetryPaths(engine, s.id, await incarnationOf(engine, s.id))).toEqual([]);
   const check = await s.doctor();
-  expect(check).toMatchObject({ status: 'ok', severity: 'info', details: { sources: [{ state: 'ok', metafile_skipped: 1, metafile_samples: ['investors/fund-a/index.md'] }] } });
+  expect(check).toMatchObject({ status: 'ok', severity: 'info', details: { sources: [{ state: 'ok', metafile_skipped: 1, metafile_samples: ['investors/fund-a/schema.md'] }] } });
   const fix = check.fix as Action;
   expect(fix).toMatchObject({ actor: 'user', argv: ['gbrain', 'sync', '--source', s.id, '--no-pull'] });
-  expect(fix.user_message).toContain('investors/fund-a/index.md -> investors/fund-a.md');
+  expect(fix.user_message).toContain('investors/fund-a/schema.md -> investors/fund-a.md');
   expect(fix.user_message).toContain('on purpose');
 }), 240_000);
 
