@@ -96,14 +96,18 @@ export async function readConversationOccurrences(engine: BrainEngine, pageId: n
   return { body, occurrences: rows.map(row => ({ row, conversation: states.get(row.seq) ?? null })) };
 }
 
-/** One occurrence's trusted stored text: reads exactly its segment's bytes. */
-export async function readOccurrenceText(engine: BrainEngine, body: SegmentedBody, row: BodyRow): Promise<string> {
+/** Bytes conversation facts read to detect a page's grammar over the whole page (conversation-incremental.ts), apart from segmentedPassWork. */
+export const conversationDetectionWork = { bytes: 0 };
+
+/** One occurrence's trusted stored text: reads exactly its segment's bytes, counted in segmentedPassWork (conversationDetectionWork with `detection`). */
+export async function readOccurrenceText(engine: BrainEngine, body: SegmentedBody, row: BodyRow, opts: { detection?: boolean } = {}): Promise<string> {
   const collect = readGarbageCollector();
   const parts: Buffer[] = [];
   for await (const piece of readBodyRange(engine, { pageId: body.pageId, space: 'stored', start: row.byteStart, end: row.byteStart + row.byteLen,
     audience: 'trusted', region: row.region, body })) {
     parts.push(piece.bytes);
-    segmentedPassWork.bytes += piece.bytes.length;
+    if (opts.detection) conversationDetectionWork.bytes += piece.bytes.length;
+    else segmentedPassWork.bytes += piece.bytes.length;
     collect(piece.bytes.length);
   }
   return Buffer.concat(parts).toString('utf8');

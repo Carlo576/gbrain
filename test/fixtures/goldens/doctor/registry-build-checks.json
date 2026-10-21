@@ -891,6 +891,10 @@
       },
       {
         "category": "brain",
+        "name": "derivation_unpriced_model"
+      },
+      {
+        "category": "brain",
         "name": "ghost_pages"
       },
       {

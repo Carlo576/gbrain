@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { loadPricingOverrides } from '../budget/budget-tracker.ts';
-import { estimateFactsExtractionUsd, meterPaidCall } from '../page-embedding-budget.ts';
+import { estimateFactsExtractionUsd, meterPaidCall, unpricedModelReceipt } from '../page-embedding-budget.ts';
 import { setExtractionReceipt } from '../extraction-watermark.ts';
 import { planSegmentDerivations, segmentDerivationContextHash, type SegmentDerivationInput, type SegmentDerivationRow } from '../page-body/derivations.ts';
 import { readConversationOccurrences, readOccurrenceText } from '../page-body/segment-conversation.ts';
@@ -86,12 +86,13 @@ export async function runSegmentedBackstop<R extends { inserted: number; skipped
   const results: R[] = [];
   const touched: Array<{ segment: (typeof plan.todo)[number]; windows: string[]; done: Map<number, WindowRecord> }> = [];
   let stop: 'cap_reached' | 'skipped' | 'interrupted' | null = null;
+  let unpricedModel: string | null = null;
   const rowsOf = (): SegmentDerivationInput[] => touched.map(({ segment, windows, done }) => {
     const kept = windows.flatMap((text, ordinal) => done.get(ordinal)?.sha === sha(text) ? [done.get(ordinal)!] : []);
     const finished = kept.length === windows.length;
     return { pageId: page.id, kind: KIND, occurrenceId: segment.occurrenceId, version: FACTS_BACKSTOP_DERIVATION_VERSION,
       segmentSha256: segment.sha256, contextHash: segment.contextHash, state: finished ? 'done' : 'partial', output: { windows: kept },
-      receipt: finished ? null : { kind: 'unread_windows', pipeline: KIND, reason: stop, windows_read: kept.length, windows_total: windows.length } };
+      receipt: unpricedModelReceipt(KIND, unpricedModel, stop, finished ? null : { windows_read: kept.length, windows_total: windows.length }) };
   });
   const todo = new Map(plan.todo.map(segment => [segment.occurrenceId, segment]));
   try {
@@ -111,6 +112,7 @@ export async function runSegmentedBackstop<R extends { inserted: number; skipped
         if (run.signal?.aborted) { stop = 'skipped'; break; }
         const metered = await meterPaidCall(engine, page, `facts:${run.model}`, estimateFactsExtractionUsd(run.model, text.length, maxTokens, pricingOverrides),
           () => run.extract(text), { pricingOverrides });
+        unpricedModel = metered.unpricedModel ?? unpricedModel;
         if ('refused' in metered) { stop = 'cap_reached'; break; }
         const result = metered.value;
         results.push(result);

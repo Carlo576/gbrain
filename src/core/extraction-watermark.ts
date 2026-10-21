@@ -36,7 +36,7 @@ export type HeadFallbackReason = 'no_watermark' | 'prefix_changed' | 'version_ch
 
 /** The durable receipt of an extraction that did not read all of its input. */
 export interface InputTruncated {
-  /** PR 4 (Wave B incremental derivation, transcripts): `no_messages`, a segmented conversation run parsed no message from occurrences that had windows and kept their facts. */
+  /** PR 4 (Wave B incremental derivation, transcripts): `no_messages`, a segmented conversation page reads as a transcript format over its whole text yet no message parsed under it; the run changed nothing. */
   kind: 'head' | 'tail_window' | 'skipped_too_large' | 'no_messages';
   pipeline: ExtractionPipeline;
   /** Characters the extractor read (0 for a skipped page). */

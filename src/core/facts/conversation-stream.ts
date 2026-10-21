@@ -2,18 +2,17 @@
  * PR 4 (Wave B incremental derivation, transcripts): the conversation windows of a segmented page, streamed across its
  * occurrences (wave-b spec 8.2 "Conversation facts").
  *
- * Messages are parsed one occurrence at a time under one grammar for the whole page: `opts.pattern` (the caller's: a
- * current run's recorded grammar, or the one the page's head detects), else the pattern the first parsed text detects.
+ * Messages are parsed one occurrence at a time under one grammar for the whole page: `opts.pattern` (the caller's: the
+ * one detectPagePattern picks over the whole page, as the whole-page pass picks it), else the pattern the first parsed
+ * text detects.
  * Once known, every later text is parsed under it without detection, so a continuation that would
  * fail the detector's density floor on its own is still read as the message it continues. The last message of an
  * occurrence may continue into the next one, so it is held back and parsed again with the next occurrence's text, from
  * its anchor line and with the day-header date in force there; an occurrence with no anchor line only extends the held
  * message, unparsed, so a message spanning many occurrences is parsed once. The windows (createWindowStream, the same
  * gap groups and bounds as the whole-page pass) then run over message boundaries, never over segment cuts, so a window
- * can span a cut. Each window is owned by the occurrence its first message starts in and carries the positions of its
- * first and last message piece (the occurrence each message starts in, its ordinal among the messages starting there,
- * and which piece of an oversized message the window starts or ends with). Reads one
- * occurrence's text at a time and holds the carried message and the open window, never the whole body.
+ * can span a cut. Each window is owned by the occurrence its first message starts in. Reads one occurrence's text at a
+ * time and holds the carried message and the open window, never the whole body.
  *
  * A run of occurrences is streamed on its own when the occurrence after it opens a gap group: its windows then equal
  * the whole stream's, because every window before that occurrence closed at the gap. startsConversationRun tells, from
@@ -23,20 +22,14 @@
 import type { Page } from '../types.ts';
 import { BUILTIN_PATTERNS } from '../conversation-parser/builtins.ts';
 import { normalizeBlockConversation } from '../conversation-parser/normalize-block.ts';
-import { DAY_HEADER_RE, applyPattern, deriveDateContext, isAnchorLine, parseConversation } from '../conversation-parser/parse.ts';
+import { DAY_HEADER_RE, applyPattern, createPatternDetector, deriveDateContext, isAnchorLine, parseConversation } from '../conversation-parser/parse.ts';
 import type { ConversationOccurrence } from '../page-body/segment-conversation.ts';
 import type { ConversationMessage, ConversationSegment } from './conversation-types.ts';
 import { DEFAULT_SEGMENT_GAP_MINUTES, MAX_PAGE_SEGMENT_GAP_MINUTES, createWindowStream } from './conversation-windows.ts';
 
-/**
- * Where a piece of a message is: the occurrence (an index into the occurrences) the message's anchor line is in, its
- * ordinal among the messages starting there, and the piece of it (an oversized message is split into pieces; 0 otherwise).
- */
-export interface MessagePosition { owner: number; n: number; piece: number }
-
 export interface ConversationStreamSink {
-  /** A closed window: the positions of its first message (whose occurrence owns the window) and its last. */
-  window(first: MessagePosition, last: MessagePosition, seg: ConversationSegment): void;
+  /** A closed window and the occurrence (an index into the occurrences) its first message starts in, which owns it. */
+  window(owner: number, seg: ConversationSegment): void;
   /** Occurrence `index` was read; `startsGroup`: its first message opens a gap group. */
   occurrence(index: number, startsGroup: boolean): void;
 }
@@ -55,9 +48,18 @@ interface Carry { parts: string[]; date: string | undefined; owner: number; regi
 const gapMinutesFor = (opts: ConversationStreamOpts, patternId: string | null) =>
   opts.gapMinutes ?? (patternId === 'email-thread-heading' ? MAX_PAGE_SEGMENT_GAP_MINUTES : undefined);
 
-/** The pattern the whole-page pass would pick for a page whose parser input starts with `head`, or null. */
-export function detectConversationPattern(head: string, page: Page): string | null {
-  return parseConversation(head, { page }).matched_pattern_id ?? null;
+/**
+ * The grammar the whole-page pass picks for the page (parseConversation's choice over its whole parser input: the
+ * occurrences in order, truth then timeline joined as readSummaryBody joins them), read one occurrence at a time; null
+ * when the page is not a conversation the parser reads.
+ */
+export async function detectPagePattern(occurrences: readonly ConversationOccurrence[], readText: (index: number) => Promise<string>): Promise<string | null> {
+  const detector = createPatternDetector();
+  for (let i = 0; i < occurrences.length; i++) {
+    if (i > 0 && occurrences[i]!.row.region !== occurrences[i - 1]!.row.region) detector.push('\n\n');
+    detector.push(await readText(i));
+  }
+  return detector.finish();
 }
 
 /** Parse `text` under built-in `patternId` without detection, or detect the pattern when there is none yet. */
@@ -132,14 +134,8 @@ export async function streamConversationWindows(occurrences: readonly Conversati
   const pageTitle = opts.page.title || opts.page.slug;
   let patternId = opts.pattern ?? null;
   let parsedMessages = 0;
-  let stream: ReturnType<typeof createWindowStream<{ owner: number; n: number }>> | null = null;
+  let stream: ReturnType<typeof createWindowStream<number>> | null = null;
   let carry: Carry | null = null;
-  let counted = { owner: -1, n: 0 };
-  const positionOf = (owner: number) => {
-    if (counted.owner !== owner) counted = { owner, n: 0 };
-    return { owner, n: counted.n++ };
-  };
-  const at = (position: { owner: number; n: number }, piece: number): MessagePosition => ({ ...position, piece });
   const joint = (region: string, next: string) => (region === next ? '' : '\n\n');
   for (let i = from; i < to; i++) {
     const occurrence = occurrences[i]!;
@@ -161,7 +157,7 @@ export async function streamConversationWindows(occurrences: readonly Conversati
     const fallbackDate: string | undefined = carry ? carry.date : occurrence.conversation?.fallbackDate ?? undefined;
     const parsed = parseUnder(chunk, patternId, opts, fallbackDate);
     patternId = parsed.patternId;
-    stream ??= createWindowStream<{ owner: number; n: number }>({ pageTitle, sinceIso: opts.sinceIso, gapMinutes: gapMinutesFor(opts, patternId) });
+    stream ??= createWindowStream<number>({ pageTitle, sinceIso: opts.sinceIso, gapMinutes: gapMinutesFor(opts, patternId) });
     let messages = parsed.messages;
     parsedMessages += messages.length;
     const firstOwner = carry ? carry.owner : i;
@@ -178,13 +174,13 @@ export async function streamConversationWindows(occurrences: readonly Conversati
     let startsGroup: boolean | null = null;
     messages.forEach((message, k) => {
       const owner = k === 0 ? firstOwner : i;
-      const pushed = stream!.push(message, positionOf(owner));
+      const pushed = stream!.push(message, owner);
       if (pushed.accepted && owner === i && startsGroup === null) startsGroup = pushed.startsGroup;
-      for (const w of pushed.windows) sink.window(at(w.tag, w.firstPiece), at(w.last, w.lastPiece), w.seg);
+      for (const w of pushed.windows) sink.window(w.tag, w.seg);
     });
     sink.occurrence(i, startsGroup === true);
     carry = next;
   }
-  for (const w of stream?.end() ?? []) sink.window(at(w.tag, w.firstPiece), at(w.last, w.lastPiece), w.seg);
+  for (const w of stream?.end() ?? []) sink.window(w.tag, w.seg);
   return { pattern: patternId, messages: parsedMessages };
 }

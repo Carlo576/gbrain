@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { loadPricingOverrides } from '../budget/budget-tracker.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
-import { estimateChatCallUsd, meterPaidCall } from '../page-embedding-budget.ts';
+import { estimateChatCallUsd, meterPaidCall, unpricedModelReceipt } from '../page-embedding-budget.ts';
 import { planSegmentDerivations, segmentDerivationContextHash, type SegmentDerivationInput, type SegmentDerivationRow } from '../page-body/derivations.ts';
 import { readConversationOccurrences, readOccurrenceText } from '../page-body/segment-conversation.ts';
 import { lineWindows } from '../facts/backstop-segments.ts';
@@ -72,13 +72,14 @@ async function planPage(engine: BrainEngine, sourceId: string, page: AtomPageInp
   const items: AtomPageInput[] = [];
   let unread = false;
   let stop: 'cap_reached' | null = null;
+  let unpricedModel: string | null = null;
   let open = 0;
   const todo = new Map(plan.todo.map(segment => [segment.occurrenceId, segment]));
   const row = (state: OccurrenceState): SegmentDerivationInput => {
     const finished = state.done.size === state.total;
     return { pageId, kind: KIND, occurrenceId: state.occurrenceId, version: EXTRACT_ATOMS_DERIVATION_VERSION, segmentSha256: state.sha256,
       contextHash: state.contextHash, state: finished ? 'done' : 'partial', output: { windows: [...state.done.values()].sort((a, b) => a.ordinal - b.ordinal) },
-      receipt: finished || !stop ? null : { kind: 'unread_windows', pipeline: KIND, reason: stop, windows_read: state.done.size, windows_total: state.total } };
+      receipt: unpricedModelReceipt(KIND, unpricedModel, stop, finished || !stop ? null : { windows_read: state.done.size, windows_total: state.total }) };
   };
   const settlePage = async (): Promise<string[]> => {
     const keep = new Set<string>();
@@ -116,6 +117,7 @@ async function planPage(engine: BrainEngine, sourceId: string, page: AtomPageInp
           const pricingOverrides = await loadPricingOverrides(engine);
           const metered = await meterPaidCall(engine, { id: pageId, body_storage: 'segmented' }, `atoms:${model}`,
             estimateChatCallUsd(model, text.length, maxOutputTokens, pricingOverrides), call, { pricingOverrides });
+          unpricedModel = metered.unpricedModel ?? unpricedModel;
           if (!('refused' in metered)) return metered;
           stop = 'cap_reached';
           const unfinished = [...states.values()].filter(s => s.done.size < s.total);

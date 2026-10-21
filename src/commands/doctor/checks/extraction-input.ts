@@ -17,8 +17,9 @@
  * a conversation window whose extraction failed run after run was skipped, and its
  * sample names the window). Both tables
  * are read; a page counts once per pipeline and receipt kind. A derivation receipt
- * without a `kind` (the synopsis pass's tier fallback or refused reservation) is
- * not an input-truncation receipt and is not counted.
+ * without a `kind` (the synopsis pass's tier fallback or refused reservation), or of
+ * kind `unpriced_model` (doctor derivation_unpriced_model), is not an input-truncation
+ * receipt and is not counted.
  */
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
@@ -39,7 +40,7 @@ const UNREAD_REMEDY = `the run stopped before every window of the page was read 
 const FAILED_WINDOWS = 'failed_windows';
 const FAILED_REMEDY = 'a conversation window failed to extract in run after run and is skipped, so the older windows still get extracted (the sample names the window, its receipt the last error); fix the cause, then gbrain extract-conversation-facts --slug <slug> --force tries it again';
 const NO_MESSAGES = 'no_messages';
-const NO_MESSAGES_REMEDY = 'the last run parsed no message from parts of the page that had conversation windows (a changed transcript format, or a parser fault), so it kept their facts and settled nothing; check that the page still reads as a conversation, then gbrain extract-conversation-facts --slug <slug>';
+const NO_MESSAGES_REMEDY = 'the page reads as a transcript format over its whole text, yet no message parsed under that format (a conversation parser fault), so the last run changed nothing and kept its facts; rerunning repeats this, so report it with gbrain doctor --json and the page\'s format (a page that is not a transcript settles as non-extractable instead)';
 const remedy = (g: ReceiptGroup): string | null => g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : g.kind === FAILED_WINDOWS ? FAILED_REMEDY
   : g.kind === NO_MESSAGES ? NO_MESSAGES_REMEDY : REMEDY[g.pipeline] ?? null;
 
@@ -56,7 +57,7 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
          UNION ALL
          SELECT d.page_id, d.pipeline, COALESCE(d.receipt->>'kind', 'unknown') AS kind, max(d.updated_at) AS updated_at,
                 min(CASE WHEN d.receipt->>'kind' = '${FAILED_WINDOWS}' THEN ' window ' || (d.receipt->'windows'->0->>'ordinal') || ' of occurrence ' || d.occurrence_id END) AS detail
-           FROM page_segment_derivations d WHERE d.receipt->>'kind' IS NOT NULL GROUP BY 1, 2, 3)
+           FROM page_segment_derivations d WHERE d.receipt->>'kind' IS NOT NULL AND d.receipt->>'kind' <> 'unpriced_model' GROUP BY 1, 2, 3)
        SELECT r.pipeline, r.kind, count(DISTINCT r.page_id)::int AS pages,
               (array_agg(p.source_id || ':' || p.slug || COALESCE(r.detail, '') ORDER BY r.updated_at DESC))[1:3] AS samples
          FROM receipts r JOIN pages p ON p.id = r.page_id AND p.deleted_at IS NULL
