@@ -27,7 +27,7 @@ import { readFix } from '../ops/op-fix.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { contentHash, rowToPage } from '../utils.ts';
 import { rewriteLiveSegmentedFences, rewriteSegmentedGeneration, segmentedBodyContains } from '../page-body/segment-rewrite.ts';
-import { DerivationSweepBudgetExceeded, sweepDerivationText } from '../page-body/segment-derive.ts';
+import { continueDerivationPurges, recordDerivationPurge } from '../page-body/segment-derive.ts';
 import { discoverWithdrawalTargets, withdrawalDiscoveryFailure } from './withdrawal-discovery.ts';
 import { dropPurgedFenceRows } from './purge-overlay.ts';
 import { derivedRowsFrom, hideDerivedRows, type DerivationRef } from './derivation-inputs.ts';
@@ -225,16 +225,12 @@ async function ledgerLookup<T>(fn: () => Promise<T>, factId: number, sourceId: s
   }
 }
 
-/**
- * A statement timeout of the derivation sweep, or the sweep passing its overall budget (DerivationSweepBudgetExceeded),
- * refuses the whole purge with the typed code, as the ledger redaction does.
- */
-async function derivationSweep(fn: () => Promise<number>, factId: number, sourceId: string): Promise<number> {
+/** A statement timeout recording the derivation sweep refuses the whole purge with the typed code, as the ledger redaction does. */
+async function derivationSweep(fn: () => Promise<void>, factId: number, sourceId: string): Promise<void> {
   try { return await fn(); } catch (error) {
-    const budget = error instanceof DerivationSweepBudgetExceeded;
-    if (!budget && (error as { code?: unknown } | null)?.code !== '57014') throw error;
+    if ((error as { code?: unknown } | null)?.code !== '57014') throw error;
     throw opError('purge_lookup_timeout', 'This purge could not finish; nothing was purged. Do not assume the requested content was erased.',
-      `The sweep of stored derivation results holding fact ${factId} in source ${sourceId} exceeded ${budget ? `its overall budget (${(error as Error).message})` : "the purge transaction's statement budget"}, so the transaction rolled back and nothing was removed, tombstoned or redacted. `
+      `Recording the sweep of stored derivation results holding fact ${factId} in source ${sourceId} exceeded the purge transaction's statement budget, so the transaction rolled back and nothing was removed, tombstoned or redacted. `
       + 'Run the purge again with a new request id; if it times out again, report it with the output of gbrain doctor --json.',
     { fix: readFix('Reports the brain\'s health, read-only.', { argv: ['gbrain', 'doctor', '--json'] }) });
   }
@@ -447,6 +443,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
     const prior = await getWriteRequest(ctx.engine, principal, p.requestId);
     if (prior) {
       assertReplayIntent(prior, intentDigest({ operation: PURGE_OPERATION, sourceId: p.sourceId, slug: prior.slug, callerIntent }));
+      if (prior.state === 'committed') await continueDerivationPurges(ctx.engine, prior.source_id);
       return { ...(prior.outcome ?? {}), request_id: prior.request_id, state: prior.state, replayed: true, ...await purgeCompletion(ctx.engine, prior) };
     }
   }
@@ -539,8 +536,9 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
       const bodies = await rewritePageBodies(tx, p.sourceId, plan.pages);
       ({ rewritten, unsealed } = bodies);
       const pageIds = plan.pages.map(page => page.page_id);
-      const derivationRows = bodies.derivations + await derivationSweep(() => faultPoint('purge:derivation_sweep', { sourceId: p.sourceId, operation: PURGE_OPERATION })
-        .then(() => sweepDerivationText(tx, p.sourceId, pageIds, [current.fact, escapeFenceCell(current.fact)])), current.id, p.sourceId);
+      // The rows a rewrite could not place are swept after the commit, in batches of their own (continueDerivationPurges).
+      await derivationSweep(() => faultPoint('purge:derivation_sweep', { sourceId: p.sourceId, operation: PURGE_OPERATION })
+        .then(() => recordDerivationPurge(tx, admitted.id, p.sourceId, pageIds, [current.fact, escapeFenceCell(current.fact)])), current.id, p.sourceId);
       // A segmented page's flip already retired only the chunks of the occurrences it rewrote.
       const inline = pageIds.filter(id => !bodies.segmented.includes(id));
       const chunks = inline.length ? (await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=ANY($1::integer[]) RETURNING 1', [inline])).length : 0;
@@ -560,7 +558,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
         targets: pages.map(page => ({ slug: page.slug, page_id: Number(page.id), revision: page.knowledge_revision })) })]);
       counts = { facts, takes, chunks, page_versions: versions.redacted, pages: rewritten.length, persistence_requests: intents,
         query_cache: cache, decide_review: review, open_loops: loops, take_proposals: proposals, core_edit_notices: notices,
-        write_gate_holds: holdIds.length, write_gate_receipts: gateReceipts, page_segment_texts: segments.texts, page_segment_derivations: derivationRows,
+        write_gate_holds: holdIds.length, write_gate_receipts: gateReceipts, page_segment_texts: segments.texts, page_segment_derivations: bodies.derivations,
         page_body_stagings: segments.stagings, page_body_staging_parts: segments.parts, persistence_requests_cancelled: segments.cancelled,
         derived_hidden: Object.values(derived.hidden).reduce((a, b) => a + b, 0) };
       derivedHidden = derived;
@@ -590,6 +588,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
   for (const slug of unsealed) await buildSegmentedProjection(ctx.engine, { sourceId: p.sourceId, slug }).catch(() => undefined);
   if (row.state !== 'committed') return { ...(row.outcome ?? {}), request_id: row.request_id, state: row.state, error: row.error_code };
   appendPurgeCommitted(row.id);
+  counts.page_segment_derivations = (counts.page_segment_derivations ?? 0) + await continueDerivationPurges(ctx.engine, p.sourceId);
   if (beliefReport.appended || ledger?.derived_hidden) await markBeliefCommits(ctx.engine, [row.id]).catch(() => undefined);
   const receipt: PurgeReceipt = await verifyFactPurge(ctx.engine, { target, plan: committedPlan, dryRun: false, removed: counts, prose,
     vacuum: params.vacuum === true, ledger });

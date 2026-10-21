@@ -1413,6 +1413,36 @@ CREATE TABLE IF NOT EXISTS page_derivation_spend (
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (page_id, family)
 );
+CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
+  request_id        UUID      PRIMARY KEY,
+  source_id         TEXT      NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  needles           TEXT[]    NOT NULL,
+  patterns          TEXT[]    NOT NULL,
+  page_ids          INTEGER[] NOT NULL DEFAULT '{}',
+  cursor_page       INTEGER,
+  cursor_pipeline   TEXT,
+  cursor_occurrence BIGINT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);
+CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS \$func\$
+BEGIN
+  IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
+    WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
+    WHERE m.page_id = NEW.page_id AND m.occurrence_id = NEW.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = NEW.segment_sha256))
+      AND CASE WHEN replace(translate(lower(COALESCE(NEW.output::text, '') || ' ' || COALESCE(NEW.receipt::text, '')), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM (VALUES (NEW.output), (NEW.receipt)) doc(j),
+    LATERAL (SELECT jsonb_path_query(doc.j, 'strict \$.** ? (@.type() == "string")') #>> '{}' AS t
+      UNION ALL SELECT jsonb_path_query(doc.j, 'strict \$.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
+    WHERE CASE WHEN replace(translate(lower(s.t), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM unnest(x.needles::text[]) k(n)
+      WHERE strpos(' ' || replace(translate(gbrain_fact_normalize(s.t), 'ς', 'σ'), 'i̇', 'i') || ' ', k.n) > 0) ELSE false END) ELSE false END) THEN
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END
+\$func\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
+CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
+  FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
 
 
 

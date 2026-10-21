@@ -120,6 +120,7 @@ const ROWS: readonly Row[] = [
   ['page_projection_jobs', 'out_of_scope', 'no_memory_text', 'slug reason'],
   ['page_purges', 'out_of_scope', 'text_free_ledger', 'source_id content_hash slug'],
   ['page_segment_derivations', 'swept', 'segment_derivations', 'pipeline segment_sha256 context_hash state output receipt', 'output receipt'],
+  ['page_segment_derivation_purges', 'swept', 'segment_derivations', 'source_id needles patterns page_ids cursor_pipeline'],
   ['page_segment_texts', 'swept', 'segment_texts', 'source_id sha256 body', 'body'],
   ['page_view_digests', 'out_of_scope', 'no_memory_text', 'revision view audience sha256'],
   ['page_versions', 'swept', 'page_versions', 'compiled_truth frontmatter timeline title type tags source_path write_principal_kind write_principal_id archived_principal_kind archived_principal_id trust_tier write_origin body_storage content_hash'],

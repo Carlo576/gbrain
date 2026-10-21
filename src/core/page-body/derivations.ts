@@ -27,7 +27,7 @@ export const SETTLED_DERIVATION_STATES: readonly SegmentDerivationState[] = ['do
  * It is not text-free: a links row keeps the excerpts and dated lines its candidates carry (what links.context and the
  * temporal pass store), so the store is swept, not probed: a fact purge deletes every row of the pages it rewrote, or that
  * no live segment backs, whose output or receipt holds the claim in its normalized form (segment-derive.ts
- * sweepDerivationText; a live segment's row on another page holds what that page's prose still says, and the receipt
+ * continueDerivationPurges, in batches after the purge commits; a live segment's row on another page holds what that page's prose still says, and the receipt
  * reports it with that prose), fence rewrites delete the rows of the runs they touched and of
  * occurrences no longer live, and demotion to inline deletes the page's rows. Prefer digests and offsets where the
  * pipeline can read the segment again (a fences row keeps fence digests, never fence text).

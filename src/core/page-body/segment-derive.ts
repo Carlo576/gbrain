@@ -18,6 +18,7 @@ import type { BrainEngine } from '../engine.ts';
 import { canonicalJson } from '../belief/keys.ts';
 import { planSegmentDerivations, segmentDerivationContextHash, type LiveSegment, type SegmentDerivationKind,
   type SegmentDerivationRow } from './derivations.ts';
+import { derivationClaimCandidateSql, derivationHoldsClaimSql, derivationSweepScopeSql, foldSql } from './schema.ts';
 import { bodyBlocks, type BodyBlock } from './segment-blocks.ts';
 import { ledgerApplies, readBodyLedger } from './segment-ledger.ts';
 import { SEGMENTER_VERSION } from './segmenter.ts';
@@ -351,13 +352,6 @@ export async function deleteRewrittenDerivations(engine: BrainEngine, pageId: nu
 export interface DerivationNeedles { needles: string[]; patterns: string[] }
 
 /**
- * Folds the lowercase forms a database writes depending on context or locale, applied after lowering on both sides:
- * Greek final sigma (lower('ΚΩΣΤΑΣ') is 'κωστασ' while stored text keeps 'κωστας') and the dot JavaScript and ICU keep
- * after a lowered Turkish İ ('i̇'). gbrain_fact_normalize itself stays as it is: fact fingerprints are stored.
- */
-const foldSql = (expr: string) => `replace(translate(${expr}, 'ς', 'σ'), 'i\u0307', 'i')`;
-
-/**
  * The claims in the form the derivation predicates take, normalized by the database (gbrain_fact_normalize, then
  * foldSql), so the needle and the rows go through the same SQL. A claim that normalizes to nothing matches nothing.
  */
@@ -371,68 +365,22 @@ export async function derivationNeedles(engine: Pick<BrainEngine, 'executeRaw'>,
 }
 
 /**
- * SQL predicate, the prefilter: `text`, lowered and folded, matches one of the patterns in the text[] parameter
- * `patterns` (from derivationNeedles): has a claim's words in the claim's order. Normalization only lowers, folds
- * characters to spaces and collapses spaces, keeping order, so the words of a claim a text holds occur in it in that
- * order (in a row's JSON text too: JSON escapes only quotes, backslashes and control characters, which no word holds);
- * a text this rejects never holds the claim.
+ * Bounds of a fact purge's derivation sweep and of its receipt probe: each statement reads at most `batchRows` rows of
+ * the source, walking them in primary-key order (so the rows it normalizes are bounded too); a sweep statement runs in a
+ * transaction of its own under `statementMs`; one continueDerivationPurges call starts no new batch past `totalMs`
+ * (it runs at least one), and the next call resumes from the stored cursor.
  */
-const hasWordsSql = (text: string, patterns: string) => `${foldSql(`lower(${text})`)} LIKE ANY (${patterns}::text[])`;
-
-/** SQL predicate: derivation row `d`'s output and receipt JSON text passes the prefilter (see hasWordsSql). */
-export function derivationClaimCandidateSql(d: string, patterns: string): string {
-  return hasWordsSql(`COALESCE(${d}.output::text, '') || ' ' || COALESCE(${d}.receipt::text, '')`, patterns);
-}
-
-/**
- * SQL predicate: derivation row `d` holds one of the claims (the text[] parameters `needles` and `patterns`, from
- * derivationNeedles). The row goes through the needle's own normalization (gbrain_fact_normalize, the fact fingerprint's:
- * lowercase, punctuation folded, whitespace collapsed; then foldSql) in the database, so it matches whatever case,
- * spacing or locale lowercasing the claim was written in. The claim must fill whole words of one string value or object
- * key of the row's output or receipt (link excerpts carry it inside a longer window, so equality would miss them): "plays
- * oboe" never matches "plays oboes", nor a claim straddling two fields. Only a row, and then a value, passing the
- * prefilter is normalized.
- */
-export function derivationHoldsClaimSql(d: string, needles: string, patterns: string): string {
-  return `CASE WHEN ${derivationClaimCandidateSql(d, patterns)} THEN EXISTS (SELECT 1 FROM (VALUES (${d}.output), (${d}.receipt)) doc(j),
-    LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
-      UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
-    WHERE CASE WHEN ${hasWordsSql('s.t', patterns)} THEN EXISTS (SELECT 1 FROM unnest(${needles}::text[]) k(n)
-      WHERE strpos(' ' || ${foldSql('gbrain_fact_normalize(s.t)')} || ' ', k.n) > 0) ELSE false END) ELSE false END`;
-}
-
-/**
- * SQL predicate: derivation row `d` of page `p` is one a fact purge sweeps: a row of a page the purge rewrote (the
- * int[] parameter `pageIds`), or a row no live segment backs (its occurrence retired, its page demoted to inline or
- * soft-deleted). Any other row was derived from a live segment of a page the purge left alone, so it holds only what
- * that page's prose still says, and the next derivation would write it back.
- */
-export function derivationSweepScopeSql(d: string, p: string, pageIds: string): string {
-  return `(${d}.page_id = ANY(${pageIds}::int[]) OR ${p}.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
-    WHERE m.page_id = ${d}.page_id AND m.occurrence_id = ${d}.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = ${d}.segment_sha256))`;
-}
-
-/**
- * Rows of one derivation statement: a fact purge's sweep and its receipt probe each read at most `batchRows` rows per
- * statement (so the rows they normalize per statement are bounded too, well inside a statement budget), walking the
- * source's rows in primary-key order; the sweep gives up, failing the purge, past `totalMs`.
- */
-export const DERIVATION_SWEEP_LIMITS = { batchRows: 500, totalMs: 120_000 } as const;
-let sweepLimits: { batchRows: number; totalMs: number } = { ...DERIVATION_SWEEP_LIMITS };
+export const DERIVATION_SWEEP_LIMITS = { batchRows: 500, totalMs: 120_000, statementMs: 5_000 } as const;
+let sweepLimits: { batchRows: number; totalMs: number; statementMs: number } = { ...DERIVATION_SWEEP_LIMITS };
+let afterSweepBatch: (() => Promise<void>) | null = null;
+/** @internal Test seam: run `fn` after each committed batch of continueDerivationPurges (null removes it). */
+export function __setAfterDerivationSweepBatchForTests(fn: (() => Promise<void>) | null): void { afterSweepBatch = fn; }
 /** @internal Test seam: shrink the sweep's bounds (null restores them). */
 export function __setDerivationSweepLimitsForTests(limits: Partial<typeof sweepLimits> | null): void {
   sweepLimits = { ...DERIVATION_SWEEP_LIMITS, ...(limits ?? {}) };
 }
 /** The rows one sweep or probe statement reads. */
 export function derivationBatchRows(): number { return sweepLimits.batchRows; }
-
-/** A purge's derivation sweep passed DERIVATION_SWEEP_LIMITS.totalMs; the purge fails as on a statement timeout. */
-export class DerivationSweepBudgetExceeded extends Error {
-  readonly code = 'derivation_sweep_budget';
-  constructor(readonly rows: number, readonly statements: number) {
-    super(`The derivation sweep read ${rows} rows in ${statements} statements and passed its ${sweepLimits.totalMs} ms budget.`);
-  }
-}
 
 /** A derivation row's primary key, the cursor a batched walk resumes after. */
 export type DerivationKey = [pageId: number, pipeline: string, occurrenceId: string];
@@ -462,54 +410,87 @@ export function recordDerivationStatement(entry: { phase: 'sweep' | 'probe'; sca
 }
 
 /**
- * Delete the derivation rows of a source that hold one of `claims` (derivationHoldsClaimSql) among the rows a fact purge
- * sweeps (derivationSweepScopeSql over `pageIds`, the pages it rewrote), in the purge's transaction after the body
- * rewrites, so a row a rewrite could not place goes too. The rows in scope are walked in primary-key order, at most
- * DERIVATION_SWEEP_LIMITS.batchRows per statement, each statement under the purge's statement budget; only the rows
- * that pass the prefilter (derivationClaimCandidateSql) are normalized. Past DERIVATION_SWEEP_LIMITS.totalMs it throws
- * DerivationSweepBudgetExceeded, and the caller's transaction rolls back. The purge receipt probes the store with the same
- * predicates. Returns the rows deleted.
+ * Record a fact purge's derivation sweep in the purge's transaction: the claims' normalized forms (derivationNeedles)
+ * and `pageIds`, the pages it rewrote, keyed by the purge request. From the purge's commit the trigger on
+ * page_segment_derivations refuses rows holding the claim on those pages (schema.ts), and continueDerivationPurges
+ * deletes the rows already there. A claim that normalizes to nothing records nothing.
  */
-export async function sweepDerivationText(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, pageIds: readonly number[],
-  claims: readonly string[]): Promise<number> {
+export async function recordDerivationPurge(engine: Pick<BrainEngine, 'executeRaw'>, requestId: string, sourceId: string, pageIds: readonly number[],
+  claims: readonly string[]): Promise<void> {
   const { needles, patterns } = await derivationNeedles(engine, claims);
-  if (!needles.length) return 0;
-  const { batchRows, totalMs } = sweepLimits;
+  if (!needles.length) return;
+  await engine.executeRaw(`INSERT INTO page_segment_derivation_purges (request_id, source_id, needles, patterns, page_ids)
+    VALUES ($1::uuid, $2, $3::text[], $4::text[], $5::int[]) ON CONFLICT (request_id) DO NOTHING`, [requestId, sourceId, needles, patterns, [...pageIds]]);
+}
+
+/** Whether a purge request's derivation sweep is still recorded, so its rows are not all deleted yet. */
+export async function derivationPurgePending(engine: Pick<BrainEngine, 'executeRaw'>, requestId: string): Promise<boolean> {
+  return (await engine.executeRaw('SELECT 1 FROM page_segment_derivation_purges WHERE request_id=$1::uuid', [requestId])).length > 0;
+}
+
+/**
+ * Continue the recorded derivation sweeps of a source, oldest first: each batch is a transaction of its own that locks
+ * the sweep's record (a sweep another caller is walking is left to it), reads the next DERIVATION_SWEEP_LIMITS.batchRows
+ * rows of the source after the stored cursor, deletes those in the sweep's scope (derivationSweepScopeSql over its
+ * pages) that hold the claim (derivationHoldsClaimSql; only rows passing the prefilter, derivationClaimCandidateSql, are
+ * normalized) and stores the cursor, or deletes the record after the source's last row. No batch locks the source or a
+ * page, so writes go on during a sweep. A batch is not started past DERIVATION_SWEEP_LIMITS.totalMs, and a statement
+ * timeout ends the call with its batch rolled back; either way the next call (a later purge of the source, a replay of the
+ * purge request) resumes from the cursor. Returns the rows deleted.
+ */
+export async function continueDerivationPurges(engine: BrainEngine, sourceId: string): Promise<number> {
+  const { batchRows, totalMs, statementMs } = sweepLimits;
   const deadline = performance.now() + totalMs;
   const pages = new Map<number, { scanned: number; normalized: number; deleted: number }>();
-  let cursor: DerivationKey | null = null, read = 0, statements = 0;
-  for (;;) {
-    const rows: Array<{ page_id: number; scanned: number; normalized: number; deleted: number; last_page: number; last_pipeline: string; last_occurrence: string }> =
-      await engine.executeRaw(`WITH batch AS MATERIALIZED (
-        SELECT d.page_id, d.pipeline, d.occurrence_id FROM page_segment_derivations d JOIN pages p ON p.id = d.page_id
-        WHERE p.source_id = $1 AND ${derivationSweepScopeSql('d', 'p', '$2')} AND ${derivationAfterSql('d', ['$5', '$6', '$7'])}
-        ORDER BY d.page_id, d.pipeline, d.occurrence_id LIMIT $8
-      ), scope AS MATERIALIZED (
-        SELECT d.page_id, d.pipeline, d.occurrence_id, d.output, d.receipt, ${derivationClaimCandidateSql('d', '$4')} AS candidate
-        FROM batch b JOIN page_segment_derivations d ON d.page_id = b.page_id AND d.pipeline = b.pipeline AND d.occurrence_id = b.occurrence_id
-      ), hits AS MATERIALIZED (
-        SELECT s.page_id, s.pipeline, s.occurrence_id FROM scope s WHERE s.candidate AND ${derivationHoldsClaimSql('s', '$3', '$4')}
-      ), gone AS (
-        DELETE FROM page_segment_derivations x USING hits h WHERE x.page_id = h.page_id AND x.pipeline = h.pipeline
-          AND x.occurrence_id = h.occurrence_id RETURNING x.page_id
-      ), last AS (
-        SELECT page_id, pipeline, occurrence_id::text AS occurrence_id FROM batch ORDER BY page_id DESC, pipeline DESC, occurrence_id DESC LIMIT 1
-      ) SELECT s.page_id, count(*)::int AS scanned, count(*) FILTER (WHERE s.candidate)::int AS normalized,
-        (SELECT count(*)::int FROM gone g WHERE g.page_id = s.page_id) AS deleted,
-        (SELECT page_id FROM last) AS last_page, (SELECT pipeline FROM last) AS last_pipeline, (SELECT occurrence_id FROM last) AS last_occurrence
-      FROM scope s GROUP BY s.page_id ORDER BY s.page_id`,
-      [sourceId, [...pageIds], needles, patterns, cursor?.[0] ?? null, cursor?.[1] ?? null, cursor?.[2] ?? null, batchRows]);
-    statements++;
-    const scanned = rows.reduce((n, row) => n + Number(row.scanned), 0);
-    read += scanned;
-    recordDerivationStatement({ phase: 'sweep', scanned, normalized: rows.reduce((n, row) => n + Number(row.normalized), 0) });
-    for (const row of rows) {
-      const page = pages.get(Number(row.page_id)) ?? { scanned: 0, normalized: 0, deleted: 0 };
-      pages.set(Number(row.page_id), { scanned: page.scanned + Number(row.scanned), normalized: page.normalized + Number(row.normalized), deleted: page.deleted + Number(row.deleted) });
+  try {
+    for (let batches = 0; batches === 0 || performance.now() <= deadline; batches++) {
+      type Row = { page_id: number | null; swept: number; normalized: number; deleted: number; scanned: number; last_page: number; last_pipeline: string; last_occurrence: string };
+      const rows = await engine.transaction(async tx => {
+        await tx.executeRaw("SELECT set_config('statement_timeout',$1,true)", [`${statementMs}ms`]);
+        const [purge] = await tx.executeRaw<{ request_id: string; needles: string[]; patterns: string[]; page_ids: number[]; cursor_page: number | null;
+          cursor_pipeline: string | null; cursor_occurrence: string | null }>(`SELECT request_id::text AS request_id, needles, patterns, page_ids, cursor_page,
+            cursor_pipeline, cursor_occurrence::text AS cursor_occurrence FROM page_segment_derivation_purges WHERE source_id=$1
+          ORDER BY created_at, request_id LIMIT 1 FOR UPDATE SKIP LOCKED`, [sourceId]);
+        if (!purge) return null;
+        const batch = await tx.executeRaw<Row>(`WITH batch AS MATERIALIZED (
+            SELECT d.page_id, d.pipeline, d.occurrence_id, ${derivationSweepScopeSql('d', 'p', '$2')} AS swept FROM page_segment_derivations d
+            JOIN pages p ON p.id = d.page_id WHERE p.source_id = $1 AND ${derivationAfterSql('d', ['$5', '$6', '$7'])}
+            ORDER BY d.page_id, d.pipeline, d.occurrence_id LIMIT $8
+          ), scope AS MATERIALIZED (
+            SELECT d.page_id, d.pipeline, d.occurrence_id, d.output, d.receipt, ${derivationClaimCandidateSql('d', '$4')} AS candidate
+            FROM batch b JOIN page_segment_derivations d ON d.page_id = b.page_id AND d.pipeline = b.pipeline AND d.occurrence_id = b.occurrence_id
+            WHERE b.swept
+          ), hits AS MATERIALIZED (
+            SELECT s.page_id, s.pipeline, s.occurrence_id FROM scope s WHERE s.candidate AND ${derivationHoldsClaimSql('s', '$3', '$4')}
+          ), gone AS (
+            DELETE FROM page_segment_derivations x USING hits h WHERE x.page_id = h.page_id AND x.pipeline = h.pipeline
+              AND x.occurrence_id = h.occurrence_id RETURNING x.page_id
+          ), last AS (
+            SELECT b.page_id, b.pipeline, b.occurrence_id::text AS occurrence_id FROM batch b ORDER BY b.page_id DESC, b.pipeline DESC, b.occurrence_id DESC LIMIT 1
+          ), per_page AS (
+            SELECT s.page_id, count(*)::int AS swept, count(*) FILTER (WHERE s.candidate)::int AS normalized,
+              (SELECT count(*)::int FROM gone g WHERE g.page_id = s.page_id) AS deleted FROM scope s GROUP BY s.page_id
+          ) SELECT pp.page_id, COALESCE(pp.swept, 0) AS swept, COALESCE(pp.normalized, 0) AS normalized, COALESCE(pp.deleted, 0) AS deleted,
+            (SELECT count(*)::int FROM batch) AS scanned, l.page_id AS last_page, l.pipeline AS last_pipeline, l.occurrence_id AS last_occurrence
+          FROM (SELECT 1) one LEFT JOIN last l ON true LEFT JOIN per_page pp ON true ORDER BY pp.page_id`,
+        [sourceId, purge.page_ids, purge.needles, purge.patterns, purge.cursor_page, purge.cursor_pipeline, purge.cursor_occurrence, batchRows]);
+        const scanned = Number(batch[0]?.scanned ?? 0);
+        if (scanned < batchRows) await tx.executeRaw('DELETE FROM page_segment_derivation_purges WHERE request_id=$1::uuid', [purge.request_id]);
+        else await tx.executeRaw(`UPDATE page_segment_derivation_purges SET cursor_page=$2, cursor_pipeline=$3, cursor_occurrence=$4::bigint
+          WHERE request_id=$1::uuid`, [purge.request_id, Number(batch[0]!.last_page), batch[0]!.last_pipeline, String(batch[0]!.last_occurrence)]);
+        return batch;
+      });
+      if (!rows) break;
+      recordDerivationStatement({ phase: 'sweep', scanned: Number(rows[0]?.scanned ?? 0), normalized: rows.reduce((n, row) => n + Number(row.normalized), 0) });
+      for (const row of rows) {
+        if (row.page_id === null) continue;
+        const page = pages.get(Number(row.page_id)) ?? { scanned: 0, normalized: 0, deleted: 0 };
+        pages.set(Number(row.page_id), { scanned: page.scanned + Number(row.swept), normalized: page.normalized + Number(row.normalized), deleted: page.deleted + Number(row.deleted) });
+      }
+      await afterSweepBatch?.();
     }
-    if (scanned < batchRows) break;
-    cursor = [Number(rows[0]!.last_page), rows[0]!.last_pipeline, String(rows[0]!.last_occurrence)];
-    if (performance.now() > deadline) throw new DerivationSweepBudgetExceeded(read, statements);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code !== '57014') throw error;
   }
   const sorted = [...pages].sort((a, b) => a[0] - b[0]);
   if (recordSweepWork) for (const [pageId, work] of sorted) derivationSweepWork.push({ pageId, ...work });

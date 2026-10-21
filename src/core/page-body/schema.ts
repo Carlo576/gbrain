@@ -177,13 +177,70 @@ export const SEGMENT_DERIVATION_STATES = ['done', 'partial', 'failed', 'skipped'
 const sqlList = (values: readonly string[]) => values.map(v => `'${v}'`).join(',');
 
 /**
+ * Folds the lowercase forms a database writes depending on context or locale, applied after lowering on both sides:
+ * Greek final sigma (lower('ΚΩΣΤΑΣ') is 'κωστασ' while stored text keeps 'κωστας') and the dot JavaScript and ICU keep
+ * after a lowered Turkish İ ('i̇'). gbrain_fact_normalize itself stays as it is: fact fingerprints are stored.
+ */
+export const foldSql = (expr: string) => `replace(translate(${expr}, 'ς', 'σ'), 'i\u0307', 'i')`;
+
+/**
+ * SQL predicate, the prefilter: `text`, lowered and folded, matches one of the patterns in the text[] parameter
+ * `patterns` (from derivationNeedles): has a claim's words in the claim's order. Normalization only lowers, folds
+ * characters to spaces and collapses spaces, keeping order, so the words of a claim a text holds occur in it in that
+ * order (in a row's JSON text too: JSON escapes only quotes, backslashes and control characters, which no word holds);
+ * a text this rejects never holds the claim.
+ */
+const hasWordsSql = (text: string, patterns: string) => `${foldSql(`lower(${text})`)} LIKE ANY (${patterns}::text[])`;
+
+/** SQL predicate: derivation row `d`'s output and receipt JSON text passes the prefilter (see hasWordsSql). */
+export function derivationClaimCandidateSql(d: string, patterns: string): string {
+  return hasWordsSql(`COALESCE(${d}.output::text, '') || ' ' || COALESCE(${d}.receipt::text, '')`, patterns);
+}
+
+/**
+ * SQL predicate: derivation row `d` holds one of the claims (the text[] parameters `needles` and `patterns`, from
+ * derivationNeedles). The row goes through the needle's own normalization (gbrain_fact_normalize, the fact fingerprint's:
+ * lowercase, punctuation folded, whitespace collapsed; then foldSql) in the database, so it matches whatever case,
+ * spacing or locale lowercasing the claim was written in. The claim must fill whole words of one string value or object
+ * key of the row's output or receipt (link excerpts carry it inside a longer window, so equality would miss them): "plays
+ * oboe" never matches "plays oboes", nor a claim straddling two fields. Only a row, and then a value, passing the
+ * prefilter is normalized.
+ */
+export function derivationHoldsClaimSql(d: string, needles: string, patterns: string): string {
+  return `CASE WHEN ${derivationClaimCandidateSql(d, patterns)} THEN EXISTS (SELECT 1 FROM (VALUES (${d}.output), (${d}.receipt)) doc(j),
+    LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
+      UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
+    WHERE CASE WHEN ${hasWordsSql('s.t', patterns)} THEN EXISTS (SELECT 1 FROM unnest(${needles}::text[]) k(n)
+      WHERE strpos(' ' || ${foldSql('gbrain_fact_normalize(s.t)')} || ' ', k.n) > 0) ELSE false END) ELSE false END`;
+}
+
+/**
+ * SQL predicate: derivation row `d` of page `p` is one a fact purge sweeps: a row of a page the purge rewrote (the
+ * int[] parameter `pageIds`), or a row no live segment backs (its occurrence retired, its page demoted to inline or
+ * soft-deleted). Any other row was derived from a live segment of a page the purge left alone, so it holds only what
+ * that page's prose still says, and the next derivation would write it back.
+ */
+export function derivationSweepScopeSql(d: string, p: string, pageIds: string): string {
+  return `(${d}.page_id = ANY(${pageIds}::int[]) OR ${p}.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
+    WHERE m.page_id = ${d}.page_id AND m.occurrence_id = ${d}.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = ${d}.segment_sha256))`;
+}
+
+/**
  * Per-segment derivation watermarks (migration v265): one row per page, pipeline and manifest occurrence, recording
  * the segment text and the context (`context_hash`: entry state plus the page-level inputs the pipeline reads) it was
  * derived from, the pipeline version, the outcome and a bounded per-segment output. A pipeline's work on a page is the
  * live occurrences without a settled row whose segment sha, context hash and version match, found from metadata alone.
  * Rows of an occurrence that left the live generation are deleted by their pipeline (retireSegmentDerivations) or by a
- * fence rewrite; demotion to inline deletes the page's rows, a fact purge every row holding the claim, and a page
+ * fence rewrite; demotion to inline deletes the page's rows, a fact purge the rows holding the claim, and a page
  * delete cascades. The output holds link context and window anchors, so the table gets the segment tables' RLS posture.
+ *
+ * page_segment_derivation_purges holds a fact purge's derivation sweep from the purge's commit until a walk of the
+ * source's rows has deleted every row in its scope holding the claim (segment-derive.ts continueDerivationPurges): the
+ * claim's normalized forms, the pages the purge rewrote and the walk's cursor. While it is there, the trigger on
+ * page_segment_derivations drops a write of a row of the source that the sweep would delete (in its scope,
+ * derivationSweepScopeSql, and holding the claim; returns NULL: the row is not stored and the pipeline derives it again
+ * after the sweep), so a row the walk has passed cannot come back behind it. A derivation write that read a purged
+ * page before the purge committed is refused by its own generation guard instead.
  *
  * PR 4 (Wave B incremental derivation, transcripts): page_derivation_spend is the per-page lifetime spend ledger of each
  * paid derivation family (`facts`, `atoms`, `synopsis`; page-spend.ts), each capped by `derive.max_usd_per_page` on its own,
@@ -212,12 +269,37 @@ CREATE TABLE IF NOT EXISTS page_derivation_spend (
   reserved_at  TIMESTAMPTZ,
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (page_id, family)
-);`;
+);
+CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
+  request_id        UUID      PRIMARY KEY,
+  source_id         TEXT      NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  needles           TEXT[]    NOT NULL,
+  patterns          TEXT[]    NOT NULL,
+  page_ids          INTEGER[] NOT NULL DEFAULT '{}',
+  cursor_page       INTEGER,
+  cursor_pipeline   TEXT,
+  cursor_occurrence BIGINT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);
+CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS $func$
+BEGIN
+  IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
+    WHERE p.id = NEW.page_id AND ${derivationSweepScopeSql('NEW', 'p', 'x.page_ids')}
+      AND ${derivationHoldsClaimSql('NEW', 'x.needles', 'x.patterns')}) THEN
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END
+$func$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
+CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
+  FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();`;
 
 /**
  * The segment tables hold page text (`page_segment_texts`, `page_body_staging_parts`) or a page's shape and
  * headings (`page_body_manifest`, `page_body_stagings`, `page_view_digests`) or derived link context
- * (`page_segment_derivations`), so they get the posture of `pages`
+ * (`page_segment_derivations`, and the purged claims `page_segment_derivation_purges` holds), so they get the posture of `pages`
  * and `content_chunks`: RLS on, re-asserted on every schema replay like the core list in src/schema.sql, so a brain
  * the auto-RLS event trigger (v35) missed, or one where it was dropped or disabled, never serves segment text to a
  * role `pages` returns no rows to. Only under a role that bypasses RLS (else the runtime role would lock itself out),
@@ -225,7 +307,8 @@ CREATE TABLE IF NOT EXISTS page_derivation_spend (
  * `page_view_digests` is absent while migration v248 runs. Postgres only: PGLite has no role system, and its
  * bootstrap enables RLS on no core table either. Source-scoped policies are operator SQL (docs/ENGINES.md).
  */
-export const PAGE_BODY_RLS_TABLES = ['page_segment_texts', 'page_body_manifest', 'page_body_stagings', 'page_body_staging_parts', 'page_view_digests', 'page_body_staging_texts', 'page_segment_derivations'] as const;
+export const PAGE_BODY_RLS_TABLES = ['page_segment_texts', 'page_body_manifest', 'page_body_stagings', 'page_body_staging_parts', 'page_view_digests', 'page_body_staging_texts', 'page_segment_derivations',
+  'page_segment_derivation_purges'] as const;
 export const PAGE_BODY_RLS_SQL = `DO $rls$
 DECLARE target TEXT;
 BEGIN

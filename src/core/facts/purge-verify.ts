@@ -27,9 +27,9 @@ import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from 
 import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
-import { derivationAfterSql, derivationBatchRows, derivationClaimCandidateSql, derivationHoldsClaimSql, derivationNeedles, derivationSweepScopeSql,
-  recordDerivationStatement, type DerivationKey } from '../page-body/segment-derive.ts';
-import { stagingNeedsTextSql } from '../page-body/schema.ts';
+import { derivationAfterSql, derivationBatchRows, derivationNeedles, derivationPurgePending, recordDerivationStatement,
+  type DerivationKey } from '../page-body/segment-derive.ts';
+import { derivationClaimCandidateSql, derivationHoldsClaimSql, derivationSweepScopeSql, stagingNeedsTextSql } from '../page-body/schema.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
 import { CARRYING_FIELDS } from '../belief/keys.ts';
 import { relationExists } from '../persistence/rebuildable-cache.ts';
@@ -151,7 +151,7 @@ async function derivationTextReport(engine: BrainEngine, sourceId: string, pageI
             FROM batch b JOIN page_segment_derivations d ON d.page_id=b.page_id AND d.pipeline=b.pipeline AND d.occurrence_id=b.occurrence_id
             CROSS JOIN LATERAL (SELECT ${derivationClaimCandidateSql('d', '$4')} AS candidate) c
           ), last AS (
-            SELECT page_id, pipeline, occurrence_id::text AS occurrence_id FROM batch ORDER BY page_id DESC, pipeline DESC, occurrence_id DESC LIMIT 1
+            SELECT b.page_id, b.pipeline, b.occurrence_id::text AS occurrence_id FROM batch b ORDER BY b.page_id DESC, b.pipeline DESC, b.occurrence_id DESC LIMIT 1
           ) SELECT (SELECT count(*)::int FROM batch) AS scanned, count(*) FILTER (WHERE candidate)::int AS normalized,
             count(*) FILTER (WHERE hit AND swept)::int AS swept, count(*) FILTER (WHERE hit AND NOT swept)::int AS kept,
             (SELECT page_id FROM last) AS last_page, (SELECT pipeline FROM last) AS last_pipeline, (SELECT occurrence_id FROM last) AS last_occurrence
@@ -681,7 +681,8 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
  * still holds the claim. Out-of-reach residuals never make it incomplete.
  */
 export async function purgeCompletion(engine: BrainEngine, row: Pick<WriteRequest, 'id' | 'state' | 'source_id' | 'outcome'>, receipt?: Pick<PurgeReceipt, 'stores'>):
-  Promise<{ completion: PurgeCompletion; effects: Array<{ kind: string; state: string; error_code: string | null }>; exit_code: number; fingerprint_probe?: Record<string, number> }> {
+  Promise<{ completion: PurgeCompletion; effects: Array<{ kind: string; state: string; error_code: string | null }>; exit_code: number; fingerprint_probe?: Record<string, number>;
+    derivation_sweep?: 'pending' }> {
   if (row.state !== 'committed') return { completion: 'incomplete', effects: [], exit_code: 75 };
   const effects = await engine.executeRaw<{ kind: string; state: string; error_code: string | null; parked: boolean }>(`SELECT kind,state,error_code,
     jsonb_array_length(COALESCE(data->'parked','[]'::jsonb))>0 AS parked FROM persistence_effects WHERE request_id=$1::uuid ORDER BY kind`, [row.id]);
@@ -695,9 +696,11 @@ export async function purgeCompletion(engine: BrainEngine, row: Pick<WriteReques
     fingerprint = { facts: Number(probe?.facts ?? 0), takes: Number(probe?.takes ?? 0) };
   }
   const failed = effects.some(e => e.state === 'failed' || e.parked);
-  const sweptResidual = receipt?.stores.some(s => s.status === 'incomplete') || (fingerprint && (fingerprint.facts || fingerprint.takes));
+  const sweeping = await derivationPurgePending(engine, row.id);
+  const sweptResidual = sweeping || receipt?.stores.some(s => s.status === 'incomplete') || (fingerprint && (fingerprint.facts || fingerprint.takes));
   const pending = effects.some(e => e.state !== 'committed');
   const completion: PurgeCompletion = failed || sweptResidual ? 'incomplete' : pending ? 'committed' : 'complete';
   return { completion, effects: effects.map(({ kind, state, error_code }) => ({ kind, state, error_code })),
-    exit_code: completion === 'complete' ? 0 : completion === 'committed' ? 10 : 75, ...(fingerprint ? { fingerprint_probe: fingerprint } : {}) };
+    exit_code: completion === 'complete' ? 0 : completion === 'committed' ? 10 : 75, ...(fingerprint ? { fingerprint_probe: fingerprint } : {}),
+    ...(sweeping ? { derivation_sweep: 'pending' as const } : {}) };
 }
