@@ -29,6 +29,7 @@ import {
   cleanSpeaker,
 } from './builtins.ts';
 import { blockNormalizer, normalizeBlockConversation } from './normalize-block.ts';
+import { SCAN_LINE_BUFFER_BYTES } from '../page-body/limits.ts';
 import type {
   DateContext,
   MatchedMessage,
@@ -761,26 +762,41 @@ export function pickHeadPattern(head: string): string | null {
  * parseConversation's pattern choice over a body fed in pieces (a segmented page's occurrences, in order), holding
  * counters instead of the body: the same block-format collapse (when any block header appears), head pass over the first
  * SCORING_HEAD_LINES non-blank lines, full-body re-score, acceptance floor and structure gate, over the built-in
- * patterns. `finish()` returns the pattern id parseConversation(body).matched_pattern_id would, or null.
+ * patterns. `finish()` returns the pattern id parseConversation(body).matched_pattern_id would, or null. A line over
+ * SCAN_LINE_BUFFER_BYTES characters is scored by its first that many characters (every pattern anchors at the line's
+ * start) and the rest is never held (a block message's body is held up to that many characters), so the detector retains
+ * at most that much text between pieces.
  */
 export function createPatternDetector(): { push(text: string): void; finish(): string | null } {
   const raw = scoringTrack();
   const block = scoringTrack();
-  const normalizer = blockNormalizer(line => block.line(line));
+  const normalizer = blockNormalizer(line => block.line(line), { maxBodyChars: SCAN_LINE_BUFFER_BYTES });
   let partial = '';
+  let oversized: string | null = null;
   const line = (text: string) => {
-    normalizer.line(text);
-    raw.line(text.endsWith('\r') ? text.slice(0, -1) : text);
+    const scored = text.length > SCAN_LINE_BUFFER_BYTES ? text.slice(0, SCAN_LINE_BUFFER_BYTES) : text;
+    normalizer.line(scored);
+    raw.line(scored.endsWith('\r') ? scored.slice(0, -1) : scored);
   };
   return {
     push(text: string) {
-      const lines = (partial + text).split('\n');
+      let rest = text;
+      if (oversized !== null) {
+        const end = rest.indexOf('\n');
+        if (end < 0) return;
+        line(oversized);
+        oversized = null;
+        rest = rest.slice(end + 1);
+      }
+      const lines = (partial + rest).split('\n');
       partial = lines.pop()!;
       for (const l of lines) line(l);
+      if (partial.length > SCAN_LINE_BUFFER_BYTES) { oversized = Buffer.from(partial.slice(0, SCAN_LINE_BUFFER_BYTES)).toString(); partial = ''; }
     },
     finish() {
-      line(partial);
+      line(oversized ?? partial);
       partial = '';
+      oversized = null;
       normalizer.end();
       return (normalizer.headers > 0 ? block : raw).finish();
     },

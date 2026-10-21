@@ -55,7 +55,7 @@ import { planSegmentDerivations, segmentDerivationContextHash, sourceWindowFor, 
 import { conversationDetectionWork, readConversationOccurrences, readOccurrenceText } from '../page-body/segment-conversation.ts';
 import { emptySaveTimeResolutionCounts, mergeSaveTimeResolutionCounts } from '../entities/resolve-on-save.ts';
 import { conversationEntityHints } from './conversation-entity-hints.ts';
-import { countWindowFacts, publishConversationFacts, type ConversationFactRow } from './conversation-publication.ts';
+import { countConversationFacts, countWindowFacts, publishConversationFacts, type ConversationFactRow } from './conversation-publication.ts';
 import { recordFailedPage } from './conversation-run-status.ts';
 import { detectPagePattern, startsConversationRun, streamConversationWindows } from './conversation-stream.ts';
 import type { ConversationSegment } from './conversation-types.ts';
@@ -180,6 +180,27 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   if (!pattern && from < liveIds.length) pattern = await detectPagePattern(occurrences, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
   if (!pattern && from < liveIds.length) {
     if (opts.sinceIso) { result.pages_skipped++; return { newestEnd: null }; }
+    // No grammar over the whole page. Only a page that holds no window or fact, or that parses no message under the
+    // grammar it was extracted in either, has stopped being a transcript (it settles as non-extractable below and its
+    // facts are collected); one that still does (prose added around the transcript can tip the density test) keeps
+    // everything and settles nothing.
+    const recordedGrammar = prior.map(row => rowOutput(row).pattern).find(Boolean) ?? null;
+    const holds = prior.some(row => rowOutput(row).windows.length > 0) || await countConversationFacts(engine, sourceId, page.slug, { active: true }) > 0;
+    let still = holds && !recordedGrammar ? null : 0;
+    if (holds && recordedGrammar) {
+      still = (await streamConversationWindows(occurrences, 0, liveIds.length, { page, gapMinutes: opts.gapMinutes, pattern: recordedGrammar },
+        i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }), { window() {}, occurrence() {} })).messages;
+    }
+    if (still !== 0) {
+      await setExtractionReceipt(engine, page.id, KIND, { kind: 'grammar_lost', pipeline: KIND, processed_chars: 0, ...(recordedGrammar ? { pattern: recordedGrammar } : {}),
+        ...(still !== null ? { messages: still } : {}) });
+      const why = recordedGrammar ? `no chat format is detected over the page any more, yet ${still} message(s) still parse as ${recordedGrammar}`
+        : 'no chat format is detected over the page, which holds conversation facts from a run that recorded none';
+      process.stderr.write(`[extract-conversation-facts] ${page.slug}: ${why}; its facts were kept, nothing settled; gbrain doctor lists it\n`);
+      result.pages_failed++;
+      recordFailedPage(result, page.slug, `${why}; facts kept`);
+      return { newestEnd: null };
+    }
     from = 0;
   }
   // Earlier windows of the occurrences the stream covers (and of retired ones), reusable by rendered text under the same context.
@@ -257,14 +278,12 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   let newestEnd: string | null = null;
   let extracted = 0;
   let batch: { rows: ConversationFactRow[]; windows: SourceWindow[]; keys: string[] } = { rows: [], windows: [], keys: [] };
-  /** Publish the facts extracted since the last publication and the rows of the streamed occurrences; `final` settles a finished page. */
+  /**
+   * Publish the facts extracted since the last publication and the rows of the streamed occurrences; `final` settles a
+   * finished page, but only if the page is still the version the run read, checked under the publication's row lock on
+   * the page (a write that commits after the check waits for the publication; one that committed before is seen).
+   */
   const publish = async (final: boolean) => {
-    let unchanged = true;
-    if (final) {
-      const now = await engine.getPage(page.slug, { sourceId });
-      unchanged = !!now && now.id === page.id && regularPageVersionToken(now) === versionToken;
-    }
-    const settled = final && unchanged && stop === null && !opts.sinceIso && streamedFrom <= from;
     const owned = new Map<number, StreamWindow[]>();
     for (const w of windows) owned.set(w.owner, [...(owned.get(w.owner) ?? []), w]);
     // Rows of the occurrences this run streamed; an occurrence it never reached keeps its row.
@@ -291,18 +310,26 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     });
     const settledWindows = [...liveIds.slice(0, from).flatMap(id => rowOutput(priorRow.get(id)).windows.map(w => ({ key: keyOf(id, w), failed: !!w.failed }))),
       ...windows.map(w => ({ key: sourceWindowKey(w.window), failed: w.state === 'failed' }))];
-    const liveKeys = settled ? settledWindows.map(w => w.key) : null;
-    const collect = settled && !settledWindows.some(w => w.failed);
-    const outcome = !liveKeys ? null : liveKeys.length ? terminalAuditFact(page.slug, 0, versionToken)
-      : nonExtractableAuditFact(page.slug, 0, versionToken, pattern ? 'fewer than two eligible messages' : 'no conversation messages found');
     const moves = [...pendingMoves];
     const out = await writeDerivedFacts(engine, sourceId, page.slug, async db => {
+      let unchanged = true;
+      if (final) {
+        await db.executeRaw('SELECT id FROM pages WHERE id = $1 FOR UPDATE', [page.id]);
+        const now = await db.getPage(page.slug, { sourceId });
+        unchanged = !!now && now.id === page.id && regularPageVersionToken(now) === versionToken;
+      }
+      const settled = final && unchanged && stop === null && !opts.sinceIso && streamedFrom <= from;
+      const liveKeys = settled ? settledWindows.map(w => w.key) : null;
+      const collect = settled && !settledWindows.some(w => w.failed);
+      const outcome = !liveKeys ? null : liveKeys.length ? terminalAuditFact(page.slug, 0, versionToken)
+        : nonExtractableAuditFact(page.slug, 0, versionToken, pattern ? 'fewer than two eligible messages' : 'no conversation messages found');
       const published = await publishConversationFacts(db, sourceId, page.slug, outcome ? [...batch.rows, outcome] : batch.rows,
         { scope: 'window', segments: { windows: batch.windows, moves, replace: batch.keys, live: collect ? liveKeys : null } });
       if (derived.length || released.length) await db.upsertSegmentDerivations([...derived, ...released]);
       if (settled) await db.retireSegmentDerivations(page.id, liveIds, { kind: KIND });
-      return published;
+      return { ...published, unchanged, settled, liveKeys, outcome };
     });
+    const { unchanged, settled, liveKeys, outcome } = out;
     pendingMoves.splice(0, moves.length);
     movedOff.clear();
     for (const row of [...derived, ...released]) rowsNow.set(row.occurrenceId, row);

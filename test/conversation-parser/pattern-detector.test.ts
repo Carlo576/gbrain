@@ -6,9 +6,12 @@
  *    parseConversation(body) matches, or null when it matches none: head pass, full-body re-score, score_full_body
  *    re-score, acceptance floor, structure gate, block-format collapse and the speaker-object region scan included.
  * 2. Fails when: the detector diverges from the whole-page parser on any seeded body (a preamble that tips the head
- *    pass, a block header deep in the body, an invalid speaker-object region, a label list with no repeated speaker).
+ *    pass, a block header deep in the body, an invalid speaker-object region, a label list with no repeated speaker),
+ *    or holds more than a bounded amount of text between pieces: a 40 MiB line with no newline, or a 40 MiB block
+ *    message body, fed in 1 MiB pieces (N6, round 6); a message line over the cap is still scored by its head.
  */
 import { describe, expect, test } from 'bun:test';
+import { heapSize } from 'bun:jsc';
 import { BUILTIN_PATTERNS } from '../../src/core/conversation-parser/builtins.ts';
 import { createPatternDetector, parseConversation } from '../../src/core/conversation-parser/parse.ts';
 
@@ -79,5 +82,34 @@ describe('createPatternDetector', () => {
     const text = `${preamble}\n\n${transcript}`;
     expect(parseConversation(text.slice(0, 64 * 1024)).matched_pattern_id).toBe('plain-role-no-time');
     expect({ parsed: parseConversation(text).matched_pattern_id, detected: detect(text, 1) }).toEqual({ parsed: 'bold-paren-time-12h', detected: 'bold-paren-time-12h' });
+  });
+
+  /** Heap growth (bytes) over a baseline after each of 40 fresh 1 MiB pieces `piece(i)` the detector is fed: the most it retained. */
+  const peakRetained = (head: string, piece: (i: number) => string, tail: string) => {
+    const detector = createPatternDetector();
+    detector.push(head);
+    Bun.gc(true);
+    const base = heapSize();
+    let peak = 0;
+    for (let i = 0; i < 40; i++) {
+      detector.push(piece(i));
+      Bun.gc(true);
+      peak = Math.max(peak, heapSize() - base);
+    }
+    detector.push(tail);
+    return { peak, pattern: detector.finish() };
+  };
+  const MIB = 1024 ** 2;
+  const transcript = Array.from({ length: 60 }, (_, t) => `**${t % 2 ? 'Alice' : 'Bob'}** (${1 + (t % 11)}:0${t % 10} PM): turn ${t} about the roadmap review.`).join('\n');
+
+  test('N6: a 40 MiB line with no newline, fed in 1 MiB pieces, is never held whole; only its head is scored', () => {
+    const { peak, pattern } = peakRetained(`${transcript}\n`, i => String.fromCharCode(97 + (i % 26)).repeat(MIB - 8) + String(i).padStart(8, '0'), `\n${transcript}\n`);
+    expect({ held: peak < 4 * MIB, pattern }).toEqual({ held: true, pattern: 'bold-paren-time-12h' });
+  });
+
+  test('N6: a block message whose 40 MiB body arrives in 1 MiB pieces of short lines holds a bounded body', () => {
+    const line = (i: number, j: number) => `  body line ${j} of piece ${i} `.padEnd(1023, 'x');
+    const { peak, pattern } = peakRetained('- **Theo** (Mon 11:18)\n', i => Array.from({ length: 1024 }, (_, j) => `${line(i, j)}\n`).join(''), '- **Juan** (11:20 AM)\n  done\n');
+    expect({ held: peak < 4 * MIB, pattern }).toEqual({ held: true, pattern: 'bold-paren-time' });
   });
 });
