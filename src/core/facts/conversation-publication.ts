@@ -416,15 +416,17 @@ type UnnumberedFact = Omit<ConversationFactRow, 'row_num' | 'source_markdown_slu
 
 /**
  * A segmented page's incremental publication (wave-b spec 8.2, PR 4): `windows[i]` anchors `rows[i]` (facts.source_window;
- * null for an outcome row). Nothing is replaced wholesale: the page's extractor facts whose window key is not in `keep`
- * (windows of retired or rewritten occurrences) are cleared, and so are its unanchored facts (older full-pass runs)
- * when `retireUnanchored` (every live occurrence is settled); every other fact keeps its row and id.
+ * null for an outcome row). Nothing is replaced wholesale. A settled page (every live window extracted) passes `keep`: its
+ * extractor facts whose window key is not in it (windows that left the page) are cleared, and so are its unanchored facts
+ * (older full-pass runs) when `retireUnanchored`. An unsettled page passes `keep: null` and clears only the window keys in
+ * `clear` (windows extracted again, or covered by windows extracted since); every other fact keeps its row and id.
  */
 export interface ConversationSegmentsPublication {
   windows: ReadonlyArray<SourceWindow | null>;
   /** Facts re-anchored, not re-extracted: the same rendered window under the same context now lives in another occurrence. */
   moves: ReadonlyArray<{ from: string; to: SourceWindow }>;
-  keep: readonly string[];
+  keep: readonly string[] | null;
+  clear?: readonly string[];
   retireUnanchored: boolean;
 }
 
@@ -539,10 +541,10 @@ export async function countConversationFacts(db: BrainEngine, sourceId: string, 
 }
 
 export async function clearConversationFacts(db: BrainEngine, sourceId: string, slug: string,
-  windows?: Pick<ConversationSegmentsPublication, 'keep' | 'retireUnanchored'>): Promise<number> {
+  windows?: Pick<ConversationSegmentsPublication, 'keep' | 'clear' | 'retireUnanchored'>): Promise<number> {
   const page = `f.source_id=$1 AND f.source_markdown_slug=$2 AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%'` + (windows
-    ? ` AND NOT (f.source = ANY($3::text[])) AND (CASE WHEN f.source_window IS NULL THEN $4::boolean ELSE NOT (${WINDOW_KEY_SQL} = ANY($5::text[])) END)` : '');
-  const params = windows ? [sourceId, slug, [...AUDIT_ROW_SOURCES], windows.retireUnanchored, [...windows.keep]] : [sourceId, slug];
+    ? ` AND NOT (f.source = ANY($3::text[])) AND (CASE WHEN f.source_window IS NULL THEN $4::boolean ELSE (${WINDOW_KEY_SQL} = ANY($5::text[])) = $6::boolean END)` : '');
+  const params = windows ? [sourceId, slug, [...AUDIT_ROW_SOURCES], windows.retireUnanchored, [...(windows.keep ?? windows.clear ?? [])], windows.keep === null] : [sourceId, slug];
   const referenced = 'EXISTS (SELECT 1 FROM open_loops o WHERE o.fact_id=f.id) OR EXISTS (SELECT 1 FROM facts g WHERE g.superseded_by=f.id)';
   await db.executeRaw(`DELETE FROM facts f WHERE ${page} AND f.expired_at IS NOT NULL AND ${RELINKED_DERIVED_ROW} AND NOT (${referenced})`, params);
   const [relinked] = await db.executeRaw<{ count: string }>(`WITH up AS (UPDATE facts f SET expired_at=now()

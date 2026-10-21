@@ -168,6 +168,11 @@
       "page_body_stagings.page_body_stagings_principal_kind_principal_id_client_reque_key": "u UNIQUE (principal_kind, principal_id, client_request_id)",
       "page_body_stagings.page_body_stagings_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "page_body_stagings.page_body_stagings_state_check": "c CHECK ((state = ANY (ARRAY['open'::text, 'sealed'::text, 'prepared'::text, 'committed'::text, 'aborted'::text, 'expired'::text])))",
+      "page_derivation_spend.page_derivation_spend_family_check": "c CHECK ((family = ANY (ARRAY['facts'::text, 'atoms'::text, 'synopsis'::text])))",
+      "page_derivation_spend.page_derivation_spend_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
+      "page_derivation_spend.page_derivation_spend_pkey": "p PRIMARY KEY (page_id, family)",
+      "page_derivation_spend.page_derivation_spend_reserved_usd_check": "c CHECK ((reserved_usd >= (0)::double precision))",
+      "page_derivation_spend.page_derivation_spend_spent_usd_check": "c CHECK ((spent_usd >= (0)::double precision))",
       "page_embedding_budget.page_embedding_budget_cap_usd_check": "c CHECK (((cap_usd IS NULL) OR (cap_usd >= (0)::double precision)))",
       "page_embedding_budget.page_embedding_budget_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "page_embedding_budget.page_embedding_budget_pkey": "p PRIMARY KEY (page_id)",
@@ -574,6 +579,9 @@
       "page_body_stagings": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
+      "page_derivation_spend": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
       "page_embedding_budget": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
@@ -954,6 +962,7 @@
       "page_body_stagings_expiry": "CREATE INDEX page_body_stagings_expiry ON public.page_body_stagings USING btree (hard_expires_at) WHERE (state = ANY (ARRAY['open'::text, 'sealed'::text, 'prepared'::text]))",
       "page_body_stagings_pkey": "CREATE UNIQUE INDEX page_body_stagings_pkey ON public.page_body_stagings USING btree (id)",
       "page_body_stagings_principal_kind_principal_id_client_reque_key": "CREATE UNIQUE INDEX page_body_stagings_principal_kind_principal_id_client_reque_key ON public.page_body_stagings USING btree (principal_kind, principal_id, client_request_id)",
+      "page_derivation_spend_pkey": "CREATE UNIQUE INDEX page_derivation_spend_pkey ON public.page_derivation_spend USING btree (page_id, family)",
       "page_embedding_budget_pkey": "CREATE UNIQUE INDEX page_embedding_budget_pkey ON public.page_embedding_budget USING btree (page_id)",
       "page_embedding_budget_state_idx": "CREATE INDEX page_embedding_budget_state_idx ON public.page_embedding_budget USING btree (state) WHERE (state <> 'open'::text)",
       "page_extraction_state_pkey": "CREATE UNIQUE INDEX page_extraction_state_pkey ON public.page_extraction_state USING btree (page_id, pipeline)",
@@ -2150,6 +2159,17 @@
           "21 hard_expires_at timestamp with time zone/timestamptz NOT NULL",
           "22 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
           "23 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "page_derivation_spend": {
+        "columns": [
+          "1 page_id integer/int4 NOT NULL",
+          "2 family text/text NOT NULL",
+          "3 spent_usd double precision/float8 NOT NULL DEFAULT 0",
+          "4 reserved_usd double precision/float8 NOT NULL DEFAULT 0",
+          "5 reserved_at timestamp with time zone/timestamptz NULL",
+          "6 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

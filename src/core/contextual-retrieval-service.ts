@@ -74,7 +74,7 @@ import { acquirePageEmbeddingLease } from './page-embedding-lease.ts';
 import { planSegmentDerivations, segmentDerivationContextHash } from './page-body/derivations.ts';
 import { embeddingInputHash, synopsisDocumentHash, type EmbeddingTier } from './embedding-input-hash.ts';
 import { currentEmbeddingSignature } from './embedding.ts';
-import { estimatePageEmbedUsd, reservePageSpend } from './page-embedding-budget.ts';
+import { estimatePageEmbedUsd, meterPaidCall } from './page-embedding-budget.ts';
 import { segmentSynopsisLead } from './page-body/segment-synopsis.ts';
 
 /**
@@ -563,26 +563,8 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
       const estimateUsd = todo.reduce((usd, c) => usd
         + (c.chunk_source === 'fenced_code' ? 0 : estimateSynopsisCallUsd(synopsisModel, window.document, c.chunk_text, synopsisMaxTokens)), 0)
         + estimatePageEmbedUsd(todo.reduce((n, c) => n + wrapChunkForEmbedding(c.chunk_text, titlePrefix, c.chunk_source).length + SYNOPSIS_WRAPPER_CHARS, 0), embedSignature);
-      const decision = await reservePageSpend(engine, page, `synopsis:${synopsisModel}`, estimateUsd);
-      if (decision.kind === 'refused') {
-        await derivation(segment, 'partial', anchors, { reason: 'budget_limited', cap_usd: decision.capUsd, estimate_usd: decision.estimateUsd });
-        return { kind: 'skipped', reason: 'budget_limited' };
-      }
-      const grant = decision.kind === 'grant' ? decision.grant : undefined;
-      const billed = new Set<SynopsisChunk>();
-      // A window that fails books only the synopsis calls the provider may have billed (never its embedding, which
-      // failed or was not called): the actual amount is reserved beside the estimate, then the estimate is released.
-      // When the actual amount no longer fits the cap the estimate is booked whole, so spend is never under-counted.
-      const bookBilled = async () => {
-        if (!grant) return;
-        const usd = [...billed].reduce((n, c) => n + estimateSynopsisCallUsd(synopsisModel, window.document, c.chunk_text, synopsisMaxTokens), 0);
-        const actual = usd > 0 ? await reservePageSpend(engine, page, `synopsis:${synopsisModel}`, usd) : null;
-        if (actual?.kind === 'refused') return grant.settle({ ok: true });
-        await grant.settle({ ok: false });
-        if (actual?.kind === 'grant') await actual.grant.settle({ ok: true });
-      };
-      const built = await (async () => {
-        const synopsized = await synopsisWrappedTexts({ chunks: todo, sourceText: window.document, title: page.title, args, synopsisModel, synopsisMaxTokens, billed });
+      const metered = await meterPaidCall(engine, page, `synopsis:${synopsisModel}`, estimateUsd, async () => {
+        const synopsized = await synopsisWrappedTexts({ chunks: todo, sourceText: window.document, title: page.title, args, synopsisModel, synopsisMaxTokens });
         if (!Array.isArray(synopsized) && synopsized.kind !== 'page_level_fallback_requested') return synopsized;
         const tier: EmbeddingTier = Array.isArray(synopsized) ? 'per_chunk_synopsis' : 'title';
         const inputTexts = Array.isArray(synopsized) ? synopsized : todo.map(c => wrapChunkForEmbedding(c.chunk_text, titlePrefix, c.chunk_source));
@@ -591,15 +573,15 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
         } catch (err) {
           return classifyEmbedError(err, err instanceof Error ? err.message : String(err));
         }
-      })().catch(async err => {
-        await bookBilled().catch(() => { /* the reservation's staleness is the backstop */ });
-        throw err;
       });
+      if ('refused' in metered) {
+        await derivation(segment, 'partial', anchors, { reason: 'budget_limited', cap_usd: metered.refused.capUsd, estimate_usd: metered.refused.estimateUsd });
+        return { kind: 'skipped', reason: 'budget_limited' };
+      }
+      const built = metered.value;
       if (built.kind !== 'built') {
-        await bookBilled();
         return { kind: built.kind === 'permanent' ? 'permanent_error' : 'transient_error', cause: built.cause, detail: built.detail };
       }
-      await grant?.settle({ ok: true });
       if (built.vectors.length !== todo.length || built.vectors.some(v => !v?.length || !v.every(Number.isFinite))) {
         return { kind: 'transient_error', cause: 'embed', detail: 'Embedding provider returned an incomplete or invalid batch' };
       }

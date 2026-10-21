@@ -2144,6 +2144,15 @@ CREATE TABLE IF NOT EXISTS page_segment_derivations (
   PRIMARY KEY (page_id, pipeline, occurrence_id)
 );
 CREATE INDEX IF NOT EXISTS page_segment_derivations_unsettled ON page_segment_derivations (pipeline, page_id) WHERE state IN ('partial','failed');
+CREATE TABLE IF NOT EXISTS page_derivation_spend (
+  page_id      INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  family       TEXT    NOT NULL CHECK (family IN ('facts','atoms','synopsis')),
+  spent_usd    DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (spent_usd >= 0),
+  reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (reserved_usd >= 0),
+  reserved_at  TIMESTAMPTZ,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, family)
+);
 -- END GENERATED from src/core/page-body/schema.ts (PAGE_SEGMENT_DERIVATIONS_SQL)
 
 -- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_BODY_RLS_SQL). Edit that file, then run: bun run build:schema

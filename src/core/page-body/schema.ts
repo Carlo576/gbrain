@@ -183,6 +183,10 @@ const sqlList = (values: readonly string[]) => values.map(v => `'${v}'`).join(',
  * live occurrences without a settled row whose segment sha, context hash and version match, found from metadata alone.
  * Rows of an occurrence that left the live generation are deleted by their pipeline (retireSegmentDerivations); a page
  * delete cascades. The output holds link context and window anchors, so the table gets the segment tables' RLS posture.
+ *
+ * PR 4 (Wave B incremental derivation, transcripts): page_derivation_spend is the per-page lifetime spend ledger of each
+ * paid derivation family (`facts`, `atoms`, `synopsis`; page-spend.ts), each capped by `derive.max_usd_per_page` on its own,
+ * apart from the embedding ledger (page_embedding_budget), so derivation spend never starves a page's embeddings.
  */
 export const PAGE_SEGMENT_DERIVATIONS_SQL = `CREATE TABLE IF NOT EXISTS page_segment_derivations (
   page_id          INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
@@ -198,7 +202,16 @@ export const PAGE_SEGMENT_DERIVATIONS_SQL = `CREATE TABLE IF NOT EXISTS page_seg
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (page_id, pipeline, occurrence_id)
 );
-CREATE INDEX IF NOT EXISTS page_segment_derivations_unsettled ON page_segment_derivations (pipeline, page_id) WHERE state IN ('partial','failed');`;
+CREATE INDEX IF NOT EXISTS page_segment_derivations_unsettled ON page_segment_derivations (pipeline, page_id) WHERE state IN ('partial','failed');
+CREATE TABLE IF NOT EXISTS page_derivation_spend (
+  page_id      INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  family       TEXT    NOT NULL CHECK (family IN ('facts','atoms','synopsis')),
+  spent_usd    DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (spent_usd >= 0),
+  reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (reserved_usd >= 0),
+  reserved_at  TIMESTAMPTZ,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, family)
+);`;
 
 /**
  * The segment tables hold page text (`page_segment_texts`, `page_body_staging_parts`) or a page's shape and

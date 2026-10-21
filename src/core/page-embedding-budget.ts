@@ -37,7 +37,12 @@ import { JUNK_SAMPLE_CHARS, assessJunkWindows, assessSampledJunk } from './conte
 import type { BodyStorage, ManifestRow } from './page-body/types.ts';
 import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { estimateCostFromChars } from './embedding-pricing.ts';
-import { reservationCostUsd } from './budget/reservation-cost.ts';
+import { reservationCostUsd, type BudgetKind } from './budget/reservation-cost.ts';
+import { BudgetTracker, type PricingOverrides } from './budget/budget-tracker.ts';
+import { getCurrentBudgetTracker, withBudgetTracker } from './ai/gateway.ts';
+import { recordOnTracker } from './ai/budget-record.ts';
+import { RESERVATION_WINDOW_SQL, RESERVED_AT_SQL, reserveDerivationSpend, settleLedgerReservation, type PageSpendDecision, type PageSpendGrant,
+  type PageSpendKind, type PageSpendSignature } from './page-spend.ts';
 import { PAGE_INLINE_MAX_BYTES, budgetRowAppliesFilter, isLargePageBytes } from './page-size-policy.ts';
 import { isEmbedSkipped } from './embed-skip.ts';
 import { parseUsdLimit, resolveSpendPosture } from './spend-posture.ts';
@@ -45,6 +50,9 @@ import { chunkGenerationFilter } from './search/safe-chunks.ts';
 import { quoteIdentifier } from './search/embedding-column.ts';
 import { embeddingWriteTarget } from './page-state/projections.ts';
 import { approvalAmount, approvalBasis, heldApproveAction, heldPreviewCommand, ledgerPricePerMTok, renderedCommand } from './held-embedding-action.ts';
+
+export type { PageSpendDecision, PageSpendGrant, PageSpendKind, PageSpendSignature } from './page-spend.ts';
+export { PAGE_DERIVATION_CAP_KEY } from './page-spend.ts';
 
 export const PAGE_EMBED_CAP_KEY = 'embed.max_usd_per_page';
 export const DEFAULT_PAGE_EMBED_CAP_USD = 2;
@@ -129,7 +137,7 @@ export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
   return engine.transaction(async tx => {
     await tx.executeRaw('INSERT INTO page_embedding_budget (page_id) VALUES ($1) ON CONFLICT (page_id) DO NOTHING', [page.id]);
     const [row] = await tx.executeRaw<BudgetRow>(`SELECT state, reason, embedding_signature, spent_usd, reserved_usd, cap_usd,
-        (reserved_usd > 0 AND reserved_at < now() - interval '1 hour') AS stale_reservation
+        (reserved_usd > 0 AND updated_at < now() - interval '1 hour') AS stale_reservation
       FROM page_embedding_budget WHERE page_id = $1 FOR UPDATE`, [page.id]);
     if (!row) return { kind: 'unmetered' } as const;
     if (row.state === 'held' && !approved) return { kind: 'held', reason: row.reason ?? 'awaiting_approval' } as const;
@@ -158,81 +166,59 @@ export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
       chunkIndexes.add(chunk.chunk_index);
     }
     const deferred = stale.length - chunkIndexes.size;
+    const openWindow = reserved > 0;
     reserved += reservedUsd;
     const state: PageBudgetState = deferred > 0 ? 'capped' : 'open';
-    await tx.executeRaw(`UPDATE page_embedding_budget SET state = $2, reason = $3, embedding_signature = COALESCE($4, embedding_signature),
-        spent_usd = $5::float8, reserved_usd = $6::float8, reserved_at = CASE WHEN $6::float8 > 0 THEN now() ELSE NULL END,
-        cap_usd = $7::float8, updated_at = now() WHERE page_id = $1`,
+    const [written] = await tx.executeRaw<{ reservation_window: string | null }>(`UPDATE page_embedding_budget SET state = $2, reason = $3, embedding_signature = COALESCE($4, embedding_signature),
+        spent_usd = $5::float8, reserved_usd = $6::float8, ${RESERVED_AT_SQL('$6::float8', '$8::boolean')},
+        cap_usd = $7::float8, updated_at = now() WHERE page_id = $1 RETURNING ${RESERVATION_WINDOW_SQL} AS reservation_window`,
     [page.id, state, deferred > 0 ? 'cap_reached' : null, opts.signature ?? null, spent, reserved,
-      approved && Number.isFinite(capUsd) ? capUsd : row.cap_usd]);
+      approved && Number.isFinite(capUsd) ? capUsd : row.cap_usd, openWindow]);
     const grant: PageEmbedGrant = {
       chunkIndexes, reservedUsd, deferred, capUsd,
-      settle: async ({ ok }) => {
-        if (reservedUsd === 0) return;
-        await engine.executeRaw(`UPDATE page_embedding_budget SET reserved_usd = GREATEST(0, reserved_usd - $2::float8),
-            spent_usd = spent_usd + $3::float8, unpriced_calls = unpriced_calls + $4::int, updated_at = now() WHERE page_id = $1`,
-        [page.id, reservedUsd, ok ? reservedUsd : 0, ok && !priced ? 1 : 0]);
-      },
+      settle: ({ ok }) => settleLedgerReservation(engine, { table: 'page_embedding_budget', pageId: page.id }, written?.reservation_window ?? null,
+        reservedUsd, ok ? reservedUsd : 0, ok && !priced ? 1 : 0),
     };
     return { kind: 'grant', grant } as const;
   });
 }
 
-/** What a paid step spends on a page (wave-b spec 8.3): the kind and its model, `embedding:<signature>`, `facts:<model>`, `atoms:<model>`, `synopsis:<model>`. */
-export type PageSpendKind = 'embedding' | 'facts' | 'atoms' | 'synopsis';
-export type PageSpendSignature = `${PageSpendKind}:${string}`;
-
-export interface PageSpendGrant {
-  reservedUsd: number;
-  capUsd: number;
-  /** Book the reservation as spent (`ok`) or release it (the provider call failed before billing). */
-  settle(outcome: { ok: boolean }): Promise<void>;
-}
-
-/** `refused`: the estimate does not fit what the cap leaves (`cap_reached`), or an embedding waits for approval (`held`); nothing was reserved. */
-export type PageSpendDecision =
-  | { kind: 'unmetered' }
-  | { kind: 'refused'; reason: 'cap_reached' | 'held'; capUsd: number; spentUsd: number; reservedUsd: number; estimateUsd: number }
-  | { kind: 'grant'; grant: PageSpendGrant };
-
 /**
  * Reserve `estimateUsd` of one paid step on `page` against its per-page cap (wave-b spec 8.3), before the provider call.
- * Every kind shares the page's one ledger in page_embedding_budget and its lifetime cap (`embed.max_usd_per_page`):
- * the kind lives in the signature, not in a new table. Only an embedding signature names the ledger's model, so only a
- * new embedding model starts a new ledger, as planPageEmbedding does; derivation spend (facts, atoms, synopsis) never
- * resets it. Metered: segmented pages and pages over `pages.inline_max_bytes`; any other page is unmetered. A
- * refusal reserves nothing, so the caller skips the call. Settle the grant (spendGrant) when the call returns or throws.
+ * An embedding reserves on page_embedding_budget under `embed.max_usd_per_page` (a new embedding model starts a new
+ * ledger, as planPageEmbedding does); a derivation (facts, atoms, synopsis) on its own family's ledger (page-spend.ts).
+ * Metered: segmented pages and pages over `pages.inline_max_bytes`; any other page is unmetered. A refusal reserves
+ * nothing, so the caller skips the call. A derivation runs its call through meterPaidCall, which books the actual cost.
  */
 export async function reservePageSpend(engine: BrainEngine, page: BudgetPage, signature: PageSpendSignature, estimateUsd: number): Promise<PageSpendDecision> {
   if (!isSegmentedPage(page) && !isLargePageBytes(pageBodyBytes(page))) return { kind: 'unmetered' };
   const split = signature.indexOf(':');
   const kind = signature.slice(0, split) as PageSpendKind;
-  const embeddingSignature = kind === 'embedding' ? signature.slice(split + 1) : null;
+  if (kind !== 'embedding') return reserveDerivationSpend(engine, page.id, kind, estimateUsd);
+  const embeddingSignature = signature.slice(split + 1);
   const configured = await resolvePageEmbedCapUsd(engine);
   const estimate = Math.max(0, estimateUsd);
   return engine.transaction(async tx => {
     await tx.executeRaw('INSERT INTO page_embedding_budget (page_id) VALUES ($1) ON CONFLICT (page_id) DO NOTHING', [page.id]);
     const [row] = await tx.executeRaw<BudgetRow>(`SELECT state, reason, embedding_signature, spent_usd, reserved_usd, cap_usd,
-        (reserved_usd > 0 AND reserved_at < now() - interval '1 hour') AS stale_reservation
+        (reserved_usd > 0 AND updated_at < now() - interval '1 hour') AS stale_reservation
       FROM page_embedding_budget WHERE page_id = $1 FOR UPDATE`, [page.id]);
     if (!row) return { kind: 'unmetered' } as const;
-    const sameLedger = !embeddingSignature || !row.embedding_signature || row.embedding_signature === embeddingSignature;
+    const sameLedger = !row.embedding_signature || row.embedding_signature === embeddingSignature;
     const spent = sameLedger ? Number(row.spent_usd) + (row.stale_reservation ? Number(row.reserved_usd) : 0) : 0;
     const reserved = sameLedger && !row.stale_reservation ? Number(row.reserved_usd) : 0;
     const capUsd = row.cap_usd === null ? configured : Number(row.cap_usd);
     const refused = (reason: 'cap_reached' | 'held') => ({ kind: 'refused', reason, capUsd, spentUsd: spent, reservedUsd: reserved, estimateUsd: estimate } as const);
-    if (kind === 'embedding' && row.state === 'held') return refused('held');
+    if (row.state === 'held') return refused('held');
     if (spent + reserved + estimate > capUsd) return refused('cap_reached');
-    await tx.executeRaw(`UPDATE page_embedding_budget SET embedding_signature = COALESCE($2, embedding_signature), spent_usd = $3::float8,
-        reserved_usd = $4::float8, reserved_at = CASE WHEN $4::float8 > 0 THEN now() ELSE NULL END, updated_at = now() WHERE page_id = $1`,
-    [page.id, embeddingSignature, spent, reserved + estimate]);
+    const [written] = await tx.executeRaw<{ reservation_window: string | null }>(`UPDATE page_embedding_budget SET embedding_signature = COALESCE($2, embedding_signature),
+        spent_usd = $3::float8, reserved_usd = $4::float8, ${RESERVED_AT_SQL('$4::float8', '$5::boolean')}, updated_at = now()
+      WHERE page_id = $1 RETURNING ${RESERVATION_WINDOW_SQL} AS reservation_window`,
+    [page.id, embeddingSignature, spent, reserved + estimate, reserved > 0]);
     const grant: PageSpendGrant = {
       reservedUsd: estimate, capUsd,
-      settle: async ({ ok }) => {
-        if (estimate === 0) return;
-        await engine.executeRaw(`UPDATE page_embedding_budget SET reserved_usd = GREATEST(0, reserved_usd - $2::float8),
-            spent_usd = spent_usd + $3::float8, updated_at = now() WHERE page_id = $1`, [page.id, estimate, ok ? estimate : 0]);
-      },
+      settle: ({ ok, usd }) => settleLedgerReservation(engine, { table: 'page_embedding_budget', pageId: page.id }, written?.reservation_window ?? null,
+        estimate, ok ? usd ?? estimate : 0),
     };
     return { kind: 'grant', grant } as const;
   });
@@ -244,10 +230,51 @@ const PROMPT_OVERHEAD_TOKENS = 1500;
 /** Per-1M-token rates for a chat model without a price: the reservation still bounds the spend. */
 const UNPRICED_CHAT_RATE = { input: 15, output: 75 };
 
-/** What one chat call over `chars` of input may cost at most (the prompt estimate plus the full output ceiling): the estimate a paid derivation reserves. */
-export function estimateChatCallUsd(model: string, chars: number, maxOutputTokens: number): number {
+/**
+ * What one chat call over `chars` of input may cost at most (the prompt estimate plus the full output ceiling), at the
+ * operator's `pricing.overrides` rate when one is set: the estimate a paid derivation reserves.
+ */
+export function estimateChatCallUsd(model: string, chars: number, maxOutputTokens: number, pricingOverrides?: PricingOverrides): number {
   const input = Math.ceil(chars / CHARS_PER_TOKEN) + PROMPT_OVERHEAD_TOKENS;
-  return reservationCostUsd(model, 'chat', input, maxOutputTokens) ?? (input * UNPRICED_CHAT_RATE.input + maxOutputTokens * UNPRICED_CHAT_RATE.output) / 1_000_000;
+  return reservationCostUsd(model, 'chat', input, maxOutputTokens, pricingOverrides)
+    ?? (input * UNPRICED_CHAT_RATE.input + maxOutputTokens * UNPRICED_CHAT_RATE.output) / 1_000_000;
+}
+
+/** The worst case of one facts extraction (extract.ts): the call, a truncation retry at twice the output cap, and a malformed-output retry at that cap. */
+export function estimateFactsExtractionUsd(model: string, chars: number, maxOutputTokens: number, pricingOverrides?: PricingOverrides): number {
+  return estimateChatCallUsd(model, chars, maxOutputTokens, pricingOverrides) + 2 * estimateChatCallUsd(model, chars, 2 * maxOutputTokens, pricingOverrides);
+}
+
+const TOUCHPOINT_KIND: Partial<Record<string, BudgetKind>> = { embedding: 'embed', rerank: 'rerank' };
+
+/**
+ * Run one paid derivation step on `page` under its family's cap (wave-b spec 8.3): reserve `estimateUsd` (every attempt the
+ * step may make), run `call`, and book what its provider calls actually cost, read from a budget tracker scoped to the call.
+ * Every attempt the gateway recorded is booked whatever the step's outcome (a truncated, malformed or refused answer, a
+ * throw after the provider answered, an abort); an unpriced model books the reservation; a step that recorded no attempt
+ * (the provider was never called) books nothing. The attempts are recorded on the caller's tracker too, and the caller's
+ * remaining cap bounds them.
+ */
+export async function meterPaidCall<T>(engine: BrainEngine, page: BudgetPage, signature: PageSpendSignature, estimateUsd: number,
+  call: () => Promise<T>, opts: { pricingOverrides?: PricingOverrides } = {}): Promise<{ refused: Extract<PageSpendDecision, { kind: 'refused' }> } | { value: T }> {
+  const decision = await reservePageSpend(engine, page, signature, estimateUsd);
+  if (decision.kind === 'refused') return { refused: decision };
+  if (decision.kind === 'unmetered') return { value: await call() };
+  const parent = getCurrentBudgetTracker();
+  const parentCap = parent?.cap;
+  const tracker = new BudgetTracker({ label: `page-spend:${signature}`, pricingOverrides: opts.pricingOverrides,
+    ...(parent && parentCap !== undefined ? { maxCostUsd: Math.max(0, parentCap - parent.totalSpent), capSource: parent.capSource } : {}) });
+  try {
+    return { value: await withBudgetTracker(tracker, call) };
+  } finally {
+    const models = tracker.snapshot().models.filter(m => m.attempts > 0);
+    for (const m of models) {
+      recordOnTracker(parent, { modelId: m.model, requestedModelId: m.requested_model, inputTokens: m.input_tokens, outputTokens: m.output_tokens,
+        label: 'page-spend', kind: TOUCHPOINT_KIND[m.touchpoint] ?? 'chat' });
+    }
+    const unpriced = models.some(m => m.cost_usd === null);
+    await decision.grant.settle({ ok: models.length > 0, usd: unpriced ? decision.grant.reservedUsd : tracker.totalSpent });
+  }
 }
 
 export interface PageBudgetReport { slug: string; source_id: string; state: Exclude<PageBudgetState, 'open'>; reason: string | null;

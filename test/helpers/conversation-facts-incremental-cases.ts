@@ -2,7 +2,8 @@
  * Incremental conversation facts on a segmented page (wave-b spec 8.2 "Conversation facts", PR 4 lane 4b), shared by
  * the PGLite arm (test/large-pages/conversation-facts-incremental.test.ts) and the Postgres arm
  * (test/e2e/conversation-facts-incremental-postgres.test.ts). A fake extractor counts calls by window text; no model
- * is called. Spend is metered (reservePageSpend) but the fake call costs nothing.
+ * is called. Spend is metered (meterPaidCall, the facts ledger); the cap case's fake extractor calls the gateway, whose
+ * fake transport reports token usage on a priced model, so its windows cost what that usage costs.
  *
  * 1. Protects: an import extracts each window once and anchors every fact (facts.source_window, a JSONB object); an
  *    append (by a remote writer) extracts only windows no earlier run extracted, keeps the facts (same ids) of every
@@ -19,12 +20,13 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import { runExtractConversationFactsCore } from '../../src/commands/extract-conversation-facts.ts';
 import { parseSourceWindow, sourceWindowKey, type SourceWindow } from '../../src/core/page-body/derivations.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
+import { PAGE_DERIVATION_CAP_KEY } from '../../src/core/page-spend.ts';
 import type { AppendBrain } from './append-brain.ts';
 import { runFactsBackstop } from '../../src/core/facts/backstop.ts';
 import { lineWindows } from '../../src/core/facts/backstop-segments.ts';
 import { MAX_TURN_TEXT_CHARS } from '../../src/core/facts/extract.ts';
 import { truthLead } from '../../src/core/page-body/segment-blocks.ts';
-import { __setChatTransportForTests, type ChatOpts, type ChatResult } from '../../src/core/ai/gateway.ts';
+import { __setChatTransportForTests, chat as gatewayChat, type ChatOpts, type ChatResult } from '../../src/core/ai/gateway.ts';
 import { runPhaseExtractAtoms } from '../../src/core/cycle/extract-atoms.ts';
 import { MAX_ATOM_WINDOWS_PER_PAGE_RUN } from '../../src/core/cycle/extract-atoms-segments.ts';
 import { extractionInputTruncatedEntry } from '../../src/commands/doctor/checks/extraction-input.ts';
@@ -33,7 +35,7 @@ import type { Check } from '../../src/commands/doctor.ts';
 
 const SPEAKERS = ['Alice Example', 'Bob Example', 'Carol Example'];
 const WORDS = ['launch', 'pricing', 'budget', 'roadmap', 'hiring', 'review', 'contract', 'latency', 'onboarding', 'forecast', 'retention', 'deploy'];
-const SOURCE = 'cli:extract-conversation-facts';
+export const SOURCE = 'cli:extract-conversation-facts';
 
 const clock = (minutes: number) => { const h = 9 + Math.floor(minutes / 60); return `${h > 12 ? h - 12 : h}:${String(minutes % 60).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
 const dateOf = (day: number) => new Date(Date.UTC(2025, 0, 1) + day * 86_400_000).toISOString().slice(0, 10);
@@ -70,7 +72,7 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 interface FactRow { id: number; key: string; type: string }
 
 /** The page's live extractor facts (audit rows aside) with their window keys and the stored JSONB type. */
-async function factsOf(engine: BrainEngine, slug: string): Promise<FactRow[]> {
+export async function factsOf(engine: BrainEngine, slug: string): Promise<FactRow[]> {
   const rows = await engine.executeRaw<{ id: number; w: unknown; t: string | null }>(
     `SELECT id, source_window AS w, jsonb_typeof(source_window) AS t FROM facts WHERE source_id='default' AND source_markdown_slug=$1 AND source=$2 AND expired_at IS NULL ORDER BY id`,
     [slug, SOURCE]);
@@ -81,7 +83,7 @@ async function factsOf(engine: BrainEngine, slug: string): Promise<FactRow[]> {
 }
 
 /** Window keys every live occurrence's derivation row records, and the rows' states and receipts. */
-async function derivations(engine: BrainEngine, slug: string) {
+export async function derivations(engine: BrainEngine, slug: string) {
   const [page] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug=$1", [slug]);
   const pageId = Number(page!.id);
   const rows = await engine.readSegmentDerivations(pageId, { kind: 'conversation_facts' });
@@ -91,14 +93,32 @@ async function derivations(engine: BrainEngine, slug: string) {
   return { pageId, rows, keys, live: live.map(row => row.occurrenceId), states: rows.map(row => row.state), receipts: rows.map(row => row.receipt) };
 }
 
-/** One extraction run with a fake extractor; \`calls\` lists every window text it was handed, in call order. */
-async function extract(engine: BrainEngine, slug: string, opts: { force?: boolean } = {}) {
+export const PAID_MODEL = 'anthropic:claude-sonnet-4-6';
+
+/** A fake chat transport reporting usage on a priced model: a quarter token per input character, 32 output tokens. */
+export function paidTransport(o: ChatOpts): Promise<ChatResult> {
+  const chars = o.messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length), 0);
+  return Promise.resolve({ text: '{"facts":[]}', blocks: [], stopReason: 'end', model: PAID_MODEL, providerId: 'anthropic',
+    usage: { input_tokens: Math.ceil(chars / 4), output_tokens: 32, cache_read_tokens: 0, cache_creation_tokens: 0 } });
+}
+
+/**
+ * One extraction run with a fake extractor; `calls` lists every window text it was handed, in call order. `paid`: each
+ * window also calls the gateway (install paidTransport), so the call is booked. `failAt`: the extractor throws on that
+ * call (1-based) after the provider answered; `abortAfter`: the run is aborted after that many calls.
+ */
+export async function extract(engine: BrainEngine, slug: string, opts: { force?: boolean; paid?: boolean; failAt?: number; abortAfter?: number; sinceIso?: string } = {}) {
   const calls: string[] = [];
+  const controller = new AbortController();
   const result = await runExtractConversationFactsCore(engine, { sourceId: 'default', slugs: [slug], sleepMs: 0, force: opts.force,
+    sinceIso: opts.sinceIso,
     extractor: async input => {
       calls.push(input.turnText);
+      if (opts.paid) await gatewayChat({ model: PAID_MODEL, messages: [{ role: 'user', content: input.turnText }], maxTokens: 64 });
+      if (calls.length === opts.failAt) throw new Error('fake extractor failure after the provider answered');
+      if (calls.length === opts.abortAfter) controller.abort();
       return [{ fact: `Alice Example noted window ${sha(input.turnText).slice(0, 12)}`, kind: 'fact', entity_slug: null, source: SOURCE }];
-    } });
+    } }, controller.signal);
   return { calls, result };
 }
 
@@ -111,6 +131,7 @@ export function defineConversationFactsIncrementalCases(opts: { getBrain: () => 
   test('an import extracts every window exactly once and anchors every fact to its window', async () => {
     const { engine, seed } = opts.getBrain();
     await engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+    await engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
     await seed(slug, chatPage('Chat A', BODY));
     const { calls, result } = await extract(engine, slug);
     const facts = await factsOf(engine, slug);
@@ -189,18 +210,21 @@ ${chatDays(100, 3, 1)}`;
     await engine.executeRaw(`INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, notability, source, source_markdown_slug, row_num, confidence)
       VALUES ('default', NULL, 'Bob Example owns the forecast', 'fact', 'private', 'medium', $2, $1, 5000, 0.9)`, [capped, SOURCE]);
     const unanchored = async () => (await factsOf(engine, capped)).filter(f => f.key === 'unanchored').length;
-    await engine.setConfig(PAGE_EMBED_CAP_KEY, '0.3');
-    const first = await extract(engine, capped);
+    await engine.setConfig(PAGE_DERIVATION_CAP_KEY, '0.5');
+    __setChatTransportForTests(paidTransport);
+    const first = await extract(engine, capped, { paid: true }).finally(() => __setChatTransportForTests(null));
     const partial = await derivations(engine, capped);
-    const [ledger] = await engine.executeRaw<{ spent: number }>('SELECT spent_usd AS spent FROM page_embedding_budget WHERE page_id=$1', [partial.pageId]);
+    const [ledger] = await engine.executeRaw<{ spent: number }>("SELECT spent_usd AS spent FROM page_derivation_spend WHERE page_id=$1 AND family='facts'", [partial.pageId]);
     expect(first.calls.length).toBeGreaterThanOrEqual(1);
-    expect(Number(ledger!.spent)).toBeLessThanOrEqual(0.3);
+    expect(Number(ledger!.spent)).toBeLessThanOrEqual(0.5);
     expect(Number(ledger!.spent)).toBeGreaterThan(0);
+    // A cap stop partway through the page publishes the windows it finished: one fact each, anchored to its window.
+    expect((await factsOf(engine, capped)).filter(f => f.key !== 'unanchored').length).toBe(first.calls.length);
     expect(partial.receipts.filter(Boolean)).toEqual([expect.objectContaining({ kind: 'unread_windows', reason: 'cap_reached' })]);
     expect(await unanchored()).toBe(1);
     // The newest windows: the last day's turns are in the first call.
     expect(first.calls[0]).toContain(`${dateOf(299)}`);
-    await engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+    await engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
     const second = await extract(engine, capped);
     const done = await derivations(engine, capped);
     expect({ repeats: second.calls.filter(text => first.calls.includes(text)).length, total: first.calls.length + second.calls.length,
@@ -239,6 +263,7 @@ export function defineSegmentedBackstopCases(opts: { getBrain: () => AppendBrain
   test('an import extracts each window of each occurrence once; an unchanged page extracts nothing', async () => {
     const { engine, seed, body } = opts.getBrain();
     await engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+    await engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
     await seed(slug, chatPage('Backstop', chatDays(400, 100, 5)).replace('type: conversation', 'type: note'));
     const page = await pageOf(engine, slug);
     const truth = Buffer.from((await body(slug)).truth, 'utf8');
@@ -278,7 +303,7 @@ export function defineSegmentedBackstopCases(opts: { getBrain: () => AppendBrain
     const { engine, seed } = opts.getBrain();
     const capped = `notes/backstop-capped-${randomUUID().slice(0, 8)}`;
     await seed(capped, chatPage('Backstop capped', chatDays(600, 100, 6)).replace('type: conversation', 'type: note'));
-    await engine.setConfig(PAGE_EMBED_CAP_KEY, '0.000001');
+    await engine.setConfig(PAGE_DERIVATION_CAP_KEY, '0.000001');
     install();
     try {
       await backstop(engine, capped);
@@ -288,7 +313,7 @@ export function defineSegmentedBackstopCases(opts: { getBrain: () => AppendBrain
         .toEqual({ calls: 0, receipts: [expect.objectContaining({ kind: 'unread_windows', pipeline: 'facts_backstop', reason: 'cap_reached', windows_read: 0 })] });
     } finally {
       __setChatTransportForTests(null);
-      await engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+      await engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
     }
   }, 600_000);
 }
@@ -341,6 +366,7 @@ export function defineSegmentedAtomsCases(opts: { getBrain: () => AppendBrain })
   test('an import extracts every window of every occurrence once, one atom each; a settled page extracts nothing', async () => {
     const brain = opts.getBrain();
     await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+    await brain.engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
     await brain.engine.setConfig('cycle.extract_atoms.max_input_chars', String(cap));
     await brain.seed(slug, chatPage('Atoms', chatDays(700, 100, 5)).replace('type: conversation', 'type: meeting'));
     before = await windowsOf(brain, slug);
@@ -375,7 +401,7 @@ export function defineSegmentedAtomsCases(opts: { getBrain: () => AppendBrain })
     const brain = opts.getBrain();
     const capped = `notes/atoms-capped-${randomUUID().slice(0, 8)}`;
     await brain.seed(capped, chatPage('Atoms capped', chatDays(900, 100, 6)).replace('type: conversation', 'type: meeting'));
-    await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, '0.000001');
+    await brain.engine.setConfig(PAGE_DERIVATION_CAP_KEY, '0.000001');
     try {
       const made = await drain(brain.engine, capped);
       const rows = await rowsOf(brain.engine, capped);
@@ -383,7 +409,7 @@ export function defineSegmentedAtomsCases(opts: { getBrain: () => AppendBrain })
         .toEqual({ calls: 0, receipts: [JSON.stringify({ state: 'partial', reason: 'cap_reached' })] });
       expect(rows.length).toBeGreaterThan(0);
     } finally {
-      await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
+      await brain.engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
     }
   }, 600_000);
 }
@@ -403,6 +429,6 @@ export function defineSegmentReceiptDoctorCases(opts: { getBrain: () => AppendBr
     const groups = (check.details as { groups: Array<{ pipeline: string; kind: string; samples: string[] }> }).groups;
     expect({ status: check.status, argv: (check as { fix?: { argv: string[] } }).fix?.argv,
       listed: groups.some(g => g.pipeline === 'extract_atoms' && g.kind === 'unread_windows' && g.samples.includes(`default:${s}`)) })
-      .toEqual({ status: 'warn', argv: ['gbrain', 'config', 'set', PAGE_EMBED_CAP_KEY, '<usd>'], listed: true });
+      .toEqual({ status: 'warn', argv: ['gbrain', 'config', 'set', PAGE_DERIVATION_CAP_KEY, '<usd>'], listed: true });
   }, 600_000);
 }

@@ -22,7 +22,7 @@ import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { agentFix, checkError } from '../check-fix.ts';
 import { EXTRACT_MAX_INPUT_CHARS_KEY } from '../../../core/cycle/extract-atoms-input.ts';
-import { PAGE_EMBED_CAP_KEY } from '../../../core/page-embedding-budget.ts';
+import { PAGE_DERIVATION_CAP_KEY } from '../../../core/page-spend.ts';
 
 interface ReceiptGroup { pipeline: string; kind: string; pages: number; samples: string[] }
 
@@ -33,7 +33,7 @@ const REMEDY: Record<string, string> = {
 };
 
 const UNREAD_WINDOWS = 'unread_windows';
-const UNREAD_REMEDY = `the run stopped before every window of the page was read (the receipt's reason: the per-page spend cap, a window limit or a skipped window); the next run resumes where it stopped, and when the cap stopped it: gbrain config set ${PAGE_EMBED_CAP_KEY} <usd>`;
+const UNREAD_REMEDY = `the run stopped before every window of the page was read (the receipt's reason: the per-page spend cap, a window limit or a skipped window); the next run resumes where it stopped, and when the cap stopped it: gbrain config set ${PAGE_DERIVATION_CAP_KEY} <usd>`;
 const remedy = (g: ReceiptGroup): string | null => g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : REMEDY[g.pipeline] ?? null;
 
 const describe = (g: ReceiptGroup): string =>
@@ -73,7 +73,7 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
           'A higher cap lets the next extract_atoms cycle read more of each cut page; it raises model spend, so the value is the user\'s call.', 'extraction_input_truncated',
           { ask_user: true, consent: ['paid'], inputs: [{ name: 'n', how: 'a character count above the cut pages\' sizes, chosen with the user' }] }) }
         : capped
-          ? { fix: agentFix(['gbrain', 'config', 'set', PAGE_EMBED_CAP_KEY, '<usd>'],
+          ? { fix: agentFix(['gbrain', 'config', 'set', PAGE_DERIVATION_CAP_KEY, '<usd>'],
             'A higher per-page cap lets the next run read the windows the cap stopped; it raises model spend, so the value is the user\'s call.', 'extraction_input_truncated',
             { ask_user: true, consent: ['paid'], inputs: [{ name: 'usd', how: 'a per-page dollar cap chosen with the user' }] }) }
           : { fix_unavailable_reason: 'operator_judgement' as const }) });
