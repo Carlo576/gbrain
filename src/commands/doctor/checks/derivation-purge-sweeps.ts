@@ -40,7 +40,7 @@ async function runDerivationPurgeSweeps(ctx: DoctorContext): Promise<Check[]> {
       + 'Until each ends, paid atom, synopsis and fact extraction makes no call on the pages it covers (purge_sweep_pending). '
       + `Continue each with gbrain forget --purge --status --request-id <request_id> --continue.`,
     ...(first ? { fix: { argv: continueSweepArgv(first), consent: [], actor: 'agent' as const, requires_exclusive: false, verify: doctorVerify('derivation_purge_sweeps'),
-      why: 'Continues the purge\'s sweep (a stalled one is tried again) and reports its completion; it deletes only stored results holding the claim the user already purged. Run it once per request id listed.' } }
+      why: 'Continues the purge\'s sweep (a stalled one is tried again) and reports its completion. It deletes the stored results in the sweep\'s scope that hold the claim the user already purged, and an unpaid result in that scope that alone cannot be read within the statement budget, unread, whether or not it holds the claim (unpaid results are derived again from the page at no cost; a paid one is never deleted unread). Run it for each request id listed until its completion is complete.' } }
       : { fix_unavailable_reason: 'operator_judgement' as const }),
   });
   return checks;

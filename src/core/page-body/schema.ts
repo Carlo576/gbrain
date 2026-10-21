@@ -228,9 +228,10 @@ export function derivationSweepScopeSql(d: string, p: string, pageIds: string): 
 /**
  * SQL: the advisory lock key that serializes a write bringing a row into a derivation sweep's scope with the end of the
  * source's sweeps. The scope-entry trigger takes it shared in the writer's transaction every time it fires, a sweep
- * recorded or not, and a sweep ends (deletes its record) only under it taken exclusively without waiting: while such a
- * writer is open, including one that fired before the sweep was recorded and so left no note, the sweep walks again
- * instead of ending, and the walk after the writer commits sees its rows.
+ * recorded or not. A sweep moves from its first walk to its verify walks, and ends (deletes its record), only under it
+ * held exclusively: so every writer that fired before the sweep was recorded, and left no note, has committed before a
+ * verify walk starts, and every later writer's note is visible when the record ends. The sweep tries it without waiting
+ * and otherwise waits a bounded time in a transaction that holds no other lock (segment-derive.ts continueDerivationPurges).
  */
 export function derivationScopeLockSql(sourceId: string): string {
   return `hashtextextended('gbrain:derivation-scope:' || ${sourceId}, 0)`;

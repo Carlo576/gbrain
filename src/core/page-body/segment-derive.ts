@@ -370,10 +370,11 @@ export async function derivationNeedles(engine: Pick<BrainEngine, 'executeRaw'>,
  * the source, walking them in primary-key order (so the rows it normalizes are bounded too), fewer after a statement
  * outran `statementMs` (the batch halves, down to one row); a sweep statement runs in a transaction of its own under
  * `statementMs`; one continueDerivationPurges call starts no new batch past `totalMs` (`inlineMs` for the call a
- * purge makes before it returns; it runs at least one), and the next call resumes from the stored cursor.
+ * purge makes before it returns; it runs at least one), and the next call resumes from the stored cursor. A walk that
+ * ends while a writer holds the source's scope lock waits at most `finalizeWaitMs` for it before leaving it to a later call.
  */
-export const DERIVATION_SWEEP_LIMITS = { batchRows: 500, totalMs: 120_000, statementMs: 5_000, inlineMs: 5_000 } as const;
-let sweepLimits: { batchRows: number; totalMs: number; statementMs: number; inlineMs: number } = { ...DERIVATION_SWEEP_LIMITS };
+export const DERIVATION_SWEEP_LIMITS = { batchRows: 500, totalMs: 120_000, statementMs: 5_000, inlineMs: 5_000, finalizeWaitMs: 1_500 } as const;
+let sweepLimits: { batchRows: number; totalMs: number; statementMs: number; inlineMs: number; finalizeWaitMs: number } = { ...DERIVATION_SWEEP_LIMITS };
 let afterSweepBatch: (() => Promise<void>) | null = null;
 /** @internal Test seam: run `fn` after each committed batch of continueDerivationPurges (null removes it). */
 export function __setAfterDerivationSweepBatchForTests(fn: (() => Promise<void>) | null): void { afterSweepBatch = fn; }
@@ -476,11 +477,19 @@ type SweepRecord = { request_id: string; needles: string[]; patterns: string[]; 
  * record is skipped from then on, so it blocks no other sweep, until `opts.retry` names it.
  *
  * At the end of the source the first walk (`sweep`) is followed by a `verify` walk, repeated until one deletes nothing;
- * then the pages that entered the scope meanwhile (page_segment_derivation_purge_pages) are walked again (`recheck`)
- * until none are noted, and only then is the record deleted: under the source's scope lock (derivationScopeLockSql),
- * taken without waiting. While a write that brings rows into the scope is still open (the trigger holds the lock shared,
- * also when it fired before the sweep was recorded and left no note), the record goes back to a fresh `verify` walk
- * for a later call, which sees the writer's rows once it commits. No batch starts past DERIVATION_SWEEP_LIMITS.totalMs (the lower `inlineMs` for the
+ * then the pages that entered the scope meanwhile (page_segment_derivation_purge_pages) are checked again, and only
+ * when none of their rows the sweep covers holds the claim is the record deleted. A writer that brings rows into the
+ * scope holds the source's scope lock (derivationScopeLockSql) shared from the trigger's first firing to its commit,
+ * and leaves no note when it fired before the sweep was recorded. So both the move from the first walk to `verify`
+ * (every writer open when the sweep was recorded has ended, and every verify walk sees its rows) and the end of the
+ * record (every noted page is visible) happen under that lock held exclusively. It is tried without waiting at the end
+ * of a walk; when a writer holds it, the record waits at the end of its walk (its cursor kept) and the call waits for
+ * the lock at most DERIVATION_SWEEP_LIMITS.finalizeWaitMs in a transaction of its own that holds no other lock, so no
+ * deadlock is possible and writers that arrive meanwhile queue behind it. Holding it, the rest of the walk is read
+ * without deleting (a row lock is never awaited under it) and, when none of it holds the claim, the walk ends there;
+ * the noted pages are read the same way, and walked again (`recheck`) only when one holds the claim or they hold more
+ * than a batch of rows. A wait that times out leaves the record where it is for a later call; no walk restarts.
+ * No batch starts past DERIVATION_SWEEP_LIMITS.totalMs (the lower `inlineMs` for the
  * purge's own call, `opts.inline`, so a purge returns `pending` soon after it recorded the sweep); the next call resumes
  * from the cursor. Returns the rows deleted.
  */
@@ -490,27 +499,68 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
   const pages = new Map<number, { scanned: number; normalized: number; deleted: number }>();
   if (opts.retry) await engine.executeRaw('UPDATE page_segment_derivation_purges SET stalled_at = NULL, stalled_reason = NULL WHERE request_id=$1::uuid', [opts.retry]);
   const skip: string[] = [];
-  const endWalk = async (tx: BrainEngine, purge: SweepRecord, found: number) => {
-    const restart = 'cursor_page = NULL, cursor_pipeline = NULL, cursor_occurrence = NULL, found = 0';
-    if (purge.phase === 'sweep' || (purge.phase === 'verify' && found > 0)) {
-      await tx.executeRaw('DELETE FROM page_segment_derivation_purge_pages WHERE request_id=$1::uuid', [purge.request_id]);
-      await tx.executeRaw(`UPDATE page_segment_derivation_purges SET phase = 'verify', recheck = NULL, ${restart} WHERE request_id=$1::uuid`, [purge.request_id]);
-      return;
-    }
-    const [lock] = await tx.executeRaw<{ held: boolean }>(`SELECT pg_try_advisory_xact_lock(${derivationScopeLockSql('$1::text')}) AS held`, [sourceId]);
-    if (!lock?.held) {
-      await tx.executeRaw(`UPDATE page_segment_derivation_purges SET phase = 'verify', recheck = NULL, ${restart} WHERE request_id=$1::uuid`, [purge.request_id]);
-      skip.push(purge.request_id);
-      return;
-    }
+  const restart = 'cursor_page = NULL, cursor_pipeline = NULL, cursor_occurrence = NULL, found = 0';
+  const toVerify = async (tx: BrainEngine, purge: SweepRecord) => {
+    await tx.executeRaw('DELETE FROM page_segment_derivation_purge_pages WHERE request_id=$1::uuid', [purge.request_id]);
+    await tx.executeRaw(`UPDATE page_segment_derivation_purges SET phase = 'verify', recheck = NULL, ${restart} WHERE request_id=$1::uuid`, [purge.request_id]);
+  };
+  /** Read-only: whether at most the record's batch size of rows after `at` (on `onPages`; every page when null) are all there are, and how many the sweep covers hold the claim. */
+  const unswept = async (tx: BrainEngine, purge: SweepRecord, at: [number | null, string | null, string | null], onPages: number[] | null) => {
+    const [row] = await tx.executeRaw<{ scanned: number; hits: number }>(`WITH batch AS MATERIALIZED (
+        SELECT d.page_id, d.pipeline, d.occurrence_id, ${derivationSweepScopeSql('d', 'p', '$2')} AS swept FROM page_segment_derivations d
+        JOIN pages p ON p.id = d.page_id WHERE p.source_id = $1 AND ${derivationAfterSql('d', ['$5', '$6', '$7'])} AND ($9::int[] IS NULL OR d.page_id = ANY($9::int[]))
+        ORDER BY d.page_id, d.pipeline, d.occurrence_id LIMIT $8
+      ) SELECT (SELECT count(*)::int FROM batch) AS scanned, count(*) FILTER (WHERE CASE WHEN ${derivationClaimCandidateSql('d', '$4')}
+          THEN ${derivationHoldsClaimSql('d', '$3', '$4')} ELSE false END)::int AS hits
+        FROM batch b JOIN page_segment_derivations d ON d.page_id = b.page_id AND d.pipeline = b.pipeline AND d.occurrence_id = b.occurrence_id WHERE b.swept`,
+    [sourceId, purge.page_ids, purge.needles, purge.patterns, ...at, purge.batch_rows, onPages]);
+    return { all: Number(row?.scanned ?? 0) < Number(purge.batch_rows), hits: Number(row?.hits ?? 0) };
+  };
+  /** The end of a walk, under the source's scope lock held exclusively. */
+  const finish = async (tx: BrainEngine, purge: SweepRecord) => {
+    if (purge.phase === 'sweep') return toVerify(tx, purge);
     const noted = (await tx.executeRaw<{ page_id: number }>('DELETE FROM page_segment_derivation_purge_pages WHERE request_id=$1::uuid RETURNING page_id',
       [purge.request_id])).map(row => Number(row.page_id));
-    if (noted.length) await tx.executeRaw(`UPDATE page_segment_derivation_purges SET phase = 'recheck', recheck = $2::int[], ${restart} WHERE request_id=$1::uuid`,
-      [purge.request_id, noted]);
-    else {
-      await tx.executeRaw('DELETE FROM page_segment_derivation_purges WHERE request_id=$1::uuid', [purge.request_id]);
-      await tx.executeRaw(`DELETE FROM page_segment_derivation_purge_pages n WHERE NOT EXISTS (SELECT 1 FROM page_segment_derivation_purges x
-        WHERE x.request_id = n.request_id)`);
+    if (noted.length) {
+      const check = await unswept(tx, purge, [null, null, null], noted);
+      if (!check.all || check.hits) {
+        await tx.executeRaw(`UPDATE page_segment_derivation_purges SET phase = 'recheck', recheck = $2::int[], ${restart} WHERE request_id=$1::uuid`, [purge.request_id, noted]);
+        return;
+      }
+    }
+    await tx.executeRaw('DELETE FROM page_segment_derivation_purges WHERE request_id=$1::uuid', [purge.request_id]);
+    await tx.executeRaw(`DELETE FROM page_segment_derivation_purge_pages n WHERE NOT EXISTS (SELECT 1 FROM page_segment_derivation_purges x
+      WHERE x.request_id = n.request_id)`);
+  };
+  let parked: string | null = null;
+  const endWalk = async (tx: BrainEngine, purge: SweepRecord, found: number, last: [number, string, string] | null) => {
+    if (purge.phase === 'verify' && found > 0) return toVerify(tx, purge);
+    const [lock] = await tx.executeRaw<{ held: boolean }>(`SELECT pg_try_advisory_xact_lock(${derivationScopeLockSql('$1::text')}) AS held`, [sourceId]);
+    if (lock?.held) return finish(tx, purge);
+    await tx.executeRaw(`UPDATE page_segment_derivation_purges SET cursor_page = COALESCE($2::int, cursor_page), cursor_pipeline = COALESCE($3::text, cursor_pipeline),
+      cursor_occurrence = COALESCE($4::bigint, cursor_occurrence), found = $5 WHERE request_id=$1::uuid`, [purge.request_id, ...(last ?? [null, null, null]), found]);
+    parked = purge.request_id;
+  };
+  /** A record waiting at the end of its walk: wait for the scope lock (holding no other), then end the walk if the rest of it holds nothing to sweep. */
+  const finishParked = async (requestId: string) => {
+    try {
+      await engine.transaction(async tx => {
+        await tx.executeRaw("SELECT set_config('statement_timeout',$1,true), set_config('lock_timeout',$2,true)", [`${statementMs}ms`, `${sweepLimits.finalizeWaitMs}ms`]);
+        await tx.executeRaw(`SELECT pg_advisory_xact_lock(${derivationScopeLockSql('$1::text')})`, [sourceId]);
+        const [purge] = await tx.executeRaw<SweepRecord>(`SELECT request_id::text AS request_id, needles, patterns, page_ids, phase, recheck, found, cursor_page,
+            cursor_pipeline, cursor_occurrence::text AS cursor_occurrence, LEAST(COALESCE(batch_rows, $2), $2) AS batch_rows
+          FROM page_segment_derivation_purges WHERE request_id=$1::uuid AND stalled_at IS NULL FOR UPDATE SKIP LOCKED`, [requestId, maxRows]);
+        if (!purge) {
+          skip.push(requestId);
+          return;
+        }
+        const rest = await unswept(tx, purge, [purge.cursor_page, purge.cursor_pipeline, purge.cursor_occurrence], purge.recheck);
+        if (rest.all && !rest.hits) await finish(tx, purge);
+      });
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (code !== '55P03' && code !== '57014') throw error;
+      skip.push(requestId);
     }
   };
   const timedOut = (error: unknown) => (error as { code?: unknown } | null)?.code === '57014';
@@ -520,6 +570,7 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
   };
   for (let batches = 0; batches === 0 || performance.now() <= deadline; batches++) {
     let picked: SweepRecord | null = null;
+    parked = null;
     type Row = { page_id: number | null; swept: number; normalized: number; deleted: number; scanned: number; last_page: number; last_pipeline: string; last_occurrence: string };
     let rows: Row[] | 'paid' | null;
     try {
@@ -558,7 +609,9 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
           FROM (SELECT 1) one LEFT JOIN last l ON true LEFT JOIN per_page pp ON true ORDER BY pp.page_id`,
         [sourceId, purge.page_ids, purge.needles, purge.patterns, purge.cursor_page, purge.cursor_pipeline, purge.cursor_occurrence, purge.batch_rows, purge.recheck]);
         const found = Number(purge.found) + batch.reduce((n, row) => n + Number(row.deleted), 0);
-        if (Number(batch[0]?.scanned ?? 0) < Number(purge.batch_rows)) await endWalk(tx, purge, found);
+        if (Number(batch[0]?.scanned ?? 0) < Number(purge.batch_rows)) {
+          await endWalk(tx, purge, found, batch[0]?.last_page == null ? null : [Number(batch[0].last_page), batch[0].last_pipeline, String(batch[0].last_occurrence)]);
+        }
         else await tx.executeRaw(`UPDATE page_segment_derivation_purges SET cursor_page=$2, cursor_pipeline=$3, cursor_occurrence=$4::bigint, found=$5
           WHERE request_id=$1::uuid`, [purge.request_id, Number(batch[0]!.last_page), batch[0]!.last_pipeline, String(batch[0]!.last_occurrence), found]);
         return batch;
@@ -580,7 +633,7 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
             ORDER BY d.page_id, d.pipeline, d.occurrence_id LIMIT 1`,
           [sourceId, purge.page_ids, purge.cursor_page, purge.cursor_pipeline, purge.cursor_occurrence, purge.recheck]);
           if (!next) {
-            await endWalk(tx, purge, Number(purge.found));
+            await endWalk(tx, purge, Number(purge.found), null);
             return [];
           }
           if (next.swept && !UNPAID_PIPELINES.includes(next.pipeline)) return 'paid' as const;
@@ -612,6 +665,7 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
       pages.set(Number(row.page_id), { scanned: page.scanned + Number(row.swept), normalized: page.normalized + Number(row.normalized), deleted: page.deleted + Number(row.deleted) });
     }
     await afterSweepBatch?.();
+    if (parked) await finishParked(parked);
   }
   const sorted = [...pages].sort((a, b) => a[0] - b[0]);
   if (recordSweepWork) for (const [pageId, work] of sorted) derivationSweepWork.push({ pageId, ...work });

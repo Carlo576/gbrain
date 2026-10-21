@@ -594,8 +594,12 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
   appendPurgeCommitted(row.id);
   counts.page_segment_derivations = (counts.page_segment_derivations ?? 0) + await continueDerivationPurges(ctx.engine, p.sourceId, { first: row.id, inline: true });
   if (beliefReport.appended || ledger?.derived_hidden) await markBeliefCommits(ctx.engine, [row.id]).catch(() => undefined);
+  const sweepVerified = !await derivationPurgeState(ctx.engine, row.id);
   const receipt: PurgeReceipt = await verifyFactPurge(ctx.engine, { target, plan: committedPlan, dryRun: false, removed: counts, prose,
-    vacuum: params.vacuum === true, ledger, sweepVerified: !await derivationPurgeState(ctx.engine, row.id) });
+    vacuum: params.vacuum === true, ledger, sweepVerified });
+  if (sweepVerified && receipt.stores.some(s => s.store === 'page_segment_derivations' && s.status === 'incomplete')) {
+    await recordDerivationPurge(ctx.engine, row.id, p.sourceId, committedPlan.pages.map(page => page.page_id), [target.fact, escapeFenceCell(target.fact)]);
+  }
   return { ...receipt, purge: (row.outcome as { purge?: unknown } | null)?.purge, request_id: row.request_id, state: row.state, similar_active: similar,
     ...await purgeCompletion(ctx.engine, row as WriteRequest, receipt) };
 }

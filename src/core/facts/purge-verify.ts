@@ -130,19 +130,27 @@ async function segmentTextReport(engine: BrainEngine, sourceId: string, needles:
  * live segment of a page the purge did not rewrite is that page's prose, reported with it. The source's rows are walked
  * in primary-key order, segment-derive.ts derivationBatchRows() per statement, each under the probe's statement bound; a
  * statement that outruns it is read again in half as many rows, down to one row, and a single row that still outruns it
- * leaves the store unverified. When the purge's own sweep already ended verified (`sweepVerified`: its record is gone,
- * removed only after a walk that deleted nothing), a probe stopped by a deadline reports the sweep's result instead,
- * with the deadline it hit as `probe`.
+ * leaves the store unverified. A probe that stops (a deadline or its row bound) after a statement counted a row holding
+ * the claim reports what it found, the stop as `probe`: a row the sweep covers makes the store `incomplete`, a row of a
+ * live segment of another page `out_of_scope`. Only when no statement that ran counted one and the purge's own sweep
+ * already ended verified (`sweepVerified`: its record is gone, removed only after a walk that deleted nothing) does a
+ * probe stopped by a deadline report the sweep's result instead, with the deadline it hit as `probe`.
  */
 async function derivationTextReport(engine: BrainEngine, sourceId: string, pageIds: readonly number[], claims: readonly string[], removed: number,
   deadline: number, sweepVerified: boolean): Promise<StoreReport> {
   const { needles, patterns } = await derivationNeedles(engine, claims);
   if (!needles.length) return { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed };
-  const unverified = (reason: string): StoreReport => sweepVerified && reason !== 'row_bound'
-    ? { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed, reason: 'verified_by_sweep', probe: reason,
-      detail: `The receipt's probe stopped at its deadline (${reason}); the purge's sweep had already verified that no stored result it covers holds the claim. Results of live segments of other pages that still state it are listed under pages.` }
-    : { store: 'page_segment_derivations', status: 'unverified', reason, removed };
   let swept = 0, kept = 0;
+  const unverified = (reason: string): StoreReport => {
+    if (swept) return { store: 'page_segment_derivations', status: 'incomplete', remaining: swept, removed, probe: reason,
+      detail: `The receipt's probe stopped (${reason}) after it counted ${swept} stored result(s) the sweep covers still holding the claim; there may be more.` };
+    if (kept) return { store: 'page_segment_derivations', status: 'out_of_scope', reason: 'source_prose', remaining: kept, removed, probe: reason,
+      detail: `The receipt's probe stopped (${reason}) after it counted ${kept} derivation(s) of live segments of pages the purge did not rewrite that hold the text their prose still states; they are listed under pages.` };
+    return sweepVerified && reason !== 'row_bound'
+      ? { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed, reason: 'verified_by_sweep', probe: reason,
+        detail: `The receipt's probe stopped at its deadline (${reason}) before any statement that ran counted a stored result holding the claim; the purge's sweep had already verified that no stored result it covers holds it. Results of live segments of other pages that still state it are listed under pages.` }
+      : { store: 'page_segment_derivations', status: 'unverified', reason, removed };
+  };
   let cursor: DerivationKey | null = null;
   let rows = derivationBatchRows();
   for (;;) {
