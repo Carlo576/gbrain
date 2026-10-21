@@ -72,7 +72,6 @@ import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { installSegmentedVectors, listLiveEmbedSegments, listSegmentChunkRows, readSegmentedEmbedPage } from './page-body/segmented-embedding.ts';
 import { acquirePageEmbeddingLease } from './page-embedding-lease.ts';
 import { planSegmentDerivations, segmentDerivationContextHash } from './page-body/derivations.ts';
-import { SEGMENTED_CHUNKER_VERSION } from './page-body/segment-chunks.ts';
 import { embeddingInputHash, synopsisDocumentHash, type EmbeddingTier } from './embedding-input-hash.ts';
 import { currentEmbeddingSignature } from './embedding.ts';
 import { estimatePageEmbedUsd, reservePageSpend, spendGrant } from './page-embedding-budget.ts';
@@ -497,7 +496,7 @@ export const SYNOPSIS_DERIVATION_VERSION = 1;
  * (synopsisDocumentHash), so a chunk whose recorded input already matches keeps its vector. The pipeline's
  * page_segment_derivations rows (kind synopsis, one per occurrence, output = the window anchors) record each segment
  * done under a context hash over its entry state, the title, the lead's hash, the synopsis model, its output cap, the
- * segmented chunker version, the corpus generation and the write target: a rerun reads no chunk row of a settled
+ * chunker version the page's rows were cut at (so a re-chunk unsettles its segments), the corpus generation and the write target: a rerun reads no chunk row of a settled
  * segment, and an append pays only for the windows of its new segments. Segments run newest first, so a per-page cap
  * spends on the newest text, as the embedding path's grants do.
  *
@@ -537,8 +536,9 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
   const titlePrefix = buildContextualPrefix(page.title, null);
   const embedSignature = currentEmbeddingSignature();
   const lead = await segmentSynopsisLead(engine, page);
+  const [chunked] = await engine.executeRaw<{ chunker_version: number | string | null }>('SELECT chunker_version FROM pages WHERE id = $1', [page.id]);
   const inputs = { title: page.title, lead_sha256: sha256(lead), synopsis_model: synopsisModel, synopsis_max_tokens: synopsisMaxTokens ?? SYNOPSIS_MAX_TOKENS,
-    chunker_version: SEGMENTED_CHUNKER_VERSION, corpus_generation: corpusGeneration,
+    chunker_version: chunked?.chunker_version == null ? null : Number(chunked.chunker_version), corpus_generation: corpusGeneration,
     embedding: { column: target.column.name, model: target.provenanceModel, dimensions: target.column.dimensions } };
   const segments = await listLiveEmbedSegments(engine, page.id);
   const live = segments.map(s => ({ occurrenceId: s.occurrenceId, sha256: s.sha256,

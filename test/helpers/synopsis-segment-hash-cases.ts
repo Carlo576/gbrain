@@ -31,6 +31,8 @@ import { embedStalePages } from '../../src/core/embed-stale.ts';
 import { pageEmbeddingLeaseProbe } from '../../src/core/page-embedding-lease.ts';
 import { installSegmentedVectors, readSegmentedEmbedPage } from '../../src/core/page-body/segmented-embedding.ts';
 import type { AppendBrain } from './append-brain.ts';
+import { needlePage, needlePageBody, sealAtOldChunker } from './rechunk-segmented-cases.ts';
+import { runSegmentedRechunk } from '../../src/core/page-body/rechunk.ts';
 
 const WORDS = ['launch', 'pricing', 'roadmap', 'hiring', 'metrics', 'retention', 'design', 'latency', 'budget', 'customer'];
 const paragraph = (d: number, k: number) =>
@@ -320,6 +322,33 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: after.length });
     expect(calls.length).toBe(nonCode(after).length);
     expect(calls.every(call => call.documentText.startsWith(editedLead))).toBe(true);
+  }, 300_000);
+
+  test('re-chunk: segments settled at the old chunker go unsettled after reindex --segmented --apply; the pass synopsizes every re-chunked row once', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-rechunk';
+    await brain.seed(slug, needlePage(needlePageBody()));
+    const id = await sealAtOldChunker(brain.engine, slug);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis' });
+    expect((await chunks(slug)).every(c => c.vector !== null)).toBe(true);
+    const receipt = await runSegmentedRechunk(brain.engine, { apply: true, slug });
+    expect(receipt.pages).toMatchObject([{ slug, state: 'rechunked' }]);
+    const rechunked = await chunks(slug);
+    const pending = rechunked.filter(c => c.vector === null);
+    expect(pending.length).toBeGreaterThan(0);
+    const segments = new Set(rechunked.map(c => c.occurrence_id)).size;
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: pending.length });
+    expect({ calls: calls.length, embedded: brain.embedded.length, segmentReads }).toEqual({ calls: nonCode(pending).length, embedded: pending.length, segmentReads: segments });
+    const done = await chunks(slug);
+    expect(done.every(c => c.vector !== null)).toBe(true);
+    for (const c of done) expect(c.embedding_input_hash).not.toBe(await titleHash(c));
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: 0 });
+    expect({ calls: calls.length, segmentReads }).toEqual({ calls: 0, segmentReads: 0 });
+    expect((await synopsisRows(id)).every(r => r.state === 'done')).toBe(true);
   }, 300_000);
 
   test('an inline page keeps the synopsisBodyHash input', async () => {
