@@ -225,6 +225,17 @@ async function ledgerLookup<T>(fn: () => Promise<T>, factId: number, sourceId: s
   }
 }
 
+/** The derivation sweep's statement timeout refuses the whole purge with the typed code, as the ledger redaction does. */
+async function derivationSweep(fn: () => Promise<number>, factId: number, sourceId: string): Promise<number> {
+  try { return await fn(); } catch (error) {
+    if ((error as { code?: unknown } | null)?.code !== '57014') throw error;
+    throw opError('purge_lookup_timeout', 'This purge could not finish; nothing was purged. Do not assume the requested content was erased.',
+      `The sweep of stored derivation results holding fact ${factId} in source ${sourceId} exceeded the purge transaction's statement budget, so the transaction rolled back and nothing was removed, tombstoned or redacted. `
+      + 'Run the purge again with a new request id; if it times out again, report it with the output of gbrain doctor --json.',
+    { fix: readFix('Reports the brain\'s health, read-only.', { argv: ['gbrain', 'doctor', '--json'] }) });
+  }
+}
+
 /** Pages with a pending recovery record or an unfinished mirror refuse a purge, as effects refuse other writes. */
 async function assertNoPendingPublication(tx: BrainEngine, sourceId: string, pages: PurgePlan['pages'], ownRequest: string): Promise<void> {
   if (!pages.length) return;
@@ -524,7 +535,8 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
       const bodies = await rewritePageBodies(tx, p.sourceId, plan.pages);
       ({ rewritten, unsealed } = bodies);
       const pageIds = plan.pages.map(page => page.page_id);
-      const derivationRows = bodies.derivations + await sweepDerivationText(tx, p.sourceId, pageIds, [current.fact, escapeFenceCell(current.fact)]);
+      const derivationRows = bodies.derivations + await derivationSweep(() => faultPoint('purge:derivation_sweep', { sourceId: p.sourceId, operation: PURGE_OPERATION })
+        .then(() => sweepDerivationText(tx, p.sourceId, pageIds, [current.fact, escapeFenceCell(current.fact)])), current.id, p.sourceId);
       // A segmented page's flip already retired only the chunks of the occurrences it rewrote.
       const inline = pageIds.filter(id => !bodies.segmented.includes(id));
       const chunks = inline.length ? (await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=ANY($1::integer[]) RETURNING 1', [inline])).length : 0;

@@ -27,7 +27,7 @@ import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from 
 import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
-import { derivationHoldsClaimSql, derivationSweepScopeSql } from '../page-body/segment-derive.ts';
+import { derivationHoldsClaimSql, derivationNeedles, derivationSweepScopeSql } from '../page-body/segment-derive.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
 import { CARRYING_FIELDS } from '../belief/keys.ts';
@@ -129,8 +129,10 @@ async function segmentTextReport(engine: BrainEngine, sourceId: string, needles:
  */
 async function derivationTextReport(engine: BrainEngine, sourceId: string, pageIds: readonly number[], claims: readonly string[], removed: number,
   deadline: number): Promise<StoreReport> {
-  const carrying = `SELECT 1 FROM page_segment_derivations d JOIN pages p ON p.id=d.page_id WHERE p.source_id=$1 AND ${derivationHoldsClaimSql('d', '$2')}`;
-  const params = [sourceId, claims.filter(Boolean), [...pageIds]];
+  const { needles, patterns } = await derivationNeedles(engine, claims);
+  if (!needles.length) return { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed };
+  const carrying = `SELECT 1 FROM page_segment_derivations d JOIN pages p ON p.id=d.page_id WHERE p.source_id=$1 AND ${derivationHoldsClaimSql('d', '$2', '$4')}`;
+  const params = [sourceId, needles, [...pageIds], patterns];
   const swept = await boundedCount(engine, `${carrying} AND ${derivationSweepScopeSql('d', 'p', '$3')}`, params, deadline);
   if ('unverified' in swept) return { store: 'page_segment_derivations', status: 'unverified', reason: swept.unverified, removed };
   if (swept.count) return { store: 'page_segment_derivations', status: 'incomplete', remaining: swept.count, removed };

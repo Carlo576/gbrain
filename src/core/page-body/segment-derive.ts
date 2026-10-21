@@ -345,18 +345,60 @@ export async function deleteRewrittenDerivations(engine: BrainEngine, pageId: nu
 }
 
 /**
- * SQL predicate: derivation row `d` holds one of the claims in the text[] parameter `needles`. Both sides go through
- * gbrain_fact_normalize, the fact fingerprint's normalization (lowercase, punctuation folded, whitespace collapsed), in
- * the database, so a row matches whatever case, spacing or locale lowercasing the claim was written in. The claim must
- * fill whole words of one string value or object key of the row's output or receipt (link excerpts carry it inside a
- * longer window, so equality would miss them): "plays oboe" never matches "plays oboes", nor a claim straddling two fields.
+ * Claims as the derivation predicates match them: each claim's folded normalized text between spaces (`needles`), and
+ * for each a LIKE pattern of its words in order (`patterns`), which the prefilter tries on a row's raw text.
  */
-export function derivationHoldsClaimSql(d: string, needles: string): string {
-  return `EXISTS (SELECT 1 FROM (VALUES (${d}.output), (${d}.receipt)) doc(j),
+export interface DerivationNeedles { needles: string[]; patterns: string[] }
+
+/**
+ * Folds the lowercase forms a database writes depending on context or locale, applied after lowering on both sides:
+ * Greek final sigma (lower('ΚΩΣΤΑΣ') is 'κωστασ' while stored text keeps 'κωστας') and the dot JavaScript and ICU keep
+ * after a lowered Turkish İ ('i̇'). gbrain_fact_normalize itself stays as it is: fact fingerprints are stored.
+ */
+const foldSql = (expr: string) => `replace(translate(${expr}, 'ς', 'σ'), 'i\u0307', 'i')`;
+
+/**
+ * The claims in the form the derivation predicates take, normalized by the database (gbrain_fact_normalize, then
+ * foldSql), so the needle and the rows go through the same SQL. A claim that normalizes to nothing matches nothing.
+ */
+export async function derivationNeedles(engine: Pick<BrainEngine, 'executeRaw'>, claims: readonly string[]): Promise<DerivationNeedles> {
+  const list = [...new Set(claims.filter(Boolean))];
+  const rows = list.length ? await engine.executeRaw<{ f: string }>(`SELECT DISTINCT f FROM (SELECT ${foldSql('gbrain_fact_normalize(c)')} AS f
+    FROM unnest($1::text[]) c) x WHERE f <> '' ORDER BY f`, [list]) : [];
+  // A word holding a control character is spelled \uXXXX in a row's JSON text, so it cannot prefilter.
+  const pattern = (text: string) => ['', ...text.split(' ').filter(t => t && !/[\u0000-\u001f]/.test(t)).map(t => t.replace(/[\\%_]/g, '\\$&')), ''].join('%');
+  return { needles: rows.map(row => ` ${row.f} `), patterns: rows.map(row => pattern(row.f)) };
+}
+
+/**
+ * SQL predicate, the prefilter: `text`, lowered and folded, matches one of the patterns in the text[] parameter
+ * `patterns` (from derivationNeedles): has a claim's words in the claim's order. Normalization only lowers, folds
+ * characters to spaces and collapses spaces, keeping order, so the words of a claim a text holds occur in it in that
+ * order (in a row's JSON text too: JSON escapes only quotes, backslashes and control characters, which no word holds);
+ * a text this rejects never holds the claim.
+ */
+const hasWordsSql = (text: string, patterns: string) => `${foldSql(`lower(${text})`)} LIKE ANY (${patterns}::text[])`;
+
+/** SQL predicate: derivation row `d`'s output and receipt JSON text passes the prefilter (see hasWordsSql). */
+export function derivationClaimCandidateSql(d: string, patterns: string): string {
+  return hasWordsSql(`COALESCE(${d}.output::text, '') || ' ' || COALESCE(${d}.receipt::text, '')`, patterns);
+}
+
+/**
+ * SQL predicate: derivation row `d` holds one of the claims (the text[] parameters `needles` and `patterns`, from
+ * derivationNeedles). The row goes through the needle's own normalization (gbrain_fact_normalize, the fact fingerprint's:
+ * lowercase, punctuation folded, whitespace collapsed; then foldSql) in the database, so it matches whatever case,
+ * spacing or locale lowercasing the claim was written in. The claim must fill whole words of one string value or object
+ * key of the row's output or receipt (link excerpts carry it inside a longer window, so equality would miss them): "plays
+ * oboe" never matches "plays oboes", nor a claim straddling two fields. Only a row, and then a value, passing the
+ * prefilter is normalized.
+ */
+export function derivationHoldsClaimSql(d: string, needles: string, patterns: string): string {
+  return `CASE WHEN ${derivationClaimCandidateSql(d, patterns)} THEN EXISTS (SELECT 1 FROM (VALUES (${d}.output), (${d}.receipt)) doc(j),
     LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
-      UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s,
-    (SELECT DISTINCT ' ' || gbrain_fact_normalize(n) || ' ' AS n FROM unnest(${needles}::text[]) n) k
-    WHERE k.n <> '  ' AND strpos(' ' || gbrain_fact_normalize(s.t) || ' ', k.n) > 0)`;
+      UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
+    WHERE CASE WHEN ${hasWordsSql('s.t', patterns)} THEN EXISTS (SELECT 1 FROM unnest(${needles}::text[]) k(n)
+      WHERE strpos(' ' || ${foldSql('gbrain_fact_normalize(s.t)')} || ' ', k.n) > 0) ELSE false END) ELSE false END`;
 }
 
 /**
@@ -370,28 +412,38 @@ export function derivationSweepScopeSql(d: string, p: string, pageIds: string): 
     WHERE m.page_id = ${d}.page_id AND m.occurrence_id = ${d}.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = ${d}.segment_sha256))`;
 }
 
-/** @internal Per page, for the work-volume tests (counts, not time): derivation rows each sweep read and deleted. */
-export const derivationSweepWork: Array<{ pageId: number; scanned: number; deleted: number }> = [];
+/**
+ * @internal Per page, for the work-volume tests (counts, not time): derivation rows each sweep read, normalized and
+ * deleted. Recorded only while __setDerivationSweepWorkForTests(true) is in effect.
+ */
+export const derivationSweepWork: Array<{ pageId: number; scanned: number; normalized: number; deleted: number }> = [];
+let recordSweepWork = false;
+/** @internal Test seam: start (clearing what is there) or stop recording derivationSweepWork. */
+export function __setDerivationSweepWorkForTests(on: boolean): void { recordSweepWork = on; derivationSweepWork.length = 0; }
 
 /**
  * Delete the derivation rows of a source that hold one of `claims` (derivationHoldsClaimSql) among the rows a fact purge
  * sweeps (derivationSweepScopeSql over `pageIds`, the pages it rewrote), in the purge's transaction after the body
- * rewrites, so a row a rewrite could not place goes too. Only rows in scope are normalized and matched; the purge
- * receipt probes the store with the same two predicates. Returns the rows deleted.
+ * rewrites and under its statement budget, so a row a rewrite could not place goes too. Only rows in scope that pass the
+ * prefilter (derivationClaimCandidateSql) are normalized; the purge receipt probes the store with the same predicates.
+ * Returns the rows deleted.
  */
 export async function sweepDerivationText(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, pageIds: readonly number[],
   claims: readonly string[]): Promise<number> {
-  const list = [...new Set(claims.filter(Boolean))];
-  if (!list.length) return 0;
-  const rows = await engine.executeRaw<{ page_id: number; scanned: number; deleted: number }>(`WITH scope AS MATERIALIZED (
-      SELECT d.page_id, d.pipeline, d.occurrence_id, ${derivationHoldsClaimSql('d', '$3')} AS hit
+  const { needles, patterns } = await derivationNeedles(engine, claims);
+  if (!needles.length) return 0;
+  const rows = await engine.executeRaw<{ page_id: number; scanned: number; normalized: number; deleted: number }>(`WITH scope AS MATERIALIZED (
+      SELECT d.page_id, d.pipeline, d.occurrence_id, d.output, d.receipt, ${derivationClaimCandidateSql('d', '$4')} AS candidate
       FROM page_segment_derivations d JOIN pages p ON p.id = d.page_id WHERE p.source_id = $1 AND ${derivationSweepScopeSql('d', 'p', '$2')}
+    ), hits AS MATERIALIZED (
+      SELECT s.page_id, s.pipeline, s.occurrence_id FROM scope s WHERE s.candidate AND ${derivationHoldsClaimSql('s', '$3', '$4')}
     ), gone AS (
-      DELETE FROM page_segment_derivations x USING scope s WHERE s.hit AND x.page_id = s.page_id AND x.pipeline = s.pipeline
-        AND x.occurrence_id = s.occurrence_id RETURNING x.page_id
-    ) SELECT s.page_id, count(*)::int AS scanned, (SELECT count(*)::int FROM gone g WHERE g.page_id = s.page_id) AS deleted
-    FROM scope s GROUP BY s.page_id ORDER BY s.page_id`, [sourceId, [...pageIds], list]);
-  for (const row of rows) derivationSweepWork.push({ pageId: Number(row.page_id), scanned: Number(row.scanned), deleted: Number(row.deleted) });
+      DELETE FROM page_segment_derivations x USING hits h WHERE x.page_id = h.page_id AND x.pipeline = h.pipeline
+        AND x.occurrence_id = h.occurrence_id RETURNING x.page_id
+    ) SELECT s.page_id, count(*)::int AS scanned, count(*) FILTER (WHERE s.candidate)::int AS normalized,
+      (SELECT count(*)::int FROM gone g WHERE g.page_id = s.page_id) AS deleted
+    FROM scope s GROUP BY s.page_id ORDER BY s.page_id`, [sourceId, [...pageIds], needles, patterns]);
+  if (recordSweepWork) for (const row of rows) derivationSweepWork.push({ pageId: Number(row.page_id), scanned: Number(row.scanned), normalized: Number(row.normalized), deleted: Number(row.deleted) });
   return rows.reduce((n, row) => n + Number(row.deleted), 0);
 }
 
