@@ -2906,6 +2906,16 @@
         {
           "category": "brain",
           "details": {
+            "models": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No segmented page derivation is held back by a model without a price.",
+          "name": "derivation_unpriced_model",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "by_source": [
               {
                 "count": 0,
