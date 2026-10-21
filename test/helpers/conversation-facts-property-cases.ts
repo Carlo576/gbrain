@@ -15,8 +15,10 @@
  *         row records holds exactly that count (a key holding no fact included), and a window marked failed holds either
  *         that count (an earlier context's batch) or none;
  *   (iii) every window a row claims holds exactly the facts the row says, and a settled page holds only current windows.
+ * Before a step, the page may also be rewritten to prose that keeps zero to three of its message lines, so no grammar
+ * is detected while it still holds facts, then restored; each of the two runs is checked like a step.
  * Each step records which paths it exercised (a moved window, a window-specific failure, a window marked failed, a
- * settled collection, a --since run, a cap refusal); across the seeds every path must fire at least its floor. Each seed
+ * settled collection, a --since run, a cap refusal, a lost grammar on a page holding facts); across the seeds every path must fire at least its floor. Each seed
  * also dooms the windows whose text hash starts with one chosen digit for a span of steps, so windows reach the failure
  * limit and block collection until the final --force run.
  * At the end a healthy unconstrained --force run leaves the same windows and facts as one extraction of the same page on
@@ -32,6 +34,7 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import type { AppendBrain } from './append-brain.ts';
 import { runExtractConversationFactsCore } from '../../src/commands/extract-conversation-facts.ts';
 import { CONVERSATION_FACTS_DERIVATION_VERSION } from '../../src/core/facts/conversation-incremental.ts';
+import { createPatternDetector } from '../../src/core/conversation-parser/parse.ts';
 import { parseSourceWindow, sourceWindowKey, type SourceWindow } from '../../src/core/page-body/derivations.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import { PAGE_DERIVATION_CAP_KEY } from '../../src/core/page-spend.ts';
@@ -140,12 +143,16 @@ async function violations(engine: BrainEngine, slug: string, before: Fact[], o: 
   return { problems, after, fired };
 }
 
-type PropertyPath = 'moved' | 'failed_window' | 'marked_failed' | 'collected' | 'since' | 'cap';
-/** Steps, across every seed, that must exercise each path: about half of what the 30 seeds exercise on both engines (193, 165, 46, 133, 28, 21). */
-export const PROPERTY_PATH_FLOORS: Record<PropertyPath, number> = { moved: 96, failed_window: 82, marked_failed: 23, collected: 66, since: 14, cap: 10 };
+type PropertyPath = 'moved' | 'failed_window' | 'marked_failed' | 'collected' | 'since' | 'cap' | 'grammar_lost';
+/**
+ * Steps, across every seed, that must exercise each path: the round-5 floors (about half of 193, 165, 46, 133, 28, 21),
+ * and half of the 24 steps that lose the grammar on a page holding facts (the 30 seeds now exercise 189, 155, 37, 167,
+ * 30, 22, 24).
+ */
+export const PROPERTY_PATH_FLOORS: Record<PropertyPath, number> = { moved: 96, failed_window: 82, marked_failed: 23, collected: 66, since: 14, cap: 10, grammar_lost: 12 };
 
 export function defineConversationFactsPropertyCases(opts: { getBrain: () => AppendBrain; getFresh: () => AppendBrain }): void {
-  const firedSteps: Record<PropertyPath, number> = { moved: 0, failed_window: 0, marked_failed: 0, collected: 0, since: 0, cap: 0 };
+  const firedSteps: Record<PropertyPath, number> = { moved: 0, failed_window: 0, marked_failed: 0, collected: 0, since: 0, cap: 0, grammar_lost: 0 };
   let seedsRun = 0;
   for (let seed = 1; seed <= PROPERTY_SEEDS; seed++) {
     test(`seed ${seed}: ${PROPERTY_STEPS} seeded changes and constrained runs keep the deletion invariant, and the page converges to a fresh extraction`, async () => {
@@ -164,6 +171,29 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
       await brain.seed(slug, chatPage(title, chatDays(FIRST_DAY, DAYS, seed)));
       const log: string[] = [];
       let facts = await factsOf(engine, slug);
+      // Its own stream, so the steps the main stream draws stay those of a run with no lost grammar.
+      const lost = rng(seed + 7919);
+      /** Rewrite the page to prose keeping up to three of its message lines (no grammar is detected while it holds facts), run, then restore the transcript and run; each run is checked like a step. */
+      const loseGrammar = async (step: number) => {
+        const truth = (await brain.body(slug)).truth;
+        const quoted = truth.split('\n').filter(line => line.startsWith('**')).slice(-(1 + Math.floor(lost() * 40))).slice(0, Math.floor(lost() * 4));
+        const prose = Array.from({ length: 12_000 }, (_, i) => `Paragraph ${i} of the notes: ${WORDS[Math.floor(lost() * WORDS.length)]} and ${WORDS[i % WORDS.length]}.`).join('\n\n');
+        for (const phase of ['lost', 'restored'] as const) {
+          await brain.seed(slug, chatPage(title, phase === 'lost' ? [prose, ...quoted].join('\n\n') : truth));
+          const detector = createPatternDetector();
+          detector.push((await brain.body(slug)).truth);
+          const lostGrammar = phase === 'lost' && detector.finish() === null && facts.length > 0;
+          const constraint = (['none', 'none', 'abort', 'limit'] as const)[Math.floor(lost() * 4)]!;
+          const o: RunOpts = constraint === 'abort' ? { abortAfter: 1 + Math.floor(lost() * 30) } : constraint === 'limit' ? { segmentLimit: 1 + Math.floor(lost() * 20) } : {};
+          const outcome = await run(engine, slug, o);
+          const checked = await violations(engine, slug, facts, o, outcome);
+          if (lostGrammar) checked.fired.add('grammar_lost');
+          log.push(`step ${step} (grammar ${phase}, ${quoted.length} message line(s) kept): ${constraint} ${JSON.stringify(o)} -> ${JSON.stringify(outcome)}, ${checked.after.length} facts; ${[...checked.fired].join(' ') || 'no path'}`);
+          for (const path of checked.fired) firedSteps[path]++;
+          expect({ step, log: log.at(-1), problems: checked.problems.slice(0, 5) }).toEqual({ step, log: log.at(-1), problems: [] });
+          facts = checked.after;
+        }
+      };
       // The windows whose text hash starts with this digit fail in every run of these steps.
       const doomDigit = pick([...'0123456789abcdef']);
       const doomFrom = 1 + Math.floor(next() * (PROPERTY_STEPS - 6));
@@ -177,6 +207,8 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
       try {
         for (let step = 1; step <= PROPERTY_STEPS + 1; step++) {
           const final = step > PROPERTY_STEPS;
+          // Never inside the doomed span, whose windows must fail run after run to reach the failure limit.
+          if (lost() < 0.08 && !final && !(step >= doomFrom && step < doomFrom + doomSteps)) await loseGrammar(step);
           const change = final ? 'none' : pick(['none', 'none', 'append', 'append', 'append', 'new-day', 'edit', 'edit', 'insert', 'insert', 'delete', 'oversized',
             'title', 'title', 'visibility', 'model', 'version'] as const);
           if (change === 'append') {
