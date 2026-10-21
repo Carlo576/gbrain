@@ -23,18 +23,14 @@ import { openAppendBrain, type AppendBrain } from './helpers/append-brain.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { waitFor } from './helpers/wait-for.ts';
 import { withEnv } from './helpers/with-env.ts';
-import type { OperationContext } from '../src/core/ops/contract.ts';
 import { __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 import { resolveActiveEmbeddingColumnFromEngine } from '../src/core/search/embedding-column.ts';
 import { chunkGenerationFilter } from '../src/core/search/safe-chunks.ts';
 import { runEmbedCore } from '../src/commands/embed.ts';
 import { pageEmbeddingLeaseProbe } from '../src/core/page-embedding-lease.ts';
 import { runPersistenceEffects } from '../src/core/persistence/effects.ts';
-import { localHostId, registerLocalWriter } from '../src/core/persistence/identity.ts';
-import { submissionAuthority } from '../src/core/persistence/authority.ts';
-import { admitWrite, claimNextWrite } from '../src/core/persistence/journal.ts';
-import { publishMutation } from '../src/core/persistence/coordinator.ts';
-import { installPageProjection, readProjectionSnapshot } from '../src/core/page-state/projections.ts';
+import { localHostId } from '../src/core/persistence/identity.ts';
+import { pendingEmbedPage } from './helpers/pending-embed-page.ts';
 
 /** Marks the drain's provider calls; every other call comes from an embedding effect. */
 const drainScope = new AsyncLocalStorage<true>();
@@ -148,31 +144,9 @@ for (const kind of testBackends()) {
       rmSync(home, { recursive: true, force: true });
     }, 120_000);
 
-    /** A published put_page whose embedding effect is queued but not yet due, and whose chunks have no vector. */
-    async function pendingPage() {
-      const engine = brain.engine;
-      await registerLocalWriter(engine, 'cli');
-      const sourceId = `embed-once-${randomUUID()}`;
-      const [source] = await engine.executeRaw<{ incarnation: string }>('INSERT INTO sources(id,name) VALUES($1,$1) RETURNING incarnation', [sourceId]);
-      const ctx: OperationContext = { engine, config: { engine: engine.kind }, remote: false, dryRun: false, sourceId,
-        logger: { info() {}, warn() {}, error() {} } };
-      const authority = await submissionAuthority(ctx, 'put_page', sourceId, source!.incarnation, 'page');
-      await admitWrite(engine, { principal: authority.principal, authority, operation: 'put_page', sourceId,
-        sourceIncarnation: source!.incarnation, slug: 'page', requestId: randomUUID(), callerIntent: { body: CHUNKS.join(' ') }, intent: { body: CHUNKS.join(' ') } });
-      const row = (await claimNextWrite(engine, localHostId()))!;
-      await publishMutation(engine, row, { observedRevision: null, apply: async tx => {
-        await tx.putPage('page', { type: 'note', title: 'Example', compiled_truth: CHUNKS.join(' '), timeline: '', frontmatter: {} }, { sourceId }); return {};
-      } }, localHostId());
-      const prepared = (await readProjectionSnapshot(engine, 'page', sourceId, { allowUnsealed: true }))!;
-      await installPageProjection(engine, prepared, CHUNKS.map((chunk_text, chunk_index) => ({ chunk_index, chunk_source: 'compiled_truth' as const, chunk_text })), { seal: true });
-      await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now()+interval '1 hour' WHERE request_id=$1::uuid", [row.id]);
-      const [effect] = await engine.executeRaw<{ id: string }>("SELECT id FROM persistence_effects WHERE request_id=$1::uuid AND kind='embedding'", [row.id]);
-      return { sourceId, effectId: effect!.id };
-    }
-
     test('forced probe: a stale drain holds its provider call while the page\'s embedding effect runs; each chunk is sent once', () => withEnv({ GBRAIN_HOME: home }, () => withGate(async g => {
       const engine = brain.engine;
-      const { sourceId, effectId } = await pendingPage();
+      const { sourceId, effectId } = await pendingEmbedPage(engine, CHUNKS);
       const fresh = await vectorless(brain, sourceId, 'page');
       expect(fresh).toEqual(CHUNKS);
       const drained = drain(brain);

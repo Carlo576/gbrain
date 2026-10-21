@@ -12,11 +12,17 @@
  * The lease is a `gbrain_cycle_locks` row (`embed-page:<page id>`) written with
  * plain statements, so it holds across processes and through a transaction
  * pooler without pinning a connection during the provider call. The holder
- * refreshes it; a holder that dies leaves a row that expires after the TTL.
+ * refreshes it and renews it once more inside its install transaction, which
+ * installs nothing when that renewal matches no row. A waiter gives up at its
+ * deadline or after one TTL and gets a busy lease instead of the page. A holder
+ * that dies leaves a row that expires after the TTL; every release deletes the
+ * expired `embed-page:` rows.
  */
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { BrainEngine } from './engine.ts';
+import { opError, type OperationError } from './ops/contract.ts';
+import { readFix } from './ops/op-fix.ts';
 import { quoteIdentifier } from './search/embedding-column.ts';
 import { chunkGenerationFilter } from './search/safe-chunks.ts';
 
@@ -24,11 +30,29 @@ export const PAGE_EMBEDDING_LEASE_TTL_MINUTES = 2;
 const LEASE_REFRESH_MS = 30_000;
 const LEASE_WAIT_MAX_MS = 1_000;
 
-/** Test seam: called each time a path finds a page's lease held by another path, before it waits. */
-export const pageEmbeddingLeaseProbe: { contended?: (pageId: number) => void } = {};
+/**
+ * Test seams: `contended` runs each time a path finds a page's lease held by another path, before it waits;
+ * `waitBoundMs` replaces the default wait bound (one TTL).
+ */
+export const pageEmbeddingLeaseProbe: { contended?: (pageId: number) => void; waitBoundMs?: number } = {};
 
 export function pageEmbeddingLeaseId(pageId: number): string {
   return `embed-page:${pageId}`;
+}
+
+/**
+ * A page's embedding lease. `busy`: another path held it through the whole wait, nothing was taken and the
+ * caller leaves the page to that path. Otherwise `assertHeld(tx)` renews it inside the install transaction and
+ * throws `lock_busy` when the renewal matches no row (it expired and was taken or deleted), so nothing installs.
+ */
+export type PageEmbeddingLease = AsyncDisposable & ({ busy: true } | { busy: false; assertHeld(tx: Pick<BrainEngine, 'executeRaw'>): Promise<void> });
+
+/** The retryable error for a page whose embedding lease another path holds (`lost`: this holder's lease was taken over). */
+export function pageEmbeddingLeaseUnavailable(pageId: number, lost: boolean): OperationError {
+  return opError('lock_busy', lost ? 'This page\'s embedding lease was lost before the install.' : 'Another path is embedding this page.',
+    lost ? `The embedding lease of page ${pageId} expired and was taken or reclaimed by another path, so this attempt installed no vectors; that path or the next embed run embeds the page.`
+      : `Another path held the embedding lease of page ${pageId} through the whole wait, so this attempt sent nothing to the provider; that path embeds the page, and a retry embeds only what it leaves.`,
+    { fix: readFix('Shows the gbrain_cycle_locks rows, embed-page leases included, with holder and expiry, read-only.', { argv: ['gbrain', 'status', '--section', 'locks', '--json'] }) });
 }
 
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
@@ -40,13 +64,13 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Takes page `pageId`'s embedding lease, waiting while another path holds it.
- * `whileWaiting` runs before each wait (an effect renews its claim there); an
- * abort of `signal` ends the wait by throwing its reason. Bind the result with
+ * Takes page `pageId`'s embedding lease, waiting while another path holds it until `deadline` (epoch ms) or one
+ * TTL, whichever is sooner, and returning a busy lease then. `whileWaiting` runs before each wait (an effect
+ * renews its claim there); an abort of `signal` ends the wait by throwing its reason. Bind the result with
  * `await using` in the scope that ends with the install: leaving it releases the lease.
  */
 export async function acquirePageEmbeddingLease(engine: BrainEngine, pageId: number,
-  opts: { signal?: AbortSignal; whileWaiting?: () => Promise<void> } = {}): Promise<AsyncDisposable> {
+  opts: { signal?: AbortSignal; deadline?: number; whileWaiting?: () => Promise<void> } = {}): Promise<PageEmbeddingLease> {
   const id = pageEmbeddingLeaseId(pageId);
   const token = randomUUID();
   const take = async () => (await engine.executeRaw(
@@ -56,21 +80,31 @@ export async function acquirePageEmbeddingLease(engine: BrainEngine, pageId: num
        ttl_expires_at = EXCLUDED.ttl_expires_at, last_refreshed_at = now(), acquisition_token = EXCLUDED.acquisition_token
      WHERE gbrain_cycle_locks.ttl_expires_at < now()
      RETURNING id`, [id, process.pid, hostname(), PAGE_EMBEDDING_LEASE_TTL_MINUTES, token])).length > 0;
+  const bound = Math.min(opts.deadline ?? Infinity, Date.now() + (pageEmbeddingLeaseProbe.waitBoundMs ?? PAGE_EMBEDDING_LEASE_TTL_MINUTES * 60_000));
   for (let waitMs = 50; !await take(); waitMs = Math.min(waitMs * 2, LEASE_WAIT_MAX_MS)) {
     pageEmbeddingLeaseProbe.contended?.(pageId);
+    if (Date.now() >= bound) return { busy: true, [Symbol.asyncDispose]: async () => {} };
     await opts.whileWaiting?.();
-    await pause(waitMs, opts.signal);
+    await pause(Math.min(waitMs, Math.max(0, bound - Date.now())), opts.signal);
     opts.signal?.throwIfAborted();
   }
+  let lost = false;
+  const renew = async (exec: Pick<BrainEngine, 'executeRaw'>) => {
+    if (!lost) lost = (await exec.executeRaw(`UPDATE gbrain_cycle_locks SET ttl_expires_at = now() + make_interval(mins => $3::int), last_refreshed_at = now()
+      WHERE id = $1 AND acquisition_token = $2::uuid RETURNING id`, [id, token, PAGE_EMBEDDING_LEASE_TTL_MINUTES])).length === 0;
+    return !lost;
+  };
   const refresh = setInterval(() => {
-    engine.executeRaw(`UPDATE gbrain_cycle_locks SET ttl_expires_at = now() + make_interval(mins => $3::int), last_refreshed_at = now()
-      WHERE id = $1 AND acquisition_token = $2::uuid`, [id, token, PAGE_EMBEDDING_LEASE_TTL_MINUTES]).catch(() => { /* the TTL is the backstop */ });
+    renew(engine).then(held => { if (!held) clearInterval(refresh); }, () => { /* the install's renewal decides */ });
   }, LEASE_REFRESH_MS);
   refresh.unref?.();
   return {
+    busy: false,
+    assertHeld: async tx => { if (!await renew(tx)) throw pageEmbeddingLeaseUnavailable(pageId, true); },
     [Symbol.asyncDispose]: async () => {
       clearInterval(refresh);
-      await engine.executeRaw('DELETE FROM gbrain_cycle_locks WHERE id = $1 AND acquisition_token = $2::uuid', [id, token])
+      await engine.executeRaw(`DELETE FROM gbrain_cycle_locks
+        WHERE (id = $1 AND acquisition_token = $2::uuid) OR (id LIKE 'embed-page:%' AND ttl_expires_at < now())`, [id, token])
         .catch(() => { /* the TTL is the backstop */ });
     },
   };

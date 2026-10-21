@@ -325,12 +325,15 @@ export async function embedStalePages(
         if (page.embedded) result.pagesProcessed += 1;
         continue;
       }
+      const [page] = await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL', [sourceId, slug]);
+      if (!page) continue;
+      await using lease = await acquirePageEmbeddingLease(engine, page.id, { signal: opts.signal });
+      if (lease.busy) continue;
       // SUP-3874: split legacy oversized rows before embedding so a single
       // pre-cap chunk cannot permanently fail the page.
       await healOversizedPageChunks(engine, slug, { sourceId });
       const prepared = await readProjectionSnapshot(engine, slug, sourceId, { requireLiveSource: true });
-      if (!prepared) continue;
-      await using _lease = await acquirePageEmbeddingLease(engine, prepared.snapshot.page.id, { signal: opts.signal });
+      if (!prepared || prepared.snapshot.page.id !== page.id) continue;
       const existing = prepared.chunks;
       const staleIdx = new Set(
         (await engine.executeRaw<{ chunk_index: number }>(
@@ -362,6 +365,7 @@ export async function embedStalePages(
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
       const install = await engine.transaction(async tx => {
+        await lease.assertHeld(tx);
         const installed = await installPageEmbeddings(tx, prepared, merged,
           opts.embeddingSignature && stale.length === existing.length ? opts.embeddingSignature : undefined);
         if (stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, sourceId);
@@ -559,7 +563,8 @@ export async function embedStaleForSource(
       try {
         await opts.assertOwned?.();
         if (stopped() || await embedSegmentedStaleRows(engine, stale, result, { embedFn, signal, signature, stamp, pacer, assertOwned: opts.assertOwned, stopped })) return;
-        await using _lease = await acquirePageEmbeddingLease(engine, stale[0].page_id, { signal });
+        await using lease = await acquirePageEmbeddingLease(engine, stale[0].page_id, { signal, deadline: opts.deadline });
+        if (lease.busy) return;
         // SUP-3874: split legacy oversized chunk_text before embedding.
         const healed = await observed(pacer, () => engine.transaction(async tx => {
           await opts.assertOwned?.(tx);
@@ -617,6 +622,7 @@ export async function embedStaleForSource(
         const install = await observed(pacer, () => engine.transaction(async tx => {
           await opts.assertOwned?.(tx);
           if (stopped()) throw new AbortError();
+          await lease.assertHeld(tx);
           const installed = await installPageEmbeddings(tx, prepared, merged);
           if (stamp) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
           if (stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);

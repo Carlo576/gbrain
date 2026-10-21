@@ -120,9 +120,10 @@ export async function listSegmentedStaleRows(engine: Pick<BrainEngine, 'executeR
  * nothing to embed.
  */
 export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmbedPage, listed: readonly SegmentedStaleRow[],
-  opts: SegmentedEmbedOpts & { includeEmbedded?: boolean }): Promise<{ pending: number; installed: number } | null> {
+  opts: SegmentedEmbedOpts & { includeEmbedded?: boolean }): Promise<{ pending: number; installed: number; busy?: true } | null> {
   if (listed.length === 0) return { pending: 0, installed: 0 };
-  await using _lease = await acquirePageEmbeddingLease(engine, page.id, { signal: opts.signal, whileWaiting: opts.whileWaiting });
+  await using lease = await acquirePageEmbeddingLease(engine, page.id, { signal: opts.signal, whileWaiting: opts.whileWaiting });
+  if (lease.busy) return { pending: listed.length, installed: 0, busy: true };
   const target = await embeddingWriteTarget(engine);
   const missing = opts.includeEmbedded ? null : await vectorlessChunkIndexes(engine, page.id, target.column.name);
   const rows = missing ? listed.filter(row => missing.has(row.chunk_index)) : listed;
@@ -137,7 +138,8 @@ export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmb
   const tier = plainEmbeddingTier(page.contextual_retrieval_mode);
   const provenance = embeddingInputContext(target, page.title, null, []);
   return { pending: rows.length, installed: await installSegmentedVectors(engine, page, target, chunks.map((chunk, i) => ({ chunk_index: chunk.chunk_index,
-    chunk_text: chunk.chunk_text, vector: vectors[i]!, hash: embeddingInputHash(provenance, tier, chunk) })), opts.beforeInstall) };
+    chunk_text: chunk.chunk_text, vector: vectors[i]!, hash: embeddingInputHash(provenance, tier, chunk) })),
+    async tx => { await lease.assertHeld(tx); await opts.beforeInstall?.(tx); }) };
 }
 
 /** One vector to install on a segmented page: the row's chunk_index and exact text, and the recorded embedding input. */
@@ -208,7 +210,7 @@ export async function listSegmentChunkRows(engine: Pick<BrainEngine, 'executeRaw
  * batches keep the approval's lifted hold but spend under the cap it set.
  */
 export async function embedSegmentedPage(engine: BrainEngine, page: SegmentedEmbedPage,
-  opts: SegmentedEmbedOpts & { occurrenceIds?: readonly number[]; batchRows?: number; all?: boolean }): Promise<{ embedded: number; complete: boolean; stopped?: 'budget' | 'page_moved' }> {
+  opts: SegmentedEmbedOpts & { occurrenceIds?: readonly number[]; batchRows?: number; all?: boolean }): Promise<{ embedded: number; complete: boolean; stopped?: 'budget' | 'page_moved' | 'busy' }> {
   const column = (await embeddingWriteTarget(engine)).column.name;
   const limit = opts.batchRows ?? SEGMENTED_EMBED_BATCH_ROWS;
   let embedded = 0;
@@ -219,6 +221,7 @@ export async function embedSegmentedPage(engine: BrainEngine, page: SegmentedEmb
     const approvedCapUsd = opts.approvedCapUsd === undefined || before === null ? opts.approvedCapUsd : 0;
     const done = await embedSegmentedRows(engine, page, rows, { ...opts, approvedCapUsd, includeEmbedded: opts.all });
     if (done === null) return { embedded, complete: false, stopped: 'budget' };
+    if (done.busy) return { embedded, complete: false, stopped: 'busy' };
     embedded += done.installed;
     if (done.pending > 0 && done.installed === 0) return { embedded, complete: false, stopped: 'page_moved' };
     if (done.installed < done.pending) return { embedded, complete: false, stopped: 'budget' };
