@@ -27,6 +27,7 @@ import { readFix } from '../ops/op-fix.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { contentHash, rowToPage } from '../utils.ts';
 import { rewriteLiveSegmentedFences, rewriteSegmentedGeneration, segmentedBodyContains } from '../page-body/segment-rewrite.ts';
+import { sweepDerivationText } from '../page-body/segment-derive.ts';
 import { discoverWithdrawalTargets, withdrawalDiscoveryFailure } from './withdrawal-discovery.ts';
 import { dropPurgedFenceRows } from './purge-overlay.ts';
 import { derivedRowsFrom, hideDerivedRows, type DerivationRef } from './derivation-inputs.ts';
@@ -522,6 +523,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
       const facts = (await tx.executeRaw('DELETE FROM facts WHERE id=ANY($1::bigint[]) AND source_id=$2 RETURNING id', [ids, p.sourceId])).length;
       const bodies = await rewritePageBodies(tx, p.sourceId, plan.pages);
       ({ rewritten, unsealed } = bodies);
+      const derivationRows = bodies.derivations + await sweepDerivationText(tx, p.sourceId, [current.fact, escapeFenceCell(current.fact)]);
       const pageIds = plan.pages.map(page => page.page_id);
       // A segmented page's flip already retired only the chunks of the occurrences it rewrote.
       const inline = pageIds.filter(id => !bodies.segmented.includes(id));
@@ -542,7 +544,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
         targets: pages.map(page => ({ slug: page.slug, page_id: Number(page.id), revision: page.knowledge_revision })) })]);
       counts = { facts, takes, chunks, page_versions: versions.redacted, pages: rewritten.length, persistence_requests: intents,
         query_cache: cache, decide_review: review, open_loops: loops, take_proposals: proposals, core_edit_notices: notices,
-        write_gate_holds: holdIds.length, write_gate_receipts: gateReceipts, page_segment_texts: segments.texts, page_segment_derivations: bodies.derivations,
+        write_gate_holds: holdIds.length, write_gate_receipts: gateReceipts, page_segment_texts: segments.texts, page_segment_derivations: derivationRows,
         page_body_stagings: segments.stagings, page_body_staging_parts: segments.parts, persistence_requests_cancelled: segments.cancelled,
         derived_hidden: Object.values(derived.hidden).reduce((a, b) => a + b, 0) };
       derivedHidden = derived;

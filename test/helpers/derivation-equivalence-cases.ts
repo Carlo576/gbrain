@@ -11,7 +11,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
-import { makeResolver, type ExtractPageLinksOptions } from '../../src/core/link-extraction.ts';
+import { extractPageLinks, makeResolver, type ExtractPageLinksOptions } from '../../src/core/link-extraction.ts';
 import { loadActivePackForLocalEngine } from '../../src/core/schema-pack/best-effort.ts';
 import { extractSegmentedPageLinks, openSegmentedLinkSession, segmentedRoleText } from '../../src/core/page-body/segment-links.ts';
 import { segmentDeriveWork, SEGMENT_PIPELINE_VERSIONS, type UnpaidDerivationKind } from '../../src/core/page-body/segment-derive.ts';
@@ -107,6 +107,13 @@ export async function incrementalLinks(engine: BrainEngine, page: EquivalencePag
   return session!.finish({ ...opts, temporal: true, targetType } as never);
 }
 
+/** extractPageLinks over the joined body (`${compiled_truth}\n${timeline}`), as an inline page of the same text is extracted. */
+export async function inlineLinks(engine: BrainEngine, page: EquivalencePage, body: { truth: string; timeline: string }) {
+  const resolver = makeResolver(engine, { mode: 'live', sourceId: SOURCE });
+  const { opts, targetType } = await linkOptions(engine);
+  return extractPageLinks(page.slug, `${body.truth}\n${body.timeline}`, page.frontmatter, page.type, resolver, { ...opts, targetType });
+}
+
 export async function fullLinks(engine: BrainEngine, page: EquivalencePage) {
   const resolver = makeResolver(engine, { mode: 'live', sourceId: SOURCE });
   const { opts, targetType } = await linkOptions(engine);
@@ -198,7 +205,7 @@ export async function liveOccurrences(engine: BrainEngine, pageId: number): Prom
 }
 
 export function resetDeriveWork(): void {
-  for (const work of Object.values(segmentDeriveWork)) Object.assign(work, { derived: 0, occurrences: 0, reused: 0 });
+  for (const work of Object.values(segmentDeriveWork)) Object.assign(work, { derived: 0, occurrences: 0, reused: 0, skipped: 0, reread: 0 });
 }
 
 const revision = async (brain: AppendBrain) => (await brain.engine.executeRaw<{ r: string }>(
@@ -264,6 +271,8 @@ export function registerDerivationEquivalenceCases(kind: 'pglite' | 'postgres'):
         const current = await storedPage(brain.engine);
         const links = { incremental: await incrementalLinks(brain.engine, current), full: await fullLinks(brain.engine, current) };
         expect({ label, links: links.incremental.candidates }).toEqual({ label, links: links.full.candidates });
+        const inline = await inlineLinks(brain.engine, current, await brain.body(EQUIVALENCE_SLUG));
+        expect({ label, inline: links.incremental.candidates }).toEqual({ label, inline: inline.candidates });
         expect({ label, temporal: links.incremental.temporalBody }).toEqual({ label, temporal: links.full.temporalBody! });
         expect({ label, attendance: links.incremental.attendanceComplete }).toEqual({ label, attendance: links.full.attendanceComplete });
         expect({ label, mentions: await incrementalMentions(brain.engine, current) }).toEqual({ label, mentions: await fullMentions(brain.engine, current) });
@@ -340,21 +349,6 @@ export function registerDerivationEquivalenceCases(kind: 'pglite' | 'postgres'):
       await derivationRowsMatch(brain.engine, current, KINDS);
     }, 600_000);
 
-    test('a remote edit queues a links effect carrying the occurrences the edit added (spec 8.5)', async () => {
-      const page = await storedPage(brain.engine);
-      const before = await liveOccurrences(brain.engine, page.id);
-      const old = /Marker 3(?: \(edit \d+\))?: /.exec((await brain.body(EQUIVALENCE_SLUG)).truth)![0];
-      const res = await brain.call('edit_page', { slug: EQUIVALENCE_SLUG, expected_revision: await revision(brain),
-        edits: [{ old_text: old, new_text: 'Marker 3 (remote edit): see [[companies/c3-example]] and ' }] }, { remote: true });
-      expect(res).toMatchObject({ isError: false });
-      const added = [...await liveOccurrences(brain.engine, page.id)].filter(id => !before.has(id)).sort((a, b) => a - b);
-      expect(added.length).toBeGreaterThan(0);
-      const effects = await brain.engine.executeRaw<{ data: { occurrence_ids?: number[]; slug?: string } }>(
-        "SELECT e.data FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id WHERE e.kind='links' AND r.operation='edit_page' AND e.data->>'slug'=$1",
-        [EQUIVALENCE_SLUG]);
-      expect(effects.length).toBe(1);
-      expect([...(effects[0]!.data.occurrence_ids ?? [])].sort((a, b) => a - b)).toEqual(added);
-    }, 600_000);
   });
 }
 

@@ -201,8 +201,9 @@ export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyI
  * Demotion: turn a segmented page row into an inline row with an empty body
  * (the caller's inline write fills it in the same transaction). The live
  * manifest rows close at the next generation, so versions that pin earlier
- * generations keep theirs; the page's segmented chunk rows are deleted here,
- * before the inline write stages its chunks. The write holds the page row FOR
+ * generations keep theirs; the page's segmented chunk rows and every
+ * page_segment_derivations row (outputs of segments no body holds any more)
+ * are deleted here, before the inline write stages its chunks. The write holds the page row FOR
  * UPDATE (lockPageKeys), so a chunk batch in flight (FOR KEY SHARE) commits
  * before this delete, and a later batch of a racing preparation refuses
  * (stageSegmentChunks: an inline page at the generation it targets).
@@ -214,6 +215,7 @@ export async function demoteSegmentedPage(tx: Pick<BrainEngine, 'executeRaw'>, p
     body_bytes=NULL, truth_bytes=NULL, body_lines=NULL, segment_count=NULL, segmenter_version=NULL, body_flags=NULL,
     body_generation=body_generation+1 WHERE id=$1 AND body_storage='segmented'`, [pageId]);
   await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=$1 AND occurrence_id IS NOT NULL', [pageId]);
+  await tx.executeRaw('DELETE FROM page_segment_derivations WHERE page_id=$1', [pageId]);
 }
 
 /** Abort a staging whose write will not publish (best effort: expiry collects it anyway). */

@@ -1056,7 +1056,7 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; 
   // PR 4 (Wave B incremental derivation, transcripts)
   // PR 4 4a
   { since: 'TBD', text: 'Links, mentions, timeline entries and facts/takes fences of a large (segmented) page are now kept per segment, so a write reads only the segments it changed, and an append reads its new tail instead of the whole page. A rewrite of the whole page does the same work as before. The results are unchanged.' },
-  { since: 'TBD', text: 'Forgetting, purging or withdrawing a fact on a large page now also deletes the stored link, mention, timeline and fence results of the segment that held it, in the same transaction. A purge counts them as `page_segment_derivations`.' },
+  { since: 'TBD', text: 'Forgetting, purging or withdrawing a fact on a large page now also deletes the stored link, mention, timeline and fence results of the segment that held it, and of segments an earlier write replaced, in the same transaction. A fact purge also deletes every stored result anywhere in the source that still holds the claim (including a page since stored inline) and counts them as `page_segment_derivations`; stored fence results keep a digest of the fence, never its text. A derivation that read a page before a purge, forget or edit no longer writes its results after it.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */

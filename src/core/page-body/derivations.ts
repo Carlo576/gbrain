@@ -22,7 +22,14 @@ export type SegmentDerivationKind = typeof SEGMENT_DERIVATION_KINDS[number];
 export type SegmentDerivationState = typeof SEGMENT_DERIVATION_STATES[number];
 export const SETTLED_DERIVATION_STATES: readonly SegmentDerivationState[] = ['done', 'skipped'];
 
-/** What a pipeline records for one occurrence. `output` stays bounded per segment (candidates, keys, anchors, never text). */
+/**
+ * What a pipeline records for one occurrence. `output` stays bounded per segment (candidates, keys, digests, anchors).
+ * It is not text-free: a links row keeps the excerpts and dated lines its candidates carry (what links.context and the
+ * temporal pass store), so the store is swept, not probed: a fact purge deletes every row whose output or receipt holds
+ * the claim (segment-derive.ts sweepDerivationText), fence rewrites delete the rows of the runs they touched and of
+ * occurrences no longer live, and demotion to inline deletes the page's rows. Prefer digests and offsets where the
+ * pipeline can read the segment again (a fences row keeps fence digests, never fence text).
+ */
 export interface SegmentDerivationInput {
   pageId: number;
   kind: SegmentDerivationKind;
