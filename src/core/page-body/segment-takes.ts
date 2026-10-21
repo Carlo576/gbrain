@@ -68,9 +68,41 @@ export class TakesFenceScan {
 
   result(): StreamedTakes {
     if (this.done) return this.done;
-    const reduced = this.fence ? TAKES_FENCE_BEGIN : this.endOnly ? `${'\n'.repeat(TAKES_FENCE_BEGIN.length)}${TAKES_FENCE_END}` : this.nearMiss ? 'gbrain:takes:begin' : '';
-    return { parsed: parseTakesFence(reduced), hasBegin: this.hasBegin, hasMarker: this.hasMarker };
+    return { parsed: parseTakesFence(reducedTakes(this.fence !== null, this.endOnly, this.nearMiss)), hasBegin: this.hasBegin, hasMarker: this.hasMarker };
   }
+
+  /** What the blocks pushed so far hold, for a run's fences row (segment-facts.ts segmentedFenceRuns). */
+  summary(): TakesRunSummary {
+    return { hasBegin: this.hasBegin, hasMarker: this.hasMarker, endOnly: this.endOnly, nearMiss: this.nearMiss,
+      fence: this.fence ? { text: this.fence.join(''), closed: this.done !== null } : null };
+  }
+}
+
+/** The text parseTakesFence reduces an unfinished scan to: a lone begin, an end only, a near-miss marker, or nothing. */
+function reducedTakes(begun: boolean, endOnly: boolean, nearMiss: boolean): string {
+  return begun ? TAKES_FENCE_BEGIN : endOnly ? `${'\n'.repeat(TAKES_FENCE_BEGIN.length)}${TAKES_FENCE_END}` : nearMiss ? 'gbrain:takes:begin' : '';
+}
+
+/**
+ * One run's TakesFenceScan state (a scan started fresh at the run, its blocks pushed with region offsets): the raw marker
+ * flags up to the block that closed its first fence, the end-only and near-miss scans before any begin, and that fence.
+ */
+export interface TakesRunSummary { hasBegin: boolean; hasMarker: boolean; endOnly: boolean; nearMiss: boolean; fence: { text: string; closed: boolean } | null }
+
+/**
+ * parseTakesFenceBlocks of a region from its runs' summaries, in order; null when a fence a run begins does not close
+ * in that run (the caller reads the region whole).
+ */
+export function takesFromRuns(summaries: readonly TakesRunSummary[]): StreamedTakes | null {
+  let hasBegin = false, hasMarker = false, endOnly = false, nearMiss = false;
+  for (const summary of summaries) {
+    hasBegin ||= summary.hasBegin;
+    hasMarker ||= summary.hasMarker;
+    if (summary.fence) return summary.fence.closed ? { parsed: parseTakesFence(summary.fence.text), hasBegin, hasMarker } : null;
+    endOnly ||= summary.endOnly;
+    nearMiss ||= summary.nearMiss;
+  }
+  return { parsed: parseTakesFence(reducedTakes(false, endOnly, nearMiss)), hasBegin, hasMarker };
 }
 
 export async function parseTakesFenceBlocks(blocks: AsyncIterable<BodyBlock>, page: { slug: string; source_id: string }): Promise<StreamedTakes> {

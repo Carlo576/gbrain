@@ -1036,6 +1036,10 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; 
   { since: 'TBD', text: 'The per-page spend cap now also covers fact and atom extraction on large pages; doctor lists pages it stopped.' },
   // PR 4 (Wave B incremental derivation, transcripts) — 4c, contextual synopsis per segment. `since` is restamped at the merge slot.
   { since: 'TBD', text: 'With contextual retrieval set to `per_chunk_synopsis`, a page stored in segments now gets per-chunk synopses instead of staying on the title tier: each chunk\'s synopsis reads the page title, the first 8 KiB of the page and up to 32 KB of its own segment, so the contextual re-embed (`gbrain reindex --markdown` and the per-chunk synopsis backfill) re-synopsizes only the segments an append or edit rewrote and leaves every other chunk\'s vector as it is. The page\'s spend cap (`embed.max_usd_per_page`) bounds the synopsis calls: when it is reached, the rest of the page keeps its title-tier vectors (`budget_limited`) and nothing more is spent. A chunk whose synopsis the model refuses is embedded at the title tier. Pages read whole are unchanged.' },
+  // PR 4 (Wave B incremental derivation, transcripts)
+  // PR 4 4a
+  { since: 'TBD', text: 'Links, mentions, timeline entries and facts/takes fences of a large (segmented) page are now kept per segment, so a write reads only the segments it changed, and an append reads its new tail instead of the whole page. A rewrite of the whole page does the same work as before. The results are unchanged.' },
+  { since: 'TBD', text: 'Forgetting, purging or withdrawing a fact on a large page now also deletes the stored link, mention, timeline and fence results of the segment that held it, in the same transaction. A purge counts them as `page_segment_derivations`.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */

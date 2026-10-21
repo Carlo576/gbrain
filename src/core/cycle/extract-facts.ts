@@ -83,7 +83,7 @@ import { writeReceipt } from '../extract/receipt-writer.ts';
 import { fenceUnfencedFacts, planUnfencedFacts } from '../facts/unfenced-facts.ts';
 import { classifyRunStop, upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { factsFenceView } from '../facts-fence.ts';
-import { segmentedBodyMatchesFile, segmentedFactsFenceView } from '../page-body/segment-facts.ts';
+import { incrementalFactsFenceView, segmentedBodyMatchesFile } from '../page-body/segment-facts.ts';
 import {
   duplicateActiveFenceRows,
   extractFactsFromFenceText,
@@ -390,7 +390,8 @@ interface FenceReconcilePlan {
  * fence in each section of the page (#6686: a split fence) preserves the page's existing index.
  */
 async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: string, sourceId: string, warnings: string[]): Promise<FenceReconcilePlan | null> {
-  const view = isSegmentedPage(page) ? await segmentedFactsFenceView(db, page) : factsFenceView(page);
+  // A segmented page's view comes from its fences rows: only runs changed since their row was written are read.
+  const view = isSegmentedPage(page) ? await incrementalFactsFenceView(db, page) : factsFenceView(page);
   // #6686: a lone fence below the timeline sentinel that parses cleanly is the page's fence, read where the writers
   // edit it; one that does not parse keeps the #3625 guard below.
   const below = !view.sections.body && view.sections.timeline ? view.timeline : null;
