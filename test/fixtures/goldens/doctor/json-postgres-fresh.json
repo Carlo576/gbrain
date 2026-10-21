@@ -942,7 +942,7 @@
         {
           "category": "ops",
           "elapsed_ms": "<volatile>",
-          "message": "RLS enabled on 152/152 public tables",
+          "message": "RLS enabled on 153/153 public tables",
           "name": "rls",
           "status": "ok"
         },
@@ -956,14 +956,14 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1313 column(s) verified against live schema",
+          "message": "1319 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "All 151 table(s) the applied migrations create exist.",
+          "message": "All 153 table(s) the applied migrations create exist.",
           "name": "schema_missing_tables",
           "status": "ok"
         },
@@ -3172,7 +3172,7 @@
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
-          "message": "11 retrieval-affecting file(s) changed since HEAD: src/core/search/collapse.ts, src/core/search/hybrid.ts, src/core/search/hybrid/keyword-only.ts, …. Re-run `gbrain eval run-all` after committing these changes.",
+          "message": "No retrieval-affecting files changed in working tree.",
           "name": "eval_drift",
           "status": "ok"
         },
