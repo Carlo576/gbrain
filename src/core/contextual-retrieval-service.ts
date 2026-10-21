@@ -238,7 +238,7 @@ export type ReembedPageResult =
     }
   | {
       kind: 'skipped';
-      reason: 'mode_none' | 'no_chunks' | 'page_missing' | 'soft_deleted' | 'budget_limited' | 'page_body_segmented';
+      reason: 'mode_none' | 'no_chunks' | 'page_missing' | 'soft_deleted' | 'budget_limited' | 'purge_sweep_pending' | 'page_body_segmented';
     }
   | {
       kind: 'page_fallback';
@@ -501,7 +501,8 @@ export const SYNOPSIS_DERIVATION_VERSION = 1;
  * spends on the newest text, as the embedding path's grants do.
  *
  * Each window with work reserves its synopsis calls and their embedding against the page's spend cap
- * (`synopsis:<model>`) first: a held page or a refused reservation leaves the title tier in place (`budget_limited`), the
+ * (`synopsis:<model>`) first: a held page or a refused reservation leaves the title tier in place (`budget_limited`, or
+ * `purge_sweep_pending` when a fact purge's pending derivation sweep covers the page), the
  * segment `partial` and the windows already installed kept. A window whose synopsis is refused, empty or malformed
  * embeds at the title tier, which a synopsis page accepts (page_fallback; the segment is settled with the fallback in
  * its receipt, so it is not paid for again until its inputs change). Each segment runs under the page's embedding lease:
@@ -582,7 +583,7 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
       if ('refused' in metered) {
         await derivation(segment, 'partial', anchors, { reason: unpricedModel ? 'unpriced_model' : metered.refused.reason === 'purge_sweep_pending' ? 'purge_sweep_pending' : 'budget_limited', ...(unpricedModel ? { model: unpricedModel } : {}),
           cap_usd: metered.refused.capUsd, estimate_usd: metered.refused.estimateUsd });
-        return { kind: 'skipped', reason: 'budget_limited' };
+        return { kind: 'skipped', reason: metered.refused.reason === 'purge_sweep_pending' ? 'purge_sweep_pending' : 'budget_limited' };
       }
       const built = metered.value;
       if (built.kind !== 'built') {

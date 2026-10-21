@@ -4218,8 +4218,8 @@
         "idempotent": true,
         "name": "segment_derivations",
         "sql": {
-          "length": 6369,
-          "sha256": "1334aad47cf3eb04efe03ab06d8c68f924ec1a389a158d63d7cd8168046c0dda"
+          "length": 6595,
+          "sha256": "d666eb4f6eab38464426254377470c3f8d4c33107e6368147280d71dada69e65"
         },
         "sqlFor": "absent",
         "transaction": false,

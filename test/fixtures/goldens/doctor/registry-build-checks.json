@@ -911,6 +911,10 @@
       },
       {
         "category": "brain",
+        "name": "derivation_purge_sweeps"
+      },
+      {
+        "category": "brain",
         "name": "missing_recorded_files"
       },
       {

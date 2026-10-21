@@ -28,7 +28,7 @@ import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
 import { derivationAfterSql, derivationBatchRows, derivationNeedles, derivationPurgeState, recordDerivationStatement,
-  type DerivationKey, type DerivationSweepState } from '../page-body/segment-derive.ts';
+  type DerivationKey, type DerivationStallReason, type DerivationSweepState } from '../page-body/segment-derive.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { derivationClaimCandidateSql, derivationHoldsClaimSql, derivationSweepScopeSql, stagingNeedsTextSql } from '../page-body/schema.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
@@ -37,7 +37,7 @@ import { relationExists } from '../persistence/rebuildable-cache.ts';
 
 export type StoreCount = Record<string, number>;
 export type StoreStatus = 'deleted' | 'would_remove' | 'retained_inactive' | 'unverified' | 'out_of_reach' | 'out_of_scope' | 'not_present' | 'incomplete';
-export interface StoreReport { store: string; status: StoreStatus; removed?: number; remaining?: number; reason?: string; detail?: string; items?: unknown[] }
+export interface StoreReport { store: string; status: StoreStatus; removed?: number; remaining?: number; reason?: string; detail?: string; items?: unknown[]; probe?: string }
 export type PurgeCompletion = 'committed' | 'complete' | 'incomplete';
 export interface PurgeReceipt {
   summary: string;
@@ -130,13 +130,18 @@ async function segmentTextReport(engine: BrainEngine, sourceId: string, needles:
  * live segment of a page the purge did not rewrite is that page's prose, reported with it. The source's rows are walked
  * in primary-key order, segment-derive.ts derivationBatchRows() per statement, each under the probe's statement bound; a
  * statement that outruns it is read again in half as many rows, down to one row, and a single row that still outruns it
- * leaves the store unverified.
+ * leaves the store unverified. When the purge's own sweep already ended verified (`sweepVerified`: its record is gone,
+ * removed only after a walk that deleted nothing), a probe stopped by a deadline reports the sweep's result instead,
+ * with the deadline it hit as `probe`.
  */
 async function derivationTextReport(engine: BrainEngine, sourceId: string, pageIds: readonly number[], claims: readonly string[], removed: number,
-  deadline: number): Promise<StoreReport> {
+  deadline: number, sweepVerified: boolean): Promise<StoreReport> {
   const { needles, patterns } = await derivationNeedles(engine, claims);
   if (!needles.length) return { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed };
-  const unverified = (reason: string): StoreReport => ({ store: 'page_segment_derivations', status: 'unverified', reason, removed });
+  const unverified = (reason: string): StoreReport => sweepVerified && reason !== 'row_bound'
+    ? { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed, reason: 'verified_by_sweep', probe: reason,
+      detail: `The receipt's probe stopped at its deadline (${reason}); the purge's sweep had already verified that no stored result it covers holds the claim. Results of live segments of other pages that still state it are listed under pages.` }
+    : { store: 'page_segment_derivations', status: 'unverified', reason, removed };
   let swept = 0, kept = 0;
   let cursor: DerivationKey | null = null;
   let rows = derivationBatchRows();
@@ -459,7 +464,7 @@ async function vectorProbe(engine: BrainEngine, target: PurgeTarget): Promise<Re
 
 /** Build the receipt: swept-store verification (or would-remove counts on a dry run), probes, residuals first. */
 export async function verifyFactPurge(engine: BrainEngine, input: { target: PurgeTarget; plan: PurgePlan; dryRun: boolean; removed?: StoreCount;
-  prose?: Array<{ slug: string; version_id: number }>; vacuum?: boolean; ledger?: LedgerPurgeReport | null }): Promise<PurgeReceipt> {
+  prose?: Array<{ slug: string; version_id: number }>; vacuum?: boolean; ledger?: LedgerPurgeReport | null; sweepVerified?: boolean }): Promise<PurgeReceipt> {
   const { target, plan, dryRun } = input;
   const deadline = performance.now() + probeLimits.totalMs;
   const claim = target.fact, needle = claim.toLowerCase(), src = target.source_id;
@@ -508,7 +513,8 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
     detail: `${legacy.n} model-derived page(s) in this source predate derivation edges, so purge cannot tell whether they restate the claim in other words.` });
   if (!dryRun) {
     stores.push(await segmentTextReport(engine, src, [...new Set([claim, escapeFenceCell(claim)])], removed.page_segment_texts ?? 0, deadline));
-    stores.push(await derivationTextReport(engine, src, plan.pages.map(page => page.page_id), [claim, escapeFenceCell(claim)], removed.page_segment_derivations ?? 0, deadline));
+    stores.push(await derivationTextReport(engine, src, plan.pages.map(page => page.page_id), [claim, escapeFenceCell(claim)], removed.page_segment_derivations ?? 0, deadline,
+      input.sweepVerified === true));
     stores.push(...await ledgerReports(engine, src, [claim], input.ledger, deadline));
     stores.push(await effectPayloadReport(engine, src, [claim], deadline, removed.persistence_effects ?? 0));
   }
@@ -689,7 +695,7 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
  */
 export async function purgeCompletion(engine: BrainEngine, row: Pick<WriteRequest, 'id' | 'request_id' | 'state' | 'source_id' | 'outcome'>, receipt?: Pick<PurgeReceipt, 'stores'>):
   Promise<{ completion: PurgeCompletion; effects: Array<{ kind: string; state: string; error_code: string | null }>; exit_code: number; fingerprint_probe?: Record<string, number>;
-    derivation_sweep?: DerivationSweepState; next?: string[] }> {
+    derivation_sweep?: DerivationSweepState; derivation_sweep_reason?: DerivationStallReason; next?: string[] }> {
   if (row.state !== 'committed') return { completion: 'incomplete', effects: [], exit_code: 75 };
   const effects = await engine.executeRaw<{ kind: string; state: string; error_code: string | null; parked: boolean }>(`SELECT kind,state,error_code,
     jsonb_array_length(COALESCE(data->'parked','[]'::jsonb))>0 AS parked FROM persistence_effects WHERE request_id=$1::uuid ORDER BY kind`, [row.id]);
@@ -703,13 +709,15 @@ export async function purgeCompletion(engine: BrainEngine, row: Pick<WriteReques
     fingerprint = { facts: Number(probe?.facts ?? 0), takes: Number(probe?.takes ?? 0) };
   }
   const failed = effects.some(e => e.state === 'failed' || e.parked);
-  const sweeping = await derivationPurgeState(engine, row.id);
-  const sweptResidual = sweeping || receipt?.stores.some(s => s.status === 'incomplete') || (fingerprint && (fingerprint.facts || fingerprint.takes));
+  const sweep = await derivationPurgeState(engine, row.id);
+  const sweptResidual = sweep || receipt?.stores.some(s => s.status === 'incomplete') || (fingerprint && (fingerprint.facts || fingerprint.takes));
   const pending = effects.some(e => e.state !== 'committed');
   const completion: PurgeCompletion = failed || sweptResidual ? 'incomplete' : pending ? 'committed' : 'complete';
   return { completion, effects: effects.map(({ kind, state, error_code }) => ({ kind, state, error_code })),
     exit_code: completion === 'complete' ? 0 : completion === 'committed' ? 10 : 75, ...(fingerprint ? { fingerprint_probe: fingerprint } : {}),
-    ...(sweeping ? { derivation_sweep: sweeping, next: [sweeping === 'pending'
+    ...(sweep ? { derivation_sweep: sweep.state, ...(sweep.reason ? { derivation_sweep_reason: sweep.reason } : {}), next: [sweep.state === 'pending'
       ? `Stored derivation results are still being swept for the claim (derivation_sweep: pending). Continue the sweep with gbrain forget --purge --status --request-id ${row.request_id} --continue until completion is complete.`
-      : `The sweep of stored derivation results stopped on a result it could not read or delete within its statement budget (derivation_sweep: stalled); other sweeps go on. Retry it with gbrain forget --purge --status --request-id ${row.request_id} --continue; if it stalls again, report it with the output of gbrain doctor --json.`] } : {}) };
+      : sweep.reason === 'paid_row_unreadable'
+        ? `The sweep of stored derivation results stopped on a paid result (atoms, synopsis or conversation facts) it could not read within its statement budget (derivation_sweep: stalled, paid_row_unreadable); paid results are never deleted unread, and other sweeps go on. Retry it with gbrain forget --purge --status --request-id ${row.request_id} --continue; if it stalls again, report it with the output of gbrain doctor --json.`
+        : `The sweep of stored derivation results stopped on a result it could not read or delete within its statement budget (derivation_sweep: stalled); other sweeps go on. Retry it with gbrain forget --purge --status --request-id ${row.request_id} --continue; if it stalls again, report it with the output of gbrain doctor --json.`] } : {}) };
 }

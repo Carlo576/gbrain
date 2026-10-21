@@ -2171,6 +2171,7 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
   cursor_occurrence BIGINT,
   batch_rows        INTEGER   CHECK (batch_rows >= 1),
   stalled_at        TIMESTAMPTZ,
+  stalled_reason    TEXT      CHECK (stalled_reason IN ('statement_timeout','paid_row_unreadable')),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);
@@ -2180,14 +2181,23 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purge_pages (
   PRIMARY KEY (request_id, page_id)
 );
 CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SET search_path = pg_catalog, public AS \$func\$
+DECLARE
+  src TEXT;
+  page INTEGER;
 BEGIN
   IF TG_TABLE_NAME = 'pages' THEN
-    INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
-      SELECT x.request_id, NEW.id FROM page_segment_derivation_purges x WHERE x.source_id = NEW.source_id ON CONFLICT DO NOTHING;
+    src := NEW.source_id;
+    page := NEW.id;
   ELSE
-    INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
-      SELECT x.request_id, OLD.page_id FROM page_segment_derivation_purges x WHERE x.source_id = OLD.source_id ON CONFLICT DO NOTHING;
+    src := OLD.source_id;
+    page := OLD.page_id;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM page_segment_derivation_purges x WHERE x.source_id = src) THEN
+    RETURN NULL;
+  END IF;
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('gbrain:derivation-scope:' || src, 0));
+  INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
+    SELECT x.request_id, page FROM page_segment_derivation_purges x WHERE x.source_id = src ON CONFLICT DO NOTHING;
   RETURN NULL;
 END
 \$func\$ LANGUAGE plpgsql;

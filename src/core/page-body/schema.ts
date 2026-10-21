@@ -226,6 +226,15 @@ export function derivationSweepScopeSql(d: string, p: string, pageIds: string): 
 }
 
 /**
+ * SQL: the advisory lock key that serializes the note of a page entering a derivation sweep's scope with the end of the
+ * source's sweeps. The scope-entry trigger takes it shared in the writer's transaction, and a sweep ends (deletes its
+ * record) only under it exclusively, so a note written by a transaction still open is never missed.
+ */
+export function derivationScopeLockSql(sourceId: string): string {
+  return `hashtextextended('gbrain:derivation-scope:' || ${sourceId}, 0)`;
+}
+
+/**
  * Per-segment derivation watermarks (migration v265): one row per page, pipeline and manifest occurrence, recording
  * the segment text and the context (`context_hash`: entry state plus the page-level inputs the pipeline reads) it was
  * derived from, the pipeline version, the outcome and a bounded per-segment output. A pipeline's work on a page is the
@@ -288,6 +297,7 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
   cursor_occurrence BIGINT,
   batch_rows        INTEGER   CHECK (batch_rows >= 1),
   stalled_at        TIMESTAMPTZ,
+  stalled_reason    TEXT      CHECK (stalled_reason IN ('statement_timeout','paid_row_unreadable')),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);
@@ -297,14 +307,23 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purge_pages (
   PRIMARY KEY (request_id, page_id)
 );
 CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SET search_path = pg_catalog, public AS $func$
+DECLARE
+  src TEXT;
+  page INTEGER;
 BEGIN
   IF TG_TABLE_NAME = 'pages' THEN
-    INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
-      SELECT x.request_id, NEW.id FROM page_segment_derivation_purges x WHERE x.source_id = NEW.source_id ON CONFLICT DO NOTHING;
+    src := NEW.source_id;
+    page := NEW.id;
   ELSE
-    INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
-      SELECT x.request_id, OLD.page_id FROM page_segment_derivation_purges x WHERE x.source_id = OLD.source_id ON CONFLICT DO NOTHING;
+    src := OLD.source_id;
+    page := OLD.page_id;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM page_segment_derivation_purges x WHERE x.source_id = src) THEN
+    RETURN NULL;
+  END IF;
+  PERFORM pg_advisory_xact_lock_shared(${derivationScopeLockSql('src')});
+  INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
+    SELECT x.request_id, page FROM page_segment_derivation_purges x WHERE x.source_id = src ON CONFLICT DO NOTHING;
   RETURN NULL;
 END
 $func$ LANGUAGE plpgsql;

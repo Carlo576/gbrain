@@ -274,6 +274,7 @@
       "page_segment_derivation_purges.page_segment_derivation_purges_phase_check": "c CHECK ((phase = ANY (ARRAY['sweep'::text, 'verify'::text, 'recheck'::text])))",
       "page_segment_derivation_purges.page_segment_derivation_purges_pkey": "p PRIMARY KEY (request_id)",
       "page_segment_derivation_purges.page_segment_derivation_purges_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
+      "page_segment_derivation_purges.page_segment_derivation_purges_stalled_reason_check": "c CHECK ((stalled_reason = ANY (ARRAY['statement_timeout'::text, 'paid_row_unreadable'::text])))",
       "page_segment_derivations.page_segment_derivations_context_hash_check": "c CHECK ((octet_length(context_hash) = 32))",
       "page_segment_derivations.page_segment_derivations_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "page_segment_derivations.page_segment_derivations_pipeline_check": "c CHECK ((pipeline = ANY (ARRAY['links'::text, 'mentions'::text, 'timeline'::text, 'fences'::text, 'conversation_facts'::text, 'extract_atoms'::text, 'facts_backstop'::text, 'synopsis'::text])))",
@@ -539,7 +540,7 @@
       "gbrain_guard_request_protocol()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=12baf1d365a8aa3009ac0fe6605497e6433304e8d5915a3fc0b0b39ad748f6c2",
       "gbrain_guard_skill_publication()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=e854c0d058e75a65c3a90127c5c417380975100e83fc34288f6085e786df10a9",
       "gbrain_lease_shared_skill_delivery()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=5e493c1ac8dce8cb025a736629e563437c4b214744137c302c532c20bf7e7acf",
-      "gbrain_mark_derivation_scope_entry()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=5675b060d5ba382f77ce7d4209ba2d035931cf50a94005241be5691bba750a7c",
+      "gbrain_mark_derivation_scope_entry()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=a0c4dcd7282f771765e1328670e44a04dd28934ed88f5a51c42cc31f6bf4cc50",
       "gbrain_preserve_fact_withdrawal()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=9beb118551a08451a228146373f50f2aa2ce0cfe89937e937d361b33224aa0aa",
       "gbrain_queue_page_projection()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=6c544b9c129b6a17dcabeb5ee8d44a2b0e0af9d02ca3fe47c7d7f22ec313042c",
       "gbrain_refuse_purged_fact()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=d1d584b91ceea7f4e63c235b790ef89c958c578e635f77ddd644918bc36d33f1",
@@ -3019,7 +3020,8 @@
           "11 cursor_occurrence bigint/int8 NULL",
           "12 batch_rows integer/int4 NULL",
           "13 stalled_at timestamp with time zone/timestamptz NULL",
-          "14 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+          "14 stalled_reason text/text NULL",
+          "15 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
         ],
         "flags": "relkind=r rls=true force_rls=false"
       },

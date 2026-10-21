@@ -19,7 +19,10 @@
  * are read; a page counts once per pipeline and receipt kind. A derivation receipt
  * without a `kind` (the synopsis pass's tier fallback or refused reservation), or of
  * kind `unpriced_model` (doctor derivation_unpriced_model), is not an input-truncation
- * receipt and is not counted.
+ * receipt and is not counted. A receipt whose reason is `purge_sweep_pending` (atoms,
+ * synopsis or fact extraction made no paid call because a fact purge's sweep covers the
+ * page) counts under that kind, whatever its own: its remedy is finishing the sweep
+ * (doctor derivation_purge_sweeps), not a higher spend cap.
  */
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
@@ -39,9 +42,11 @@ const UNREAD_WINDOWS = 'unread_windows';
 const UNREAD_REMEDY = `the run stopped before every window of the page was read (the receipt's reason: the per-page spend cap, a window limit or a skipped window); the next run resumes where it stopped, and when the cap stopped it: gbrain config set ${PAGE_DERIVATION_CAP_KEY} <usd>`;
 const FAILED_WINDOWS = 'failed_windows';
 const FAILED_REMEDY = 'a conversation window failed to extract in run after run and is skipped, so the older windows still get extracted (the sample names the window, its receipt the last error); fix the cause, then gbrain extract-conversation-facts --slug <slug> --force tries it again';
+const PURGE_SWEEP = 'purge_sweep_pending';
+const PURGE_SWEEP_REMEDY = 'a fact purge\'s sweep of stored derivation results covers the page, so the run made no paid call there; gbrain doctor --only derivation_purge_sweeps names the purge, gbrain forget --purge --status --request-id <request_id> --continue finishes its sweep, and the next run resumes where it stopped';
 const NO_MESSAGES = 'no_messages';
 const NO_MESSAGES_REMEDY = 'the page reads as a transcript format over its whole text, yet no message parsed under that format (a conversation parser fault), so the last run changed nothing and kept its facts; rerunning repeats this, so report it with gbrain doctor --json and the page\'s format (a page that is not a transcript settles as non-extractable instead)';
-const remedy = (g: ReceiptGroup): string | null => g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : g.kind === FAILED_WINDOWS ? FAILED_REMEDY
+const remedy = (g: ReceiptGroup): string | null => g.kind === PURGE_SWEEP ? PURGE_SWEEP_REMEDY : g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : g.kind === FAILED_WINDOWS ? FAILED_REMEDY
   : g.kind === NO_MESSAGES ? NO_MESSAGES_REMEDY : REMEDY[g.pipeline] ?? null;
 
 const describe = (g: ReceiptGroup): string =>
@@ -55,9 +60,11 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
          SELECT s.page_id, s.pipeline, COALESCE(s.input_truncated->>'kind', 'unknown') AS kind, s.updated_at, NULL::text AS detail
            FROM page_extraction_state s WHERE s.input_truncated IS NOT NULL
          UNION ALL
-         SELECT d.page_id, d.pipeline, COALESCE(d.receipt->>'kind', 'unknown') AS kind, max(d.updated_at) AS updated_at,
+         SELECT d.page_id, d.pipeline, CASE WHEN d.receipt->>'reason' = '${PURGE_SWEEP}' THEN '${PURGE_SWEEP}' ELSE COALESCE(d.receipt->>'kind', 'unknown') END AS kind,
+                max(d.updated_at) AS updated_at,
                 min(CASE WHEN d.receipt->>'kind' = '${FAILED_WINDOWS}' THEN ' window ' || (d.receipt->'windows'->0->>'ordinal') || ' of occurrence ' || d.occurrence_id END) AS detail
-           FROM page_segment_derivations d WHERE d.receipt->>'kind' IS NOT NULL AND d.receipt->>'kind' <> 'unpriced_model' GROUP BY 1, 2, 3)
+           FROM page_segment_derivations d
+          WHERE (d.receipt->>'kind' IS NOT NULL AND d.receipt->>'kind' <> 'unpriced_model') OR d.receipt->>'reason' = '${PURGE_SWEEP}' GROUP BY 1, 2, 3)
        SELECT r.pipeline, r.kind, count(DISTINCT r.page_id)::int AS pages,
               (array_agg(p.source_id || ':' || p.slug || COALESCE(r.detail, '') ORDER BY r.updated_at DESC))[1:3] AS samples
          FROM receipts r JOIN pages p ON p.id = r.page_id AND p.deleted_at IS NULL
@@ -69,13 +76,14 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
       return checks;
     }
     const summary = `Page extractions that read only part of their input: ${groups.map(describe).join('. ')}.`;
-    const actionable = groups.filter(g => g.pipeline !== 'facts_backstop' || g.kind === UNREAD_WINDOWS);
+    const actionable = groups.filter(g => g.pipeline !== 'facts_backstop' || g.kind === UNREAD_WINDOWS || g.kind === PURGE_SWEEP);
     if (!actionable.length) {
       checks.push({ name: 'extraction_input_truncated', status: 'ok', severity: 'info', readiness_state: 'degraded', message: summary, details });
       return checks;
     }
-    const atoms = actionable.find(g => g.pipeline === 'extract_atoms' && g.kind !== UNREAD_WINDOWS);
+    const atoms = actionable.find(g => g.pipeline === 'extract_atoms' && g.kind !== UNREAD_WINDOWS && g.kind !== PURGE_SWEEP);
     const capped = actionable.some(g => g.kind === UNREAD_WINDOWS);
+    const sweeping = actionable.some(g => g.kind === PURGE_SWEEP);
     checks.push({ name: 'extraction_input_truncated', status: 'warn', message: summary, details,
       ...(atoms
         ? { fix: agentFix(['gbrain', 'config', 'set', EXTRACT_MAX_INPUT_CHARS_KEY, '<n>'],
@@ -85,7 +93,10 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
           ? { fix: agentFix(['gbrain', 'config', 'set', PAGE_DERIVATION_CAP_KEY, '<USD>'],
             'A higher per-page cap lets the next run read the windows the cap stopped; it raises model spend, so the value is the user\'s call.', 'extraction_input_truncated',
             { ask_user: true, consent: ['paid'], inputs: [{ name: 'USD', how: 'a per-page dollar cap chosen with the user' }] }) }
-          : { fix_unavailable_reason: 'operator_judgement' as const }) });
+          : sweeping
+            ? { fix: agentFix(['gbrain', 'doctor', '--only', 'derivation_purge_sweeps', '--json'],
+              'Names each unfinished fact purge sweep and the command that continues it; paid extraction resumes on the pages once the sweep ends. It changes nothing.', 'extraction_input_truncated') }
+            : { fix_unavailable_reason: 'operator_judgement' as const }) });
   } catch (error) {
     checks.push(checkError('extraction_input_truncated', 'read the extraction receipts', error, { details: { health: 'unknown' } }));
   }

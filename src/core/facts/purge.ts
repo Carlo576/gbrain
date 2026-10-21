@@ -27,7 +27,7 @@ import { readFix } from '../ops/op-fix.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { contentHash, rowToPage } from '../utils.ts';
 import { rewriteLiveSegmentedFences, rewriteSegmentedGeneration, segmentedBodyContains } from '../page-body/segment-rewrite.ts';
-import { continueDerivationPurges, recordDerivationPurge } from '../page-body/segment-derive.ts';
+import { continueDerivationPurges, derivationPurgeState, recordDerivationPurge } from '../page-body/segment-derive.ts';
 import { discoverWithdrawalTargets, withdrawalDiscoveryFailure } from './withdrawal-discovery.ts';
 import { dropPurgedFenceRows } from './purge-overlay.ts';
 import { derivedRowsFrom, hideDerivedRows, type DerivationRef } from './derivation-inputs.ts';
@@ -592,10 +592,10 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
   for (const slug of unsealed) await buildSegmentedProjection(ctx.engine, { sourceId: p.sourceId, slug }).catch(() => undefined);
   if (row.state !== 'committed') return { ...(row.outcome ?? {}), request_id: row.request_id, state: row.state, error: row.error_code };
   appendPurgeCommitted(row.id);
-  counts.page_segment_derivations = (counts.page_segment_derivations ?? 0) + await continueDerivationPurges(ctx.engine, p.sourceId, { first: row.id });
+  counts.page_segment_derivations = (counts.page_segment_derivations ?? 0) + await continueDerivationPurges(ctx.engine, p.sourceId, { first: row.id, inline: true });
   if (beliefReport.appended || ledger?.derived_hidden) await markBeliefCommits(ctx.engine, [row.id]).catch(() => undefined);
   const receipt: PurgeReceipt = await verifyFactPurge(ctx.engine, { target, plan: committedPlan, dryRun: false, removed: counts, prose,
-    vacuum: params.vacuum === true, ledger });
+    vacuum: params.vacuum === true, ledger, sweepVerified: !await derivationPurgeState(ctx.engine, row.id) });
   return { ...receipt, purge: (row.outcome as { purge?: unknown } | null)?.purge, request_id: row.request_id, state: row.state, similar_active: similar,
     ...await purgeCompletion(ctx.engine, row as WriteRequest, receipt) };
 }

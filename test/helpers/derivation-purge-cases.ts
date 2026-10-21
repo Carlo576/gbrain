@@ -11,9 +11,14 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { runExtractFacts } from '../../src/core/cycle/extract-facts.ts';
-import { __setAfterDerivationSweepBatchForTests, __setBeforeDerivationWriteForTests, __setDerivationSweepLimitsForTests, __setDerivationSweepWorkForTests, derivationSweepStatements, derivationSweepWork,
+import { __setAfterDerivationSweepBatchForTests, __setBeforeDerivationWriteForTests, __setBeforeUnreadDerivationDeleteForTests, __setDerivationSweepLimitsForTests,
+  __setDerivationSweepWorkForTests, continueDerivationPurges, DERIVATION_SWEEP_LIMITS, derivationPurgeState, derivationSweepStatements, derivationSweepWork,
   segmentDeriveWork } from '../../src/core/page-body/segment-derive.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
+import { __setPurgeProbeLimitsForTests } from '../../src/core/facts/purge-verify.ts';
+import { derivationPurgeSweepsEntry } from '../../src/commands/doctor/checks/derivation-purge-sweeps.ts';
+import { extractionInputTruncatedEntry } from '../../src/commands/doctor/checks/extraction-input.ts';
+import { categorizeCheck } from '../../src/core/doctor-categories.ts';
 import { incrementalFactsFenceView, segmentedFactsFenceView } from '../../src/core/page-body/segment-facts.ts';
 import { forgetFactInFence } from '../../src/core/facts/forget.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
@@ -435,6 +440,8 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
 
     test('a sweep call starts no batch past its deadline, also after the last short batch of a sweep', async () => {
       const claimA = 'Purge Example cellar code is 5307', claimB = 'Purge Example attic code is 6418';
+      // Rows ahead of the holder in key order, so the first 100-row batch never reaches it, even when this test runs alone.
+      await candidateRowsPage('notes/sweep-deadline-pad', 'Purge Example padding row is 0001', 150, 0);
       const rows = await candidateRowsPage('notes/sweep-deadline-rows', claimA, 300, 1);
       const a = await confirmed(await seed('notes/sweep-deadline-a', claimA));
       const idB = await seed('notes/sweep-deadline-b', claimB);
@@ -454,6 +461,7 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
         const replay = await brain.call('purge_fact', a);
         expect({ replayed: replay.body.replayed, sweep: replay.body.derivation_sweep, recorded: await sweepsRecorded() })
           .toEqual({ replayed: true, sweep: undefined, recorded: 0 });
+        expect(await exactHolders(brain.engine, rows, claimA)).toEqual([]);
       } finally {
         __setDerivationSweepLimitsForTests(null);
         __setDerivationSweepWorkForTests(false);
@@ -510,8 +518,13 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
         rounds.push(Number(detail.round));
         if (Number(detail.round) > fits) throw timeout();
       });
+      // The purge's own call gets the full sweep budget here, so the halving runs to the end within it.
+      __setDerivationSweepLimitsForTests({ inlineMs: DERIVATION_SWEEP_LIMITS.totalMs });
       let receipt: Record<string, any>;
-      try { receipt = await purge(id); } finally { installFaultHook(undefined); }
+      try { receipt = await purge(id); } finally {
+        installFaultHook(undefined);
+        __setDerivationSweepLimitsForTests(null);
+      }
       expect(rounds.slice(0, 7)).toEqual([500, 250, 125, 62, 31, 15, 7]);
       expect(rounds.slice(7).every(r => r <= 7)).toBe(true);
       expect({ rows: await exactHolders(brain.engine, rows, claim), sweep: receipt!.derivation_sweep, completion: receipt!.completion, recorded: await sweepsRecorded() })
@@ -613,6 +626,148 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
       const resumed = await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true });
       expect(resumed.body.derivation_sweep).toBeUndefined();
       expect(await run()).toBeGreaterThan(0);
+    }, 600_000);
+
+    test('a page entering a sweep\'s scope in a transaction still open as the sweep would end is swept after it commits, leaving no row holding the claim', async () => {
+      const claim = 'Purge Example well code is 4821', planted = 'Alice Example said Purge Example well code is 4821';
+      await brain.seed('notes/sweep-race-live', prosePage(planted, 67));
+      const live = await storedPage(brain.engine, 'notes/sweep-race-live');
+      await deriveAll(brain.engine, live);
+      expect((await exactHolders(brain.engine, live.id, planted)).length).toBeGreaterThan(0);
+      const params = await confirmed(await seed('notes/sweep-race-purge', claim));
+      __setDerivationSweepLimitsForTests({ totalMs: 0 });
+      try { expect((await brain.call('purge_fact', params)).body.derivation_sweep).toBe('pending'); } finally { __setDerivationSweepLimitsForTests(null); }
+      // The import soft-deletes the page, so its rows enter the sweep's scope; on Postgres it stays open while the sweep runs to its end.
+      const softDelete = 'UPDATE pages SET deleted_at = now() WHERE id = $1';
+      let commit = async () => {};
+      if (kind === 'postgres') {
+        const opened = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+        const held = (brain.engine as any).sql.begin(async (tx: any) => { await tx.unsafe(softDelete, [live.id]); opened.resolve(); await release.promise; });
+        await opened.promise;
+        commit = async () => { release.resolve(); await held; };
+      } else await brain.engine.executeRaw(softDelete, [live.id]);
+      let open: Record<string, any>;
+      try { open = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body; } finally { await commit(); }
+      expect(open!.derivation_sweep).toBe(kind === 'postgres' ? 'pending' : undefined);
+      const done = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+      expect({ sweep: done.derivation_sweep, rows: await exactHolders(brain.engine, live.id, planted), recorded: await sweepsRecorded() })
+        .toEqual({ sweep: undefined, rows: [], recorded: 0 });
+    }, 600_000);
+
+    /**
+     * A source of its own with one page holding one `pipeline` row, the page soft-deleted (so the row is in a sweep's scope), and a sweep recorded for
+     * it. `backed`: a live manifest occurrence backs the row, so only the soft delete puts it in the scope.
+     */
+    const unreadFixture = async (source: string, pipeline: string, backed: boolean) => {
+      await brain.engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1) ON CONFLICT DO NOTHING', [source]);
+      await brain.engine.putPage('notes/unread-fixture', { type: 'note', title: 'Unread Fixture', compiled_truth: 'Unread fixture.', timeline: '', frontmatter: {} }, { sourceId: source });
+      const [row] = await brain.engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2', [source, 'notes/unread-fixture']);
+      const page = Number(row!.id);
+      if (backed) {
+        await brain.engine.executeRaw(`INSERT INTO page_segment_texts (source_id, sha256, byte_len, line_count, body) VALUES ($1, decode(repeat('00', 32), 'hex'), 1, 1, convert_to('x', 'UTF8'))`, [source]);
+        await brain.engine.executeRaw(`INSERT INTO page_body_manifest (page_id, occurrence_id, gen_from, seq, region, source_id, sha256, byte_start, byte_len, line_start, line_count, cut_kind,
+          entry_state, static_proj_bytes, static_proj_lines, hash_state)
+          VALUES ($1, 1, 1, 0, 'truth', $2, decode(repeat('00', 32), 'hex'), 0, 1, 0, 1, 'eof', '{}'::jsonb, 0, 0, decode(repeat('00', 32), 'hex'))`, [page, source]);
+      }
+      await brain.engine.executeRaw(`INSERT INTO page_segment_derivations (page_id, pipeline, occurrence_id, pipeline_version, segment_sha256, context_hash, state, output, receipt)
+        VALUES ($1, $2, 1, 1, decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), 'done', '{"note":"a paid or unpaid result"}'::jsonb, NULL)`, [page, pipeline]);
+      await brain.engine.executeRaw('UPDATE pages SET deleted_at = now() WHERE id = $1', [page]);
+      const requestId = randomUUID();
+      await brain.engine.executeRaw(`INSERT INTO page_segment_derivation_purges (request_id, source_id, needles, patterns) VALUES ($1::uuid, $2, ARRAY[' purge example never stated '], ARRAY['%purge%example%never%stated%'])`,
+        [requestId, source]);
+      return { page, requestId, rows: async () => (await brain.engine.readSegmentDerivations(page)).length };
+    };
+
+    test('an unread delete keeps the row of a page restored after the sweep picked it (the scope is checked in the DELETE)', async () => {
+      const fixture = await unreadFixture('unread-restore', 'links', true);
+      installFaultHook(point => { if (point === 'purge:derivation_batch') throw timeout(); });
+      __setBeforeUnreadDerivationDeleteForTests(async tx => { await tx.executeRaw('UPDATE pages SET deleted_at = NULL WHERE id = $1', [fixture.page]); });
+      try { await continueDerivationPurges(brain.engine, 'unread-restore', { first: fixture.requestId }); } finally {
+        installFaultHook(undefined);
+        __setBeforeUnreadDerivationDeleteForTests(null);
+      }
+      expect({ rows: await fixture.rows(), sweep: await derivationPurgeState(brain.engine, fixture.requestId) }).toEqual({ rows: 1, sweep: null });
+    }, 600_000);
+
+    test('a paid row that alone outruns the budget is never deleted unread: the sweep stalls with a named reason, and a retry that fits sweeps it', async () => {
+      const fixture = await unreadFixture('unread-paid', 'extract_atoms', false);
+      installFaultHook(point => { if (point === 'purge:derivation_batch') throw timeout(); });
+      try { await continueDerivationPurges(brain.engine, 'unread-paid', { first: fixture.requestId }); } finally { installFaultHook(undefined); }
+      expect({ rows: await fixture.rows(), sweep: await derivationPurgeState(brain.engine, fixture.requestId) })
+        .toEqual({ rows: 1, sweep: { state: 'stalled', reason: 'paid_row_unreadable' } });
+      await continueDerivationPurges(brain.engine, 'unread-paid', { first: fixture.requestId, retry: fixture.requestId });
+      expect({ rows: await fixture.rows(), sweep: await derivationPurgeState(brain.engine, fixture.requestId) }).toEqual({ rows: 1, sweep: null });
+    }, 600_000);
+
+    test('a purge returns pending once it recorded its sweep and its own bounded call ran, and --status --continue finishes it', async () => {
+      const claim = 'Purge Example gate code is 7302';
+      const rows = await candidateRowsPage('notes/sweep-inline-rows', claim, 300, 1);
+      const params = await confirmed(await seed('notes/sweep-inline-purge', claim));
+      __setDerivationSweepLimitsForTests({ batchRows: 100, inlineMs: 0 });
+      __setDerivationSweepWorkForTests(true);
+      try {
+        const first = (await brain.call('purge_fact', params)).body;
+        expect({ sweep: first.derivation_sweep, completion: first.completion, exit: first.exit_code, statements: sweepStatements().length })
+          .toEqual({ sweep: 'pending', completion: 'incomplete', exit: 75, statements: 1 });
+        expect((first.next as string[]).some(n => n.includes(`gbrain forget --purge --status --request-id ${params.request_id} --continue`))).toBe(true);
+        const done = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+        expect(done.derivation_sweep).toBeUndefined();
+      } finally {
+        __setDerivationSweepLimitsForTests(null);
+        __setDerivationSweepWorkForTests(false);
+      }
+      expect({ rows: await exactHolders(brain.engine, rows, claim), recorded: await sweepsRecorded() }).toEqual({ rows: [], recorded: 0 });
+    }, 600_000);
+
+    test('a receipt probe stopped by its deadline reports a verified, finished sweep\'s result and says so; with the sweep pending it is unverified and next continues it', async () => {
+      const claimA = 'Purge Example dock code is 5190', claimB = 'Purge Example pier code is 6203';
+      const rowsA = await candidateRowsPage('notes/sweep-probe-rows-a', claimA, 20, 2);
+      const idA = await seed('notes/sweep-probe-a', claimA);
+      __setPurgeProbeLimitsForTests({ totalMs: 0 });
+      let verified: Record<string, any>;
+      try { verified = await purge(idA); } finally { __setPurgeProbeLimitsForTests(null); }
+      const store = derivationStore(verified!)! as Record<string, any>;
+      expect({ sweep: verified!.derivation_sweep, status: store.status, reason: store.reason, probe: store.probe, rows: await exactHolders(brain.engine, rowsA, claimA) })
+        .toEqual({ sweep: undefined, status: 'deleted', reason: 'verified_by_sweep', probe: 'verification_deadline', rows: [] });
+      complete(verified!);
+      await candidateRowsPage('notes/sweep-probe-rows-b', claimB, 20, 2);
+      const params = await confirmed(await seed('notes/sweep-probe-b', claimB));
+      __setPurgeProbeLimitsForTests({ totalMs: 0 });
+      __setDerivationSweepLimitsForTests({ totalMs: 0 });
+      let pending: Record<string, any>;
+      try { pending = (await brain.call('purge_fact', params)).body; } finally {
+        __setPurgeProbeLimitsForTests(null);
+        __setDerivationSweepLimitsForTests(null);
+      }
+      const open = derivationStore(pending!)! as Record<string, any>;
+      expect({ sweep: pending!.derivation_sweep, status: open.status, reason: open.reason }).toEqual({ sweep: 'pending', status: 'unverified', reason: 'verification_deadline' });
+      expect((pending!.next as string[]).some(n => n.includes(`gbrain forget --purge --status --request-id ${params.request_id} --continue`))).toBe(true);
+      const done = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+      expect({ sweep: done.derivation_sweep, recorded: await sweepsRecorded() }).toEqual({ sweep: undefined, recorded: 0 });
+    }, 600_000);
+
+    test('doctor names a pending sweep with its request id and the command that continues it, and atom receipts it blocked point there, not at the spend cap', async () => {
+      const claim = 'Purge Example loft code is 8461';
+      await candidateRowsPage('notes/sweep-doctor-rows', claim, 300, 0);
+      const params = await confirmed(await seed('notes/sweep-doctor-purge', claim));
+      __setDerivationSweepLimitsForTests({ batchRows: 50, totalMs: 0 });
+      try { expect((await brain.call('purge_fact', params)).body.derivation_sweep).toBe('pending'); } finally { __setDerivationSweepLimitsForTests(null); }
+      const [check] = await derivationPurgeSweepsEntry.run({ engine: brain.engine } as never) as Array<Record<string, any>>;
+      const command = `gbrain forget --purge --status --request-id ${params.request_id} --continue`;
+      expect({ status: check!.status, named: check!.message.includes(params.request_id), argv: check!.fix?.argv, category: categorizeCheck('derivation_purge_sweeps') })
+        .toEqual({ status: 'warn', named: true, argv: command.split(' '), category: 'brain' });
+      expect(check!.details.records).toContainEqual(expect.objectContaining({ request_id: params.request_id, state: 'pending', command }));
+      const page = await storedPage(brain.engine, 'notes/sweep-doctor-purge');
+      await brain.engine.executeRaw(`INSERT INTO page_segment_derivations (page_id, pipeline, occurrence_id, pipeline_version, segment_sha256, context_hash, state, output, receipt)
+        VALUES ($1, 'extract_atoms', 999999, 1, decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), 'partial', '{"windows":[]}'::jsonb,
+          jsonb_build_object('kind', 'unread_windows', 'pipeline', 'extract_atoms', 'reason', 'purge_sweep_pending', 'windows_read', 0, 'windows_total', 2))`, [page.id]);
+      const [truncated] = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as never) as Array<Record<string, any>>).filter(c => c.name === 'extraction_input_truncated');
+      const group = (truncated!.details.groups as Array<Record<string, any>>).find(g => g.pipeline === 'extract_atoms' && g.kind === 'purge_sweep_pending');
+      expect({ remedy: group?.remedy.includes('derivation_purge_sweeps'), cap: group?.remedy.includes(PAGE_DERIVATION_CAP_KEY) }).toEqual({ remedy: true, cap: false });
+      await brain.engine.executeRaw("DELETE FROM page_segment_derivations WHERE page_id=$1 AND pipeline='extract_atoms' AND occurrence_id=999999", [page.id]);
+      expect((await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body.derivation_sweep).toBeUndefined();
+      const [clear] = await derivationPurgeSweepsEntry.run({ engine: brain.engine } as never) as Array<Record<string, any>>;
+      expect(clear!.status).toBe('ok');
     }, 600_000);
   });
 }

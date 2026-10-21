@@ -447,6 +447,30 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     expect(check.status).not.toBe('warn');
   }, 300_000);
 
+  test('a pending fact purge sweep covering the page skips its synopsis as purge_sweep_pending (no call), and doctor points at the sweep, not the cap', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-purge-sweep';
+    await brain.seed(slug, page(days(1_300_000).body + '\nPurge sweep fixture.\n'));
+    const { id } = await pageRow(slug);
+    const requestId = randomUUID();
+    await brain.engine.executeRaw(`INSERT INTO page_segment_derivation_purges (request_id, source_id, needles, patterns, page_ids)
+      VALUES ($1::uuid, 'default', ARRAY[' purge example never stated '], ARRAY['%purge%example%never%stated%'], ARRAY[$2::int])`, [requestId, id]);
+    try {
+      reset();
+      expect(await run(slug)).toEqual({ kind: 'skipped', reason: 'purge_sweep_pending' });
+      expect(calls.length).toBe(0);
+      const check = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
+      const group = (check.details as { groups: Array<{ pipeline: string; kind: string; remedy: string | null }> }).groups.find(g => g.pipeline === 'synopsis');
+      expect({ kind: group?.kind, sweep: group?.remedy?.includes('derivation_purge_sweeps'), cap: group?.remedy?.includes(PAGE_DERIVATION_CAP_KEY), fix: check.fix?.argv })
+        .toEqual({ kind: 'purge_sweep_pending', sweep: true, cap: false, fix: ['gbrain', 'doctor', '--only', 'derivation_purge_sweeps', '--json'] });
+    } finally {
+      await brain.engine.executeRaw('DELETE FROM page_segment_derivation_purges WHERE request_id = $1::uuid', [requestId]);
+    }
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis' });
+  }, 300_000);
+
   const ledger = async (pageId: number, table: 'page_derivation_spend' | 'page_embedding_budget') => (await opts.getBrain().engine.executeRaw<{ spent: number | string; reserved: number | string }>(
     `SELECT spent_usd AS spent, reserved_usd AS reserved FROM ${table} WHERE page_id = $1${table === 'page_derivation_spend' ? " AND family = 'synopsis'" : ''}`, [pageId]))
     .map(r => ({ spent: Number(r.spent), reserved: Number(r.reserved) }))[0] ?? null;
