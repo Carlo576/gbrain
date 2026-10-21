@@ -30,6 +30,11 @@ export const GRADUATION_INVENTORY: Inventory = {
   version: 1,
   entries: [
     carry('access_tokens', 'security', 'Legacy bearer tokens and their unified grant columns; token hashes keep authorizing on the target.'),
+    carry('belief_commit_marks', 'user_data', 'Belief ledger post-commit observations; without them carried events would read as unproven (W2 visibility).'),
+    carry('belief_events', 'user_data', 'The belief ledger: recorded history Markdown cannot rebuild; event keys carry no ids, and the id order and sequence carry verbatim.'),
+    carry('belief_page_lifetimes', 'user_data', 'Belief ledger page identities; event keys name these lifetimes.'),
+    carry('belief_redactions', 'user_data', 'Belief ledger purge suppressions; dropping them would let a later append write purged text back.'),
+    carry('belief_retier_manifest', 'user_data', 'Per-subject manifests behind bulk trust.retiered events.'),
     carry('budget_ledger', 'operational', 'Daily resolver spend totals; admission keeps counting today\'s spend.'),
     carry('calibration_profiles', 'user_data', 'Published calibration profiles per holder.'),
     carry('chat_usage_log', 'operational', 'Chat model usage and cost log.'),
@@ -106,6 +111,7 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('page_body_manifest', 'user_data', 'Segmented page bodies: which segment texts make each body generation, in order; without it a large page has no body.'),
     carry('page_body_staging_parts', 'operational', 'Raw parts of open upload sessions; without them a client resuming an upload starts over.'),
     carry('page_body_stagings', 'operational', 'Body stagings of segmented writes and upload sessions (idempotent begin and commit, expiry deadlines).'),
+    carry('page_body_staging_texts', 'operational', 'The segment texts each live body staging needs, so a page purge keeps an unpublished write\'s texts.'),
     carry('page_embedding_budget', 'operational', 'Large-page embedding spend ledger: per-page spend, holds awaiting approval and caps; without it held pages would embed without consent.'),
     carry('page_extraction_state', 'operational', 'Extraction watermarks and partial-input receipts per page and pipeline; without them the next extraction of a large page reads its head again and records the receipt anew.'),
     carry('page_facts_reconcile', 'operational', 'Facts reconcile watermark: per-page revision extract_facts last reconciled; without it every page is due again.'),
@@ -165,9 +171,11 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('sources', 'user_data', 'Sources with incarnations and archive state.'),
     carry('subagent_messages', 'operational', 'Subagent job transcripts.'),
     carry('subagent_tool_executions', 'operational', 'Subagent tool execution log.'),
+    carry('sync_wanted_markers', 'operational', 'Pending sync requests (GBRA-133): a sync trigger, push or nudge not yet drained; dropping them would lose an accepted request. Rows name carried sources and jobs; the target\'s residents drain them.'),
     carry('synthesis_evidence', 'user_data', 'Synthesis citations.'),
     carry('tags', 'user_data', 'Page tags.'),
     carry('take_domain_assignments', 'user_data', 'Take domain assignments.'),
+    carry('take_horizons', 'user_data', 'Forecast horizons per take, owner-set or from the stated-horizon scan.'),
     carry('take_grade_cache', 'operational', 'Paid take grading cache; rebuilding spends money.'),
     carry('take_nudge_log', 'operational', 'Take nudge log.'),
     carry('take_proposals', 'user_data', 'Take proposals and their status.'),
@@ -188,6 +196,7 @@ export const GRADUATION_INVENTORY: Inventory = {
 
     entry('query_cache', 'rebuild', 'operational', 'Query result cache; regenerated on the target.'),
     entry('code_traversal_cache', 'rebuild', 'operational', 'Code traversal cache; regenerated on the target.'),
+    entry('page_view_digests', 'rebuild', 'operational', 'get_page view sizes and sha256 of segmented pages per revision; recomputed by the next read on the target.'),
 
     entry('planner_stats_deltas', 'discard', 'operational', 'PGLite-only planner accounting.', { engines: { pglite: true, postgres: false } }),
     entry('planner_stats_state', 'discard', 'operational', 'PGLite-only planner accounting.', { engines: { pglite: true, postgres: false } }),
@@ -195,6 +204,8 @@ export const GRADUATION_INVENTORY: Inventory = {
     entry('budget_reservations', 'discard', 'operational', 'Daily-ledger holds (src/core/budget/daily-ledger.ts) that expire within minutes; budget_ledger carries the day\'s totals, so a hold dropped mid-graduation stays counted as reserved until its UTC day ends (only tightening that day\'s cap).'),
     entry('subagent_rate_leases', 'discard', 'operational', 'Job-owned concurrency leases that expire.'),
     entry('persistence_consumers', 'discard', 'operational', 'Per-process consumer heartbeat rows (#6317): each is renewed every 10 s by a live process on the source host and lapses in 90 s; the target\'s consumers write their own rows.'),
+    entry('sync_notifier_leases', 'discard', 'operational', 'Host notifier lease (GBRA-133): renewed every heartbeat by a live resident on the source engine and lapses in two; the target\'s residents claim their own.'),
+    entry('sync_notifier_sources', 'discard', 'operational', 'Per-source notifier runtime state and coverage (GBRA-133), written by the source engine\'s resident; the target\'s resident re-observes HEAD, and a classic source\'s syncer host is recorded again by its next sync on the target (until then it reads not monitored).'),
     entry('oauth_codes', 'discard', 'security', 'One-time authorization codes; an in-flight OAuth handshake restarts.'),
 
     entry('page_links', 'schema_owned', 'operational', 'View over links; each engine\'s schema defines it.', { kind: 'view' }),

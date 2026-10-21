@@ -50,9 +50,10 @@ import { resolveCandidateSources, resolveLinkFallbackDefault, loadLinkPageMetada
 import { collectWantedLinks, isWantedPagesEnabled } from '../core/wanted-links.ts';
 import { readLineGrammarSettings, statedRelationTypes } from '../core/line-grammar.ts';
 import { effectiveLinkExtractorWatermark, linkExtractorWatermarkFor } from '../core/link-extraction-watermark.ts';
-import { concurrentWriteSkipLine, replaceDerivedLinksBatchOrReplay, replaceDerivedLinksDeferringConflicts, settingsChangedSkipLine, type DerivedLinkBatchItem } from '../core/derived-links.ts';
+import { concurrentWriteSkipLine, replaceDerivedLinksBatchOrReplay, replaceDerivedLinksDeferringConflicts, settingsChangedSkipLine, unknownSourceSkipLine, type DerivedLinkBatchItem, type UnknownSourceSkip } from '../core/derived-links.ts';
 import { pageSnapshotKey } from '../core/page-snapshot-batch.ts';
 import type { PageSnapshot } from '../core/page-state/types.ts';
+import { LostWrites, extractionWrite, timelineSnapshotRefs } from '../core/extract-watermark.ts';
 export { reconcileSourceLinks, type SourceLinkReconciliationResult } from '../core/link-reconciliation.ts';
 export { extractMarkdownLinks } from '../core/link-extraction.ts';
 import {
@@ -70,7 +71,7 @@ import { resolveIncludeFrontmatter } from '../core/extract-frontmatter.ts';
 import { inferLinkTypeFromPack, ownsAttendanceInference } from '../core/schema-pack/link-inference.ts';
 import { PageRegexBudget } from '../core/schema-pack/redos-guard.ts';
 export { extractTimelineFromContent, type ExtractedTimelineEntry } from '../core/timeline-extract.ts';
-import { extractTimelineFromContent, pruneTimelineOrphans, retractRemovedTimelineEntries, type ExtractedTimelineEntry } from '../core/timeline-extract.ts';
+import { extractTimelineFromContent, pruneTimelineOrphans, retractRemovedTimelineEntries, segmentedTimelineText, type ExtractedTimelineEntry } from '../core/timeline-extract.ts';
 import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
 import { addProjectedTimelineBatch, addProjectedTimelineEntry } from '../core/trust/timeline-projection.ts';
 import { createProgress } from '../core/progress.ts';
@@ -86,7 +87,8 @@ import { withRetry, isRetryableConnError } from '../core/retry.ts';
 export { withRetry };
 export type { WithRetryOpts } from '../core/retry.ts';
 import { buildGazetteer, findMentionedEntities, hashGazetteer } from '../core/by-mention.ts';
-import { runMentionPass, type MentionPassResult } from '../core/mentions/pass.ts';
+import { pageMentions, runMentionPass, type MentionPassResult } from '../core/mentions/pass.ts';
+import type { LinkExtractionFailure, LinkExtractionSystemic } from '../core/persistence/links-maintenance.ts';
 import { formatMentionSummary, linkPhaseDeadline, mentionJsonFields, previewMentionPass } from '../core/mentions/stale.ts';
 // #4611: the cross-source link fallback follows the configured
 // `sources.default` (validated shape) instead of the literal 'default'.
@@ -101,6 +103,10 @@ import { isAborted } from '../core/abort-check.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
 import { loadAllSources } from '../core/sources-load.ts';
 import { plannerStatsForLinkDrain } from '../core/planner-stats.ts';
+import { isSegmentedPage, withoutBody } from '../core/page-body/page-shape.ts';
+import { extractSegmentedPageLinks } from '../core/page-body/segment-links.ts';
+import { STALE_TIME_BUDGET_MS, formatStaleCounts, staleExtractionCounts } from '../core/extraction-lag.ts';
+import { assertStaleSourceModeUnambiguous } from './extract-stale-options.ts';
 
 // Batch size for addLinksBatch / addTimelineEntriesBatch.
 // Postgres bind-parameter limit is 65535. Links use 4 cols/row → 16K hard ceiling;
@@ -117,12 +123,10 @@ const BATCH_SIZE = 100;
 // 25 caps the worst case at ~625MB even if every page is a 25MB transcript.
 // Normal pages are KBs; raise via GBRAIN_EXTRACT_STALE_BATCH for throughput.
 const STALE_BATCH_SIZE = Math.max(1, Number(process.env.GBRAIN_EXTRACT_STALE_BATCH) || 25);
-// v0.42.7: wall-clock budget for one `extract --stale` invocation (default
-// 30 min). `--catch-up` removes the cap (loops until 0 stale). Mirrors
-// embedAllStale's time-budget shape. Exported so the #2849 deferred-sweep
-// submitters (sync's size-gate defer branch + the jobs continuation chain)
-// derive their job timeout_ms from the SAME budget instead of hardcoding.
-export const STALE_TIME_BUDGET_MS = Math.max(1000, Number(process.env.GBRAIN_EXTRACT_TIME_BUDGET_MS) || 30 * 60 * 1000);
+// v0.42.7: wall-clock budget for one `extract --stale` invocation (default 30 min; `--catch-up` removes it). It lives
+// with the shared extraction-lag read (#6803) so doctor's and the sync nudge's estimates use it; re-exported for the
+// #2849 deferred-sweep submitters, which derive their job timeout_ms from it.
+export { STALE_TIME_BUDGET_MS };
 
 /**
  * v0.42.7 (#1696): best-effort extraction stamp for the source-correct write
@@ -274,6 +278,9 @@ interface ExtractResult {
   skipped_cross_source?: number;
   /** #6272: pages a concurrent writer changed mid-run, left unstamped (DB links path, present when non-zero). */
   skipped_concurrent_write?: number;
+  /** #6808: pages whose source (or a link target's) has no sources row, left unstamped; the first 20 named (DB paths, present when non-zero). */
+  skipped_unknown_source?: number;
+  unknown_source_pages?: UnknownSourceSkip[];
   /** #5904: timeline writes the writer refused or left pending (DB path); the command exits non-zero. */
   timeline_refused?: number;
 }
@@ -798,6 +805,7 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
     return result;
   }
 
+  const lost = new LostWrites();
   // Full walk path: CLI `gbrain extract` or first-run.
   //
   // #3957 review (D4): snapshot the walked pages' updated_at BEFORE the walk
@@ -811,16 +819,18 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
     stampRefs = refsWithSnapshotStamps(walkRefs, await snapshotStampTimes(engine, walkRefs));
   }
   if (opts.mode === 'links' || opts.mode === 'all') {
-    const r = await extractLinksFromDir(engine, opts.dir, dryRun, jsonMode, workers, opts.signal, opts.sourceId, quiet);
+    const r = await extractLinksFromDir(engine, opts.dir, dryRun, jsonMode, workers, opts.signal, opts.sourceId, quiet, lost);
     result.links_created = r.created;
     result.pages_processed = r.pages;
     const processed = new Set(r.processed);
     stampRefs = stampRefs.filter(ref => processed.has(ref.slug));
   }
   if (opts.mode === 'timeline' || opts.mode === 'all') {
-    const r = await extractTimelineFromDir(engine, opts.dir, dryRun, jsonMode, workers, opts.signal, opts.sourceId, quiet);
+    const r = await extractTimelineFromDir(engine, opts.dir, dryRun, jsonMode, workers, opts.signal, opts.sourceId, quiet, lost);
     result.timeline_entries_created = r.created;
     result.pages_processed = Math.max(result.pages_processed, r.pages);
+    const processed = new Set(r.processed);
+    stampRefs = stampRefs.filter(ref => processed.has(ref.slug));
   }
 
   // #3957: stamp the links_extracted_at watermark for the walked pages —
@@ -832,12 +842,14 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
   // source id + the row's pre-read updated_at (D4); files with no pages row
   // at snapshot time are skipped (nothing to stamp — they stay visible to
   // `extract --stale` once synced).
+  stampRefs = lost.stampable(stampRefs);
   if (!dryRun && opts.mode === 'all' && !isAborted(opts.signal)) {
     for (let i = 0; i < stampRefs.length; i += BATCH_SIZE) {
       await stampExtracted(engine, stampRefs.slice(i, i + BATCH_SIZE));
     }
   }
 
+  lost.throwIfAny();
   return result;
 }
 
@@ -878,12 +890,15 @@ Extraction:
 Incremental sweep:
 ${ATTENDANCE_REPAIR_HELP}
   gbrain extract --stale [--source-id <id>] [--include-frontmatter]
-                         [--catch-up] [--dry-run] [--json]
-      Re-extract links + timeline only for stale pages, then run the mention
-      pass: refresh entity pages' declared aliases and title subjects and link
-      every page that names an entity (link_source='mentions'). DB-source;
-      safe to cron. --catch-up loops past the 30-minute budget until none
-      remain. Off: gbrain config set mentions.auto_link false.
+                         [--catch-up] [--retry-held] [--dry-run] [--json]
+      Re-extract links + timeline for stale pages, then the mention pass (entity
+      aliases and title subjects; link_source='mentions'; off: gbrain config set
+      mentions.auto_link false). DB-source; safe to cron; 30 min per run, the next
+      resumes; --catch-up runs until none remain. Scope with --source-id (--source
+      is fs|db). Done when --dry-run --json reports actionable 0 and mention_due 0.
+      On a managed brain a page whose extraction fails is reported and skipped;
+      after 3 runs failing it the same way it is held until it is edited, the
+      extractor changes, or --retry-held clears the holds and retries it now.
 
 Inspection:
   gbrain extract mentions --explain <name|slug> [--page <slug>] [--source-id <id>] [--json]
@@ -912,6 +927,7 @@ async function extractFromDB(engine: BrainEngine, result: ExtractResult, subcomm
       result.skipped_cross_source = r.skippedCrossSource;
       if (r.skippedAttendanceIncomplete) result.skipped_attendance_incomplete = r.skippedAttendanceIncomplete;
       if (r.skippedConcurrentWrite) result.skipped_concurrent_write = r.skippedConcurrentWrite;
+      if (r.unknownSource.length) { result.skipped_unknown_source = r.unknownSource.length; result.unknown_source_pages = r.unknownSource.slice(0, 20); }
     }
     if (subcommand === 'timeline' || subcommand === 'all') {
       const r = await (await import('./extract-timeline-db.ts')).extractTimelineFromDB(engine, { ...o, completed: completed?.timeline });
@@ -962,15 +978,8 @@ export async function runExtract(engine: BrainEngine, args: string[], authority?
   // works with no subcommand (and `gbrain extract all --stale` too). DB-source
   // only — reads page content from the DB so it runs on checkout-less brains.
   if (args.includes('--stale')) {
-    const sIdx = args.indexOf('--source');
-    const src = (sIdx >= 0 && sIdx + 1 < args.length) ? args[sIdx + 1] : 'db';
-    if (src === 'fs') {
-      console.error(
-        `extract --stale is DB-source only (reads page content from the database\n` +
-        `so it works on checkout-less brains). Drop '--source fs' or pass '--source db'.`,
-      );
-      process.exit(1);
-    }
+    // #6803 (D2): --source fs|<id> was refused before connecting (extract-stale-options.ts); --source db is ambiguous only when a source is named db.
+    await assertStaleSourceModeUnambiguous(engine, args);
     const sidIdx = args.indexOf('--source-id');
     const staleSourceId = (sidIdx >= 0 && sidIdx + 1 < args.length) ? args[sidIdx + 1] : undefined;
     await extractStaleFromDB(engine, {
@@ -981,6 +990,7 @@ export async function runExtract(engine: BrainEngine, args: string[], authority?
       includeFrontmatter: args.includes('--include-frontmatter') || undefined,
       sourceIdFilter: staleSourceId,
       catchUp: args.includes('--catch-up'),
+      retryHeld: args.includes('--retry-held'),
     });
     return;
   }
@@ -1342,6 +1352,7 @@ async function extractForSlugs(
   // Embedded callers own the report: nothing on stdout (see ExtractOpts.quiet).
   quiet: boolean = false,
 ): Promise<{ links_created: number; timeline_created: number; pages: number }> {
+  const lost = new LostWrites();
   const stdoutQuiet = jsonMode || quiet;
   // Build the full slug set for link resolution (fast: just readdir, no file reads)
   const allFiles = walkMarkdownFiles(brainDir);
@@ -1394,6 +1405,7 @@ async function extractForSlugs(
     try {
       return await replacePageFileLinks(engine, slug, sourceId ?? 'default', links, includeFrontmatter, owner) ?? 0;
     } catch (e) {
+      lost.record('links', links.length, [{ slug, source_id: sourceId ?? 'default' }], e);
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
         process.stderr.write(JSON.stringify({ event: 'batch_error', size: links.length, error: msg }) + '\n');
@@ -1411,6 +1423,7 @@ async function extractForSlugs(
     try {
       timelineCreated += await addProjectedTimelineBatch(engine, snapshot, { auditSite: 'extract.timeline_inc' });
     } catch (e) {
+      lost.record('timeline', snapshot.length, timelineSnapshotRefs(snapshot), e);
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
         process.stderr.write(JSON.stringify({ event: 'batch_error', size: snapshot.length, error: msg }) + '\n');
@@ -1455,7 +1468,7 @@ async function extractForSlugs(
             let written: number | null | undefined;
             if (snapshot?.page.type === 'meeting' || ownership.origins.has(slug) || links.some(link => link.link_type === 'attended' && link.origin_slug === slug && link.to_slug === slug)) {
               if (!snapshot) throw new Error('Link extraction origin is missing');
-              written = await replaceFileLinks(engine, slug, sourceId ?? 'default', links, includeFrontmatter, snapshot, ownership, content, { pack, globalBasename });
+              written = await extractionWrite('links', links.length, [{ slug, source_id: sourceId ?? 'default' }], () => replaceFileLinks(engine, slug, sourceId ?? 'default', links, includeFrontmatter, snapshot!, ownership!, content, { pack, globalBasename }));
               if (written === null) return;
             }
             linksCreated += written ?? await replaceLinksReportingLoss(slug, links, ownership);
@@ -1478,7 +1491,9 @@ async function extractForSlugs(
 
         pagesProcessed++;
         if (!dryRun) processedRefs.push({ slug, source_id: sourceId ?? 'default' });
-      } catch { /* skip unreadable */ }
+      } catch (error) {
+        lost.absorb(error);
+      }
       progress.tick(1);
     },
   });
@@ -1491,7 +1506,7 @@ async function extractForSlugs(
   // with the pre-read updated_at snapshot (D4) — refs the snapshot never
   // saw (row created mid-run) are skipped and stay stale.
   if (!dryRun && mode === 'all') {
-    await stampExtracted(engine, refsWithSnapshotStamps(processedRefs, stampSnapshot));
+    await stampExtracted(engine, refsWithSnapshotStamps(lost.stampable(processedRefs), stampSnapshot));
   }
   progress.finish();
 
@@ -1500,6 +1515,7 @@ async function extractForSlugs(
     console.log(`Incremental extract: ${label} ${linksCreated} link(s), ${timelineCreated} timeline entries from ${pagesProcessed}/${slugs.length} page(s)`);
   }
 
+  lost.throwIfAny();
   return { links_created: linksCreated, timeline_created: timelineCreated, pages: pagesProcessed };
 }
 
@@ -1512,6 +1528,7 @@ async function extractLinksFromDir(
   sourceId?: string,
   // Embedded callers own the report: nothing on stdout (see ExtractOpts.quiet).
   quiet: boolean = false,
+  lost: LostWrites = new LostWrites(),
 ): Promise<{ created: number; pages: number; processed: string[] }> {
   const stdoutQuiet = jsonMode || quiet;
   const files = walkMarkdownFiles(brainDir);
@@ -1556,15 +1573,16 @@ async function extractLinksFromDir(
         const content = readFileSync(file.path, 'utf-8');
         const links = await extractLinksFromFile(content, file.relPath, allSlugs, { globalBasename, pack, pageTypes });
         if (ownership) {
-          let written: number | null | undefined;
-          if (snapshot?.page.type === 'meeting' || ownership.origins.has(slug) || links.some(link => link.link_type === 'attended' && link.origin_slug === slug && link.to_slug === slug)) {
-            if (!snapshot) throw new Error('Link extraction origin is missing');
-            written = await replaceFileLinks(engine, slug, sourceId ?? 'default', links, false, snapshot, ownership, content, { pack, globalBasename });
-            if (written === null) return;
-          }
-          // A file with no page row yet has nothing to reconcile; it is not processed.
-          written ??= await replacePageFileLinks(engine, slug, sourceId ?? 'default', links, false, ownership);
-          if (written === null) return;
+          const written = await extractionWrite('links', links.length, [{ slug, source_id: sourceId ?? 'default' }], async () => {
+            if (snapshot?.page.type === 'meeting' || ownership.origins.has(slug) || links.some(link => link.link_type === 'attended' && link.origin_slug === slug && link.to_slug === slug)) {
+              if (!snapshot) throw new Error('Link extraction origin is missing');
+              const replaced = await replaceFileLinks(engine, slug, sourceId ?? 'default', links, false, snapshot, ownership, content, { pack, globalBasename });
+              if (replaced !== undefined) return replaced;
+            }
+            // A file with no page row yet has nothing to reconcile; it is not processed.
+            return replacePageFileLinks(engine, slug, sourceId ?? 'default', links, false, ownership);
+          });
+          if (written == null) return;
           created += written;
         } else for (const link of links) {
           const key = `${link.from_slug}::${link.to_slug}::${link.link_type}`;
@@ -1574,7 +1592,9 @@ async function extractLinksFromDir(
           created++;
         }
         processed.push(slug);
-      } catch { /* skip unreadable */ }
+      } catch (error) {
+        lost.absorb(error);
+      }
       progress.tick(1);
     },
   });
@@ -1597,7 +1617,9 @@ async function extractTimelineFromDir(
   sourceId?: string,
   // Embedded callers own the report: nothing on stdout (see ExtractOpts.quiet).
   quiet: boolean = false,
-): Promise<{ created: number; pages: number }> {
+  lost: LostWrites = new LostWrites(),
+): Promise<{ created: number; pages: number; processed: string[] }> {
+  const processed: string[] = [];
   const stdoutQuiet = jsonMode || quiet;
   const files = walkMarkdownFiles(brainDir);
   const quarantined = await quarantinedSlugs(engine, sourceId ?? 'default');
@@ -1617,6 +1639,7 @@ async function extractTimelineFromDir(
     try {
       created += await addProjectedTimelineBatch(engine, snapshot, { auditSite: 'extract.timeline_fs' });
     } catch (e) {
+      lost.record('timeline', snapshot.length, timelineSnapshotRefs(snapshot), e);
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
         process.stderr.write(JSON.stringify({ event: 'batch_error', size: snapshot.length, error: msg }) + '\n');
@@ -1651,7 +1674,8 @@ async function extractTimelineFromDir(
             if (batch.length >= BATCH_SIZE) await flush();
           }
         }
-      } catch { /* skip unreadable */ }
+        processed.push(slug);
+      } catch { /* unreadable or uncompleted pages remain due */ }
       progress.tick(1);
     },
   });
@@ -1662,7 +1686,7 @@ async function extractTimelineFromDir(
     const label = dryRun ? '(dry run) would create' : 'created';
     console.log(`Timeline: ${label} ${created} entries from ${files.length} pages`);
   }
-  return { created, pages: files.length };
+  return { created, pages: files.length, processed };
 }
 
 // --- Sync integration hooks ---
@@ -1793,10 +1817,11 @@ export async function extractTimelineForSlugs(
       const content = readFileSync(filePath, 'utf-8');
       const entries = extractTimelineFromContent(content, slug);
       await retractRemovedTimelineEntries(engine, slug, opts?.sourceId ?? 'default', content);
-      processed.push(slug);
       for (const entry of entries) {
-        try { await addProjectedTimelineEntry(engine, entry.slug, { date: entry.date, source: entry.source, summary: entry.summary, detail: entry.detail }, entryOpts); created++; } catch { /* skip */ }
+        await addProjectedTimelineEntry(engine, entry.slug, { date: entry.date, source: entry.source, summary: entry.summary, detail: entry.detail }, entryOpts);
+        created++;
       }
+      processed.push(slug);
     } catch (e) { errors.push({ slug, error: e instanceof Error ? e.message : String(e) }); }
   }
   return { created, processed, ...(errors.length ? { errors } : {}) };
@@ -1834,7 +1859,7 @@ async function extractLinksFromDB(
   typeFilter: PageType | undefined,
   since: string | undefined,
   opts?: { includeFrontmatter?: boolean; sourceIdFilter?: string; completed?: Set<string> },
-): Promise<{ created: number; pages: number; unresolved: UnresolvedFrontmatterRef[]; skippedMissingTarget: number; skippedCrossSource: number; skippedAttendanceIncomplete: number; skippedConcurrentWrite?: number }> {
+): Promise<{ created: number; pages: number; unresolved: UnresolvedFrontmatterRef[]; skippedMissingTarget: number; skippedCrossSource: number; skippedAttendanceIncomplete: number; skippedConcurrentWrite?: number; unknownSource: UnknownSourceSkip[] }> {
   const includeFrontmatter = opts?.includeFrontmatter ?? false;
   const sourceIdFilter = opts?.sourceIdFilter;
   // C3 (D6) + S4 (P2.18): the links_extracted_at watermark covers links AND timeline, so this phase never stamps it;
@@ -1912,6 +1937,7 @@ async function extractLinksFromDB(
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   const grammar = await readLineGrammarSettings(engine), lineGrammar = { enabled: grammar.enabled, allowUndeclaredTypes: grammar.allowUndeclaredTypes };
   let skippedSettingsChanged = 0, skippedConcurrentWrite = 0;
+  const unknownSource: UnknownSourceSkip[] = [];
   progress.start('extract.links_db', walkRefs.length);
   const plannerTick = dryRun ? async () => {} : await plannerStatsForLinkDrain(engine, async () => walkRefs.length);
 
@@ -1931,6 +1957,7 @@ async function extractLinksFromDB(
       const written = results[i];
       if (written === 'settings_changed') skippedSettingsChanged++;
       else if (written === 'concurrent_write') skippedConcurrentWrite++;
+      else if ('unknownSource' in written) unknownSource.push({ slug, source_id, missing_source: written.unknownSource });
       else { created += written.created; processed++; if (!dryRun) opts?.completed?.add(extractCompletionKey(source_id, slug, item.origin.expectedRevision)); }
       progress.tick(1);
     });
@@ -1957,20 +1984,21 @@ async function extractLinksFromDB(
     if (!resolvers.has(source_id)) resolvers.set(source_id, makeResolver(engine, { mode: 'batch', sourceId: source_id }));
     const resolver = resolvers.get(source_id)!;
 
-    const fullContent = page.compiled_truth + '\n' + page.timeline;
     // --include-frontmatter default OFF in v0.13 (codex tension 5, back-compat).
     // Migration orchestrator explicitly enables it for the one-time backfill;
     // user-invoked `gbrain extract links` stays outgoing-only.
     // Issue #972: globalBasename routes bare `[[name]]` wikilinks through
     // basename lookup; off by default for back-compat.
-    const extracted = await extractPageLinks(
-      slug, fullContent, page.frontmatter, page.type, resolver,
-      { skipFrontmatter: !includeFrontmatter, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
-        const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, slug,
-          source_id, allSlugs, slugToSources, federatedSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
-        return !resolved.ok ? undefined : targetSlug === slug && resolved.toSourceId === source_id ? page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
-      } },
-    );
+    const linkOpts = { skipFrontmatter: !includeFrontmatter, globalBasename, pack, lineGrammar, targetType: (targetSlug: string, targetSourceId?: string) => {
+      const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, slug,
+        source_id, allSlugs, slugToSources, federatedSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
+      return !resolved.ok ? undefined : targetSlug === slug && resolved.toSourceId === source_id ? page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
+    } };
+    // A segmented body is read block by block, with its temporal inputs for the publication (page-body/segment-links.ts).
+    const extracted: Awaited<ReturnType<typeof extractSegmentedPageLinks>> = isSegmentedPage(page)
+      ? await extractSegmentedPageLinks(engine, { id: Number(page.id), slug, source_id, type: page.type, frontmatter: page.frontmatter }, resolver,
+        { ...linkOpts, temporal: true })
+      : await extractPageLinks(slug, page.compiled_truth + '\n' + page.timeline, page.frontmatter, page.type, resolver, linkOpts);
     unresolved.push(...extracted.unresolved);
     if (!extracted.attendanceComplete) { skippedAttendanceIncomplete++; continue; }
 
@@ -2019,6 +2047,7 @@ async function extractLinksFromDB(
             allSlugs, slugToSources, federatedSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId }) }) : [];
         pendingWrites.push({ slug, source_id, item: { origin: { slug, sourceId: source_id, expectedRevision: snapshot.revision,
           sourceIncarnation: snapshot.sourceIncarnation }, links: batch, opts: { includeFrontmatter, lineGrammar: grammar,
+          ...(extracted.temporalBody ? { temporalBody: extracted.temporalBody } : {}),
           wanted: { producers: includeFrontmatter ? ['body', 'frontmatter'] : ['body'], rows: wanted },
           expectedEndpoints: capturedLinkEndpoints(batch, targetMetadata, { slug, sourceId: source_id }) } } });
       } catch (error) {
@@ -2039,6 +2068,7 @@ async function extractLinksFromDB(
     if (skippedAttendanceIncomplete) console.log(`Skipped ${skippedAttendanceIncomplete} page(s) with unresolved attendance; prior links and extraction watermarks were preserved.`);
     if (skippedSettingsChanged) console.log(settingsChangedSkipLine(skippedSettingsChanged));
     if (skippedConcurrentWrite) console.log(concurrentWriteSkipLine(skippedConcurrentWrite));
+    if (unknownSource.length) console.log(unknownSourceSkipLine(unknownSource));
     if (skippedMissingTarget > 0) {
       console.log(`Skipped ${skippedMissingTarget} candidate(s) whose target page doesn't exist (references to non-pages are never persisted).`);
     }
@@ -2063,7 +2093,7 @@ async function extractLinksFromDB(
   // #2589: the counters ride the return value so machine consumers (and the
   // --json path, which has no summary event on this path) can see the drops —
   // "counted, never silent" must hold beyond human-mode console lines.
-  return { created, pages: processed, unresolved, skippedMissingTarget, skippedCrossSource, skippedAttendanceIncomplete, ...(skippedSettingsChanged ? { skippedSettingsChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}) };
+  return { created, pages: processed, unresolved, skippedMissingTarget, skippedCrossSource, skippedAttendanceIncomplete, ...(skippedSettingsChanged ? { skippedSettingsChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}), unknownSource };
 }
 
 /**
@@ -2100,8 +2130,10 @@ export async function extractStaleFromDB(
      * explicit `gbrain extract --stale` command. Ignored when catchUp.
      */
     timeBudgetMs?: number;
+    /** GBRA-130 A-1 (managed brains): clear held link-extraction failures first. */ retryHeld?: boolean;
   },
-): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; mentions?: MentionPassResult }> {
+): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; skippedUnknownSource?: number; mentions?: MentionPassResult;
+  linkFailed?: number; linkFailures?: LinkExtractionFailure[]; linkSystemic?: LinkExtractionSystemic[] }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
   const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
   const log = opts.quiet ? (..._args: unknown[]) => {} : console.log;
@@ -2112,11 +2144,11 @@ export async function extractStaleFromDB(
   // Pre-flight count — cheap indexed COUNT. dry-run reports and returns.
   const totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
   if (dryRun) {
-    const m = await previewMentionPass(engine, sourceIdFilter);
+    const m = await previewMentionPass(engine, sourceIdFilter), counts = opts.quiet ? null : await staleExtractionCounts(engine, sourceIdFilter);
     if (jsonMode && !opts.quiet) {
-      process.stdout.write(JSON.stringify({ action: 'extract_stale_dry_run', stale_pages: totalStale, mention_due_pages: m.due, mention_last_pass_at: m.last_pass_at }) + '\n');
+      process.stdout.write(JSON.stringify({ action: 'extract_stale_dry_run', stale_pages: totalStale, mention_due_pages: m.due, mention_last_pass_at: m.last_pass_at, ...counts }) + '\n');
     } else {
-      log(`(dry run) ${totalStale} page(s) need link/timeline extraction; ${m.due} page(s) need a mention pass (last pass: ${m.last_pass_at ?? 'never'}). Run without --dry-run to extract.`);
+      log(`(dry run) ${totalStale} page(s) need link/timeline extraction; ${m.due} page(s) need a mention pass (last pass: ${m.last_pass_at ?? 'never'}). Run without --dry-run to extract.${counts ? `\n${formatStaleCounts(counts)}` : ''}`);
     }
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: totalStale + m.due };
   }
@@ -2124,12 +2156,13 @@ export async function extractStaleFromDB(
   // canonical timeline rows and the watermark publish on the one managed path
   // (the mention pass runs inside it).
   if (await managedPersistenceEnabled(engine)) {
-    const { extractManagedStaleLinks, formatManagedStaleExtraction } = await import('../core/persistence/links-maintenance.ts');
-    const r = await extractManagedStaleLinks(engine, { sourceId: sourceIdFilter, ...(catchUp ? {} : { timeBudgetMs }) });
+    const { runManagedStaleExtraction, formatManagedStaleExtraction } = await import('../core/persistence/links-maintenance.ts');
+    const r = await runManagedStaleExtraction(engine, { sourceId: sourceIdFilter, catchUp, timeBudgetMs, counts: !opts.quiet, retryHeld: opts.retryHeld });
     if (!jsonMode) log(formatManagedStaleExtraction(r, false, false));
     else if (!opts.quiet) process.stdout.write(formatManagedStaleExtraction(r, false, true) + '\n');
     return { linksCreated: r.created, timelineCreated: r.timeline, pagesProcessed: r.pages, staleRemaining: r.remaining + (r.mentions?.remaining ?? 0),
-      ...(r.skipped ? { skippedChanged: r.skipped } : {}), ...(r.mentions ? { mentions: r.mentions } : {}) };
+      ...(r.skipped ? { skippedChanged: r.skipped } : {}), ...(r.mentions ? { mentions: r.mentions } : {}),
+      ...(r.failed ? { linkFailed: r.failed, linkFailures: r.failures } : {}), ...(r.systemic?.length ? { linkSystemic: r.systemic } : {}) };
   }
 
   // Resolver + cross-source resolution map built ONCE before the loop (the
@@ -2189,6 +2222,7 @@ export async function extractStaleFromDB(
   // design (source isolation) unless the #3908 flag is on, but distinct
   // from a genuinely missing target.
   let skippedCrossSource = 0, skippedChanged = 0, skippedConcurrentWrite = 0;
+  const unknownSource: UnknownSourceSkip[] = [];
 
   const wantedEnabled = await isWantedPagesEnabled(engine);
   const plannerTick = await plannerStatsForLinkDrain(engine, async () => totalStale);
@@ -2223,18 +2257,19 @@ export async function extractStaleFromDB(
         }
         const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
         if (!snapshot) { skippedConcurrentWrite++; continue; } // deleted since the stale scan: nothing to stamp
-        const fullContent = snapshot.page.compiled_truth + '\n' + snapshot.page.timeline;
+        // A segmented body is read block by block (page-body/segment-links.ts, segmentedTimelineText), never as one string.
+        const fullContent = isSegmentedPage(snapshot.page) ? null : snapshot.page.compiled_truth + '\n' + snapshot.page.timeline;
         const linkRows: LinkBatchInput[] = [];
         if (!resolvers.has(page.source_id)) resolvers.set(page.source_id, makeResolver(engine, { mode: 'batch', sourceId: page.source_id }));
         const resolver = resolvers.get(page.source_id)!;
-        const extracted = await extractPageLinks(
-          page.slug, fullContent, snapshot.page.frontmatter, snapshot.page.type, resolver,
-          { skipFrontmatter: !includeFrontmatter, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
-            const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, page.slug,
-              page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
-            return !resolved.ok ? undefined : targetSlug === page.slug && resolved.toSourceId === page.source_id ? snapshot.page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
-          } },
-        );
+        const pageLinkOpts = { skipFrontmatter: !includeFrontmatter, globalBasename, pack, lineGrammar, targetType: (targetSlug: string, targetSourceId?: string) => {
+          const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, page.slug,
+            page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
+          return !resolved.ok ? undefined : targetSlug === page.slug && resolved.toSourceId === page.source_id ? snapshot.page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
+        } };
+        const extracted: Awaited<ReturnType<typeof extractSegmentedPageLinks>> = fullContent === null
+          ? await extractSegmentedPageLinks(engine, { ...withoutBody(snapshot.page), id: Number(snapshot.page.id), slug: page.slug, source_id: page.source_id }, resolver, { ...pageLinkOpts, temporal: true })
+          : await extractPageLinks(page.slug, fullContent, snapshot.page.frontmatter, snapshot.page.type, resolver, pageLinkOpts);
         if (!extracted.attendanceComplete) {
           skippedAttendanceIncomplete++;
           attendanceBlocked.push({ slug: page.slug, source_id: page.source_id, revision: snapshot.revision });
@@ -2259,15 +2294,18 @@ export async function extractStaleFromDB(
           crossSourceAllowed: federatedSourceIds.has(page.source_id) || crossSource, resolve: c => resolveCandidateSources(c, page.slug,
             page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId }) }) : [];
         const linkOpts = { includeFrontmatter, lineGrammar: grammar, expectedEndpoints: capturedLinkEndpoints(linkRows, targetMetadata, origin),
-          wanted: { producers: includeFrontmatter ? ['body', 'frontmatter'] as const : ['body'] as const, rows: wanted } };
+          wanted: { producers: includeFrontmatter ? ['body', 'frontmatter'] as const : ['body'] as const, rows: wanted },
+          ...(extracted.temporalBody ? { temporalBody: extracted.temporalBody } : {}) };
         const stampIso = page.updated_at.getTime() >= Date.parse(versionTs) ? page.updated_at_iso : versionTs;
         const written = await replaceDerivedLinksDeferringConflicts(engine, origin, linkRows, linkOpts);
         // Settings moved, or a concurrent writer moved the page or an endpoint (#6272): not stamped, re-extracts next run.
         if (written === 'settings_changed') { skippedChanged++; continue; }
         if (written === 'concurrent_write') { skippedConcurrentWrite++; continue; }
+        if ('unknownSource' in written) { unknownSource.push({ slug: page.slug, source_id: page.source_id, missing_source: written.unknownSource }); continue; }
         linksCreated += written.created;
-        await retractRemovedTimelineEntries(engine, page.slug, page.source_id, fullContent);
-        for (const entry of parseTimelineEntries(fullContent)) {
+        const timelineText = fullContent ?? await segmentedTimelineText(engine, snapshot.page);
+        await retractRemovedTimelineEntries(engine, page.slug, page.source_id, timelineText);
+        for (const entry of typeof timelineText === 'string' ? parseTimelineEntries(timelineText) : timelineText.entries) {
           // #3957: carry the parsed source label — omitting it wrote source=''
           // while the FS path wrote the split label, so the same bullet
           // extracted via both paths duplicated under the (page_id, date,
@@ -2314,6 +2352,7 @@ export async function extractStaleFromDB(
   if (packUnavailable) throw new Error('Cannot extract links: active schema pack is unavailable.');
   const mentions = await runMentionPass(engine, { sourceId: sourceIdFilter, ...(catchUp ? {} : { deadline: startMs + timeBudgetMs }) });
   const staleRemaining = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs }) + mentions.remaining;
+  const counts = opts.quiet ? null : await staleExtractionCounts(engine, sourceIdFilter);
 
   if (!jsonMode) {
     const mentionLine = formatMentionSummary(mentions);
@@ -2323,6 +2362,7 @@ export async function extractStaleFromDB(
     if (skippedAttendanceIncomplete) log(`Skipped ${skippedAttendanceIncomplete} page(s) with unresolved attendance; prior links and extraction watermarks were preserved.`);
     if (skippedChanged) log(settingsChangedSkipLine(skippedChanged));
     if (skippedConcurrentWrite) log(concurrentWriteSkipLine(skippedConcurrentWrite));
+    if (unknownSource.length) log(unknownSourceSkipLine(unknownSource));
     if (skippedMissingTarget > 0) {
       log(`Skipped ${skippedMissingTarget} candidate(s) whose target page doesn't exist (references to non-pages are never persisted).`);
     }
@@ -2332,17 +2372,19 @@ export async function extractStaleFromDB(
     if (budgetHit && staleRemaining > 0) {
       log(`Time budget reached — ${staleRemaining} page(s) still stale. Re-run 'gbrain extract --stale' (or pass --catch-up) to continue.`);
     }
+    if (counts) log(formatStaleCounts(counts));
   } else if (!opts.quiet) {
     process.stdout.write(JSON.stringify({
       action: 'extract_stale_done', links_created: linksCreated, timeline_created: timelineCreated,
       pages_processed: pagesProcessed, stale_remaining: staleRemaining, budget_hit: budgetHit,
       skipped_missing_target: skippedMissingTarget, skipped_cross_source: skippedCrossSource,
       ...(skippedAttendanceIncomplete ? { skipped_attendance_incomplete: skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skipped_changed: skippedChanged } : {}),
-      ...(skippedConcurrentWrite ? { skipped_concurrent_write: skippedConcurrentWrite } : {}), ...mentionJsonFields(mentions),
+      ...(skippedConcurrentWrite ? { skipped_concurrent_write: skippedConcurrentWrite } : {}),
+      ...(unknownSource.length ? { skipped_unknown_source: unknownSource.length, unknown_source_pages: unknownSource.slice(0, 20) } : {}), ...mentionJsonFields(mentions), ...counts,
     }) + '\n');
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining, skippedMissingTarget, skippedCrossSource,
-    ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skippedChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}), mentions };
+    ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skippedChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}), ...(unknownSource.length ? { skippedUnknownSource: unknownSource.length } : {}), mentions };
 }
 
 /**
@@ -2506,14 +2548,11 @@ async function extractMentionsFromDb(
     // D3: scan both columns joined with a paragraph separator so an
     // end-of-compiled token doesn't accidentally merge with a
     // start-of-timeline token into a false phrase match.
-    const body = (page.title ?? '') + '\n\n' + page.compiled_truth + '\n\n' + (page.timeline ?? '');
-    const mentions = body.trim()
-      ? findMentionedEntities(body, gazetteer, {
-          fromSlug: slug,
-          fromSourceId: source_id,
-          allowCrossSource,
-        })
-      : [];
+    // A segmented body is scanned block by block (mentions/pass.ts pageMentions).
+    const body = isSegmentedPage(page) ? null : (page.title ?? '') + '\n\n' + page.compiled_truth + '\n\n' + (page.timeline ?? '');
+    const mentionOpts = { fromSlug: slug, fromSourceId: source_id, allowCrossSource };
+    const mentions = body === null ? await pageMentions(engine, { ...withoutBody(page), id: Number(page.id), source_id }, gazetteer, mentionOpts)
+      : body.trim() ? findMentionedEntities(body, gazetteer, mentionOpts) : [];
 
     // #3674 --rebuild: per-page delete-then-insert in ONE transaction. The
     // delete sweeps the page's link_source='mentions' rows — INCLUDING pages

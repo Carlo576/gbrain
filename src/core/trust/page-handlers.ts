@@ -47,6 +47,8 @@ import {
 } from './proposals.ts';
 import { OWNER_TIER_FLOOR, compareTrust, effectiveWriteTrust, storedTrustTier, type TrustTier, type WriteTrust } from './tier.ts';
 import { propagateTierLowering } from './propagation.ts';
+import { beliefStreamSlugs, lockedBeliefBatch } from '../belief/writers.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 
 /** The journaled operation that publishes an owner page action on a managed brain. */
 export const TRUST_OWNER_PAGE_OPERATION = 'trust_owner_page';
@@ -128,28 +130,36 @@ async function attributionFor(engine: BrainEngine, by: Principal | null | undefi
 export async function setRowTier(engine: BrainEngine, input: {
   table: 'facts' | 'takes' | 'pages'; id: number; sourceId: string; tier: TrustTier; ceiling?: TrustTier;
   expect?: (tx: BrainEngine) => Promise<boolean>; by?: Principal | null; note?: Record<string, unknown>;
-  also?: (tx: BrainEngine) => Promise<void>;
+  also?: (tx: BrainEngine, publicationId: string) => Promise<void>;
 }): Promise<boolean> {
   const attribution = await attributionFor(engine, input.by);
   const enabled = await managed(engine);
-  return engine.transaction(async tx => {
+  const publicationId = randomUUID();
+  const report = { appended: 0 };
+  const changed = await engine.transaction(async tx => {
     const run = async () => {
       if (input.expect && !(await input.expect(tx))) return false;
       const [prior] = await tx.executeRaw<{ trust_tier: string }>(`SELECT trust_tier FROM ${input.table} WHERE id = $1`, [input.id]);
       const update = () => tx.executeRaw<{ id: number }>(
         `UPDATE ${input.table} SET trust_tier = $2,
             write_origin = COALESCE(write_origin, '{}'::jsonb) || jsonb_build_object('owner_decision', $3::text::jsonb)
-          WHERE id = $1 RETURNING id`, [input.id, input.tier, JSON.stringify({ tier: input.tier, at: new Date().toISOString(), ...input.note })]);
+          WHERE id = $1 RETURNING id`, [input.id, input.tier, JSON.stringify({ tier: input.tier, at: new Date().toISOString(), publication_id: publicationId, ...input.note })]);
       const rows = input.ceiling ? await withTrustPromotion(tx, input.ceiling, update) : await update();
       if (rows.length !== 1) return false;
       await queueTierProjection(tx, input.table, input.id);
       // W1 #6783 §12 (b): a lowering reaches what was derived from the row; a raise never does.
       if (prior && compareTrust(input.tier, storedTrustTier(prior.trust_tier)) < 0) await propagateTierLowering(tx, [{ table: input.table, id: input.id }]);
-      await input.also?.(tx);
+      await input.also?.(tx, publicationId);
       return true;
     };
-    return enabled ? withCoordinatedWrite(tx, [input.sourceId], run, attribution) : withWriteAttribution(tx, attribution, run);
+    // W1 #6783 §6.4: the tier change is recorded as trust.retiered in the row's stream, under its page key.
+    const slugs = await beliefStreamSlugs(tx, input.table, [input.id]);
+    const recorded = () => lockedBeliefBatch(tx, { sourceId: input.sourceId, slugs, publicationId, op: 'trust_set_tier', report,
+      cause: { owner_decision: { tier: input.tier, ...input.note } } }, run);
+    return enabled ? withCoordinatedWrite(tx, [input.sourceId], recorded, attribution) : withWriteAttribution(tx, attribution, recorded);
   });
+  if (report.appended) await markBeliefCommits(engine, [publicationId]).catch(() => undefined);
+  return changed;
 }
 
 export interface PageActionInput {

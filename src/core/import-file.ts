@@ -1,5 +1,7 @@
 import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
 import { suffixedFrontmatterSlugHold } from './persistence/suffixed-slug.ts';
+import { maintenanceBeliefTransaction } from './belief/writers.ts';
+import { withUnmanagedBeliefs } from './belief/projection-point.ts';
 import { maintenanceTransaction, ownerSourceGateInput, suppliedTrustMarkerView, trustMarkerChanged, writeTrustOfGate } from './persistence/attribution.ts';
 import { assertImportBase, sameCanonicalImport, sameContentAnyKeyOrder } from './page-state/import-guard.ts';
 import { stabilizeSafetyAssessments } from './persistence/reconcile-safety.ts';
@@ -25,7 +27,7 @@ import { sanitizeRemoteBody } from './remote-body.ts';
 import { installPageEmbeddings, installPageProjection, preparePageProjection, projectionBelowSafeFence, queuePageProjection, readProjectionSnapshot, resealSafeChunks,
   sealPageTextProjection, stampEmbeddingInputs, type ProjectionSnapshot } from './page-state/projections.ts';
 import { sanitizeText } from './batch-rows.ts';
-import { hasProtectedBody, safeChunksFilter } from './search/safe-chunks.ts';
+import { hasProtectedBody, OCR_REQUIRED_ERROR, provenanceDistrusted, safeChunksFilter } from './search/safe-chunks.ts';
 import { planEmbeddingReuse } from './embed-reuse.ts';
 import { reuseStoredChunkVectors } from './import-chunk-reuse.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
@@ -37,6 +39,7 @@ import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
 import { embedBatchKeepingUsable, embedBatchWithBackoff } from './embed-retry.ts';
 import { isEmbeddingZeroNormError, type EmbeddingZeroNormError } from './ai/embedding-guard.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
+import { addCodeReferenceLinks } from './engine-sql/links.ts';
 import type { ChunkInput, Page, PageInput, PageType } from './types.ts';
 import type { PageSnapshot } from './page-state/types.ts';
 import { pipelined } from './page-state/transactions.ts';
@@ -57,12 +60,14 @@ import { warnOncePerProcess, validateSlug, contentHash, contentHashLegacy, ATOMS
 import { decorateEmbeddingDimError } from './embedding-dim-check.ts';
 import { resolveImportContextualMode } from './import-contextual-mode.ts';
 import { runGuardrails } from './guardrails.ts';
-import { fenceBody } from './page-body/page-shape.ts';
+import { fenceBody, pageBodySegmentedError } from './page-body/page-shape.ts';
 import { abortSegmentedStaging, bodyStorageOf, demoteSegmentedPage, materializedPage, materializedSnapshot, sealSegmentedPage, stageSegmentedImport,
   stringWriteStorage, type SegmentedImport } from './persistence/segmented-apply.ts';
 import type { SegmentedStagingOwner } from './page-body/ingest.ts';
 import type { PageBodyPolicy } from './page-body/limits.ts';
 import { parseFactsFence, renderFactsTable, restoreHiddenFactRows, factsGapWarning, replaceOrInsertFactsFence } from './facts-fence.ts';
+import { assertOriginUnclaimed, isOriginClaimRefusal } from './persistence/origin-guard.ts';
+import { fileBodyMatchesStored, readStoredBody } from './facts/file-body-guard.ts';
 
 /**
  * #2044 / #4548: row-level, visibility-aware fence merge for one page
@@ -145,6 +150,10 @@ export interface ImportResult {
   /** Which flag tier fired, when `flagged` (`instruction_like`: the #5575 write gate). */
   flag_reason?: 'markup_heavy' | 'oversized' | 'instruction_like';
   gate?: WriteGateAssessment; // #5575: the write-gate assessment, when the caller passed writeGate
+  /** Wave B: whether search sees a segmented write on return (searchable.ts), outside the coordinator or through a managed import. */
+  searchable?: boolean | 'pending';
+  /** #7106: a managed import of a new segmented page over 4 MiB replies at commit; read receipt `request_id` again after `searchable_retry_after_ms` (`searchable_fix`) until `searchable` is true. */
+  projection?: 'pending'; request_id?: string; searchable_retry_after_ms?: number; searchable_fix?: Record<string, unknown>;
   /** #5050: unchanged content below the safe-chunk fence was re-sealed; chunks left to embed. */
   resealed?: { pendingChunks: number; pendingChars: number };
   /**
@@ -205,12 +214,16 @@ async function refreshSourcePath(engine: BrainEngine, slug: string, sourceId: st
   try {
     // Keep this optional legacy repair inside a savepoint: a rejected SQL
     // statement must not poison the surrounding canonical transaction.
-    await engine.transaction(tx => tx.executeRaw(
-      `UPDATE pages SET source_path = $1, source_uri = COALESCE($4::text, source_uri) WHERE source_id = $2 AND slug = $3
+    await engine.transaction(async tx => {
+      await assertOriginUnclaimed(tx, { sourceId: sourceId ?? 'default', slug, sourcePath });
+      // origin-guard-ok: assertOriginUnclaimed above, in the same savepoint
+      await tx.executeRaw(`UPDATE pages SET source_path = $1, source_uri = COALESCE($4::text, source_uri) WHERE source_id = $2 AND slug = $3
         AND deleted_at IS NULL AND (source_path IS DISTINCT FROM $1 OR source_uri IS DISTINCT FROM COALESCE($4::text, source_uri))`,
-      [sourcePath, sourceId ?? 'default', slug, originUri],
-    ));
-  } catch { /* bookkeeping only — never fail the import over it */ }
+      [sourcePath, sourceId ?? 'default', slug, originUri]);
+    });
+  } catch (error) {
+    if (isOriginClaimRefusal(error)) process.stderr.write(`[import] ${slug}: origin ${sourcePath} not recorded: ${(error as Error).message}\n`);
+  }
 }
 
 /** #6188 (E8): `importFromContent`'s fence options. */
@@ -512,12 +525,17 @@ export async function importFromContent(
 
   const originUri = fileOriginUri(existing?.source_uri, opts.sourceRoot, opts.sourcePath);
   const persistUnchanged = async (refreshBody = false) => {
-    await maintenanceTransaction(engine, async tx => {
+    return maintenanceTransaction(engine, async tx => {
       await assertImportBase(tx, slug, sourceId ?? 'default', existing);
-      if (refreshBody) await tx.refreshPageBody(slug, sourceId ?? 'default', parsed.compiled_truth, parsed.timeline || '', hash);
+      if (refreshBody) {
+        const stored = await readStoredBody(tx, sourceId ?? 'default', slug, true);
+        if (!stored || !fileBodyMatchesStored(content, slug, stored)) return false;
+        await tx.refreshPageBody(slug, sourceId ?? 'default', parsed.compiled_truth, parsed.timeline || '', hash);
+      }
       await refreshSourcePath(tx, slug, sourceId, opts.sourcePath, existing, originUri);
       if (opts.beforeCommit) await verifyPageReadable(tx, slug, refreshBody ? hash : existing?.content_hash ?? hash, sourceId, 'importFromContent');
       await opts.beforeCommit?.(tx, slug);
+      return true;
     });
   };
 
@@ -558,8 +576,8 @@ export async function importFromContent(
     return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}), ...(resealed ? { resealed } : {}), ...fences.fields };
   }
 
-  if (existing && legacyHashMatch) {
-    await persistUnchanged(true);
+  if (existing && legacyHashMatch && bodyStorageOf(existing) === 'segmented') throw pageBodySegmentedError(existing, 'legacy hash reconciliation');
+  if (existing && legacyHashMatch && fileBodyMatchesStored(content, slug, existing) && await persistUnchanged(true)) {
     const resealed = await projectionBelowSafeFence(engine, existing.id) ? await resealSafeChunks(engine, slug, sourceId ?? 'default') : null;
     return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}), ...(resealed ? { resealed } : {}), ...fences.fields };
   }
@@ -573,7 +591,7 @@ export async function importFromContent(
     body: { title: parsed.title, compiled_truth: parsed.compiled_truth, timeline: parsed.timeline || '' },
   });
   if (identity.kind === 'move' && !existing && !opts.prepare
-    && await maintenanceTransaction(engine, tx => tx.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' })) > 0) {
+    && await maintenanceBeliefTransaction(engine, { sourceId: sourceId ?? 'default', slugs: [identity.dupSlug, slug], op: 'import_move' }, tx => tx.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' })) > 0) {
     process.stderr.write(
       `[import] ${opts.sourcePath} carries frontmatter.id=${fmIdStr} from moved file ${identity.dupSourcePath}; ` +
       `renamed ${identity.dupSlug} -> ${slug} in source ${sourceId ?? 'default'}.\n`
@@ -827,39 +845,19 @@ export async function importFromContent(
 
     // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
     // (e.g. 'src/core/sync.ts:42'), create bidirectional edges to the code
-    // page. addLink throws when either endpoint is missing (master tightened
-    // this in v0.18.x), so we wrap each pair in try/catch — guides imported
-    // before their code repo syncs are common, and the missing edges land
-    // later via `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
+    // page, all in one statement (addCodeReferenceLinks). An edge whose code
+    // page is missing is skipped — guides imported before their code repo
+    // syncs are common, and the missing edges land later via
+    // `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
     const codeRefs = extractCodeRefs(sanitizeRemoteBody(parsed.compiled_truth) + '\n' + sanitizeRemoteBody(parsed.timeline || ''));
     // For doc↔impl edges, both endpoints are within the same source as the
     // markdown page being imported. Cross-source edges (markdown in one
-    // source, code in another) currently fail with "page not found" — a
-    // faster failure mode than the pre-fix cross-product fan-out, which
-    // silently wired edges to whichever same-slug page Postgres returned
-    // first across sources.
-    const linkOpts = sourceId
-      ? { fromSourceId: sourceId, toSourceId: sourceId, originSourceId: sourceId }
-      : undefined;
-    for (const ref of codeRefs) {
-      const codeSlug = slugifyCodePath(ref.path);
-      // Forward: markdown guide → code page (this guide documents that code)
-      try {
-        await tx.transaction(savepoint => savepoint.addLink(
-          slug, codeSlug,
-          ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
-          'documents', 'markdown', slug, 'compiled_truth',
-          linkOpts,
-        ));
-      } catch { /* code page not yet imported — reconcile-links will catch it */ }
-      // Reverse: code page → markdown guide (this code is documented by the guide)
-      try {
-        await tx.transaction(savepoint => savepoint.addLink(
-          codeSlug, slug,
-          ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
-          linkOpts,
-        ));
-      } catch { /* same reason — silent skip */ }
+    // source, code in another) are skipped as missing — never the pre-fix
+    // cross-product fan-out, which silently wired edges to whichever
+    // same-slug page Postgres returned first across sources.
+    if (codeRefs.length) {
+      await tx.transaction(savepoint => addCodeReferenceLinks(savepoint, slug, sourceId || 'default',
+        codeRefs.map(ref => ({ codeSlug: slugifyCodePath(ref.path), path: ref.path, line: ref.line })))).catch(() => undefined);
     }
     if (!opts.coordinated) await verifyPageReadable(tx, slug, hash, sourceId, 'importFromContent');
     await opts.beforeCommit?.(tx, slug);
@@ -877,9 +875,9 @@ export async function importFromContent(
     noop: false, contentHash: hash, result: { slug, status: 'imported', chunks: segmented ? segmented.prepared.rows.chunks : chunks.length, parsedPage,
       ...(pageQuarantined ? { quarantined: true } : {}), ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}), ...(disposition.gate ? { gate: disposition.gate } : {}), ...fences.fields },
     validate: tx => assertPreparedFactWithdrawals(tx, txOpts.sourceId, parsed.compiled_truth, parsed.timeline || '', slug),
-    apply: applyPrepared, ...(segmented ? { afterCommit: segmented.afterCommit, segmented } : {}),
+    apply: applyPrepared, ...(segmented ? { afterCommit: async (target: BrainEngine) => { await segmented.afterCommit(target); }, segmented } : {}),
   });
-  await maintenanceTransaction(engine, applyPrepared, writeTrustOfGate(opts.writeGate)).catch(async (err: unknown) => {
+  await withUnmanagedBeliefs(engine, txOpts.sourceId, [slug], 'import', run => maintenanceTransaction(engine, tx => run(tx, () => applyPrepared(tx)), writeTrustOfGate(opts.writeGate)).catch(async (err: unknown) => {
     await abortSegmentedStaging(engine, segmented?.prepared);
     // #4287: name the dimension-mismatch rollback instead of letting the bare
     // pgvector message ("expected N dimensions, not M") surface with no code,
@@ -895,8 +893,8 @@ export async function importFromContent(
       } catch { /* keep the plane-agnostic wording */ }
     }
     throw decorateEmbeddingDimError(err, slug, activeColName);
-  });
-  await segmented?.afterCommit(engine);
+  }));
+  const searchable = await segmented?.afterCommit(engine);
 
 
   if (postCommitEmbedding && !noEmbed && chunks.length > 0) {
@@ -921,7 +919,7 @@ export async function importFromContent(
     ...(pageQuarantined ? { quarantined: true } : {}),
     ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}),
     ...(typeWarning ? { type_warning: typeWarning } : {}),
-    ...(embeddingDeferred ? { embedding_deferred: true } : {}), ...fences.fields,
+    ...(embeddingDeferred ? { embedding_deferred: true } : {}), ...fences.fields, ...(searchable !== undefined ? { searchable } : {}),
   };
 }
 
@@ -1936,9 +1934,9 @@ export async function importImageFile(
   const ocr = opts.noEmbed
     ? { text: '', successful: false }
     : await _ocrLimiter(() => maybeOcr(engine, decoded.buf, decoded.mime));
-  if (hadProtectedOcr && !ocr.successful) {
+  if ((hadProtectedOcr || (existing?.content_hash === hash && await provenanceDistrusted(engine, existing.id))) && !ocr.successful) {
     return { slug: imageSlug, status: 'skipped', chunks: 0,
-      error: 'Replacing an image with protected OCR requires successful fresh OCR. Enable OCR and reimport the changed image.' };
+      error: OCR_REQUIRED_ERROR };
   }
   // Protection checks, chunks and stored OCR must agree on canonical text,
   // including markers made recognizable by NUL removal.

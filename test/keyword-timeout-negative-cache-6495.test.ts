@@ -74,7 +74,6 @@ function harness(opts: { ttl?: string | null } = {}): Harness {
     async (strings: TemplateStringsArray, ..._values: unknown[]) => {
       const sql = strings.join('$');
       all.push(sql);
-      if (/SET LOCAL enable_seqscan = off/.test(sql)) inRelaxed = true;
       return /SHOW enable_seqscan/i.test(sql) ? [{ enable_seqscan: 'on' }] : [];
     },
     {
@@ -89,13 +88,16 @@ function harness(opts: { ttl?: string | null } = {}): Harness {
     },
   );
   const priv = engine as unknown as {
-    withScopedReadTransaction: (ids: unknown, id: unknown, cb: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
+    withScopedReadTransaction: (ids: unknown, id: unknown, cb: (tx: unknown) => Promise<unknown>, o?: { settings?: Record<string, string> }) => Promise<unknown>;
     executeRaw: (sql: string, params?: unknown[]) => Promise<unknown[]>;
     _savedConfig: Record<string, unknown> | undefined;
     _pageTransaction: boolean;
     keywordTimeouts: KeywordTimeoutNegativeCache;
   };
-  priv.withScopedReadTransaction = (_ids, _id, cb) => cb(tx);
+  priv.withScopedReadTransaction = (_ids, _id, cb, o) => {
+    if (o?.settings?.enable_seqscan === 'off') inRelaxed = true;
+    return cb(tx);
+  };
   priv.executeRaw = async (sql) => {
     all.push(sql);
     if (sql.includes(KEYWORD_TIMEOUT_NEGATIVE_CACHE_KEY)) return opts.ttl == null ? [] : [{ value: opts.ttl }];

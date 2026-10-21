@@ -17,6 +17,7 @@ import { isInteractive, readLine, type InteractiveProbe } from '../interaction.t
 import { opError, OperationError, type OperationContext } from '../ops/contract.ts';
 import { databaseRefusal } from '../persistence/publication-failure.ts';
 import { hasScope } from '../scope.ts';
+import type { BrainEngine } from '../engine.ts';
 
 export const MEMORY_CONFIRM_SCOPE = 'memory_confirm';
 

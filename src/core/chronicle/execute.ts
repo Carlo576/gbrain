@@ -10,7 +10,12 @@
  * reconciliation → ledger outcome. An ended calendar invite takes the judge's
  * place with its deterministic projection (invite-projection.ts): no
  * reservation, no model call. A failed or superseded run never retires
- * the previous generation.
+ * the previous generation, and neither does an empty or partial one (#7013:
+ * no events, a proposal dropped or capped, or a body longer than the judge
+ * read); an ineligible revision still retires it. A segmented page is never
+ * materialized: the judge reads its compiled truth's first JUDGE_BODY_CHARS
+ * and its last message time comes from a block-by-block parse
+ * (segmentedJudgePage).
  */
 import type { BrainEngine } from '../engine.ts';
 import { BudgetTracker, type PricingOverrides } from '../budget/budget-tracker.ts';
@@ -18,13 +23,16 @@ import { recordOnTracker } from '../ai/budget-record.ts';
 import { getCurrentBudgetTracker, withBudgetTracker } from '../ai/gateway.ts';
 import type { ExtractAtomsCostGate } from '../cycle/extract-atoms-cost-gate.ts';
 import type { MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
-import { materializedPage, segmentedOverCeiling } from '../persistence/segmented-apply.ts';
+import type { Page } from '../types.ts';
+import { isSegmentedPage, withoutBody } from '../page-body/page-shape.ts';
+import { bodyBlocks, truthLead } from '../page-body/segment-blocks.ts';
+import { DAY_HEADER_RE } from '../conversation-parser/parse.ts';
 import { CHRONICLE_DEFAULTS, CHRONICLE_EXTRACTOR_VERSION, type ChronicleLedgerRow } from './contract.ts';
 import type { ChronicleReasonCode } from './reasons.ts';
 import type { ChronicleSettings } from './config.ts';
-import { isChronicleEligible } from './eligibility.ts';
+import { chroniclePageDate, isChronicleEligible } from './eligibility.ts';
 import {
-  allDroppedReason, buildChronicleEvents, chronicleJudgeContext, isValidProposal,
+  allDroppedReason, buildChronicleEvents, chronicleJudgeContext, isValidProposal, JUDGE_BODY_CHARS, lastMessageAt, replacesPreviousGeneration,
   type ChronicleDropCounts, type ChronicleJudge, type ChronicleJudgeResult,
 } from './extract-events.ts';
 import { endedInviteProposal, markInviteEvents } from './invite-projection.ts';
@@ -167,7 +175,7 @@ export async function executeChronicleRow(ctx: ChronicleExecContext, row: Chroni
   // An ineligible revision of a page that once produced events retires them (E8). No model call.
   if (row.state === 'skipped') {
     const generation = await publishChronicleGeneration(engine, { sourceId: row.source_id, pin, events: [],
-      decisionRequestId: null, maintenance: ctx.maintenance, signal: ctx.signal });
+      decisionRequestId: null, replaces: true, maintenance: ctx.maintenance, signal: ctx.signal });
     await setNextAttempt(engine, row, null);
     return done('skipped', row.reason, { retired: generation.retired.length });
   }
@@ -176,11 +184,8 @@ export async function executeChronicleRow(ctx: ChronicleExecContext, row: Chroni
     await finish(engine, row, row.attempts, { state: 'skipped', reason: 'no_extract', nextAttemptAt: null });
     return done('skipped', 'no_extract');
   }
-  if (segmentedOverCeiling(snapshot.page)) {
-    await finish(engine, row, row.attempts, { state: 'skipped', reason: 'page_body_segmented', nextAttemptAt: null });
-    return done('skipped', 'page_body_segmented');
-  }
-  const page = await materializedPage(engine, snapshot.page);
+  const { page, lastMessage, bodyTruncated } = isSegmentedPage(snapshot.page) ? await segmentedJudgePage(engine, snapshot.page)
+    : { page: snapshot.page, lastMessage: undefined, bodyTruncated: (snapshot.page.compiled_truth ?? '').length > JUDGE_BODY_CHARS };
   const auto = row.trigger === 'auto';
   const eligible = isChronicleEligible({
     type: page.type, slug: page.slug, body: page.compiled_truth ?? '',
@@ -199,7 +204,7 @@ export async function executeChronicleRow(ctx: ChronicleExecContext, row: Chroni
     return done('skipped', reason);
   }
 
-  const judgeCtx = chronicleJudgeContext(page);
+  const judgeCtx = chronicleJudgeContext(page, lastMessage);
   const invite = endedInviteProposal(page, judgeCtx.attendees, now);
   if (auto && !invite && !(await reserveChronicleSlot(engine, settings.dailyLimit, { sourceId: row.source_id, pageId: Number(row.page_id), contentHash: row.content_hash }))) {
     await setNextAttempt(engine, row, null);
@@ -243,13 +248,14 @@ export async function executeChronicleRow(ctx: ChronicleExecContext, row: Chroni
   }
 
   const proposals = result?.events ?? [];
-  const { events, dropped } = buildChronicleEvents(proposals, judgeCtx,
+  const built = buildChronicleEvents(proposals, judgeCtx,
     { slug: pin.slug, visibility: pin.visibility, contentHash: pin.contentHash }, { tz: ctx.tz, now, maxEvents: settings.maxEventsPerPage });
+  const { events, dropped } = built;
   let generation;
   try {
     generation = await publishChronicleGeneration(engine, {
       sourceId: row.source_id, pin, decisionRequestId: row.request_id, maintenance: ctx.maintenance, signal: ctx.signal,
-      events: invite ? markInviteEvents(events) : events,
+      events: invite ? markInviteEvents(events) : events, replaces: replacesPreviousGeneration(built, bodyTruncated),
     });
   } catch (error) {
     if ((error as Error)?.name === 'AbortError') throw error;
@@ -267,3 +273,23 @@ export async function executeChronicleRow(ctx: ChronicleExecContext, row: Chroni
 }
 
 export type { ChronicleDepthPin };
+
+/**
+ * A segmented page as the judge reads it, without materializing its body: `compiled_truth` is the truth's first
+ * JUDGE_BODY_CHARS (all the judge and the length rule read), `bodyTruncated` whether the truth is longer than that,
+ * and `lastMessage` the latest message time over the truth, parsed block by block; a block starting under a day header
+ * from an earlier block parses with that header's date.
+ */
+async function segmentedJudgePage(engine: BrainEngine, stored: Page): Promise<{ page: Page; lastMessage: Date | null; bodyTruncated: boolean }> {
+  const lead = await truthLead(engine, Number(stored.id), JUDGE_BODY_CHARS + 1);
+  const page = { ...withoutBody(stored), compiled_truth: lead.slice(0, JUDGE_BODY_CHARS), timeline: '' } as Page;
+  let day = chroniclePageDate({ effectiveDate: stored.effective_date ?? null, effectiveDateSource: stored.effective_date_source ?? null,
+    frontmatter: stored.frontmatter ?? null })?.toISOString().slice(0, 10);
+  let lastMessage: Date | null = null;
+  for await (const block of bodyBlocks(engine, stored, { regions: ['truth'] })) {
+    const last = lastMessageAt(block.text, day);
+    if (last && (!lastMessage || last > lastMessage)) lastMessage = last;
+    for (const line of block.text.split('\n')) day = DAY_HEADER_RE.exec(line.trim())?.[1] ?? day;
+  }
+  return { page, lastMessage, bodyTruncated: lead.length > JUDGE_BODY_CHARS };
+}

@@ -1,5 +1,5 @@
 import type { BrainEngine } from '../core/engine.ts';
-import { execSync, execFileSync, spawnSync } from 'child_process';
+import { execSync, execFileSync, spawnSync } from '../core/spawn.ts';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, realpathSync } from 'fs';
 import { basename, join, dirname, resolve } from 'path';
 import { isNewerVersion, parseSemver, semverGt } from '../core/semver.ts';
@@ -8,11 +8,11 @@ import { opError, type OperationError } from '../core/ops/contract.ts';
 import { writeCliError } from '../cli/cli-error.ts';
 import { VERSION } from '../version.ts';
 import type { InteractiveProbe } from '../core/interaction.ts';
-import { forwardProgressPast, migrationLedgerSummary } from '../core/migration-ledger.ts';
+import { forwardProgressPast, migrationLedgerSummary, wedgedLedgerHint } from '../core/migration-ledger.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { MIGRATIONS_RUNNING_EXIT_CODE, readMigrationLockHolder } from '../core/migration-orchestration-lock.ts';
 import { loadConfig } from '../core/config.ts';
-import { clearSnooze, clearUpdateCache, pendingUpgradeVersion, writeJustUpgraded } from '../core/self-upgrade.ts';
+import { clearSnooze, clearUpdateCache, writeJustUpgraded, writeSwapReceipt } from '../core/self-upgrade.ts';
 import { MOVEMENT_SUPERVISOR_STEP } from './movement-step.ts';
 import {
   BUN_FLOOR_EXIT_CODE,
@@ -186,9 +186,28 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
 
   if (!upgraded) {
     console.log('Binary: upgrade failed');
+    // #6828: an install step can fail after replacing files, so only a probe
+    // that still reads the old version proves nothing was installed.
+    const observed = verifyUpgrade();
+    if (observed && observed === oldVersion) writeSwapReceipt({ outcome: 'not_installed', from: oldVersion, installed: observed });
     return;
   }
   const newVersion = verifyUpgrade();
+  // #6828: an install step that exits 0 can install nothing (`bun update` on a
+  // moving tag whose head is already installed). A verified version that is
+  // not newer than the one running is no swap: no last_upgrade overwrite, no
+  // JUST_UPGRADED breadcrumb, no cache reset, and the receipt tells the
+  // autopilot channel not to relaunch or record known-bad. A verified version
+  // EQUAL to the running one is the no-op; an unreadable one keeps the legacy path.
+  const newParsed = parseSemver(newVersion);
+  const oldParsed = parseSemver(oldVersion);
+  const unchanged = !!newParsed && !!oldParsed && newParsed.join('.') === oldParsed.join('.');
+  if (unchanged) {
+    console.log(`No newer version was installed: still running gbrain ${newVersion}.`);
+    writeSwapReceipt({ outcome: 'not_installed', from: oldVersion, installed: newVersion });
+  } else {
+    console.log(newVersion ? `Upgrade complete. Now running: gbrain ${newVersion}` : 'Upgrade complete. Could not verify new version.');
+  }
   // #4366: a still-older resolved version means the swap never happened
   // (exact-tag Git pins make `bun update` a successful no-op). Fail loudly
   // and return BEFORE the breadcrumb/cache bookkeeping below, so the
@@ -211,12 +230,13 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   // #5311: a bare `gbrain upgrade` has no target, so the check above cannot
   // fire, and on an exact-tag Git pin `bun update` is a successful no-op.
   // When the version did not change and the global install pins a tag, say
-  // so and exit non-zero instead of reporting an upgrade.
-  if (!target && method === 'bun' && newVersion && newVersion === oldVersion) {
+  // so and exit non-zero instead of reporting an upgrade. #6718: the target is
+  // the newest PUBLISHED release tag only; with none newer the hint moves the
+  // install off the pin, and the ledger row names no unpublished version.
+  if (!target && method === 'bun' && unchanged) {
     const pin = bunGlobalExactTagPin(resolveBunGlobalRoot());
     if (pin) {
-      const published = planPinnedReinstall(null, oldVersion);
-      const plan = published.version ? published : { version: pendingUpgradeVersion(oldVersion), unpublished: null };
+      const plan = planPinnedReinstall(null, oldVersion);
       console.error(`Upgrade did not take effect: still running ${newVersion}, because the global install is pinned to ${pin} and \`bun update\` keeps a pinned tag.`);
       printPinnedReinstall(plan, oldVersion, 'Reinstall to move off the pin:');
       recordUpgradeError({
@@ -230,29 +250,35 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
       return;
     }
   }
-  // Save old version for post-upgrade migration detection
-  saveUpgradeState(oldVersion, newVersion);
-  // #5855: `--version` answers on any Bun, so prove the new release starts.
-  if (!postSwapSmoke(newVersion, recovery)) return;
+  if (!unchanged) {
+    // Save old version for post-upgrade migration detection
+    saveUpgradeState(oldVersion, newVersion);
+    // #5855: `--version` answers on any Bun, so prove the new release starts.
+    if (!postSwapSmoke(newVersion, recovery)) {
+      writeSwapReceipt({ outcome: 'installed_broken', from: oldVersion, installed: newVersion || null });
+      return;
+    }
 
-  // Self-upgrade breadcrumb + cache reset (covers both the full and
-  // --swap-only paths, so the autopilot silent channel benefits too):
-  //   - write just-upgraded-from so the next invocation's startup hook prints
-  //     the one-time JUST_UPGRADED confirmation;
-  //   - clear the update-check cache + snooze so a now-stale "upgrade
-  //     available" marker doesn't keep nudging after we've already applied it.
-  try {
-    writeJustUpgraded(oldVersion);
-    clearUpdateCache();
-    clearSnooze();
-  } catch {
-    /* best-effort: never block the upgrade on confirmation bookkeeping */
+    // Self-upgrade breadcrumb + cache reset (covers both the full and
+    // --swap-only paths, so the autopilot silent channel benefits too):
+    //   - write just-upgraded-from so the next invocation's startup hook prints
+    //     the one-time JUST_UPGRADED confirmation;
+    //   - clear the update-check cache + snooze so a now-stale "upgrade
+    //     available" marker doesn't keep nudging after we've already applied it.
+    try {
+      writeJustUpgraded(oldVersion);
+      clearUpdateCache();
+      clearSnooze();
+    } catch {
+      /* best-effort: never block the upgrade on confirmation bookkeeping */
+    }
+    writeSwapReceipt({ outcome: 'installed', from: oldVersion, installed: newVersion || null });
   }
 
-  // --swap-only stops here: the swap is done + smoke-verified, but the
-  // (potentially 30-min) post-upgrade is deferred to the next launch so the
-  // autopilot silent channel can swap + relaunch without freezing its tick.
-  // connectEngine's pending-migration probe + runPostUpgrade run on boot.
+  // --swap-only stops here: the swap is done + smoke-verified (or installed
+  // nothing), but the (potentially 30-min) post-upgrade is deferred to the
+  // next launch so the autopilot silent channel can swap + relaunch without
+  // freezing its tick. connectEngine's pending-migration probe + runPostUpgrade run on boot.
   if (swapOnly) {
     return;
   }
@@ -289,7 +315,7 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   } catch {
     // features scan is best-effort
   }
-  console.log(`Binary: installed ${newVersion || 'a new version (could not verify)'}`);
+  console.log(unchanged ? `Binary: no newer version installed (still ${newVersion})` : `Binary: installed ${newVersion || 'a new version (could not verify)'}`);
   console.log(migrationsLine);
   // #6317 (I2): upgrade owns no relaunch, so the supervisor proves data movement after it restarts serve and the workers.
   console.log(`Next: ${MOVEMENT_SUPERVISOR_STEP}`);
@@ -386,7 +412,7 @@ export async function describeMigrationFailure(error: unknown, newVersion: strin
   const ledger = newVersion ? loadCompletedMigrations() : [];
   const wedged = newVersion ? migrationLedgerSummary(newVersion).wedged.filter(v => forwardProgressPast(v, ledger) === null) : [];
   if (wedged.length > 0) {
-    return `Migrations: wedged (${wedged.map(v => `v${v}`).join(', ')} ended partial 3+ times in a row). Fix the cause in ~/.gbrain/upgrade-errors.jsonl, then run: `
+    return `Migrations: wedged (${wedged.map(v => `v${v}`).join(', ')} ended partial 3+ times in a row). Fix the cause recorded in ${wedgedLedgerHint()}, then run: `
       + `${wedged.map(v => `gbrain apply-migrations --force-retry ${v}`).join(' && ')} && gbrain apply-migrations --yes`;
   }
   return 'Migrations: failed. Run: gbrain apply-migrations --yes';
@@ -556,10 +582,8 @@ function findBunInstallRootFromArgv(): string | null {
 function verifyUpgrade(): string {
   try {
     const output = execSync('gbrain --version', { encoding: 'utf-8', timeout: 10_000 }).trim();
-    console.log(`Upgrade complete. Now running: ${output}`);
     return output.replace(/^gbrain\s*/i, '').trim();
   } catch {
-    console.log('Upgrade complete. Could not verify new version.');
     return '';
   }
 }
@@ -810,6 +834,7 @@ export async function runPostUpgrade(args: string[] = []): Promise<void> {
         await (await import('../core/feedback/upgrade-notice.ts')).printRetrievalFeedbackUpgradeNotice(engine);
         // Entity mention index: [AGENT] catch-up line while pages are due (best-effort).
         await (await import('../core/mentions/upgrade-notice.ts')).printMentionIndexUpgradeNotice(engine);
+        await (await import('../core/page-state/projection-upgrade-notice.ts')).printProjectionUpgradeNotice(engine); // #6803 image projections: read-only [AGENT] drain preview
         // Large pages: re-index pages an older gbrain stored chunkless for size (keyless-safe, time-boxed, resumable).
         await (await import('../core/oversized-backfill.ts')).printOversizedBackfillUpgradeNotice(engine);
 

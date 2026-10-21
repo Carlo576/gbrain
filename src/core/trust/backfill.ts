@@ -42,6 +42,8 @@ import { opError } from '../ops/contract.ts';
 import { CONNECTOR_SOURCE_KINDS } from '../persistence/connector-identity.ts';
 import { withCoordinatedWrite, withTrustBackfill } from '../persistence/context.ts';
 import { propagateTierLowering } from './propagation.ts';
+import { appendBulkRetier } from '../belief/retier.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { readManagedMode } from '../persistence/managed-mode.ts';
 import { EXTRACT_ATOMS_EXTRACTOR_PREFIX, frontmatterTrustCapsSql } from './channel.ts';
@@ -148,7 +150,7 @@ function classifier(cols: Columns, assumeClaimed: readonly string[] = [], ceilin
       WHEN ${r}.authority->>'remote' = 'true' THEN ${rank('agent_written')}
       WHEN ${kind} LIKE 'managed\\_sync\\_%' OR ${kind} IN ('managed_file_import','canonical_reconcile','managed_file_repair') THEN ${rank('operator_curated')}
       WHEN ${kind} LIKE 'managed\\_facts\\_%' OR ${kind} LIKE 'managed\\_atom\\_%' OR ${kind} LIKE 'managed\\_maintenance\\_%' THEN ${rank('agent_written')}
-      WHEN ${r}.intent IS NOT NULL AND ${kind} IS NULL AND ${r}.operation IN ('put_page','capture','remember','edit_page','delete_page','restore_page',
+      WHEN ${r}.intent IS NOT NULL AND ${kind} IS NULL AND ${r}.operation IN ('put_page','capture','remember','edit_page','append_page','delete_page','restore_page',
         'revert_version','add_tag','remove_tag','add_timeline_entry','takes_add','takes_update','takes_supersede','takes_resolve','takes_remove') THEN ${rank('agent_written')}
       END`;
   };
@@ -334,13 +336,21 @@ export async function runTrustBackfill(engine: BrainEngine, opts: TrustBackfillO
       if (ids.length === 0) break;
       const sources = (await engine.executeRaw<{ source_id: string | null }>(
         `SELECT DISTINCT ${src} AS source_id FROM ${from} WHERE x.id = ANY($1::bigint[])`, [ids])).map(r => r.source_id).filter((s): s is string => !!s);
-      const apply = (tx: BrainEngine) => withTrustBackfill(tx, async () => (await tx.executeRaw<{ id: number }>(
-        `WITH b AS (SELECT x.id, ${trustTierFromRankSql(rule)} AS tier FROM ${from} WHERE x.id = ANY($1::bigint[]))
-         UPDATE ${table} t SET trust_tier = b.tier, write_origin = COALESCE(t.write_origin, $2::text::jsonb)
-           FROM b WHERE t.id = b.id AND t.trust_tier = 'unknown' AND b.tier <> 'unknown' RETURNING t.id`, [ids, origin])).length);
+      const publications: string[] = [];
+      // W1 #6783 §6.4: each batch's changed subjects are recorded as one summary trust.retiered per stream plus a manifest row each.
+      const apply = (tx: BrainEngine) => withTrustBackfill(tx, async () => {
+        const changed = await tx.executeRaw<{ id: number; tier: string }>(
+          `WITH b AS (SELECT x.id, ${trustTierFromRankSql(rule)} AS tier FROM ${from} WHERE x.id = ANY($1::bigint[]))
+           UPDATE ${table} t SET trust_tier = b.tier, write_origin = COALESCE(t.write_origin, $2::text::jsonb)
+             FROM b WHERE t.id = b.id AND t.trust_tier = 'unknown' AND b.tier <> 'unknown' RETURNING t.id, b.tier`, [ids, origin]);
+        const publication = await appendBulkRetier(tx, changed.map(r => ({ table, id: Number(r.id), from: 'unknown', to: r.tier })), scoped ? 'trust_claim' : 'trust_backfill');
+        if (publication) publications.push(publication);
+        return changed.length;
+      });
       updated += await engine.transaction(tx => managedBrain && sources.length
         ? withCoordinatedWrite(tx, sources, () => apply(tx), attribution)
         : apply(tx));
+      if (publications.length) await markBeliefCommits(engine, publications).catch(() => undefined);
       after = ids[ids.length - 1]!;
       cursor[table] = after;
       await saveCursor(engine, cursor, op, key);
@@ -414,11 +424,17 @@ export async function relowerClaimedRows(engine: BrainEngine, opts: { dryRun?: b
     if (opts.dryRun || rows.length === 0) continue;
     const ids = rows.map(r => Number(r.id));
     const sources = [...new Set(rows.map(r => r.source_id))];
-    const apply = async (tx: BrainEngine) => (await withTrustBackfill(tx, () => tx.executeRaw<{ id: number }>(
-      `WITH b AS (${candidates} AND x.id = ANY($2::bigint[]))
-       UPDATE ${table} t SET trust_tier = b.to_tier, write_origin = $3::text::jsonb FROM b WHERE t.id = b.id RETURNING t.id`, [claimed, ids, origin])))
-      .map(row => ({ table, id: Number(row.id) }));
+    const publications: string[] = [];
+    const apply = async (tx: BrainEngine) => {
+      const changed = await withTrustBackfill(tx, () => tx.executeRaw<{ id: number; from_tier: string; to_tier: string }>(
+        `WITH b AS (${candidates} AND x.id = ANY($2::bigint[]))
+         UPDATE ${table} t SET trust_tier = b.to_tier, write_origin = $3::text::jsonb FROM b WHERE t.id = b.id RETURNING t.id, b.from_tier, b.to_tier`, [claimed, ids, origin]));
+      const publication = await appendBulkRetier(tx, changed.map(r => ({ table, id: Number(r.id), from: r.from_tier, to: r.to_tier })), 'trust_relower');
+      if (publication) publications.push(publication);
+      return changed.map(row => ({ table, id: Number(row.id) }));
+    };
     lowered.push(...await engine.transaction(tx => managedBrain ? withCoordinatedWrite(tx, sources, () => apply(tx), attribution!) : apply(tx)));
+    if (publications.length) await markBeliefCommits(engine, publications).catch(() => undefined);
   }
   // W1 #6783 §12 (b): after every table is relowered (the dry run reports exactly these rows), what was derived from them follows.
   if (lowered.length) await engine.transaction(tx => managedBrain

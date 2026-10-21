@@ -23,8 +23,11 @@
 import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import { isStatementTimeout } from './bounded-reads.ts';
+import { readSchemaBehind } from './schema-admission.ts';
 import { readReceiptRetentionDays, DEFAULT_RECEIPT_RETENTION_DAYS } from './limits.ts';
-import { classifyTerminal, dispositionOf, TERMINAL_FIXED_IN, supersessionOrderSql, supersessionSql, terminalInspectArgv, terminalKnockOnSql, type TerminalCategory,
+import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
+import type { PublicCategory } from './public-category.ts';
+import { classifyTerminal, dispositionOf, driftSinceAction, TERMINAL_FIXED_IN, supersessionOrderSql, supersessionSql, terminalInspectArgv, terminalKnockOnSql, type TerminalCategory,
   type TerminalDisposition, type TerminalVerdict, CONNECTION_MESSAGE_PATTERN, LEGACY_PUBLICATION_PREFIX } from './terminal-classify.ts';
 
 export const TERMINAL_WINDOW_KEY = 'persistence.terminal_failures.window_days';
@@ -79,17 +82,19 @@ const BUILD = (r: string) => `COALESCE(${r}.error_detail->'attempt'->>'consumer_
 const ENDED = (r: string) => `COALESCE(${r}.completed_at, ${r}.updated_at)`;
 const TERMINAL = (r: string) => `${r}.state IN ('failed','conflict','cancelled')`;
 /** A request holding a publication recovery record outside an in-flight claim: it blocks its root. `recovering` is the durable parked state (a blocked restore). */
+/** #6904: the grouped `reason`, with an older build's owner exception on a missing relation or column (its errno) read as `schema_missing`, as `classifyTerminal` reads the full detail. */
+const SCHEMA_AWARE_REASON = (r: string) => `COALESCE(${r}.error_detail->>'reason', CASE WHEN ${r}.error_detail->>'origin'='owner_exception' AND ${r}.error_detail->>'errno' IN ('42P01','42703') THEN 'schema_missing' END)`;
 const RECOVERY = (r: string) => `(${r}.recovery IS NOT NULL AND ${r}.state IN ('committed','recovering','failed','conflict','cancelled'))`;
 
-interface KeyColumns { source_id: string; state: string; error_code: string | null; origin: string | null; reason: string | null; cause: string | null; operation: string;
+interface KeyColumns { source_id: string; state: string; error_code: string | null; origin: string | null; reason: string | null; cause: string | null; operation: string; intent_kind?: string | null;
   has_recovery: boolean; blocked_reason: string | null; compacted: boolean; knock_on: boolean; routed_message: string | null; build: string | null }
 
-function verdictOf(row: KeyColumns & { request_id?: string; slug?: string; error_detail?: Record<string, unknown> | null }): TerminalVerdict {
+function verdictOf(row: KeyColumns & { request_id?: string; slug?: string; error_detail?: Record<string, unknown> | null }, schemaBehind: boolean | null = null): TerminalVerdict {
   const detail = row.error_detail ?? (row.origin || row.reason || row.cause ? { ...(row.origin ? { origin: row.origin } : {}), ...(row.reason ? { reason: row.reason } : {}),
     ...(row.cause ? { cause: row.cause } : {}) } : null);
   return classifyTerminal({ request_id: row.request_id, source_id: row.source_id, slug: row.slug ?? '<slug>', operation: row.operation, state: row.state, error_code: row.error_code,
     error_detail: detail, recovery: row.has_recovery || null, blocked_reason: row.blocked_reason, compacted: row.compacted, knock_on: row.knock_on,
-    error_message: row.routed_message, build: row.build })!;
+    error_message: row.routed_message, build: row.build, intent_kind: row.intent_kind ?? null, schema_behind: schemaBehind })!;
 }
 
 async function bounded<T>(engine: BrainEngine, sql: string, params: unknown[]): Promise<T[] | 'unknown'> {
@@ -113,7 +118,7 @@ export interface TerminalSourceSummary {
   new_last_24h_older_builds: { rows: number; builds: string[] };
   daily_7d: number[];
   defects: Array<{ category: TerminalCategory; code: string; origin: string | null; rows: number; human_reason?: string; action: Action }>;
-  categories: Array<{ category: TerminalCategory; code: string; origin: string | null; rows: number; unresolved: number; historical: number; class: string; needs_human: boolean }>;
+  categories: Array<{ category: TerminalCategory; public_category: PublicCategory; code: string; origin: string | null; rows: number; unresolved: number; historical: number; class: string; needs_human: boolean }>;
 }
 export type TerminalSummary = { status: 'ok'; window_days: number; window_clamped: boolean; retention_days: number; sources: TerminalSourceSummary[] } | { status: 'unknown'; window_days: number; reason: string };
 
@@ -124,13 +129,14 @@ export type TerminalSummary = { status: 'ok'; window_days: number; window_clampe
 export async function readTerminalFailureSummary(engine: BrainEngine, opts: { sourceIds?: string[]; thresholds?: TerminalThresholds;
   checkpointBlockers?: Map<string, Array<{ request_id: string; slug: string; knock_on: boolean; recovery: boolean }>> } = {}): Promise<TerminalSummary> {
   const t = opts.thresholds ?? await readTerminalThresholds(engine);
+  const schemaBehind = await readSchemaBehind(engine);
   const span = Math.max(t.windowDays, 8);
   const days = Array.from({ length: 7 }, (_, i) => `count(*) FILTER (WHERE state IN ('failed','conflict','cancelled') AND ended_at <= now()-interval '${i + 1} day' AND ended_at > now()-interval '${i + 2} day')::int AS d${i + 2}`).join(',\n      ');
   const rows = await bounded<KeyColumns & { set: number; resolved: boolean | null; rows: number; in_window: number; n_24h: number; oldest: string | null; oldest_age: number | null;
     distinct_slugs: number; distinct_intents: number; recovery_ids: string[] | null; recovery_slugs: string[] | null } & Record<string, number>>(engine,
     `WITH base AS (
-      SELECT r.id, r.request_id::text AS request_id, r.source_id, r.slug, r.digest, r.sequence, r.operation, r.state, r.error_code,
-        r.error_detail->>'origin' AS origin, r.error_detail->>'reason' AS reason, r.error_detail->>'cause' AS cause,
+      SELECT r.id, r.request_id::text AS request_id, r.source_id, r.slug, r.digest, r.sequence, r.operation, r.intent->>'kind' AS intent_kind, r.state, r.error_code,
+        r.error_detail->>'origin' AS origin, ${SCHEMA_AWARE_REASON('r')} AS reason, r.error_detail->>'cause' AS cause,
         r.recovery IS NOT NULL AS has_recovery, r.blocked_reason, r.compacted, ${terminalKnockOnSql('r')} AS knock_on,
         ${ROUTED_MESSAGE('r')} AS routed_message, ${BUILD('r')} AS build, ${ENDED('r')} AS ended_at
       FROM persistence_requests r JOIN sources s ON s.id=r.source_id AND s.archived IS NOT TRUE
@@ -142,7 +148,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
       SELECT b.*, (x.id IS NOT NULL) AS resolved, (b.has_recovery OR b.ended_at > now()-($3::int*interval '1 day')) AS in_window, ${HISTORICAL_BY_BUILD('b')} AS historical_build
       FROM base b LEFT JOIN resolved x ON x.id=b.id
     )
-    SELECT GROUPING(state) AS set, source_id, state, error_code, origin, reason, cause, operation, has_recovery, blocked_reason, compacted, knock_on, routed_message, build, resolved,
+    SELECT GROUPING(state) AS set, source_id, state, error_code, origin, reason, cause, operation, intent_kind, has_recovery, blocked_reason, compacted, knock_on, routed_message, build, resolved,
       count(*) FILTER (WHERE in_window)::int AS rows, count(*) FILTER (WHERE in_window)::int AS in_window,
       count(*) FILTER (WHERE state IN ('failed','conflict','cancelled') AND ended_at > now()-interval '1 day')::int AS n_24h,
       ${days},
@@ -153,7 +159,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
       (array_agg(request_id ORDER BY sequence) FILTER (WHERE has_recovery))[1:20] AS recovery_ids,
       (array_agg(slug ORDER BY sequence) FILTER (WHERE has_recovery))[1:20] AS recovery_slugs
     FROM tagged
-    GROUP BY GROUPING SETS ((source_id, state, error_code, origin, reason, cause, operation, has_recovery, blocked_reason, compacted, knock_on, routed_message, build, resolved), (source_id))
+    GROUP BY GROUPING SETS ((source_id, state, error_code, origin, reason, cause, operation, intent_kind, has_recovery, blocked_reason, compacted, knock_on, routed_message, build, resolved), (source_id))
     ORDER BY source_id`, [span, opts.sourceIds ?? null, t.windowDays]);
   if (rows === 'unknown') return { status: 'unknown', window_days: t.windowDays, reason: `the aggregate did not finish within ${TERMINAL_STATEMENT_MS} ms (or no connection within ${TERMINAL_ACQUIRE_MS} ms)` };
   const bySource = new Map<string, TerminalSourceSummary>();
@@ -172,7 +178,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
       s.daily_7d = Array.from({ length: 7 }, (_, i) => Number(row[`d${i + 2}`] ?? 0));
       continue;
     }
-    const verdict = verdictOf(row);
+    const verdict = verdictOf(row, schemaBehind);
     const n = Number(row.rows);
     if (verdict.historical && Number(row.n_24h) > 0) {
       s.new_last_24h_older_builds.rows += Number(row.n_24h);
@@ -180,7 +186,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
     }
     if (row.has_recovery) {
       (row.recovery_ids ?? []).forEach((id, i) => {
-        const v = verdictOf({ ...row, request_id: id, slug: row.recovery_slugs?.[i] });
+        const v = verdictOf({ ...row, request_id: id, slug: row.recovery_slugs?.[i] }, schemaBehind);
         s.active_blockers.push({ kind: 'recovery', source_id: row.source_id, request_id: id, slug: row.recovery_slugs?.[i], category: v.category, action: v.action,
           needs_human: v.needs_human, ...(v.human_reason ? { human_reason: v.human_reason } : {}) });
       });
@@ -201,7 +207,7 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
     }
     const cat = s.categories.find(c => c.category === verdict.category && c.code === verdict.code && c.origin === verdict.origin);
     if (cat) { cat.rows += n; cat.unresolved += unresolved ? n : 0; cat.historical += historical ? n : 0; }
-    else s.categories.push({ category: verdict.category, code: verdict.code, origin: verdict.origin, rows: n, unresolved: unresolved ? n : 0, historical: historical ? n : 0,
+    else s.categories.push({ category: verdict.category, public_category: verdict.public_category, code: verdict.code, origin: verdict.origin, rows: n, unresolved: unresolved ? n : 0, historical: historical ? n : 0,
       class: verdict.class, needs_human: verdict.needs_human });
   }
   for (const [sourceId, blockers] of opts.checkpointBlockers ?? []) {
@@ -220,6 +226,11 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
 /**
  * PR A's checkpoint blockers for every non-archived source whose managed-sync cursor waits at its checkpoint step
  * (the others have none), keyed by source, for `readTerminalFailureSummary`.
+ * #6712 PR 4b (design v3.2 §3.7): also every source whose open pass (pass row `telemetry.outcome = 'open'`) has its
+ * `managed_sync_checkpoint` admitted and not yet committed (`intent.passId` equal to the row's `pass_id`). Its blockers
+ * are what the pass checkpoint's validation refuses on (design v3 §3.3 clauses 1-2): a recovery row on the worktree, and
+ * a queued, running or recovering sync page or checkpoint request of the worktree other than the checkpoint itself.
+ * Both reads go through the partial indexes `persistence_requests_recovery` and `persistence_requests_pending`.
  */
 export async function readCheckpointBlockerMap(engine: BrainEngine, sourceIds?: string[]): Promise<NonNullable<Parameters<typeof readTerminalFailureSummary>[1]>['checkpointBlockers'] & {}> {
   const { readCheckpointBlockers } = await import('./sync-status.ts');
@@ -229,6 +240,23 @@ export async function readCheckpointBlockerMap(engine: BrainEngine, sourceIds?: 
       AND ($1::text[] IS NULL OR o.completed_keys->0->>'sourceId'=ANY($1::text[]))`, [sourceIds ?? null]);
   const blockers = new Map<string, Awaited<ReturnType<typeof readCheckpointBlockers>>>();
   for (const row of atCheckpoint) blockers.set(row.source_id, await readCheckpointBlockers(engine, row.source_id));
+  const passes = await engine.executeRaw<{ source_id: string; worktree_id: string; checkpoint: string }>(`SELECT s.id AS source_id, b.worktree_id::text AS worktree_id, r.request_id::text AS checkpoint
+    FROM sources s JOIN persistence_source_bindings b ON b.source_id=s.id AND b.source_incarnation=s.incarnation
+    JOIN op_checkpoints p ON p.op=$1 AND p.fingerprint=s.id||':'||s.incarnation::text AND p.completed_keys->0->'telemetry'->>'outcome'='open'
+    JOIN persistence_requests r ON r.worktree_id=b.worktree_id AND r.state IN ('queued','running','recovering')
+      AND r.intent->>'kind'='managed_sync_checkpoint' AND r.intent->>'passId'=p.completed_keys->0->'telemetry'->>'pass_id'
+    WHERE s.archived IS NOT TRUE AND ($2::text[] IS NULL OR s.id=ANY($2::text[]))`, [MANAGED_SYNC_PASS_OP, sourceIds ?? null]);
+  for (const pass of passes) {
+    if (blockers.has(pass.source_id)) continue;
+    const rows = await engine.executeRaw<{ request_id: string; slug: string; state: string; code: string | null; recovery: boolean }>(`SELECT DISTINCT ON (request_id) request_id, slug, state, code, recovery FROM (
+        (SELECT r.request_id::text AS request_id, r.slug, r.state, r.error_code AS code, true AS recovery, r.sequence FROM persistence_requests r
+          WHERE r.worktree_id=$1::uuid AND r.recovery IS NOT NULL ORDER BY r.sequence LIMIT 20)
+        UNION ALL (SELECT r.request_id::text, r.slug, r.state, r.error_code, false, r.sequence FROM persistence_requests r
+          WHERE r.worktree_id=$1::uuid AND r.state IN ('queued','running','recovering') AND r.request_id::text<>$2
+            AND r.intent->>'kind' IN ('managed_sync_import','managed_sync_delete','managed_sync_checkpoint') ORDER BY r.sequence LIMIT 20)) blockers
+      ORDER BY request_id, recovery DESC`, [pass.worktree_id, pass.checkpoint]);
+    blockers.set(pass.source_id, rows.slice(0, 20).map(row => ({ request_id: row.request_id, slug: row.slug, state: row.state, code: row.code, index: null, recovery: row.recovery === true, knock_on: false })));
+  }
   return blockers;
 }
 
@@ -255,12 +283,12 @@ export interface TerminalFailureQuery {
   category?: string;
 }
 export interface TerminalFailureRow {
-  request_id: string; slug: string; operation: string; state: string; code: string; origin: string | null; category: TerminalCategory;
+  request_id: string; slug: string; operation: string; state: string; code: string; origin: string | null; category: TerminalCategory; public_category: PublicCategory;
   class: string; safe_actions: string[]; needs_human: boolean; human_reason?: string; disposition: TerminalDisposition; blocking: boolean; historical: boolean;
   compacted: boolean; ended_at: string; cursor: string; inspect: Action; fix: Action; root_request_id?: string;
 }
 export interface TerminalFailureGroup {
-  code: string; origin: string | null; category: TerminalCategory; rows: number; class: string; needs_human: boolean; human_reason?: string;
+  code: string; origin: string | null; category: TerminalCategory; public_category: PublicCategory; rows: number; class: string; needs_human: boolean; human_reason?: string;
   filter: { code: string; origin: string | null; category: TerminalCategory }; drill_down: string[]; fix: Action; samples: Array<Pick<TerminalFailureRow, 'request_id' | 'slug' | 'state' | 'ended_at' | 'inspect'>>;
 }
 export type TerminalFailureListing = {
@@ -287,17 +315,21 @@ export function terminalFailuresArgv(q: TerminalFailureQuery, extra: Record<stri
  */
 export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailureQuery): Promise<TerminalFailureListing> {
   const t = await readTerminalThresholds(engine, q.sinceDays);
+  const schemaBehind = await readSchemaBehind(engine);
   const limit = Math.min(100, Math.max(1, q.limit ?? 20));
   const state = q.state ?? 'unresolved';
   const out: TerminalFailureRow[] = [];
+  // #6712 PR 2: the oldest admission per drift group, so the group's file-drift fix selects every page in it with one concrete --since.
+  const driftSince = new Map<string, string>();
   let cursor = q.before ?? null, scanned = 0, exhausted = false;
   const want = q.groupBy ? MAX_SCAN : limit + 1;
   while (out.length < want && scanned < MAX_SCAN && !exhausted) {
-    const batch = await bounded<KeyColumns & { request_id: string; sequence: string; slug: string; error_detail: Record<string, unknown> | null; ended_at: string; later_state: string | null; same_intent: boolean | null }>(engine,
-      `SELECT r.request_id::text AS request_id, r.sequence::text AS sequence, r.source_id, r.slug, r.operation, r.state, r.error_code, r.error_detail,
+    const batch = await bounded<KeyColumns & { request_id: string; sequence: string; slug: string; error_detail: Record<string, unknown> | null; ended_at: string; admitted_at: string; later_state: string | null; same_intent: boolean | null }>(engine,
+      `SELECT r.request_id::text AS request_id, r.sequence::text AS sequence, r.source_id, r.slug, r.operation, r.intent->>'kind' AS intent_kind, r.state, r.error_code, r.error_detail,
           r.error_detail->>'origin' AS origin, r.error_detail->>'reason' AS reason, r.error_detail->>'cause' AS cause,
           r.recovery IS NOT NULL AS has_recovery, r.blocked_reason, r.compacted, ${terminalKnockOnSql('r')} AS knock_on, ${ROUTED_MESSAGE('r')} AS routed_message, ${BUILD('r')} AS build,
-          to_char(${ENDED('r')} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ended_at, later.state AS later_state, later.same_intent
+          to_char(${ENDED('r')} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ended_at, to_char(r.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS admitted_at,
+          later.state AS later_state, later.same_intent
         FROM persistence_requests r
         LEFT JOIN LATERAL (SELECT c.state, c.digest=r.digest AS same_intent FROM persistence_requests c WHERE ${supersessionSql('r', 'c')}
           ORDER BY ${supersessionOrderSql('r', 'c')} LIMIT 1) later ON r.recovery IS NULL
@@ -309,16 +341,19 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
     for (const row of batch) {
       scanned++;
       cursor = row.sequence;
-      const v = verdictOf(row);
+      const v = verdictOf(row, schemaBehind);
       const disposition = dispositionOf(row.later_state ? { state: row.later_state, same_intent: row.same_intent === true } : null);
       const historical = !row.has_recovery && (disposition !== 'unknown' || v.historical);
       const matches = (!q.category || v.category === q.category) && (!q.code || v.code === q.code)
         && (q.origin === undefined || (v.origin ?? NO_ORIGIN) === q.origin) && (state === 'all' || !historical);
-      if (matches) out.push({ request_id: row.request_id, slug: row.slug, operation: row.operation, state: row.state, code: v.code, origin: v.origin, category: v.category, class: v.class,
+      if (matches) out.push({ request_id: row.request_id, slug: row.slug, operation: row.operation, state: row.state, code: v.code, origin: v.origin, category: v.category, public_category: v.public_category, class: v.class,
         safe_actions: v.safe_actions, needs_human: v.needs_human, ...(v.human_reason ? { human_reason: v.human_reason } : {}), disposition, blocking: row.has_recovery, historical,
         compacted: row.compacted, ended_at: row.ended_at, cursor: row.sequence, ...(v.root_request_id ? { root_request_id: v.root_request_id } : {}),
         inspect: { argv: terminalInspectArgv(row.request_id), consent: [], actor: 'agent', requires_exclusive: false, why: 'The receipt with its diagnosis and structured fix, read-only.' },
         fix: v.action });
+      const driftKey = `${v.code}\0${v.origin ?? ''}\0${v.category}`;
+      const seen = driftSince.get(driftKey);
+      if (matches && v.category === 'file_conflict' && (!seen || row.admitted_at < seen)) driftSince.set(driftKey, row.admitted_at);
       if (out.length >= want || scanned >= MAX_SCAN) { exhausted = exhausted && row === batch.at(-1); break; }
     }
   }
@@ -336,12 +371,16 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
     let g = groups.get(key);
     if (!g) {
       const filter = { code: row.code, origin: row.origin, category: row.category };
-      groups.set(key, g = { code: row.code, origin: row.origin, category: row.category, rows: 0, class: row.class, needs_human: row.needs_human,
+      groups.set(key, g = { code: row.code, origin: row.origin, category: row.category, public_category: row.public_category, rows: 0, class: row.class, needs_human: row.needs_human,
         ...(row.human_reason ? { human_reason: row.human_reason } : {}), filter, fix: row.fix, samples: [],
         drill_down: terminalFailuresArgv({ sourceId: q.sourceId, state: q.state, sinceDays: q.sinceDays, category: row.category, code: row.code, origin: row.origin ?? NO_ORIGIN }) });
     }
     g.rows++;
     if (g.samples.length < 3) g.samples.push({ request_id: row.request_id, slug: row.slug, state: row.state, ended_at: row.ended_at, inspect: row.inspect });
+  }
+  for (const [key, since] of driftSince) {
+    const g = groups.get(key);
+    if (g && new Set(out.filter(row => row.category === 'file_conflict' && `${row.code}\0${row.origin ?? ''}\0${row.category}` === key).map(row => row.slug)).size > 1) g.fix = driftSinceAction(q.sourceId, since);
   }
   const sorted = [...groups.values()].sort((a, b) => b.rows - a.rows || a.category.localeCompare(b.category) || a.code.localeCompare(b.code) || (a.origin ?? '').localeCompare(b.origin ?? ''));
   // Groups count the receipts this call scanned; a scan that stopped at its bound continues from where it stopped.

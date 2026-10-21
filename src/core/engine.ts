@@ -39,22 +39,13 @@ import type {
 /**
  * Options for `traverseGraph`.
  *
- * `frontierCap`: when set, the BFS recursive term applies a parenthesized
- * `LIMIT N ORDER BY slug,id` so each iteration emits at most N rows. This
- * is the "approximately per-layer" cap discussed in the T8 plan — Postgres'
- * recursive CTE caps per ITERATION, not strictly per BFS LAYER (BFS layer
- * boundaries map to recursive iterations only when fan-out is bounded).
- * For hub-fanout graphs the cap fires early and bounds the work. Default:
- * unset = no cap (back-compat; existing callers see no change).
+ * `frontierCap`: when set, each breadth-first layer adds at most N new
+ * pages, chosen after deduplication in (slug, id) order. Default: unset = no
+ * per-layer cap (the walk is still bounded by TRAVERSE_WALK_ROW_CAP).
  *
- * NOTE: a truncation-detection signal (`onTruncation` callback) was
- * designed but the v1 algorithm had both false-positive (organic count ==
- * cap) and false-negative (LIMIT-before-DISTINCT in diamond graphs) cases
- * caught by adversarial review. The signal is deferred until a
- * dedupe-then-cap SQL rewrite + real Postgres parity coverage lands. See
- * TODOS.md → "T8 truncation signal" entry. Callers that need to detect
- * truncation can compare `result.length` against expected fanout bounds
- * as a coarse-but-honest signal in the interim.
+ * NOTE: no truncation signal is exposed yet. The per-layer cap now dedupes
+ * before it limits, which was the precondition in TODOS.md → "T8 truncation
+ * signal"; restoring the callback is still open there.
  */
 /**
  * v0.38: bare row shape returned by `BrainEngine.listAllSources()`.
@@ -653,6 +644,8 @@ export interface FactListOpts {
    * semantics only.
    */
   grep?: string;
+  /** Intersect entity reads with this exact source_session before LIMIT/OFFSET. Also honored by listFactsSince. */
+  sessionId?: string;
   /**
    * When true, `listFactsSince`'s `since` comparison and ORDER BY use
    * COALESCE(valid_from, created_at) — event time — instead of creation
@@ -687,6 +680,9 @@ export interface FactListOpts {
   /** Hide facts whose provenance page (`source_markdown_slug`) is private. Resolved by the trusted operation layer (resolveExcludePrivatePages), never from MCP parameters. */
   excludePrivate?: boolean;
 }
+
+/** FactListOpts plus the entity the recall cursor reads (listFactsSince, listFactsKeyset) narrow to before LIMIT. */
+export type RecallFactReadOpts = FactListOpts & { entitySlug?: string };
 
 /** Per-source operational health snapshot consumed by `gbrain doctor`. */
 export interface FactsHealth {
@@ -1023,10 +1019,12 @@ export interface BrainEngine {
    * the cutoff (or is soft-deleted/restored) between the two statements.
    * Dry-run responses additionally carry `pages` (slug + deleted_at) for
    * display; the destructive path leaves `pages` undefined.
+   * `opts.excludeIds` keeps those page ids out of both (GBRA-130 A-49: the
+   * tombstones the unmanaged belief-ledger expiry failed or parked).
    */
   purgeDeletedPages(
     olderThanHours: number,
-    opts?: { dryRun?: boolean },
+    opts?: { dryRun?: boolean; excludeIds?: number[] },
   ): Promise<{ slugs: string[]; count: number; pages?: { slug: string; deleted_at: Date }[] }>;
   /**
    * v0.26.5: by default `listPages` excludes soft-deleted rows. Set
@@ -1292,14 +1290,13 @@ export interface BrainEngine {
   /**
    * #4246: NULL out the embeddings (embedding + embedded_at +
    * embedded_text_hash) of every chunk whose stored `embedded_text_hash` no
-   * longer matches `md5(chunk_text)` — i.e. the chunk's text was rewritten
-   * after its vector was computed, so the vector describes a previous
-   * content revision. Feeds the NULL-embedding cursor exactly like
-   * invalidateStaleSignatureEmbeddings. GRANDFATHER: NULL hash (rows
-   * embedded before v133 stamped provenance) is never invalidated — no
-   * upgrade re-embed spike; the hash lands on each row's next re-embed.
-   * embed_skip pages are excluded (listStaleChunks can't re-embed them, so
-   * NULLing would strand them). Returns the chunk count invalidated.
+   * longer matches `md5(chunk_text)` (text rewritten after its vector was
+   * computed). Feeds the NULL-embedding cursor like
+   * invalidateStaleSignatureEmbeddings. GRANDFATHER: NULL hash (pre-v133
+   * rows) is never invalidated — no upgrade re-embed spike. embed_skip pages
+   * are excluded (listStaleChunks can't re-embed them). #7117: bounded
+   * batches in id order, one transaction each, no saved cursor (the embed
+   * paths run content-drift-sweep.ts). Returns the chunk count invalidated.
    */
   invalidateContentDriftEmbeddings(opts?: { sourceId?: string }): Promise<number>;
   /**
@@ -1388,19 +1385,20 @@ export interface BrainEngine {
    * `attendance` (#5761) excludes or selects pages whose attendance marker
    * equals their current knowledge revision.
    */
-  countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked' }): Promise<number>;
+  countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; held?: 'exclude' | 'only' }): Promise<number>;
   /**
    * List a keyset page (ordered by `id`, `id > afterPageId`) of stale pages
    * WITH their content so the caller extracts without an N+1 `getPage`. Same
-   * stale predicate as countStalePagesForExtraction. Caller passes a SMALL
-   * batchSize (page bodies are unbounded — 25MB transcript pages exist) and
-   * applies its own per-batch byte budget.
+   * stale predicate as countStalePagesForExtraction (segmented rows carry no body:
+   * read it block by block). The caller passes a SMALL batchSize (25MB transcript
+   * pages exist) and applies its own per-batch byte budget.
    */
   listStalePagesForExtraction(opts: {
     batchSize: number;
     afterPageId?: number;
     sourceId?: string;
     versionTs?: string;
+    held?: 'exclude';
   }): Promise<StalePageRow[]>;
   /**
    * Stamp `links_extracted_at` for a batch of pages keyed on the unique
@@ -1603,7 +1601,8 @@ export interface BrainEngine {
    * - direction: 'in' (follow to->from), 'out' (follow from->to), 'both'
    * - depth: max depth from root (default 5)
    * - sourceId/sourceIds: v0.34.1 source-isolation filter, see traverseGraph
-   * Uses cycle prevention (visited array in recursive CTE).
+   * Breadth-first: each page is visited once, at its shortest depth, and each
+   * qualifying edge leaving a visited page is returned once.
    */
   traversePaths(
     slug: string,
@@ -1913,8 +1912,8 @@ export interface BrainEngine {
    * `jsonb_to_recordset(($1::jsonb)->'rows')` through `executeRawJsonb` (#1861;
    * free-text-safe, replaced the prior `unnest(::text[])` path). Idempotency:
    * ON CONFLICT (page_id, row_num) DO UPDATE — re-extract on a changed
-   * claim/weight updates the row in place. Returns the number of rows inserted
-   * OR updated. Row construction + weight clamp/round + NUL-strip live in
+   * claim/weight updates the row in place; an identical row stays unwritten. Returns
+   * the rows inserted, updated or already current. Row construction + weight clamp/round + NUL-strip live in
    * `src/core/batch-rows.ts:buildTakeRows` (shared across both engines).
    *
    * Wrapped in `batchRetry` like the other batch primitives, so `opts` (auditSite,
@@ -2282,19 +2281,19 @@ export interface BrainEngine {
   listFactsSince(
     source_id: string,
     since: Date,
-    opts?: FactListOpts & { entitySlug?: string; sessionId?: string },
+    opts?: RecallFactReadOpts,
   ): Promise<FactRow[]>;
 
   /**
    * delta's facts arm: facts strictly after a `(created_at, id)` keyset
    * (`id: null` = strictly after the timestamp), OLDEST first, each row with
    * `created_at_iso` at column precision. Honors activeOnly, visibility,
-   * fingerprint and limit only.
+   * fingerprint, limit, and the opt-in recall narrowing (entitySlug, sessionId, grep, excludeAuditRows) that --since-last-run paging uses.
    */
   listFactsKeyset(
     source_id: string,
     after: { createdAt: string; id: number | null } | null,
-    opts?: FactListOpts,
+    opts?: RecallFactReadOpts,
   ): Promise<FactRow[]>;
 
   /** List facts captured under a session id within a source. */
@@ -2376,8 +2375,8 @@ export interface BrainEngine {
   // Segmented page storage (Wave B; SQL in engine-sql/page-body.ts). Called only when pages.segmented_storage is on.
   /** `count` fresh manifest occurrence ids from one sequence; never reused. */
   allocateBodyOccurrenceIds(count: number): Promise<number[]>;
-  /** Insert segment texts for one source, `ON CONFLICT DO NOTHING`, in statements bounded by STAGE_BATCH_BYTES. */
-  stageSegmentTexts(sourceId: string, texts: readonly SegmentTextInput[]): Promise<{ inserted: number }>;
+  /** Insert segment texts for one source, `ON CONFLICT DO NOTHING`, in statements bounded by STAGE_BATCH_BYTES; with `stagingId`, record them as that staging's (a page purge keeps them while it is live). */
+  stageSegmentTexts(sourceId: string, texts: readonly SegmentTextInput[], opts?: { stagingId?: string }): Promise<{ inserted: number }>;
   /** Segment texts by sha256 for one source, keyed by lowercase hex; missing shas are absent. */
   readSegmentTexts(sourceId: string, sha256s: readonly Uint8Array[]): Promise<Map<string, Uint8Array>>;
   /** Insert manifest rows (staged rows carry `stagingId`), in bounded statements. */
@@ -2651,11 +2650,12 @@ export interface BrainEngine {
    * transaction the option is ignored (a `SET LOCAL` there would change the
    * enclosing transaction). PGLite ignores it: one in-process connection has
    * no other session to wait on. `deadlineAt` (#6696, epoch ms) recomputes the bound after the pool wait.
+   * `jitOff` runs it with `jit = off` when the server has JIT on (postgres-engine/jit-off-statement.ts; PGLite ignores it); `prepare: false` plans it for its actual parameters on every call.
    */
   executeRaw<T = Record<string, unknown>>(
     sql: string,
     params?: unknown[],
-    opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number },
+    opts?: { signal?: AbortSignal; timeoutMs?: number; deadlineAt?: number; jitOff?: boolean; prepare?: boolean },
   ): Promise<T[]>;
 
   /**
@@ -2675,6 +2675,15 @@ export interface BrainEngine {
     params?: unknown[],
     opts?: { signal?: AbortSignal },
   ): Promise<T[]>;
+
+  /**
+   * Runs `read` in one unscoped read transaction under the keyword statement bound
+   * (`search.keyword_statement_timeout_ms`, transaction-local): a search-time read outside the engine's own keyword
+   * statements that must not wait on a lock without a bound (the segmented-region read with its chunk-manifest probe
+   * through `db`). A statement past the bound fails with 57014. PGLite runs `read` on the engine itself and sets
+   * no statement timeout, as for its keyword statements.
+   */
+  keywordBoundedRead<T>(read: (db: Pick<BrainEngine, 'executeRaw'>) => Promise<T>): Promise<T>;
 
   // ============================================================
   // v0.20.0 Cathedral II: code edges (Layer 5 populates, Layer 7 consumes)

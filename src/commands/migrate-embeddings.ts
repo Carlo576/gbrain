@@ -197,8 +197,9 @@ function renderPlan(ctx: MigrationPlanContext): string {
   if (plan.resuming) {
     lines.push('  Resuming: a prior migration to this target was interrupted; continuing it.');
   }
-  if (concurrentWriters.workers > 0 || concurrentWriters.embedJobs > 0) {
-    lines.push(`  WARNING: ${concurrentWriters.workers} live minion worker(s) and ${concurrentWriters.embedJobs} waiting/running`);
+  if (concurrentWriters.workers !== 0 || concurrentWriters.embedJobs > 0) {
+    const workerCount = concurrentWriters.workers === null ? 'an unknown number of (worker registry unreadable)' : String(concurrentWriters.workers);
+    lines.push(`  WARNING: ${workerCount} live minion worker(s) and ${concurrentWriters.embedJobs} waiting/running`);
     lines.push('          embed job(s) detected. Generic embed/cycle jobs do not take the migration');
     lines.push('          locks — stop the worker (or let the queue drain) first, or their writes');
     lines.push('          will be counted stale by the final census and re-embedded.');
@@ -441,8 +442,8 @@ export interface MigrationPlanContext {
   rerankerPlan: RerankerPlan;
   /** Which brain/DB this run is actually pointed at (wrong-brain visibility). */
   identity: { engine: string; target: string };
-  /** Quiesce-lite: live embed writers that are NOT under the migration locks. */
-  concurrentWriters: { workers: number; embedJobs: number };
+  /** Quiesce-lite: live embed writers that are NOT under the migration locks; workers is null when the worker registry is unreadable. */
+  concurrentWriters: { workers: number | null; embedJobs: number };
   /** Non-default search_embedding_column, if configured (read-path caveat). */
   customSearchColumn: string | null;
 }
@@ -551,10 +552,12 @@ export async function planMigrationFlow(
   // Quiesce-lite census (round-1 C2 / round-2 #3): embed writers outside the
   // migration locks. Report, don't block — the completion census is the
   // correctness backstop; this is the operator's "stop the worker first" cue.
-  let concurrentWriters = { workers: 0, embedJobs: 0 };
+  let concurrentWriters: { workers: number | null; embedJobs: number } = { workers: 0, embedJobs: 0 };
   try {
     const { readWorkers } = await import('../core/minions/worker-registry.ts');
-    const workers = readWorkers().length;
+    // An unreadable registry is an unknown worker count (null), and must not also drop the embed-job count below.
+    let workers: number | null = null;
+    try { workers = readWorkers().length; } catch { /* registry unreadable: worker count unknown */ }
     const rows = await engine.executeRaw<{ n: number }>(
       `SELECT count(*)::int AS n FROM minion_jobs
         WHERE status IN ('waiting', 'running')
@@ -700,7 +703,7 @@ export async function executeMigrationFlow(
 
     await assertOwned();
     const readiness = await prepareEmbeddingProjections(engine, { repair: true, assertOwned });
-    if (readiness.blocked) return { status: 'apply_failed', reason: `projection_blocked: ${readiness.blocked} page(s) remain; no migration-wide embedding invalidation performed. Canonical projection recovery may have made durable progress. Inspect blockers before retrying: archived sources require deliberate gbrain sources restore <id>; unsupported media requires its source importer. See docs/guides/embedding-migration.md#recovery.` };
+    if (readiness.blocked) return { status: 'apply_failed', reason: `projection_blocked: ${readiness.blocked} page(s) remain; no migration-wide embedding invalidation performed. Canonical projection recovery may have made durable progress. Inspect blockers before retrying: archived sources require deliberate gbrain sources restore <id>; image pages are counted by class in gbrain doctor --only text_projection_readiness --json (gbrain projections drain seals the sealable ones). See docs/guides/embedding-migration.md#recovery.` };
 
     const applied = await applyEmbeddingMigration(engine, plan, {
       ignoreEnvOverride: opts.ignoreEnvOverride,

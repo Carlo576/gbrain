@@ -22,7 +22,7 @@ import { withEnv } from './helpers/with-env.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { isEmbedSkipped } from '../src/core/embed-skip.ts';
 import { assessContentSanity } from '../src/core/content-sanity.ts';
-import { runOversizedBackfill, BACKFILL_HOLD_REASON } from '../src/core/oversized-backfill.ts';
+import { runOversizedBackfill, formatOversizedBackfillReceipt, BACKFILL_HOLD_REASON } from '../src/core/oversized-backfill.ts';
 import { listBudgetLimitedPages, planPageEmbedding } from '../src/core/page-embedding-budget.ts';
 import { runEmbedCore } from '../src/commands/embed.ts';
 import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
@@ -131,6 +131,10 @@ describe('gbrain reindex --oversized (keyless upgrade path)', () => {
       const receipt = await runOversizedBackfill(engine);
       expect(receipt).toMatchObject({ reindexed: 1, held_for_approval: 1, embedding_enabled: true });
       expect(receipt.estimated_usd).toBeGreaterThan(0);
+      expect(receipt.commands.approve).toEqual(['gbrain', 'embed', '--held', '--source', 'default', '--max-usd', expect.stringMatching(/^\d+\.\d{2}$/)]);
+      expect(Number(receipt.commands.approve![6])).toBeGreaterThanOrEqual(receipt.estimated_usd!);
+      expect(formatOversizedBackfillReceipt(receipt).join('\n')).toContain(`approve one source at a time: ${receipt.commands.approve!.join(' ')}`);
+      expect(formatOversizedBackfillReceipt(receipt).join('\n')).not.toContain('<N>');
       expect(await keywordHits()).toEqual(['chats/big']);
       expect(await listBudgetLimitedPages(engine)).toEqual([expect.objectContaining({ slug: 'chats/big', state: 'held', reason: BACKFILL_HOLD_REASON })]);
       expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(0);
@@ -173,14 +177,15 @@ describe('per-page embedding budget (embed.max_usd_per_page)', () => {
   const stale = (n: number) => Array.from({ length: n }, (_, i) => ({ chunk_index: i, chunk_text: 'x'.repeat(4000) }));
   const page = (id: number) => ({ id, compiled_truth: 'y'.repeat(1_100_000), timeline: '' });
 
-  async function pageId(slug: string): Promise<number> {
-    await engine.putPage(slug, { type: 'note', title: slug, compiled_truth: 'short' });
+  /** The stored page matches the size planPageEmbedding is given: a budget row applies only while the page is large. */
+  async function pageId(slug: string, compiled_truth = 'short'): Promise<number> {
+    await engine.putPage(slug, { type: 'note', title: slug, compiled_truth });
     return (await engine.getPage(slug))!.id;
   }
 
   test('grants the newest chunks that fit the cap, marks the page capped, and never re-grants spent budget', async () => {
     await withHome(null, async () => {
-      const id = await pageId('notes/capped');
+      const id = await pageId('notes/capped', page(0).compiled_truth);
       await engine.setConfig('embed.max_usd_per_page', '0.0003');
       const first = await planPageEmbedding(engine, page(id), stale(10), { signature: `${MODEL}:${DIMS}` });
       if (first.kind !== 'grant') throw new Error(`expected a grant, got ${first.kind}`);
@@ -212,8 +217,9 @@ describe('per-page embedding budget (embed.max_usd_per_page)', () => {
 
   test('a large page whose head, middle and tail windows are all boilerplate is held instead of embedded', async () => {
     await withHome(null, async () => {
-      const id = await pageId('notes/boilerplate');
-      const decision = await planPageEmbedding(engine, { id, compiled_truth: navRow.repeat(Math.ceil(1_100_000 / navRow.length)) }, stale(3));
+      const body = navRow.repeat(Math.ceil(1_100_000 / navRow.length));
+      const id = await pageId('notes/boilerplate', body);
+      const decision = await planPageEmbedding(engine, { id, compiled_truth: body }, stale(3));
       expect(decision).toEqual({ kind: 'held', reason: 'sampled_markup_heavy' });
       expect(await listBudgetLimitedPages(engine)).toEqual([expect.objectContaining({ slug: 'notes/boilerplate', state: 'held' })]);
     });

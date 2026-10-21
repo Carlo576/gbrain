@@ -54,9 +54,11 @@
  * CLI's effective flags (the managed cursor owns processing options).
  */
 
+import { readMarkersForRun, settleRunMarkers } from './notifier/handoff.ts';
 import { isAdmissionOrigin, withAdmissionOrigin } from './persistence/admission-origin.ts';
 import { randomUUID } from 'node:crypto';
 import { withLegacySyncDelegation } from './persistence/sync-authority.ts';
+import { retiredWireNotice } from './wire-skew.ts';
 import { verifyLocalWriter, withVerifiedLocalRegistration } from './persistence/identity.ts';
 import { readManagedMode } from './persistence/managed-mode.ts';
 import { OperationError } from './ops/contract.ts';
@@ -213,6 +215,12 @@ function startDelegatedSyncScoped(
     settled: Promise.resolve(),
   };
   current = job;
+  // An older client's retired fields (src/core/wire-skew.ts) were dropped: say so in the serve log and to that client.
+  if (v.ignored) {
+    const notice = retiredWireNotice(v.ignored);
+    log(notice);
+    job.lines.push({ seq: ++job.lineSeq, text: notice });
+  }
   ensureDrainerRegistered();
 
   // Per-job hard deadline: 0 is the single unbounded encoding (an explicit
@@ -253,6 +261,7 @@ function startDelegatedSyncScoped(
         `start job=${job.id} source=${sourceId ?? 'default'} ` +
         `opts=${JSON.stringify({ ...options, timeoutSeconds: undefined })} deadline=${options.timeoutSeconds}s`,
       );
+      const markers = options.dryRun ? [] : await readMarkersForRun(engine, sourceId ?? 'default');
       const r = await performSync(engine, {
         ...classicSyncOpts(options, sourceId),
         // ALWAYS deferred — see module header. Drained by maybeDrainDeferredEmbeds.
@@ -269,6 +278,7 @@ function startDelegatedSyncScoped(
         `done job=${job.id} status=${r.status} added=${r.added} modified=${r.modified} ` +
         `deleted=${r.deleted} in=${Math.round((Date.now() - job.startedAt) / 1000)}s`,
       );
+      if (!options.dryRun) await settleRunMarkers(engine, sourceId ?? 'default', markers, { pulled: !options.noPull, full: options.full === true }, { queue: false });
       // Wire noEmbed means the USER declined embeds — honor it by skipping
       // the drain too (performSync above always ran noEmbed regardless).
       if (!options.dryRun && !options.noEmbed && r.added + r.modified > 0) {
@@ -343,6 +353,7 @@ async function startVerifiedDelegatedSync(
         const { performSync } = await import('../commands/sync.ts');
         const sourceId = await resolveJobSource(engine, job);
         const managed = await readManagedMode(engine);
+        const markers = options.dryRun ? [] : await readMarkersForRun(engine, sourceId ?? 'default');
         log(
           `start job=${job.id} source=${sourceId ?? 'default'} writer=${verified.principal.id} managed=${managed} ` +
           `opts=${JSON.stringify({ ...options, timeoutSeconds: undefined })} deadline=${options.timeoutSeconds}s`,
@@ -375,6 +386,8 @@ async function startVerifiedDelegatedSync(
           `done job=${job.id} status=${r.status} added=${r.added} modified=${r.modified} ` +
           `deleted=${r.deleted}${r.drain ? ` drain=${r.drain.outcome}` : ''} in=${Math.round((Date.now() - job.startedAt) / 1000)}s`,
         );
+        // GBRA-133 PR 2a.3: the post-run re-check (generation-checked); whatever is still due goes to this serve's notifier.
+        if (!options.dryRun) await settleRunMarkers(engine, sourceId ?? 'default', markers, { pulled: !managed && !options.noPull, full: options.full === true }, { queue: false });
         if (!managed && !options.dryRun && !options.noEmbed && r.added + r.modified > 0) {
           scheduleDeferredSyncEmbeds(engine, sourceId);
         }

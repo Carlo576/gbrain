@@ -198,13 +198,16 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
 - **Keep a managed catch-up moving without a human** (a live checkout where
   other agents commit while `gbrain sync` drains thousands of pages): a page
   that moves under the run is held (`concurrent_write`, `worktree_dirty`), a
-  dropped connection is retried, and a relaunch resumes the frozen manifest.
-  The operator loop is `gbrain sync status --source <id> --json` (cursor,
-  `committed_last_10m`, each hold and the last error with `class` /
-  `safe_actions` / `needs_human`), then, when nothing moved and
+  dropped connection is retried, and a relaunch starts a pass that admits only
+  what is still unsettled. The operator loop is
+  `gbrain sync status --source <id> --json` (`state` and `reason`, the
+  newest pass in `convergence`, `committed_last_10m`, each hold and the last error
+  with `class` / `safe_actions` / `needs_human`), then, when nothing moved and
   `needs_human` is false, `gbrain sync unblock --source <id> --apply` and
   the sync it prints; when `needs_human` is true, relay `next.user_message`
-  with the slug. Decision table:
+  with the slug. A plain status skips its heavy reads: a `*_read` field with
+  `status: not_read` means that field was not read (never "none"); run its
+  `fix` (`--detail`) when you need it. Decision table:
   [`docs/guides/sync-unblock-runbook.md`](./docs/guides/sync-unblock-runbook.md).
 - **Writes that ended without committing** (doctor
   `persistence_terminal_failures`, `terminal write failures` in

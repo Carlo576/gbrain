@@ -1,12 +1,14 @@
 /**
  * #6517 (GBRA-79 wave 16, G3.3 [R7]): the managed sync path end to end with a
  * duplicate-origin twin. Two live pages of the source record one file: the
- * run refuses `page_identity_changed` and names the soft-delete exit. After
+ * run holds that file `origin_conflict` (#6948; it used to refuse the whole
+ * source with `page_identity_changed`). After
  * the loser is soft-deleted (the shared-origin delete keeps the file), the run
  * imports the file into the survivor through both origin guards (discovery
  * census, `assertSyncPageOrigin` at preparation and publication), then edits
  * and deletes the survivor from the checkout. A single tombstone still
- * resurrects when its file returns; two tombstones still refuse; a winner
+ * resurrects when its file returns; two tombstones hold the file
+ * `page_identity_changed` (#6712 PR 4b, GBRA-130 A-17; they used to refuse the source); a winner
  * whose liveness changes between the census and the publication never
  * receives the import. Master: the twin's tombstone kept every run refusing
  * (`assertSyncPageOrigin` counted tombstones), the Eng P1 probe.
@@ -25,6 +27,7 @@ import { operations, type OperationContext } from '../../src/core/operations.ts'
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
 import { performManagedSync } from '../../src/core/persistence/sync-run.ts';
 import { readManagedSyncFailures } from '../../src/core/persistence/sync-failures.ts';
+import { readGitSourceHolds } from '../../src/core/persistence/sync-holds.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
@@ -32,6 +35,7 @@ import { TEST_WRITE_ATTRIBUTION } from '../helpers/write-attribution.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { testBackends } from '../helpers/test-backends.ts';
 import { withEnv } from '../helpers/with-env.ts';
+import { dropOriginIndex } from '../helpers/origin-index.ts';
 
 const op = (name: string) => operations.find(o => o.name === name)!;
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -65,14 +69,18 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 managed sync 
     await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
     const opts = { sourceId: id, noPull: true, noEmbed: true, noExtract: true };
     expect((await sync(opts)).status).toBe('first_sync');
-    await engine.transaction(tx => withCoordinatedWrite(tx, [id], () => tx.putPage('alpha-twin', { type: 'note', title: 'Twin', compiled_truth: 'A twin recording alpha.',
-      timeline: '', frontmatter: {}, content_hash: 'twin', source_path: 'alpha.md' }, { sourceId: id }), TEST_WRITE_ATTRIBUTION));
+    // #6948: no writer records a held origin on a second page any more, so the twin's origin is set as legacy data left it.
+    await engine.transaction(tx => withCoordinatedWrite(tx, [id], async () => {
+      await tx.putPage('alpha-twin', { type: 'note', title: 'Twin', compiled_truth: 'A twin recording alpha.', timeline: '', frontmatter: {}, content_hash: 'twin' }, { sourceId: id });
+      await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2', [id, 'alpha-twin', 'alpha.md']);
+    }, TEST_WRITE_ATTRIBUTION));
     return { id, root, file, opts };
   }
 
   beforeAll(async () => {
     if (backend === 'pglite') { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }
     else { const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!); engine = pg.engine; closePostgres = pg.close; }
+    await dropOriginIndex(engine);
   }, 120_000);
   afterAll(async () => {
     installFaultHook(undefined);
@@ -81,13 +89,14 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 managed sync 
     rmSync(home, { recursive: true, force: true });
   }, 60_000);
 
-  test('two live claimants refuse the run and name the exit; after the loser is soft-deleted the file imports, edits and deletes through both guards; a single tombstone resurrects', async () => {
+  test('two live claimants hold their file (the rest syncs); after the loser is soft-deleted the file imports, edits and deletes through both guards; a single edited tombstone is held', async () => {
     const f = await twins();
     writeFileSync(f.file, note('Alpha, version two.')); commit(f.root, 'version two');
-    const refused = await sync(f.opts).then(() => null, error => error as Error & { code?: string; suggestion?: string });
-    expect(refused?.code).toBe('page_identity_changed');
-    expect(refused?.message).toContain('Several pages claim the same imported origin');
-    expect(refused?.suggestion).toContain('Soft-delete the page that should not own the file');
+    // #6948: the twin no longer refuses the source; only its file is held origin_conflict (the bodies differ: a person decides).
+    const held = await sync(f.opts);
+    expect(held.status).toBe('synced');
+    const [hold] = (await readGitSourceHolds(engine, { sourceIds: [f.id] }))[0]?.holds ?? [];
+    expect(hold).toMatchObject({ path: 'alpha.md', code: 'origin_conflict', meta: { reason: 'content_differs', canonical_slug: 'alpha' } });
     expect((await page(f.id, 'alpha'))!.compiled_truth).toContain('version one');
     // The exit: the twin is hidden, the file stays.
     expect(await softDelete(f.id, 'alpha-twin')).toMatchObject({ state: 'committed', write_through: { skipped: 'shared_origin' } });
@@ -109,18 +118,34 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 managed sync 
     expect(deleted.status).toBe('synced'); expect(deleted.managedWrite).toBeUndefined();
     expect((await page(f.id, 'alpha'))!.deleted_at).not.toBeNull();
     expect((await page(f.id, 'alpha'))!.id).toBe(survivor.id);
-    // Two tombstones record the file: its return is ambiguous, as before.
+    // Two tombstones record the file: its return is ambiguous, as before. #6712 PR 4b (GBRA-130 A-17): the file alone is held
+    // page_identity_changed (several_tombstones, both pages named) instead of refusing the source; neither page is revived.
     writeFileSync(f.file, note('Alpha returns.')); commit(f.root, 'alpha returns');
-    const ambiguous = await sync(f.opts).then(() => null, error => error as Error & { code?: string });
-    expect(ambiguous?.code).toBe('page_identity_changed');
+    const ambiguous = await sync(f.opts);
+    expect(ambiguous.status).toBe('synced'); expect(ambiguous.managedWrite).toBeUndefined();
+    expect((ambiguous.held ?? []).map(item => [item.path, item.code])).toEqual([['alpha.md', 'page_identity_changed']]);
+    const identityHolds = (await readGitSourceHolds(engine, { sourceIds: [f.id] }))[0]?.holds ?? [];
+    expect(identityHolds).toHaveLength(1);
+    expect(identityHolds[0]).toMatchObject({ path: 'alpha.md', code: 'page_identity_changed', meta: { reason: 'several_tombstones' } });
+    expect([...(identityHolds[0]!.meta as { identity_slugs: string[] }).identity_slugs].sort()).toEqual(['alpha', 'alpha-twin']);
     expect((await page(f.id, 'alpha'))!.deleted_at).not.toBeNull();
-    // Point the twin tombstone elsewhere: one tombstone left, which the file resurrects (same page id).
+    expect((await page(f.id, 'alpha'))!.compiled_truth).toContain('version three');
+    expect((await page(f.id, 'alpha-twin'))!.deleted_at).not.toBeNull();
+    // Point the twin tombstone elsewhere: one tombstone left. #6712 PR 4b (design v3.2 §2.3 row 9, `deleted_edited`): the file
+    // changed after its page was deleted, so the pass holds it (side deleted, state tombstone_edited) for a person's Decision
+    // instead of reviving the page; repair file-drift --held --prefer file is the way back.
     await coordinated(f.id, 'UPDATE pages SET source_path=NULL WHERE source_id=$1 AND slug=$2', [f.id, 'alpha-twin']);
-    const resurrected = await sync(f.opts);
-    expect(resurrected.managedWrite).toBeUndefined();
+    // The file is already held page_identity_changed, so this run re-screens it (holdRescreenDue) rather than holding it anew:
+    // the result lists no new hold, and the source's one hold becomes the file_drift above in place of the identity hold.
+    const returned = await sync(f.opts);
+    expect(returned.managedWrite).toBeUndefined();
+    expect(returned).toMatchObject({ status: 'up_to_date', filesImported: 0, held_count: 0, holds_outstanding: 1 });
+    const rescreened = (await readGitSourceHolds(engine, { sourceIds: [f.id] }))[0]?.holds ?? [];
+    expect(rescreened.map(item => [item.path, item.code, item.meta.side, item.meta.state, item.slug])).toEqual([['alpha.md', 'file_drift', 'deleted', 'tombstone_edited', 'alpha']]);
     const back = (await page(f.id, 'alpha'))!;
-    expect(back).toMatchObject({ id: survivor.id, deleted_at: null });
-    expect(back.compiled_truth).toContain('Alpha returns');
+    expect(back.id).toBe(survivor.id);
+    expect(back.deleted_at).not.toBeNull();
+    expect(back.compiled_truth).toContain('version three');
     expect(await readManagedSyncFailures(engine, [f.id])).toEqual([]);
   }, 180_000);
 
@@ -145,9 +170,14 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 managed sync 
     expect((await page(f.id, 'alpha'))!.deleted_at).not.toBeNull();
     expect(error ? error.code : result!.status === 'synced' && (result!.held_count ?? 0) === 0 && !result!.managedWrite ? 'clean import' : 'refused').not.toBe('clean import');
     expect(existsSync(f.file)).toBe(true);
-    // Once the twin is the one live claimant, the next run (a new request past the frozen refusal) imports the file into it.
+    // #6712 PR 4b (design v3.2 §2.3 row 19, `drift`): once the twin is the one live claimant, it has no import record and no
+    // proof that the file was ever its own, so the pass holds it file_drift (side unknown) instead of importing over it, and
+    // the next run leaves it held and unchanged.
+    expect(error).toBeNull();
+    expect((result!.held ?? []).map(item => [item.path, item.code, item.side, item.slug])).toEqual([['alpha.md', 'file_drift', 'unknown', 'alpha-twin']]);
     const next = await sync({ ...f.opts, retryFailed: true });
     expect(next.managedWrite).toBeUndefined();
-    expect((await page(f.id, 'alpha-twin'))!.compiled_truth).toContain('version two');
+    expect(next.holds_outstanding).toBe(1);
+    expect((await page(f.id, 'alpha-twin'))!.compiled_truth).toBe('A twin recording alpha.');
   }, 180_000);
 });

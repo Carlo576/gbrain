@@ -35,13 +35,14 @@ import { runManagedSourceLifecycle } from '../src/core/persistence/source-lifecy
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { refreshWorktree, resumeWorktreeRefreshes } from '../src/core/persistence/worktree-refresh.ts';
+import { MANAGED_SYNC_PASS_OP, writePassRow, type ManagedSyncPassValue } from '../src/core/persistence/sync-pass-row.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
-import { git, page, withRefreshFixture, type RefreshFixture } from './helpers/worktree-refresh-fixture.ts';
+import { commitFile, git, page, withRefreshFixture, type RefreshFixture } from './helpers/worktree-refresh-fixture.ts';
 
 const backends = testBackends();
 const engines: BrainEngine[] = [];
@@ -271,6 +272,28 @@ test('9. an unexhausted managed-sync cursor refuses sync_in_progress with its re
   } finally { await f.engine.executeRaw(`DELETE FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1`, [key]); }
 }), 120_000);
 
+test('9b. #6712 PR 4b: an open non-company sync pass does not refuse the refresh (a cursor still does, test 9); the next pass converges at the new HEAD', () => each(async f => {
+  f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
+  const before = f.head();
+  const [source] = await f.engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [f.beta]);
+  const passId = randomUUID();
+  const value: ManagedSyncPassValue = { source_id: f.beta, incarnation: source!.incarnation, lease_token: randomUUID(),
+    obligations: { baseline_commit: null, mismatch: {}, not_converged_streak: 0, faults: {} },
+    telemetry: { pass_id: passId, target: 'HEAD', started_at: new Date().toISOString(), ended_at: null, kind: 'full', round: 1, outcome: 'open', stop_reason: null,
+      candidates: 5, settled: 2, remaining: 3, counts: {}, duration_ms: null, timings_ms: {} } };
+  expect(await writePassRow(f.engine, value, { pin: true })).toBe(true);
+  try {
+    const result = await refreshWorktree(f.engine, f.alpha);
+    expect(result).toMatchObject({ status: 'completed', old_head: before });
+    expect(result.target_head).not.toBe(before);
+    // The refresh's own sync of the members is the next pass: it replaces the open row and converges at the new HEAD.
+    expect(result.synced).toContainEqual({ source_id: f.beta, status: 'synced', last_commit: result.target_head as string | null });
+    const [row] = await f.engine.executeRaw<{ pass_id: string; outcome: string }>("SELECT completed_keys->0->'telemetry'->>'pass_id' AS pass_id, completed_keys->0->'telemetry'->>'outcome' AS outcome FROM op_checkpoints WHERE op=$1 AND completed_keys->0->>'source_id'=$2", [MANAGED_SYNC_PASS_OP, f.beta]);
+    expect(row).toMatchObject({ outcome: 'synced' });
+    expect(row?.pass_id).not.toBe(passId);
+  } finally { await f.engine.executeRaw("DELETE FROM op_checkpoints WHERE op=$1 AND completed_keys->0->>'source_id'=$2", [MANAGED_SYNC_PASS_OP, f.beta]); }
+}), 120_000);
+
 test('10. source add and remove on the worktree during a refresh refuse refresh_in_progress', () => each(async f => {
   f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
   const result = await refreshWorktree(f.engine, f.alpha, { hooks: { boundary: async point => {
@@ -442,3 +465,24 @@ test('admission completes a syncing refresh whose members all reached the target
   expect((await f.put(f.alpha, 'notes/caught-up', page('Caught up', 'admitted'))).state ?? 'committed').toBe('committed');
   expect((await f.refreshRows()).map(r => r.state)).toEqual(['completed']);
 }), 120_000);
+
+test('#6712 wave: a refresh completes once every member synced to a descendant of the target, and --resume completes it the same way', () => each(async f => {
+  const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
+  let descendant = '';
+  // A commit lands on top of the fast-forwarded target before the member syncs run, so each member syncs past the target.
+  const result = await refreshWorktree(f.engine, f.alpha, { hooks: { boundary: point => {
+    if (point === 'merged') descendant = commitFile(f.root, 'alpha/three.md', page('Alpha three', 'Committed on top of the target.'));
+  } } });
+  expect(git(f.root, 'merge-base', '--is-ancestor', target, descendant) === '' && descendant !== target).toBe(true);
+  expect(await f.lastCommit(f.alpha)).toBe(descendant);
+  expect(await f.lastCommit(f.beta)).toBe(descendant);
+  expect(result).toMatchObject({ status: 'completed', target_head: target });
+  expect(result.next).toBeUndefined();
+  expect((await f.refreshRows()).map(r => r.state)).toEqual(['completed']);
+  expect((await f.put(f.alpha, 'notes/after-descendant', page('After', 'admitted'))).state ?? 'committed').toBe('committed');
+  // A refresh left in syncing (its process died) whose members already synced past the target completes on --resume.
+  const [row] = await f.refreshRows();
+  await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state='syncing',completed_at=NULL WHERE id=$1::uuid`, [row.id]);
+  expect(await refreshWorktree(f.engine, f.alpha, { resume: true })).toMatchObject({ status: 'completed', refresh_id: row.id });
+  expect((await f.refreshRows()).map(r => r.state)).toEqual(['completed']);
+}), 180_000);

@@ -11,7 +11,7 @@ import {
   lockEmbeddingSources,
   splitEmbeddingSignature,
   currentSpaceChunkPredicate,
-  countRestampOnlyChunks,
+  measureRestampOnlyChunks,
 } from './embedding-invalidation.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { readPrimaryEmbeddingStores, readStoredEmbeddingIdentity } from './stored-embedding-identity.ts';
@@ -631,7 +631,9 @@ export async function planEmbeddingMigration(
     // counts what the stamp hides. No overlap — the stale predicates skip
     // exactly the target-stamped pages' EMBEDDED chunks counted here.
     falseStamped = await countFalseStampedChunks(engine, toModel, toDims);
-    if (!schemaRebuildNeeded(col.dims, toDims)) restamp = await countRestampOnlyChunks(engine, { signature: sig, includeNullSignature: true });
+    const kept = schemaRebuildNeeded(col.dims, toDims) ? { chunks: 0, chars: 0 } : await measureRestampOnlyChunks(engine, { signature: sig, includeNullSignature: true });
+    restamp = kept.chunks;
+    totalChars = Math.max(0, totalChars - kept.chars);
   } else {
     // Column ABSENT: the stale predicates reference cc.embedding and would
     // throw. Every chunk needs embedding once the column is (re)built.
@@ -1211,7 +1213,7 @@ export async function applyEmbeddingMigration(
     await withMigrationLeaseTransaction(engine, opts.assertOwned,
       tx => assertRetainedEmbeddingRebuildability(tx, plan.to_dims, plan.to_model, plan), { deadlockRetries: 3 });
     const readiness = await prepareEmbeddingProjections(engine, { repair: true, assertOwned: opts.assertOwned });
-    if (readiness.blocked) return { status: 'failed', reason: `projection_blocked: ${readiness.blocked} page(s) remain; no embedding invalidation performed. Canonical projection recovery may have made durable progress. Inspect blockers before retrying: archived sources require deliberate gbrain sources restore <id>; unsupported media requires its source importer. See docs/guides/embedding-migration.md#recovery.` };
+    if (readiness.blocked) return { status: 'failed', reason: `projection_blocked: ${readiness.blocked} page(s) remain; no embedding invalidation performed. Canonical projection recovery may have made durable progress. Inspect blockers before retrying: archived sources require deliberate gbrain sources restore <id>; image pages are counted by class in gbrain doctor --only text_projection_readiness --json (gbrain projections drain seals the sealable ones). See docs/guides/embedding-migration.md#recovery.` };
     await opts.assertOwned?.();
     // 1. State marker FIRST — a crash after any later step is resumable.
     //    Same-target re-apply PRESERVES the original started_at (set-if-

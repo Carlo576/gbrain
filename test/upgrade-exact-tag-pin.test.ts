@@ -16,10 +16,11 @@ import { tmpdir } from 'os';
 
 import { bunGlobalExactTagPin, bunReinstallCommand } from '../src/commands/upgrade.ts';
 import { VERSION } from '../src/version.ts';
+import { upgradeErrorResolved } from '../src/commands/doctor.ts';
 
 const REPO = resolve(import.meta.dir, '..');
 
-async function runBareUpgrade(spec: string, observedVersion: string): Promise<{ home: string; exitCode: number; stdout: string; stderr: string }> {
+async function runBareUpgrade(spec: string, observedVersion: string, cache?: string): Promise<{ home: string; exitCode: number; stdout: string; stderr: string }> {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-5311-'));
   const bin = join(home, 'bin');
   mkdirSync(bin);
@@ -32,6 +33,10 @@ async function runBareUpgrade(spec: string, observedVersion: string): Promise<{ 
   chmodSync(join(bin, 'git'), 0o755);
   chmodSync(join(bin, 'bun'), 0o755);
   chmodSync(join(bin, 'gbrain'), 0o755);
+  if (cache) {
+    mkdirSync(join(home, '.gbrain'), { recursive: true });
+    writeFileSync(join(home, '.gbrain', 'last-update-check'), `${cache}\n`);
+  }
   const globalRoot = join(home, '.bun', 'install', 'global');
   const pkgDir = join(globalRoot, 'node_modules', 'gbrain');
   mkdirSync(pkgDir, { recursive: true });
@@ -78,6 +83,27 @@ describe('#5311 bare upgrade on an exact-tag pin', () => {
       expect(existsSync(join(r.home, '.gbrain', 'just-upgraded-from'))).toBe(false);
       const errors = readFileSync(join(r.home, '.gbrain', 'upgrade-errors.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
       expect(errors.some(e => e.phase === 'verify-pin' && e.hint.startsWith('bun remove -g gbrain && bun add -g github:garrytan/gbrain'))).toBe(true);
+    } finally {
+      rmSync(r.home, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test('#6718: with no newer published tag, the hint and the ledger never name an unpublished version', async () => {
+    const v = VERSION.split('.').map(Number);
+    const unpublished = `${v[0]}.${v[1]}.${v[2] + 1}.0`;
+    // A fresh marker naming master's VERSION (what an older binary's check wrote); no tag exists for it.
+    const r = await runBareUpgrade(`github:garrytan/gbrain#v${VERSION}`, VERSION, `UPGRADE_AVAILABLE ${VERSION} ${unpublished}`);
+    try {
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).not.toContain(unpublished);
+      const errors = readFileSync(join(r.home, '.gbrain', 'upgrade-errors.jsonl'), 'utf-8').trim().split('\n').map(l => JSON.parse(l));
+      const row = errors.find(e => e.phase === 'verify-pin');
+      expect(row.to_version).toBe('latest');
+      expect(row.hint).not.toContain(unpublished);
+      // The record clears once the binary moves past the version it failed from.
+      expect(upgradeErrorResolved(row.to_version, VERSION, true, row.from_version)).toBe(false);
+      expect(upgradeErrorResolved(row.to_version, unpublished, true, row.from_version)).toBe(true);
+      expect(upgradeErrorResolved(row.to_version, unpublished, false, row.from_version)).toBe(false);
     } finally {
       rmSync(r.home, { recursive: true, force: true });
     }

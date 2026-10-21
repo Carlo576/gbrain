@@ -22,6 +22,7 @@
  */
 import type { SearchOpts } from '../types.ts';
 import { buildBestPerPagePoolCte } from './sql-ranking.ts';
+import { frontmatterWhereSql } from './frontmatter-where.ts';
 import { escapeLikePattern, cjkMatchTerms } from '../cjk.ts';
 import { appendSearchTypesClause } from './type-filter-sql.ts';
 
@@ -204,6 +205,7 @@ function shapeFilters(opts: SearchOpts | undefined, params: unknown[]): string {
   }
   const typesClause = appendSearchTypesClause(params, opts);
   if (typesClause) extraFilter += ` ${typesClause}`;
+  extraFilter += frontmatterWhereSql('p', opts?.where, json => `$${params.push(json)}`);
   if (opts?.exclude_slugs?.length) {
     params.push(opts.exclude_slugs);
     extraFilter += ` AND p.slug != ALL($${params.length}::text[])`;

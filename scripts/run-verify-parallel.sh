@@ -18,6 +18,8 @@
 #
 # Env overrides:
 #   GBRAIN_VERIFY_TIMEOUT       per-check wallclock cap, seconds (default 120)
+#   GBRAIN_VERIFY_SKIP_TYPECHECK=1  leave typecheck out: test.yml's typecheck job
+#                               runs tsc in parallel under its own measured timeout
 #   GBRAIN_VERIFY_LOG_DIR       where to write per-check logs (default tempdir,
 #                               removed on success and kept on failure)
 #   GBRAIN_TEST_RECEIPT_DIR     also write the verify receipt (X2): one JUnit
@@ -141,9 +143,11 @@ CHECKS=(
   "check:fixture-privacy"
   "check:source-scope-onboard"
   "check:getpage-scope"
+  "check:origin-assignment"
   "check:no-double-retry"
   "check:batch-audit-site"
   "check:engine-dynamic-import"
+  "check:file-url-pathname"
   "check:grok-pin"
   "check:opencode-pin"
   "check:pin-doc-privacy"
@@ -162,6 +166,9 @@ CHECKS=(
   # W5 (refactor wave 1): per-function line ratchet over src/**/*.ts (TS AST,
   # ~1.5s); baseline scripts/function-size-baseline.tsv.
   "check:function-size"
+  # GBRA-130: per-item catches that test an error code against a list and
+  # rethrow the rest only shrink; baseline scripts/item-allowlist-catches-baseline.tsv.
+  "check:item-allowlist-catches"
   # EO10 (refactor wave 1): engine-sql/ and schema-migrations/ never import
   # back up into the engine façades or migrate.ts (ESM TDZ cycles).
   "check:layering"
@@ -205,6 +212,11 @@ CHECKS=(
   # --hard or a bare/force push for a shared brain checkout (~0.5s).
   "check:shared-tree-git"
   "check:schema-migration-order"
+  # A since: 'TBD' BEHAVIOR_CHANGES row never ships: refused on a stamped tree
+  # (VERSION has a CHANGELOG header and differs from origin/master's) and on master.
+  "check:behavior-since"
+  # CHANGELOG.md keeps every release heading origin/master has (a cut file is refused).
+  "check:changelog-headings"
   "check:structural-manifest"
   # Every generated artifact's freshness in one place (GBRA-47 B8); its Fix
   # line is `bun run regen:all`, the same code path that regenerates them.
@@ -228,6 +240,11 @@ SOLO_CHECKS=(
   # Budget: 30 s wall clock (scripts/guard-self-test.sh BUDGET_SECONDS).
   "check:guard-self-test"
 )
+if [ "${GBRAIN_VERIFY_SKIP_TYPECHECK:-}" = "1" ]; then
+  KEPT=()
+  for c in "${CHECKS[@]}"; do [ "$c" = "typecheck" ] || KEPT+=("$c"); done
+  CHECKS=("${KEPT[@]}")
+fi
 ALL_CHECKS=("${CHECKS[@]}" "${SOLO_CHECKS[@]}")
 
 if [ "${#CHECKS[@]}" -eq 0 ]; then

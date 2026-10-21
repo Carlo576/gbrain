@@ -19,7 +19,7 @@ export interface SyncResult {
   failures?: ManagedSyncFailure[];
   runId?: string;
   managedWrite?: import('../core/persistence/sync-run.ts').ManagedSyncWriteDiagnostic;
-  /** #6643: the request a `--retry-failed` rediscovery waits for (its producer and slug), instead of a silent no-op. */
+  /** #6643: the request a rediscovery that retries a recorded failure waits for (its producer and slug), instead of a silent no-op. */
   retryWait?: import('../core/persistence/sync-run.ts').RetryWait;
   /** #6712 PR 1: another drainer holds (or took) the source's drain lease; `resumable`, nothing admitted by this run. */
   leaseHeld?: import('../core/persistence/sync-lease.ts').DrainLeaseHeld;
@@ -28,13 +28,12 @@ export interface SyncResult {
    * not set them (`gbrain embed --stale` / `gbrain extract --stale` settle the pages they skipped).
    */
   inherited_options?: Array<'noEmbed' | 'noExtract' | 'noSchemaPack'>;
-  /** #6712 PR 1: this run finished a cursor another writer, or an older key, started, under that run's frozen options (shown to local callers). */
-  cursorAdopted?: { writer_changed: boolean; legacy_key: boolean; sync_options?: import('../core/persistence/sync-prepare.ts').SyncCursorOptions | null;
-    processing_options?: import('../core/persistence/sync-authority.ts').SyncProcessingOptions | null };
-  /** #6712 PR 1: older-key cursors of the incarnation this run's fan-in folded (`retained`: left while a request under them is open). */
-  cursorFanIn?: { adopted: boolean; superseded: number; retained: number };
   /** #6693: caller remembers refused while their page's file awaited import (or was held), replayed after this sync imported it. */
   replayedRemembers?: import('../core/repair/failed-writes.ts').ImportReplayReport;
+  /** #6712 PR 2 (L4): live pages whose canonical file is gone (ghost pages), counted after a managed sync with the read-only repair preview; sync never deletes them. */
+  ghostPages?: import('../core/persistence/sync-ghosts.ts').SyncGhostPages; /** #6865: stray slug: lines naming no page this sync removed (repair/slug-autoheal.ts). */ slug_lines_removed?: import('../core/repair/slug-autoheal.ts').SlugHealReport;
+  /** #6948: held duplicate-origin files whose verified twins this sync merged, or why it left them (repair/origin-twins-heal.ts). */
+  origin_twins_resolved?: import('../core/repair/origin-twins-heal.ts').OriginHealReport;
   /** #6722: pages this run left large or embed_skip (chunked, keyword-searchable) and their embedding state. */ size_states?: import('../core/page-embedding-budget.ts').SyncSizeStates;
   status: 'up_to_date' | 'synced' | 'first_sync' | 'dry_run' | 'blocked_by_failures' | 'partial';
   fromCommit: string | null;
@@ -69,7 +68,9 @@ export interface SyncResult {
   prescreened?: number; writeWait?: import('../core/persistence/sync-write-diagnostic.ts').ManagedSyncWriteWait;
   /** Managed sync: files skipped because another origin keeps their slug, and links derived after the checkpoint. */
   slugCollisions?: import('../core/persistence/sync-discovery.ts').SyncSlugCollision[];
-  fileRefusals?: import('../core/persistence/sync-discovery.ts').SyncFileRefusal[]; links?: import('../core/persistence/links-maintenance.ts').ManagedLinkExtraction;
+  fileRefusals?: import('../core/persistence/sync-discovery.ts').SyncFileRefusal[]; links?: import('../core/persistence/links-maintenance.ts').ManagedLinkExtraction; /** #6729: inexact renames split into delete + add; once recorded each is an IdentityDowngrade (old slug, what stayed on it). */ identityDowngrades?: Array<import('../core/sync.ts').DowngradedRename | import('../core/sync-identity-downgrades.ts').IdentityDowngrade>;
+  /** #6712 PR 2 (L5): the owed post-checkpoint tail (statistics, links) this call ran after releasing the lease; a degraded tail carries its notice. */
+  tail?: Omit<import('../core/persistence/sync-tail.ts').SyncTailReport, 'links'>;
   /** #5459 (P4.5): live pages a `--full` tree walk kept because their file is in the working tree and their import provenance is the working tree or unknown. */
   working_tree_kept?: number;
   /**
@@ -106,7 +107,10 @@ export interface SyncResult {
    * cron operators can disambiguate timeout vs pull-timeout in monitoring; connector item failures / early stop exit 1 (isFailedPartial).
    */
   filesImported?: number;
-  reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable' | 'writer_pending' | 'writer_yield' | 'connector_item_failures' | 'connector_partial' | 'drain_lease_held';
+  reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable' | 'writer_pending' | 'writer_yield' | 'connector_item_failures' | 'connector_partial' | 'drain_lease_held' | import('../core/persistence/sync-pass-row.ts').PassResultReason;
+  /** #6712 PR 4b: the live pass behind this result (`PassResultSummary`); `reconcile` is a remote caller's `reconcile_host_required` detail (design §5). */
+  pass?: import('../core/persistence/sync-pass-row.ts').PassResultSummary;
+  reconcile?: import('../core/persistence/sync-pass-apply.ts').RemoteReconcile;
   /**
    * v0.42.x (#1794): cumulative file paths durably banked to the checkpoint
    * across THIS run + prior resumed runs. Surfaced on every partial/blocked
@@ -127,7 +131,7 @@ export interface SyncResult {
   connectorHolds?: { held: number; newly_held: number; retry_command: string; status_command: string };
   /**
    * #5988 Git holds: files held this run instead of blocking (detail capped at
-   * `sync.hold_cap`), their count, the source's outstanding total and the
+   * `GBRAIN_SYNC_HOLD_CAP`), their count, the source's outstanding total and the
    * exact inspect and repair commands. Remote callers get `held_count` and
    * `holds_fix` (a host-operator relay) only.
    */
@@ -162,6 +166,8 @@ export {
 } from '../core/sync-cost-gate.ts';
 
 export interface SyncOpts {
+  /** #6712 PR 4b (design §7): the owner approved this sync's paid work (`--yes`); an unknown pass cost no longer defers it. */
+  costApproved?: boolean;
   repoPath?: string;
   dryRun?: boolean;
   full?: boolean;
@@ -176,7 +182,7 @@ export interface SyncOpts {
   logNoop?: boolean;
   /** Bug 9 — acknowledge + skip past current failure set (CLI --skip-failed). */
   skipFailed?: boolean;
-  /** Bug 9 — re-attempt unacknowledged failures explicitly (CLI --retry-failed). */
+  /** CLI --retry-failed: a deprecated alias (#6712 PR 3); a plain sync retries a recorded failure. Connector syncs still read it. */
   retryFailed?: boolean;
   /** Managed connector sources: discard the connector checkpoint and re-walk the window once (CLI --reset-checkpoint). */
   resetCheckpoint?: boolean;
@@ -366,8 +372,8 @@ export interface SyncOpts {
   /** #6712 PR 1: who takes the source's drain lease (kind and id shown to a follower), and whether a busy lease is followed instead of refused. */
   drainHolder?: import('../core/persistence/sync-lease.ts').DrainHolderRef; followDrainLease?: boolean;
   /** #6706: absolute epoch ms a managed drain stops before (`resumable / deadline`). */ deadlineAtMs?: number;
-  /** #5984: wall-clock ms the current drain started; managed cursors measure their rate from it. */
-  drainStartedAt?: number;
+  /** #5984: wall-clock ms the current drain started; managed cursors measure their rate from it. */ drainStartedAt?: number;
+  /** Test seam: how often the drain's governor looks and how long it confirms a blocker (`DrainInput.governMs`). */ governMs?: number;
   /** #5984: `--no-bulk`; and the drain's resolved bulk settings (internal; absent = one request per pass step). */ noBulk?: boolean; bulk?: import('../core/persistence/sync-group.ts').BulkSettings;
   /** #5984 lanes: `--lanes N` (1..16) or `--no-lanes` (1). */ lanes?: number;
 }

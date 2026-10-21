@@ -12,7 +12,7 @@
  *      keeps, rendered in SQL by `orphanExclusionSql`) grouped by page type,
  *      with islanded and with-timeline counts per type. The brain_score
  *      timeline component's pack-aware grading (#5828) applies per type here;
- *   3. `most_connected`: in-scope link endpoints grouped per entity page.
+ *   3. `most_connected`: live, in-scope link endpoints grouped per entity page.
  * Statement 2 is separate because, folded into statement 1, the combined
  * plan cost crosses Postgres's JIT thresholds on a 20k-page brain and JIT
  * compilation alone costs more than the query.
@@ -194,10 +194,6 @@ export async function getHealth(
      ORDER BY type
   `);
 
-  const farInScope = {
-    to: scope === null ? sqlFragment`` : sqlFragment`AND ${tgtInScope}`,
-    from: scope === null ? sqlFragment`` : sqlFragment`AND ${srcInScope}`,
-  };
   const { rows: connected } = await exec.run<{ slug: string; link_count: number }>(sqlFragment`
     WITH entity_pages AS (
       SELECT p.id, p.slug FROM pages p
@@ -209,10 +205,10 @@ export async function getHealth(
       SELECT e.id, e.slug, 0 AS hit FROM entity_pages e
       UNION ALL
       SELECT e.id, e.slug, 1 AS hit FROM entity_pages e
-        JOIN links l ON l.from_page_id = e.id ${farInScope.to}
+        JOIN links l ON l.from_page_id = e.id AND ${liveTgt}
       UNION ALL
       SELECT e.id, e.slug, 1 AS hit FROM entity_pages e
-        JOIN links l ON l.to_page_id = e.id AND l.from_page_id <> l.to_page_id ${farInScope.from}
+        JOIN links l ON l.to_page_id = e.id AND l.from_page_id <> l.to_page_id AND ${liveSrc}
     )
     SELECT slug, sum(hit)::int AS link_count
       FROM endpoints

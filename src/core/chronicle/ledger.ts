@@ -8,7 +8,6 @@ import type { PageSnapshot } from '../page-state/types.ts';
 import type { WriteAuthority, WriteRequest } from '../persistence/model.ts';
 import { derivedExtractionSkip } from '../persistence/derived-extraction-gate.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
-import { segmentedOverCeiling } from '../persistence/segmented-apply.ts';
 import type { BodyStorage } from '../page-body/types.ts';
 import { CHRONICLE_ACTIVATED_AT_KEY, autoChronicleSetting, chronicleSettings, type ChronicleSettings } from './config.ts';
 import { CHRONICLE_EXTRACTOR_VERSION, type ChronicleLedgerRow, type ChronicleTrigger } from './contract.ts';
@@ -16,7 +15,7 @@ import { isChronicleEligible, isChronicleShaped } from './eligibility.ts';
 import { chronicleBackstopReceipt, type ChronicleBackstopReceipt, type ChronicleReasonCode, type ChronicleReasonContext } from './reasons.ts';
 
 /** Publications that import page content and therefore carry a decision (C1). */
-const DECIDING_OPERATIONS = new Set(['put_page', 'capture', 'edit_page', 'restore_page', 'revert_version']);
+const DECIDING_OPERATIONS = new Set(['put_page', 'capture', 'edit_page', 'append_page', 'restore_page', 'revert_version']);
 const DECIDING_INTENTS = new Set(['managed_sync_import', 'connector_v2_import']);
 /** Skip reasons after which an earlier extracted generation of the page is retired (E8). */
 export const RETIRE_REASONS = ['not_chronicle_shaped', 'dream_generated', 'too_short'] as const;
@@ -68,7 +67,6 @@ export function decideChronicle(input: {
     }
     return skip(eligible.reason.startsWith('kind:') ? 'not_chronicle_shaped' : eligible.reason);
   }
-  if (segmentedOverCeiling(page)) return skip('page_body_segmented');
   return { state: 'pending', reason: null, nextAttemptAt: new Date(input.now.getTime() + input.settings.settleSeconds * 1000) };
 }
 

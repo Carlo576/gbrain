@@ -63,6 +63,33 @@ timings: 74ms total — setup 1, lexical 12, relational 0, embed 0, vector 16, f
 
 All values are integer milliseconds.
 
+### The whole CLI call and what it spent
+
+`gbrain search --json --timings` and `gbrain query --json --timings` print
+`{ "results": [...], "timings_ms": {...}, "cost": {...} }` instead of the bare
+result array (plain `--json` is unchanged); without `--json`, `--timings`
+adds one `timings:` line on stderr.
+
+`timings_ms` adds the CLI's own phases to the operation's stages: `total`
+(process start to output), `startup` (module load, config, argument parsing),
+`connect` (opening the brain), `context` (operation context and source
+resolution), `remote` (a thin client's round trip to its server), `op` (the
+operation's `total_ms`), `stages` (its `stages_ms` plus `other`),
+`overlapped` and `cli_other` (CLI time in no phase: formatting, notices). A
+phase that did not run is absent; `0` means it took under half a
+millisecond. On a thin client `op` and `stages` are the server's.
+
+`cost` (also `_meta.retrieval.cost` over MCP) counts every model call the
+request made, by kind (`embedding`, `rerank`, `expansion`, `chat`, `decide`;
+`expansion` is the same call `chat_usage_log` records with phase `expansion`), each with
+`calls`, `input_tokens`, `output_tokens` and `usd`, plus `calls` and
+`estimated_usd` in total. Tokens are what the provider reported; a call it
+reported none for counts its request estimate and is tallied in
+`estimated_token_calls`. `usd` comes from the shipped price tables and is
+left out when a model is not priced. Failed calls count (a provider can bill
+them); a call a budget guard refused was never sent and does not. A
+keyword-only search reads `{ "calls": 0, "estimated_usd": 0 }`.
+
 ## Diagnose a missing page
 
 MCP:
@@ -82,7 +109,7 @@ the next step:
 | `target_dropped_return_sizing` | Autocut or adaptive return trimmed it. | `get_page`, or repeat with `autocut: false` (query). |
 | `target_dropped_token_budget` | The evidence budget filled first. | Repeat with a larger `token_budget`. |
 | `target_dropped_relaxed_keyword` | Only a loose keyword match found it. | `get_page`, or rephrase with the page's own terms. |
-| `target_not_retrieved` | No arm returned it for this query. | `query` (multi-query expansion) or rephrase. |
+| `target_not_retrieved` | No arm returned it for this query. | `query --expand` (`expand: true`; one call to the configured expansion model) or rephrase. |
 | `target_not_indexed` | The page has no indexed chunks. | `gbrain doctor --json` names the re-index command. |
 | `target_projection_stale` | The page changed and its searchable text is still being rebuilt. | Retry after `gbrain doctor` shows the backlog drained. |
 | `target_safe_chunks_uncertified` | Remote reads withhold pages indexed before the current safe-chunk format. | The brain host runs `gbrain repair safe-chunks`. |

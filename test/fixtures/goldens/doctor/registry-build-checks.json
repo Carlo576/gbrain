@@ -267,7 +267,19 @@
       },
       {
         "category": "ops",
+        "name": "managed_sync_blocked"
+      },
+      {
+        "category": "ops",
+        "name": "sync_admission_restricted"
+      },
+      {
+        "category": "ops",
         "name": "persistence_compaction"
+      },
+      {
+        "category": "ops",
+        "name": "sync_soak_counters"
       },
       {
         "category": "ops",
@@ -280,6 +292,14 @@
       {
         "category": "brain",
         "name": "embedding_state"
+      },
+      {
+        "category": "brain",
+        "name": "links_extraction_lag"
+      },
+      {
+        "category": "brain",
+        "name": "partial_embedding"
       },
       {
         "category": "ops",
@@ -332,6 +352,10 @@
       {
         "category": "meta",
         "name": "schema_columns"
+      },
+      {
+        "category": "meta",
+        "name": "schema_missing_tables"
       },
       {
         "category": "ops",
@@ -471,11 +495,19 @@
       },
       {
         "category": "brain",
+        "name": "coordination_lock_location"
+      },
+      {
+        "category": "brain",
         "name": "unbound_source"
       },
       {
         "category": "ops",
         "name": "writer_version"
+      },
+      {
+        "category": "ops",
+        "name": "segmented_storage"
       },
       {
         "category": "brain",
@@ -502,6 +534,14 @@
         "name": "google_calendar_readable"
       },
       {
+        "category": "ops",
+        "name": "google_api_access"
+      },
+      {
+        "category": "brain",
+        "name": "atom_retirements_restorable"
+      },
+      {
         "category": "brain",
         "name": "extractor_facts_expired"
       },
@@ -516,6 +556,10 @@
       {
         "category": "brain",
         "name": "captured_facts_active"
+      },
+      {
+        "category": "brain",
+        "name": "facts_redaction_marker"
       },
       {
         "category": "brain",
@@ -583,10 +627,6 @@
       },
       {
         "category": "brain",
-        "name": "partial_embedding"
-      },
-      {
-        "category": "brain",
         "name": "scraper_junk_pages"
       },
       {
@@ -651,7 +691,15 @@
       },
       {
         "category": "ops",
+        "name": "global_maintenance_stalled"
+      },
+      {
+        "category": "ops",
         "name": "embed_backfill_stalled"
+      },
+      {
+        "category": "ops",
+        "name": "content_drift_sweep"
       },
       {
         "category": "ops",
@@ -715,10 +763,6 @@
       },
       {
         "category": "brain",
-        "name": "links_extraction_lag"
-      },
-      {
-        "category": "brain",
         "name": "cycle_freshness"
       },
       {
@@ -736,6 +780,14 @@
       {
         "category": "ops",
         "name": "db_only_collector_collision"
+      },
+      {
+        "category": "brain",
+        "name": "managed_sync_latency"
+      },
+      {
+        "category": "brain",
+        "name": "commit_notifier"
       },
       {
         "category": "brain",
@@ -795,6 +847,10 @@
       },
       {
         "category": "brain",
+        "name": "belief_ledger_coverage"
+      },
+      {
+        "category": "brain",
         "name": "trust_tiers"
       },
       {
@@ -835,7 +891,39 @@
       },
       {
         "category": "brain",
+        "name": "origin_twins"
+      },
+      {
+        "category": "brain",
+        "name": "rename_identity_downgrades"
+      },
+      {
+        "category": "brain",
+        "name": "purge_parked_pages"
+      },
+      {
+        "category": "brain",
         "name": "missing_recorded_files"
+      },
+      {
+        "category": "brain",
+        "name": "uncommitted_sync_deletions"
+      },
+      {
+        "category": "brain",
+        "name": "unindexed_files"
+      },
+      {
+        "category": "brain",
+        "name": "sync_overwritten_db_edits"
+      },
+      {
+        "category": "meta",
+        "name": "sync_config_keys"
+      },
+      {
+        "category": "ops",
+        "name": "managed_sync_convergence"
       },
       {
         "category": "brain",

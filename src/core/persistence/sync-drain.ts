@@ -23,7 +23,7 @@ import { ERROR_CATALOGUE, type CatalogueName } from '../error-catalogue.ts';
 import { cliRenderContext, renderAction, type Action, type RenderedAction } from '../agent-output.ts';
 import { managedSyncResumeArgs, syncResumeCommand } from '../sync-reconcile.ts';
 import { isWriteCapacityWait, outstandingCapacityOf } from './admission-retry.ts';
-import { clearDrainStep, DrainPassAbandoned, FINISH_BUDGET_MS, markPassAbandoned, readDrainStep } from './drain-step.ts';
+import { clearDrainStep, DrainPassAbandoned, markPassAbandoned, readDrainStep } from './drain-step.ts';
 import { PUBLICATION_CEILING_DEFAULT_MS, readPublicationCeilingMs } from './publication-deadline.ts';
 import { isOwnerThisProcess, stampLastSql, WAITING_ON, type ClaimLastSql, type WaitingOn } from './claim-phase.ts';
 import { describeHostConsumer, headBlockedNext, headBlockerText, headClaimability, type HeadBlocker } from './head-blocker.ts';
@@ -43,7 +43,17 @@ export type DrainStopReason = 'deadline' | 'drain_stalled' | 'database_contentio
   /** #6696 (A7): a cumulative write cap (or the background pause line) refused the next admission after the preflight passed; resumable once capacity returns. */
   | 'capacity_paused'
   /** #6712 PR 1: another drainer holds the source's drain lease (or took it from this run); resumable, the next run follows it. */
-  | 'drain_lease_held';
+  | 'drain_lease_held'
+  /** #6712 PR 4b (design v3.2 §9): the live pass's stops. `not_converged` and `admission_paused` are resumable; the rest need the host or a report. */
+  | 'not_converged' | 'admission_paused' | 'grant_scope' | 'reconcile_host_required' | 'reconcile_read_incomplete';
+/** The pass's status reasons that end a drain, with their outcome (design v3.2 §9). */
+const PASS_STOPS: Partial<Record<string, { outcome: DrainOutcome; reason: DrainStopReason }>> = {
+  not_converged: { outcome: 'resumable', reason: 'not_converged' }, admission_paused: { outcome: 'resumable', reason: 'admission_paused' },
+  grant_scope: { outcome: 'blocked', reason: 'grant_scope' }, reconcile_host_required: { outcome: 'blocked', reason: 'reconcile_host_required' },
+  reconcile_read_incomplete: { outcome: 'blocked', reason: 'reconcile_read_incomplete' },
+};
+/** Consecutive `not_converged` passes after which the agent reports instead of rerunning (design v3.2 §9). */
+export const NOT_CONVERGED_REPORT_STREAK = 3;
 /** #6696 (A7): the refusal that paused the drain (`capacity_paused`); `fix` is the host's config raise. */
 export interface DrainCapacityPause { code: string; reason: string | null; detail: string | null; message: string; fix?: Action }
 /** A capacity refusal raised by an admission after the run's preflight (the preflight's own refusal stops the command up front). */
@@ -106,9 +116,9 @@ export interface DrainStall {
    * #6278: why the drain called it a stall: no renewal (`owner_missing`), a preparation or publication past its allowance, or no change at all.
    * #6317: `owner_wedged_here` is a live same-host owner whose preparation passed the ceiling, or whose own heartbeat row says it is wedged
    * (`restart_required`, a root barrier past the ceiling); `preparation_overdue` is kept for an owner on another host.
-   * #6423: `no_admission` is a pass that admitted nothing and left no unfinished request for the whole no-progress window.
+   * #6712 PR 2: a pass that admitted nothing and left no unfinished request is `no_progress` too (`no_admission` is retired).
    */
-  cause?: 'owner_missing' | 'preparation_overdue' | 'publication_overdue' | 'no_progress' | 'owner_wedged_here' | 'no_admission' | 'head_blocked';
+  cause?: 'owner_missing' | 'preparation_overdue' | 'publication_overdue' | 'no_progress' | 'owner_wedged_here' | 'head_blocked';
   /** #6405/#6423: the in-pass governor ended a pass that never returned (the pass was aborted and its late result is ignored). */
   in_pass?: boolean;
   /** #6317: the head owner as the stamp names it, so the stop can say which process to restart. */
@@ -306,7 +316,7 @@ export interface StallProbe {
    */
   fingerprint(result: SyncResult): Promise<{ key: string; stall: Omit<DrainStall, 'stalled_seconds'>; claim?: DrainClaim | null } | null>;
   /** #6278: the source's head while a pass runs (its oldest running request, else its oldest queued one); null when nothing is unfinished. Bounded; may reject. */
-  head?(): Promise<{ head_state: string; claim: DrainClaim | null; request_id?: string | null; claimable_here?: boolean | null; blocked_by?: HeadBlocker | null; consumer?: string } | null>;
+  head?(): Promise<{ head_state: string; claim: DrainClaim | null; request_id?: string | null; write_request_id?: string | null; claimable_here?: boolean | null; blocked_by?: HeadBlocker | null; consumer?: string } | null>;
   /** #6317: the head owner's heartbeat row on this host, or null (no row: an older owner, PGLite, the table absent, or another host). Never rejects. */
   owner?(claim: DrainClaim): Promise<DrainOwnerRow | null>;
   /** #6317: whether a consumer here could reclaim a lapsed head: this process's own, or a live full row on this host. Never rejects. */
@@ -330,8 +340,6 @@ export interface DrainInput {
   stallMs?: number;
   /** #6405/#6423 test seams: the in-pass no-progress window, the publication ceiling and how often the in-pass governor looks. */
   noProgressMs?: number;
-  /** #6696 C4: how long the tail after a committed checkpoint (drain step `finish`) may run before the governor stops it `no_progress`. */
-  finishMs?: number;
   publicationCeilingMs?: number;
   governMs?: number;
   /** Test seam: the drain's clock for commit times, stall windows and the governor's quiet time (its timers still tick on real time). */
@@ -417,6 +425,8 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
     if (event.phase === 'managed_sync.lanes' && event.lanes) lanes = { effective: event.lanes.effective, stepDown: event.lanes.stepDown, overlapped: event.lanes.overlapped, fallbacks: event.lanes.fallbacks };
     // #6696 C4: the checkpoint commit is a commit; the tail after it is governed by its own budget.
     if (event.phase === 'managed_sync.finish') { lastCommitAt = clock(); drops = 0; noteForwardProgress(); return; }
+    // GBRA-108: a pass's committed legacy-sweep slice (sync-pass-apply.ts) is progress, though it publishes no page.
+    if (event.phase === 'managed_sync.legacy_swept') { lastCommitAt = clock(); noteForwardProgress(); return; }
     if (event.phase !== 'managed_sync.page_committed') return;
     if (event.waived) waived++; else written++;
     lastCommitAt = clock(); drops = 0;
@@ -434,7 +444,6 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
   // the abandoned pass: its signal is aborted (the pass's step boundaries throw, so it admits and writes nothing more) and its
   // late result or rejection is dropped.
   const noProgressMs = input.noProgressMs ?? IN_PASS_NO_PROGRESS_MS, ceilingMs = input.publicationCeilingMs ?? PUBLICATION_CEILING_DEFAULT_MS;
-  const finishMs = input.finishMs ?? FINISH_BUDGET_MS + STALL_GRACE_MS;
   const governedPass = (): Promise<{ result: SyncResult } | { stall: DrainStall } | { deadline: true }> => {
     const controller = new AbortController(), passStartedAt = clock();
     const passSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
@@ -460,8 +469,9 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
           const base = { request_id: head?.request_id ?? 'none', state: head?.head_state ?? 'none', blocked_reason: null, head_request_id: head?.request_id ?? null,
             head_state: head?.head_state ?? null, claimable_here: !read.ok ? null : head?.claimable_here === undefined ? false : head.claimable_here, owner_is_this_host: null, in_pass: true,
             blocked_by: head?.blocked_by ?? null, consumer: head?.consumer ?? null };
-          // #6543 (B2): an intervention-required blocker on a queued head, read on two ticks in a row, stops the drain now; live blockers keep the wait below.
-          const blocker = head?.head_state === 'queued' && head.blocked_by?.intervention ? head.blocked_by : null;
+          // #6543 (B2): an intervention-required blocker on a queued head (or a recovering head stuck on the user), read on two ticks in a row, stops the
+          // drain now; live blockers keep the wait below.
+          const blocker = (head?.head_state === 'queued' || head?.head_state === 'recovering') && head.blocked_by?.intervention ? head.blocked_by : null;
           const seen = blocker ? `${head!.request_id}|${blocker.predicate}|${blocker.ids.join(',')}` : null;
           if (blocker && seen === blockedKey) { stop({ ...base, stalled_seconds: Math.round(quiet / 1000), cause: 'head_blocked' }); return; }
           blockedKey = seen;
@@ -478,11 +488,10 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
           const print = read.ok ? head ? `${head.head_state}|${claim?.phase ?? ''}|${claim?.step ?? ''}|${claim?.lapsed ?? ''}` : 'none' : 'unreadable';
           if (print !== key) { key = print; keySince = now; }
           const elapsed = now - Math.max(keySince, lastCommitAt, passStartedAt);
-          const finishing = step?.step === 'finish', windowMs = finishing ? finishMs : noProgressMs;
-          if (quiet < windowMs || elapsed < windowMs && key !== 'none') return;
+          if (quiet < noProgressMs || elapsed < noProgressMs && key !== 'none') return;
           const sql = step?.last_sql ? { label: step.last_sql.label, age_ms: now - step.last_sql.at } : claim?.last_sql ?? null;
           stop({ ...base, stalled_seconds: Math.round(quiet / 1000), phase: claim?.phase ?? null, step: head ? claim?.step ?? null : step?.step ?? null,
-            waiting_on: claim?.waiting_on ?? null, cause: read.ok && !head && !finishing ? 'no_admission' : claim?.lapsed ? 'owner_missing' : 'no_progress',
+            waiting_on: claim?.waiting_on ?? null, cause: claim?.lapsed ? 'owner_missing' : 'no_progress',
             owner_pid: claim?.owner_pid ?? null, owner_kind: claim?.owner_kind ?? null, owner_nonce: claim?.owner_nonce ?? null, last_sql: sql });
         }).finally(() => { probing = false; });
       }, governEvery);
@@ -503,7 +512,8 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
   };
   const finish = (result: SyncResult, outcome: DrainOutcome, stopReason?: DrainStopReason, extra?: Partial<DrainReport>): SyncResult => {
     if (result.managedCursor) { index = result.managedCursor.index; total = result.managedCursor.total; }
-    const left = outcome === 'synced' ? 0 : remaining();
+    // A pass that stopped reading its level (reconcile_read_incomplete) has no candidate set, so its remaining is unknown.
+    const left = outcome === 'synced' ? 0 : result.pass ? (result.reason === 'reconcile_read_incomplete' ? null : result.pass.remaining) : remaining();
     if (stopReason === 'deadline' && continues(result)) result = { ...result, reason: 'timeout' };
     if (carried) result = { ...result, added: result.added + carried.added, modified: result.modified + carried.modified, deleted: result.deleted + carried.deleted,
       renamed: result.renamed + carried.renamed, chunksCreated: result.chunksCreated + carried.chunksCreated };
@@ -525,7 +535,9 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
         if ('deadline' in governed) return finish(last ?? NO_PASS_RESULT, 'resumable', 'deadline');
         result = governed.result;
         attempt = 0; capacity = null;
-        if (last?.runId && result.runId && result.runId !== last.runId) {
+        // A cursor slice's counts are its run's so far; a pass result carries its own pass's (each resumed slice is a new pass_id).
+        const run = (r: SyncResult | null) => r?.runId ?? r?.pass?.pass_id;
+        if (last && run(last) && run(result) && run(result) !== run(last)) {
           const sum: RunCounts = carried ?? { added: 0, modified: 0, deleted: 0, renamed: 0, chunksCreated: 0 };
           carried = { added: sum.added + last.added, modified: sum.modified + last.modified, deleted: sum.deleted + last.deleted, renamed: sum.renamed + last.renamed, chunksCreated: sum.chunksCreated + last.chunksCreated };
         }
@@ -584,6 +596,8 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
           : finish(result, 'resumable', 'drain_lease_held', { retry_after_ms: result.leaseHeld.retry_after_ms });
         // #6278: the breaker's systemic stop is one diagnostic, not a failed page.
         if (result.breaker) return finish(result, 'blocked', 'preparation_systemic');
+        const passStop = result.pass ? PASS_STOPS[result.reason ?? ''] : undefined;
+        if (passStop) return finish(result, passStop.outcome, passStop.reason);
         if (result.status === 'blocked_by_failures') return finish(result, 'blocked', 'blocked_by_failures');
         if (result.managedWrite && result.managedWrite.write_error !== 'write_pending') return finish(result, 'blocked', 'blocked_by_failures');
         if (result.status === 'partial' && (result.reason === 'timeout' || signal?.aborted)) return finish(result, 'resumable', 'deadline');
@@ -754,18 +768,19 @@ export function engineStallProbe(engine: BrainEngine, sourceId?: string): StallP
       return (await listHostConsumers(engine, localHostId()).catch(() => [])).some(row => (row.mode === 'full' || row.mode === 'promoted') && row.liveness === 'live');
     },
     ...(sourceId ? { async head() {
-      const [row] = await engine.executeRaw<{ head_state: string; head_claim_phase: unknown; head_token: string | null; head_lapsed: boolean | null; head_kind: string | null; head_request_id: string | null }>(
-        `SELECT h.state AS head_state, h.id::text AS head_request_id, h.claim_phase AS head_claim_phase, h.execution_token::text AS head_token,
+      const [row] = await engine.executeRaw<{ head_state: string; head_claim_phase: unknown; head_token: string | null; head_lapsed: boolean | null; head_kind: string | null; head_request_id: string | null;
+        head_write_request_id: string | null }>(
+        `SELECT h.state AS head_state, h.id::text AS head_request_id, h.request_id::text AS head_write_request_id, h.claim_phase AS head_claim_phase, h.execution_token::text AS head_token,
            (h.claim_expires_at IS NOT NULL AND h.claim_expires_at < now()) AS head_lapsed, h.intent->>'kind' AS head_kind
          FROM persistence_source_bindings b
          JOIN sources s ON s.id = b.source_id AND s.incarnation = b.source_incarnation
-         JOIN LATERAL (SELECT e.id, e.state, e.claim_phase, e.execution_token, e.claim_expires_at, e.intent FROM persistence_requests e
+         JOIN LATERAL (SELECT e.id, e.request_id, e.state, e.claim_phase, e.execution_token, e.claim_expires_at, e.intent FROM persistence_requests e
            WHERE e.worktree_id = b.worktree_id AND e.state IN ('queued','running','recovering') ORDER BY (e.state <> 'running'), e.sequence LIMIT 1) h ON true
          WHERE b.source_id = $1`, [sourceId], { timeoutMs: HEAD_READ_TIMEOUT_MS, signal: AbortSignal.timeout(HEAD_READ_TIMEOUT_MS + 500) });
       if (!row) return null;
       const { localHostId } = await import('./identity.ts');
       const bound = { timeoutMs: HEAD_READ_TIMEOUT_MS, signal: AbortSignal.timeout(HEAD_READ_TIMEOUT_MS + 500) };
-      return { head_state: row.head_state, request_id: row.head_request_id, claim: drainClaimOf(row, await (budgets ??= readPreparationBudgets(engine))),
+      return { head_state: row.head_state, request_id: row.head_request_id, write_request_id: row.head_write_request_id, claim: drainClaimOf(row, await (budgets ??= readPreparationBudgets(engine))),
         ...await headClaimability(engine, { id: row.head_request_id, state: row.head_state }, localHostId(), bound), consumer: await describeHostConsumer(engine, { signal: bound.signal }) };
     } } : {}),
   };
@@ -790,17 +805,11 @@ export async function drainManagedSync(engine: BrainEngine, opts: SyncOpts, anno
   const laneRun = bulk.enabled && (bulk.lanes ?? 1) > 1 ? randomUUID() : undefined;
   const { closeLaneRun } = await import('./sync-lanes.ts');
   const publicationCeilingMs = await readPublicationCeilingMs(engine);
-  // #6423: the sync's own waiver runs and admissions use the ordinary pool even where the consumer has a direct route.
-  if (announce) {
-    const { consumerConnectionRoute } = await import('./consumer-lane.ts');
-    if (consumerConnectionRoute(engine).pooler_mode === 'transaction') serr('[sync] this sync admits its writes through a transaction-mode pooler (prepare=false, port 6543); '
-      + `a round trip it never answers stops the drain no_admission after ${formatDuration(IN_PASS_NO_PROGRESS_MS / 1000)}. A session-mode (5432) or direct database URL avoids it.`);
-  }
   let result: SyncResult | undefined;
   // #6696 (A7): the first pass checks the run's estimated receipts against the capacity left before any admission.
   let preflighted = false;
   try {
-    result = await runDrain({ signal: opts.signal, deadlineAtMs: opts.deadlineAtMs, onProgress: opts.onProgress, probe: engineStallProbe(engine, opts.sourceId), announce, publicationCeilingMs,
+    result = await runDrain({ signal: opts.signal, deadlineAtMs: opts.deadlineAtMs, onProgress: opts.onProgress, probe: engineStallProbe(engine, opts.sourceId), announce, publicationCeilingMs, governMs: opts.governMs,
       reconnect: error => engine.reconnect({ error }),
       bulk: { enabled: bulk.enabled, reason: bulk.reason, lanes: bulk.lanes ?? 1, lanesMax: bulk.lanesMax, lanesReason: bulk.lanesReason ?? null, lanesCap: bulk.lanesCap },
       pass: (signal, onProgress) => {
@@ -827,7 +836,7 @@ export async function drainManagedSync(engine: BrainEngine, opts: SyncOpts, anno
     if (head && head !== result.toCommit) {
       if (announce) serr(`[sync] HEAD moved past the pinned target ${result.toCommit.slice(0, 8)} while the run drained; one more pass imports the commits since (to ${head.slice(0, 8)}).`);
       const pin = result.toCommit;
-      const again = await runDrain({ signal: opts.signal, deadlineAtMs: opts.deadlineAtMs, onProgress: opts.onProgress, probe: engineStallProbe(engine, opts.sourceId), announce: false, publicationCeilingMs,
+      const again = await runDrain({ signal: opts.signal, deadlineAtMs: opts.deadlineAtMs, onProgress: opts.onProgress, probe: engineStallProbe(engine, opts.sourceId), announce: false, publicationCeilingMs, governMs: opts.governMs,
         reconnect: error => engine.reconnect({ error }),
         bulk: { enabled: bulk.enabled, reason: bulk.reason, lanes: bulk.lanes ?? 1, lanesMax: bulk.lanesMax, lanesReason: bulk.lanesReason ?? null, lanesCap: bulk.lanesCap },
         pass: (signal, onProgress) => performManagedSync(engine, { ...opts, signal, onProgress, drainStartedAt, ...(bulk.enabled ? { bulk: { ...bulk, laneRun } } : {}) }) });
@@ -905,7 +914,46 @@ const STOP_DOCS: Record<DrainStopReason, CatalogueName> = {
   unexpected_staging_bytes: 'sync_drain_writer_blocked', blocked_by_failures: 'sync_drain_blocked_by_failures',
   preparation_abandoned: 'sync_drain_preparation_abandoned', preparation_systemic: 'sync_drain_preparation_systemic', write_capacity: 'sync_drain_write_capacity',
   connection_lost: 'sync_drain_connection_lost', capacity_paused: 'sync_drain_capacity_paused', drain_lease_held: 'sync_drain_lease_held',
+  not_converged: 'sync_drain_not_converged', admission_paused: 'sync_drain_admission_paused', grant_scope: 'sync_drain_grant_scope',
+  reconcile_host_required: 'sync_drain_reconcile_host_required', reconcile_read_incomplete: 'sync_drain_reconcile_read_incomplete',
 };
+
+/**
+ * #6712 PR 4b (design v3.2 §9): `next` for the live pass's stops. `not_converged` reruns the same sync until the server-side
+ * streak reaches NOT_CONVERGED_REPORT_STREAK, then reports; the others never loop: the host runs the sync, the owner restores
+ * `sync.admission` (never run automatically), or the agent reports.
+ */
+function passNext(stop: DrainStopReason | undefined, result: SyncResult, resumeCommand: string, sourceId: string):
+  Omit<DrainNext, 'eta_seconds' | 'rate_pages_per_min' | 'docs'> | null {
+  const status = ['gbrain', 'sync', 'status', '--source', sourceId, '--json'];
+  const verify = { argv: status };
+  const render = (action: Omit<Action, 'requires_exclusive' | 'consent'>) => renderAction({ consent: [], requires_exclusive: false, verify, ...action }, cliRenderContext());
+  const hostSync = `gbrain sync --source ${sourceId} --no-pull`;
+  switch (stop) {
+    case 'not_converged': {
+      const streak = result.pass?.not_converged_streak ?? 0;
+      if (streak < NOT_CONVERGED_REPORT_STREAK) return { command: resumeCommand, safe_to_loop: true, retry_after_ms: 0, code: 'not_converged',
+        why: `The pass ran ${result.pass?.round ?? 'its'} rounds without the level settling (another writer kept changing it); everything it admitted stands. The next sync reads the level again: rerun ${resumeCommand}.`,
+        fix: render({ argv: resumeCommand.split(' '), actor: 'agent', why: 'Reruns the pass; it starts from what the last one settled.' }) };
+      return { command: status.join(' '), safe_to_loop: false, retry_after_ms: 0, code: 'not_converged',
+        why: `${streak} passes in a row ended without the level settling, so rerunning is not converging. Report it with the status (read-only) and gbrain doctor --json; the writer changing the checkout is named there.`,
+        fix: render({ actor: 'agent', why: `${streak} consecutive passes did not converge; report it instead of rerunning.` }) };
+    }
+    case 'admission_paused': return { command: status.join(' '), safe_to_loop: false, retry_after_ms: 0, code: 'admission_paused',
+      why: 'sync.admission is not normal, so the pass admitted only what it allows and stopped; nothing failed. Restoring it is the owner\'s decision: gbrain config set sync.admission normal, then the next sync continues.',
+      fix: render({ argv: ['gbrain', 'config', 'set', 'sync.admission', 'normal'], actor: 'user', why: 'Restores what managed sync may write; never run automatically.',
+        user_message: `Managed sync of ${sourceId} is paused by sync.admission. To resume it, run: gbrain config set sync.admission normal` }) };
+    case 'grant_scope': case 'reconcile_host_required': return { command: status.join(' '), safe_to_loop: false, retry_after_ms: 0, code: stop,
+      why: stop === 'grant_scope'
+        ? `This writer's grant covers only part of source ${sourceId}, so the pass admitted what it could see and cannot finish the source; the owner host's sync finishes it: ${hostSync}.`
+        : `What is left in source ${sourceId} needs the owner host (holds, markers or decisions a remote caller never writes); everything this run admitted stands. On the owner host run: ${hostSync}.`,
+      fix: render({ argv: hostSync.split(' '), actor: 'user', why: 'Only the source\'s owner host finishes the pass.', user_message: `On the host that owns source ${sourceId}, run: ${hostSync}` }) };
+    case 'reconcile_read_incomplete': return { command: status.join(' '), safe_to_loop: false, retry_after_ms: 0, code: 'reconcile_read_incomplete',
+      why: `A Git listing of source ${sourceId}'s checkout did not finish cleanly, so the pass classified nothing and wrote nothing. Check the checkout (git status), then report it with gbrain doctor --json if it repeats.`,
+      fix: render({ actor: 'agent', why: 'The checkout could not be listed; report it with gbrain doctor --json.' }) };
+    default: return null;
+  }
+}
 
 /** What the agent runs next, or null when the sync is done (DX-A2). */
 export function drainNext(result: SyncResult, resumeCommand: string, sourceId: string): DrainNext | null {
@@ -928,6 +976,8 @@ export function drainNext(result: SyncResult, resumeCommand: string, sourceId: s
       why: held?.fix.why ?? 'Another drainer holds this source\'s drain lease and resumes the same cursor; rerun after retry_after_ms.',
       ...(held ? { fix: renderAction({ ...held.fix, argv: resumeCommand.split(' ') }, cliRenderContext()) } : {}), docs: ERROR_CATALOGUE.sync_drain_lease_held.docs };
   }
+  const pass = passNext(d?.stop_reason, result, resumeCommand, sourceId);
+  if (pass) return { ...pass, ...estimate, docs: ERROR_CATALOGUE[STOP_DOCS[d!.stop_reason!]].docs };
   // #6712 PR 1: the drain-lease holder this run followed heartbeats but has committed nothing (and saved no cursor) for the
   // stall window. Waiting again would read as a clean exit on every tick, so this stops blocked with the holder named.
   if (d?.stop_reason === 'drain_stalled' && d.stall?.lease_holder) {
@@ -1027,15 +1077,6 @@ export function drainNext(result: SyncResult, resumeCommand: string, sourceId: s
         + `Run the sync from a process that can write the source's lock directory (the owner's gbrain serve, or this command outside the sandbox), then rerun: ${resumeCommand}`,
       ...(docs ? { docs } : {}) };
   }
-  // #6423: the pass admitted nothing for the whole window; the step and statement name where it waited.
-  if (d?.stop_reason === 'drain_stalled' && d.stall?.cause === 'no_admission') {
-    const stall = d.stall;
-    return { command: resumeCommand, safe_to_loop: false, retry_after_ms: 0, ...estimate, code: 'drain_stalled', cause: 'no_admission',
-      why: `The sync admitted no write for ${stall.stalled_seconds}s${stall.step ? ` while at step ${stall.step}` : ''}${stall.last_sql ? ` (last statement ${stall.last_sql.label})` : ''}, and no request for this source was unfinished, `
-        + 'so it stopped instead of waiting forever. A transaction-mode pooler (port 6543) that never answers a round trip does this. The cursor and its frozen manifest are intact. '
-        + `Point the brain's database URL at the session-mode (port 5432) or direct URL of the same database (GBRAIN_DIRECT_DATABASE_URL routes only the consumer, not the sync's own admissions), check it with gbrain doctor --json, then rerun: ${resumeCommand}`,
-      ...(docs ? { docs } : {}) };
-  }
   const writerBlocked = d?.stop_reason && d.stop_reason !== 'blocked_by_failures' && d.stop_reason !== 'deadline';
   if (writerBlocked) {
     return { command: `gbrain sources writer status ${sourceId}`, safe_to_loop: false, retry_after_ms: 0, ...estimate,
@@ -1046,9 +1087,8 @@ export function drainNext(result: SyncResult, resumeCommand: string, sourceId: s
         : `The source's writer needs intervention (${d!.stop_reason}) before more pages can publish. Inspect it, fix what it names, then rerun: ${resumeCommand}`,
       ...(d!.stop_reason === 'drain_stalled' ? { code: 'drain_stalled', cause: d!.stall?.cause } : {}), ...(docs ? { docs } : {}) };
   }
-  const retry = resumeCommand.includes(' --retry-failed') ? resumeCommand : `${resumeCommand} --retry-failed`;
-  return { command: retry, safe_to_loop: false, retry_after_ms: 0, ...estimate,
-    why: 'A page failed to publish. Fix the cause named in managed_write / failures first; rerunning without a fix returns the same failure. Ask the user before skipping content.',
+  return { command: resumeCommand.replace(' --retry-failed', ''), safe_to_loop: false, retry_after_ms: 0, ...estimate,
+    why: 'A page failed to publish. Fix the cause named in managed_write / failures first; the same sync then retries it, and rerunning without a fix returns the same failure. Ask the user before skipping content.',
     ...(docs ? { docs } : {}) };
 }
 
@@ -1076,14 +1116,16 @@ export function drainJsonFields(result: SyncResult, resumeCommand: string, sourc
 export function formatDrainSummary(result: SyncResult, resumeCommand: string, sourceId: string): string[] {
   const d = result.drain;
   if (!d) return [];
-  const lines = [`Managed sync ${d.outcome}: ${d.processed} entries this run (${d.written} written, ${d.waived} waived)`
+  // #6712 PR 2 (L5): one headline per state; a drain that finished a run an earlier invocation started says so.
+  const resumed = d.outcome === 'synced' && result.runId && (result.managedCursor?.progress?.startIndex ?? 0) > 0 ? `resumed run ${result.runId} and converged, ` : '';
+  const lines = [`Managed sync ${d.outcome}: ${resumed}${d.processed} entries this run (${d.written} written, ${d.waived} waived)`
     + (d.remaining ? `, ${d.remaining} remaining` : '') + (d.rate_pages_per_min !== null ? `, ${d.rate_pages_per_min} pages/min` : '')
     + (d.remaining && d.eta_seconds !== null ? `, indexing ETA ${formatDuration(d.eta_seconds)}` : '') + '.'];
   if (d.capacity) lines.push(`  Waited ${d.capacity.waited_seconds}s for write capacity: ${d.capacity.outstanding ?? '?'} of ${d.capacity.limit ?? '?'} ${d.capacity.scope ?? 'principal'} outstanding-request slots in use.`);
   if (d.connection) lines.push(`  Database connection dropped ${d.connection.drops} times in a row (${d.connection.last_error}); the cursor and its frozen manifest are intact.`);
   // #6317 (C3): the summary line carries the same step / waiting_on / last_sql triple as the log lines, and the owner process.
-  if (d.stall?.cause === 'no_admission') lines.push(`  Nothing admitted for ${d.stall.stalled_seconds}s${d.stall.step ? `, step=${d.stall.step}` : ''}${d.stall.last_sql ? `, last_sql=${d.stall.last_sql.label}` : ''}, cause=no_admission.`);
-  else if (d.stall) lines.push(`  Oldest unfinished request ${d.stall.head_request_id ?? d.stall.request_id} (${d.stall.head_state ?? d.stall.state})`
+  // #6712 PR 2: a pass that admitted nothing with no unfinished request (the retired no_admission) reads as such, with its step and statement.
+  if (d.stall) lines.push(`${d.stall.head_request_id === null && d.stall.request_id === 'none' ? '  No request of this source was unfinished' : `  Oldest unfinished request ${d.stall.head_request_id ?? d.stall.request_id} (${d.stall.head_state ?? d.stall.state})`}`
     + `${d.stall.blocked_reason ? `, blocked_reason=${d.stall.blocked_reason}` : ''}${d.stall.step ? `, step=${d.stall.step}` : ''}${d.stall.waiting_on ? `, waiting_on=${d.stall.waiting_on}` : ''}`
     + `${d.stall.last_sql ? `, last_sql=${d.stall.last_sql.label}${d.stall.last_sql.age_ms === null ? '' : ` (${Math.round(d.stall.last_sql.age_ms / 1000)}s ago)`}` : ''}`
     + `${d.stall.cause ? `, cause=${d.stall.cause}` : ''}${d.stall.owner_pid ? `, owner=${d.stall.owner_kind ?? 'process'} pid ${d.stall.owner_pid}` : ''}; claimable here: ${d.stall.claimable_here === null ? 'unknown' : d.stall.claimable_here ? 'yes' : 'no'}`
@@ -1101,32 +1143,62 @@ export interface ManagedSyncBacklog {
   rate_pages_per_min: number | null;
   eta_seconds: number | null;
   last_progress_at: string | null;
+  /** #6763: when the cursor's discovery ran (frozen with the manifest); the no-progress age origin until `last_progress_at` exists. */
+  discovered_at: string | null;
   /** #6317: entries this cursor advanced past as holds (no page committed for them). */
   held: number;
   resume_command: string;
   /** #6278: the arguments after `gbrain sync` that resume this cursor with its stored options. */
   resume_args: string[];
+  /**
+   * #6712 PR 4b: set when the entry is a non-company source's pass row (design §3.7), not a cursor. `index`/`total` are
+   * then the newest round's settled and candidate paths, `remaining` its unsettled ones, `last_progress_at` the row's
+   * last write, `discovered_at` the pass's start. `converged_target` is where the source last converged and `head` the
+   * checkout's HEAD on this host (null when unread); `stuck` names a pass that keeps stopping (`blocked`,
+   * `not_converged`, `settle_mismatch`) and `stuck_since` when that began.
+   */
+  pass?: { pass_id: string; kind: string; round: number; outcome: string; stop_reason: string | null; target: string; converged_target: string | null; head: string | null;
+    stuck: 'blocked' | 'not_converged' | 'settle_mismatch' | null; stuck_since: string | null };
 }
 
 /**
  * Unfinished managed cursors with their remaining entries and the rate of
  * their latest drain window (CEO-A18), readable from any process.
+ * #6712 PR 4b (design v3.2 §3.7): plus every source whose pass row is not
+ * `nothing_pending` (`passHealth`: converged at the checkout's HEAD and the
+ * newest pass ended `synced` or `up_to_date`); a source's pass entry replaces
+ * a legacy cursor entry of the same source.
  */
 export async function readManagedSyncBacklog(engine: BrainEngine, sourceIds?: string[]): Promise<ManagedSyncBacklog[]> {
-  const rows = await engine.executeRaw<{ header: { sourceId: string; index: number; total: number; done?: boolean; progress?: { startedAt: number; startIndex: number; lastAt: number; lastIndex: number };
+  const rows = await engine.executeRaw<{ header: { sourceId: string; index: number; total: number; done?: boolean; discoveredAt?: string; progress?: { startedAt: number; startIndex: number; lastAt: number; lastIndex: number };
     counts?: { held?: number }; processingOptions?: { noEmbed?: boolean; noExtract?: boolean; noSchemaPack?: boolean }; syncOptions?: Parameters<typeof managedSyncResumeArgs>[0]['syncOptions'] } }>(
     `SELECT completed_keys->0 AS header FROM op_checkpoints WHERE op='managed-sync' AND COALESCE(completed_keys->0->>'done','false')<>'true'`);
-  return rows.map(({ header }) => header).filter(h => h?.sourceId && (!sourceIds || sourceIds.includes(h.sourceId))).map(h => {
+  const { readPassReadings, passResumeArgs, passStuck, passStuckSince } = await import('./sync-pass-readers.ts');
+  const passes: ManagedSyncBacklog[] = (await readPassReadings(engine, { sourceIds })).filter(r => !r.health.nothing_pending).map(({ source_id, row, head, health }) => {
+    const t = row.value.telemetry, args = passResumeArgs(source_id, row), stuck = passStuck(health) ? health.reason as 'blocked' | 'not_converged' | 'settle_mismatch' : null;
+    return { source_id, index: Number(t.settled ?? 0), total: Number(t.candidates ?? 0), remaining: Number(health.remaining ?? t.remaining ?? 0), rate_pages_per_min: null, eta_seconds: null,
+      last_progress_at: row.updated_at, discovered_at: t.started_at ?? null, held: Number(t.counts?.held ?? 0), resume_command: syncResumeCommand(args), resume_args: args,
+      pass: { pass_id: t.pass_id, kind: t.kind, round: Number(t.round ?? 0), outcome: t.outcome, stop_reason: t.stop_reason ?? null, target: t.target,
+        converged_target: row.value.obligations.converged?.target ?? null, head, stuck, stuck_since: stuck ? passStuckSince(row) : null } };
+  });
+  const passSources = new Set(passes.map(b => b.source_id));
+  return [...rows.map(({ header }) => header).filter(h => h?.sourceId && (!sourceIds || sourceIds.includes(h.sourceId)) && !passSources.has(h.sourceId)).map(h => {
     const remaining = Math.max(0, Number(h.total) - Number(h.index));
     const p = h.progress;
     const estimate = p ? drainEstimate(remaining, p.lastIndex - p.startIndex, p.lastAt - p.startedAt) : { rate_pages_per_min: null, eta_seconds: null };
     const args = managedSyncResumeArgs({ sourceId: h.sourceId, processingOptions: h.processingOptions, syncOptions: h.syncOptions });
     return { source_id: h.sourceId, index: Number(h.index), total: Number(h.total), remaining, ...estimate,
-      last_progress_at: p ? new Date(p.lastAt).toISOString() : null, held: Number(h.counts?.held ?? 0), resume_command: syncResumeCommand(args), resume_args: args };
-  });
+      last_progress_at: p ? new Date(p.lastAt).toISOString() : null, discovered_at: h.discoveredAt ?? null, held: Number(h.counts?.held ?? 0), resume_command: syncResumeCommand(args), resume_args: args };
+  }), ...passes];
 }
 
 export function formatManagedSyncBacklog(b: ManagedSyncBacklog): string {
+  if (b.pass) {
+    const p = b.pass, behind = p.head && p.converged_target !== p.head && (p.outcome === 'synced' || p.outcome === 'up_to_date');
+    return `${b.source_id}: managed sync pass ${p.outcome === 'open' ? 'running' : `ended ${p.outcome}`}${p.stop_reason ? ` (${p.stop_reason})` : ''}`
+      + (behind ? `, HEAD ${p.head!.slice(0, 8)} is past the converged commit ${p.converged_target?.slice(0, 8) ?? '(none)'}` : ` at round ${p.round} (${b.remaining} of ${b.total} candidate path(s) unsettled)`)
+      + (p.stuck ? `; stopping ${p.stuck} since ${p.stuck_since}` : '') + `. Resume: ${b.resume_command}`;
+  }
   return `${b.source_id}: managed sync cursor at ${b.index}/${b.total} (${b.remaining} remaining`
     + (b.rate_pages_per_min !== null ? `, last drain ${b.rate_pages_per_min} pages/min, indexing ETA ${b.eta_seconds === null ? 'unknown' : formatDuration(b.eta_seconds)}` : ', rate unknown')
     + `). Resume: ${b.resume_command}`;

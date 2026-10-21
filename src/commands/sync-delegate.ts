@@ -54,6 +54,7 @@ import {
   readIpcSecret,
   readIpcSecretForConfig,
   requestSyncAbort,
+  requestSyncNudge,
   requestSyncStart,
   requestSyncStatus,
   resolveSocketPath,
@@ -62,12 +63,15 @@ import {
 } from '../core/context/resolve-ipc.ts';
 import {
   DELEGATED_SYNC_LANES_MAX,
+  SYNC_NUDGE_VERSION,
   type DelegatedSyncOptions,
+  type SyncNudgeResponse,
   type SyncStartRegistration,
   type SyncStatusResponse,
   type WireSyncResult,
 } from '../core/context/sync-ipc.ts';
 import { OperationError } from '../core/ops/contract.ts';
+import { SYNC_FLAGS, syncFlagsRouted, type SyncFlagSpec } from '../core/sync-flags.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import type { ConsumerRow } from '../core/persistence/consumer-heartbeat.ts';
 import type { SyncOpts, SyncResult } from './sync.ts';
@@ -84,28 +88,17 @@ const MAX_POLL_FAILURES = 60;
 const PID_PROBE_EVERY = 5;
 
 /**
- * Flags forwardable over the wire (boolean → DelegatedSyncOptions field).
- * Everything not in this table, VALUE_FLAGS, or IGNORED_FLAGS refuses —
- * default-deny is what keeps a future flag from being silently dropped.
+ * The serve hand-off's view of the one sync flag table (`src/core/sync-flags.ts`). Everything the table does not
+ * route through the serve refuses: default-deny is what keeps a future flag from being silently dropped.
  */
-export const WIRE_BOOL_FLAGS: Record<string, keyof DelegatedSyncOptions> = {
-  '--full': 'full',
-  '--dry-run': 'dryRun',
-  '--no-pull': 'noPull',
-  '--no-embed': 'noEmbed',
-  '--no-extract': 'noExtract',
-  '--no-schema-pack': 'noSchemaPack',
-  '--skip-failed': 'skipFailed',
-  '--retry-failed': 'retryFailed',
-  '--include-gitignored': 'includeGitignored',
-  '--no-bulk': 'noBulk',
-};
+const SERVE_FLAGS = SYNC_FLAGS as Record<string, SyncFlagSpec>;
+/** Boolean flags forwarded over the wire (flag → DelegatedSyncOptions field). */
+export const WIRE_BOOL_FLAGS: Record<string, keyof DelegatedSyncOptions> = Object.fromEntries(syncFlagsRouted('serve', 'forward')
+  .filter(flag => SERVE_FLAGS[flag].arity === 'boolean' && SERVE_FLAGS[flag].sets === undefined).map(flag => [flag, SERVE_FLAGS[flag].field as keyof DelegatedSyncOptions]));
 /** Value-taking flags the ladder consumes itself (`--lanes` is validated and forwarded; the deadlines are derived). */
-export const VALUE_FLAGS = new Set(['--source', '--timeout', '--hard-deadline', '--lanes']);
+export const VALUE_FLAGS = new Set<string>([...syncFlagsRouted('serve', 'client'), ...syncFlagsRouted('serve', 'forward')].filter(flag => SERVE_FLAGS[flag].arity === 'value'));
 /** Flags that are meaningful only outside delegation, handled pre-ladder, or rendered by this client (`--json`). */
-export const IGNORED_FLAGS = new Set(['--yes', '--no-delegate', '--no-hard-deadline', '--json']);
-/** `--no-lanes` is `--lanes 1` (`src/commands/sync/args.ts`). */
-const NO_LANES_FLAG = '--no-lanes';
+export const IGNORED_FLAGS = new Set<string>(syncFlagsRouted('serve', 'client').filter(flag => SERVE_FLAGS[flag].arity === 'boolean'));
 
 export type ParsedDelegatedArgs =
   | { ok: true; options: Omit<DelegatedSyncOptions, 'timeoutSeconds'>; explicitSource: string | null }
@@ -124,8 +117,9 @@ export function parseDelegatedSyncArgs(args: string[]): ParsedDelegatedArgs {
       options[WIRE_BOOL_FLAGS[tok]] = true;
       continue;
     }
-    if (tok === NO_LANES_FLAG) {
-      options.lanes = 1;
+    const fixed = SERVE_FLAGS[tok];
+    if (fixed?.serve === 'forward' && fixed.sets !== undefined && fixed.field) {
+      options[fixed.field] = fixed.sets;
       continue;
     }
     if (IGNORED_FLAGS.has(tok)) continue;
@@ -280,6 +274,21 @@ export async function maybeDelegateSyncToServe(dataDir: string, args: string[]):
     return true;
   }
   const startResp = start as Exclude<SyncStartIpcResult, typeof IPC_UNAVAILABLE | { degraded: string }>;
+  // GBRA-133 PR 2a: a serve already syncing records this request as a wanted marker (never for --dry-run, which stays
+  // read-only); its notifier runs it once the running sync ends, so the request is not dropped.
+  if (!startResp.ok && startResp.error === 'busy' && !options.dryRun) {
+    const nudged = await requestSyncNudge(sock, { secret, version: SYNC_NUDGE_VERSION, sourceId: sourceId ?? 'default', requestedBy: 'delegated_sync',
+      ...(options.full ? { intent: 'full' as const } : options.noPull ? { intent: 'freshness' as const } : {}) });
+    const ack = nudged === IPC_UNAVAILABLE || 'degraded' in (nudged as object) ? null : nudged as SyncNudgeResponse;
+    if (ack?.ok && ack.marker) {
+      const m = ack.marker;
+      serr(`[sync] the serve (PID ${holder.pid}) is already syncing (job ${startResp.jobId ?? '?'}); recorded this request as wanted (${m.intent}`
+        + `${m.wanted_head ? ` ${m.wanted_head.slice(0, 8)}` : ''}, generation ${m.generation}); ${ack.notifier ? 'its notifier runs it when that sync ends' : 'the next resident with a notifier runs it'}.`);
+      if (args.includes('--json')) await (await import('../core/cli-force-exit.ts')).writeStdoutFinal(JSON.stringify({ action: 'nudged', source_id: m.source_id, intent: m.intent, wanted_head: m.wanted_head, marker_generation: m.generation, running_job_id: startResp.jobId ?? null }) + '\n');
+      await setVerdict(0);
+      return true;
+    }
+  }
   if (!startResp.ok) {
     serr(`[sync] ${startRefusalText(startResp)} ${remediation(holder.pid, '')}`);
     await setVerdict(1);
@@ -496,7 +505,7 @@ export type ManagedDelegationOutcome =
   | { kind: 'delegated'; result: SyncResult; pid: number }
   /** Not delegated; `reason` names the rung, `line` is the one line printed (null when nothing was printed). */
   | { kind: 'own_consumer'; reason: 'opted_out' | 'not_host' | 'not_postgres' | 'not_managed' | 'no_owner' | 'owner_not_serve' | 'probe_failed'
-      | 'kill_switch' | 'unsupported_flag' | 'no_socket' | 'older_serve' | 'serve_refused' | 'serve_lost' | 'serve_no_admission'; line: string | null };
+      | 'kill_switch' | 'unsupported_flag' | 'no_socket' | 'older_serve' | 'serve_refused' | 'serve_lost'; line: string | null };
 
 /**
  * #6543: only a forced rung (the serve cannot take the run) really runs a consumer beside the serve; on the others this
@@ -581,7 +590,8 @@ export async function maybeDelegateManagedSyncToServe(engine: BrainEngine, args:
   const options: DelegatedSyncOptions = {
     // #6696 (A5): an operator's sync keeps the capacity background producers leave free.
     sourceId, timeoutSeconds, origin: 'interactive',
-    ...pick(opts, ['dryRun', 'full', 'noPull', 'noEmbed', 'noExtract', 'noSchemaPack', 'skipFailed', 'retryFailed', 'includeGitignored', 'noBulk'] as const),
+    // The table's forwarded booleans only: a field a newer gbrain retired (src/core/wire-skew.ts) is never in it, so it is never sent.
+    ...pick(opts as unknown as Record<string, boolean | undefined>, Object.values(WIRE_BOOL_FLAGS)) as Partial<DelegatedSyncOptions>,
     ...(opts.lanes !== undefined ? { lanes: opts.lanes } : {}),
     // Sent only when set, so a serve that predates the field keeps accepting every run without a deferral.
     ...(opts.embedDeferred ? { embedDeferred: true } : {}),
@@ -621,13 +631,6 @@ export async function maybeDelegateManagedSyncToServe(engine: BrainEngine, args:
   if (polled.kind === 'lost') return own('serve_lost', '[sync] continuing the catch-up with this process\'s own consumer; the durable cursor resumes where the serve left it.');
   if (polled.kind === 'failed') throw polled.error;
   const { result, pagesAffectedTotal } = syncResultFromWire(polled.result);
-  // #6405/#6423: a delegated drain that admitted nothing left no request a publisher could still be writing, so this run
-  // takes the catch-up over with its own consumer, once (the fallback itself never delegates). A publication that never
-  // returned is different: the serve may still hold its locks, so that stop is reported as it is (restart the serve).
-  if (result.drain?.stop_reason === 'drain_stalled' && result.drain.stall?.cause === 'no_admission') {
-    return own('serve_no_admission', `[sync] the serve (PID ${pid}) admitted no write for ${result.drain.stall.stalled_seconds}s${result.drain.stall.step ? ` at step ${result.drain.stall.step}` : ''}; `
-      + 'continuing the catch-up with this process\'s own consumer, once (the durable cursor resumes where the serve left it).');
-  }
   if (pagesAffectedTotal > polled.result.pagesAffected.length) {
     serr(`[sync] (+${pagesAffectedTotal - polled.result.pagesAffected.length} more pages affected — list truncated for the IPC wire)`);
   }
@@ -638,4 +641,40 @@ function pick<T extends object, K extends keyof T>(source: T, keys: readonly K[]
   const out: Partial<Pick<T, K>> = {};
   for (const key of keys) if (source[key] !== undefined) out[key] = source[key];
   return out;
+}
+
+/**
+ * GBRA-133 PR 2a: `gbrain sync trigger` while a live serve holds the PGLite brain. The request is recorded as a wanted
+ * marker through the serve (sync_nudge, acknowledged) and its notifier starts the sync: action nudged, exit 0. A serve
+ * running without a notifier (GBRAIN_NOTIFIER=0) records it too; the outcome then carries resident: null and the
+ * no_resident notice with the fix. Returns false off PGLite or when no serve holds the brain (the engine path records
+ * the marker and queues the job).
+ * The owner-delegated sync paths in cli/main.ts skip `sync trigger`, which they would refuse as an unknown sync option.
+ */
+export async function maybeTriggerThroughServe(config: { engine?: string; database_path?: string; database_url?: string } | null, args: string[]): Promise<boolean> {
+  if (config?.engine !== 'pglite' || !config.database_path || config.database_url || args.includes('--help') || args.includes('-h')) return false;
+  const dataDir = config.database_path;
+  const sourceId = args.find((a, i) => args[i - 1] === '--source');
+  if (!sourceId) return false;
+  const holder = probeLivePgliteHolder(dataDir);
+  if (!holder || !holder.serve) return false;
+  const json = args.includes('--json');
+  const sock = resolveSocketPath(dataDir);
+  const secret = readIpcSecret(dataDir);
+  const refuse = async (why: string) => { serr(`[sync trigger] a live gbrain serve (PID ${holder.pid}) holds this PGLite brain and ${why} ` + remediation(holder.pid, '')); await setVerdict(1); return true; };
+  if (!existsSync(sock) || !secret) return refuse('exposes no sync IPC (older gbrain, serve --http, or GBRAIN_SERVE_SYNC_IPC=0).');
+  const r = await requestSyncNudge(sock, { secret, version: SYNC_NUDGE_VERSION, sourceId, requestedBy: 'sync_trigger' });
+  if (r === IPC_UNAVAILABLE) return refuse('is not answering its IPC socket.');
+  if ('degraded' in (r as object)) return refuse('predates sync_nudge; restart it on this gbrain version.');
+  const resp = r as SyncNudgeResponse;
+  if (!resp.ok || !resp.marker) {
+    if (resp.error === 'unknown_source') { serr(`Source "${sourceId}" not found. List with: gbrain sources list`); await setVerdict(1); return true; }
+    return refuse(`refused the request (${resp.error ?? 'unknown error'}).`);
+  }
+  const { printTriggerOutcome } = await import('./sync/trigger.ts');
+  const m = resp.marker;
+  printTriggerOutcome({ action: 'nudged', source_id: m.source_id, intent: m.intent, wanted_head: m.wanted_head, marker_generation: m.generation,
+    resident: resp.notifier ? { kind: resp.resident ?? 'serve', pid: holder.pid } : null }, json);
+  await setVerdict(0);
+  return true;
 }

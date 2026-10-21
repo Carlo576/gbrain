@@ -62,12 +62,12 @@ import type { SearchOpts } from '../types.ts';
 import { hnswIndexExpected } from '../vector-index.ts';
 import { unverifiedExtractionFragment } from '../extraction-review.ts';
 import { buildVectorCastFragment, normalizeEngineColumn } from './embedding-column.ts';
+import { frontmatterWhereClauses } from './frontmatter-where.ts';
 import { resolveBoostMap, resolveHardExcludes } from './source-boost.ts';
 import { buildBestPerPagePoolCte, buildHardExcludeClause, buildSourceFactorCase, buildVisibilityClause } from './sql-ranking.ts';
 import { chunkGenerationProbe } from './safe-chunks.ts';
 
 export const VECTOR_EXTENSION_VERSION_SQL = `SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
-export const SET_STATEMENT_TIMEOUT_SQL = `SELECT set_config('statement_timeout', $1, true)`;
 
 export interface VectorSearchStatementInput {
   dialect: 'postgres' | 'pglite';
@@ -81,6 +81,8 @@ export interface VectorSearchStatementInput {
    * omitted; at most SCOPE_SCAN_MAX_CHUNKS adds the scope scan.
    */
   scope?: VectorScope;
+  /** chunkManifestReads; unset reads the manifest. */
+  chunkManifest?: boolean;
 }
 
 export interface VectorSearchStatement {
@@ -103,6 +105,14 @@ export interface VectorSearchStatement {
   /** Exact scan over a small source scope's chunks (relaxed variant), same parameters as `sql`; runs after the walk when both exist. */
   scopeScanSql?: string;
 }
+
+/**
+ * The page columns the index walk's candidates, page filters and visibility
+ * read, probed by key per ANN row. Named, never `*`: the body columns stay out
+ * of the probe (a segmented page has no body string).
+ */
+export const INDEX_WALK_PAGE_COLUMNS = ['id', 'slug', 'source_id', 'title', 'type', 'frontmatter', 'deleted_at', 'updated_at', 'effective_date',
+  'effective_date_source', 'trust_tier', 'body_generation', 'chunker_version', 'knowledge_revision', 'text_projection_revision'] as const;
 
 /** Raw rows the index walk orders per window slot, so page filters can drop some and still fill the window. */
 export const INDEX_WALK_OVERFETCH = 2;
@@ -188,7 +198,11 @@ export interface ScopeChunkCount {
   sample_chunks: number;
 }
 
-/** Share of pages the source scope holds, or undefined without a scope or statistics. */
+/**
+ * Share of pages the source scope holds, or undefined without a scope or statistics. The float4
+ * `most_common_freqs` of a scope covering every source sum to 0.99999997, which widened the walk by
+ * half (#6728), so the sum is rounded to SCOPE_SHARE_PRECISION and capped at 1.
+ */
 export function sourceScopeShare(stats: PageSourceStats | undefined, opts?: SearchOpts): number | undefined {
   const scope = scopeSourceIds(opts);
   if (!scope || !stats) return undefined;
@@ -196,8 +210,11 @@ export function sourceScopeShare(stats: PageSourceStats | undefined, opts?: Sear
   const freqs = (stats.freqs ?? []).map(Number);
   const distinct = Number(stats.n_distinct) < 0 ? -Number(stats.n_distinct) * Number(stats.reltuples) : Number(stats.n_distinct);
   const unlisted = Math.max(0, 1 - Number(stats.null_frac) - freqs.reduce((sum, freq) => sum + freq, 0)) / Math.max(1, distinct - sources.length);
-  return scope.reduce((sum, id) => sum + (sources.includes(id) ? freqs[sources.indexOf(id)]! : unlisted), 0);
+  const share = scope.reduce((sum, id) => sum + (sources.includes(id) ? freqs[sources.indexOf(id)]! : unlisted), 0);
+  return Math.min(1, Math.round(share * SCOPE_SHARE_PRECISION) / SCOPE_SHARE_PRECISION);
 }
+
+const SCOPE_SHARE_PRECISION = 1e6;
 
 function scopeSourceIds(opts?: SearchOpts): string[] | undefined {
   const scope = opts?.sourceIds?.length ? opts.sourceIds : opts?.sourceId ? [opts.sourceId] : undefined;
@@ -256,6 +273,21 @@ export function vectorScopeLoader(
   };
 }
 
+/**
+ * The statement in both chunkManifestReads forms, each built on first use. The forms differ only in SQL text, so
+ * either one answers for the shape (windows, params, walk and scope-scan presence). A Postgres search attempt picks
+ * its form with the probe it runs inside its own transaction, after the settings, so the attempt's statement_timeout
+ * bounds the probe as well (a probe before the transaction waited on a content_chunks lock with no bound).
+ */
+export function vectorStatementForms(build: (chunkManifest: boolean) => VectorSearchStatement): (chunkManifest: boolean) => VectorSearchStatement {
+  const forms = new Map<boolean, VectorSearchStatement>();
+  return chunkManifest => {
+    let stmt = forms.get(chunkManifest);
+    if (!stmt) forms.set(chunkManifest, stmt = build(chunkManifest));
+    return stmt;
+  };
+}
+
 export function buildVectorSearchStatement(input: VectorSearchStatementInput): VectorSearchStatement {
   const { dialect, limit, offset, opts } = input;
   const resolvedCol = normalizeEngineColumn(opts?.embeddingColumn);
@@ -275,6 +307,7 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
   // v0.33: multi-type filter for whoknows, AND-applied with `type`.
   const typeClause = appendSearchTypesClause(params, opts);
   if (typeClause) filters.push(typeClause);
+  filters.push(...frontmatterWhereClauses('p', opts?.where, bind));
   if (opts?.exclude_slugs?.length) filters.push(`AND p.slug != ALL(${bind(opts.exclude_slugs)}::text[])`);
   if (opts?.language) filters.push(`AND cc.language = ${bind(opts.language)}`);
   if (opts?.symbolKind) filters.push(`AND cc.symbol_type = ${bind(opts.symbolKind)}`);
@@ -304,7 +337,7 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
   // the caller narrowing the search; the walk would usually come back short,
   // so those keep the joined statement alone.
   const share = input.scope?.share, chunks = input.scope?.chunks;
-  const narrowed = !!(opts?.type || opts?.types?.length || opts?.expandedTypes?.length || opts?.afterDate || opts?.beforeDate)
+  const narrowed = !!(opts?.type || opts?.types?.length || opts?.expandedTypes?.length || opts?.where || opts?.afterDate || opts?.beforeDate)
     || (share !== undefined && share < INDEX_WALK_MIN_SCOPE_SHARE);
   const scopeScan = relaxed && share !== undefined && share < SCOPE_SCAN_MAX_SHARE && chunks !== undefined && chunks <= SCOPE_SCAN_MAX_CHUNKS;
   const walk = relaxed && !narrowed && !(scopeScan && chunks! <= SCOPE_SCAN_FIRST_MAX_CHUNKS);
@@ -377,8 +410,13 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
           ${hashCurrent} AS hash_current,
           1 - ann.distance AS raw_score
         FROM ann
-        JOIN content_chunks cc ON cc.id = ann.id
-        JOIN pages p ON p.id = cc.page_id
+        -- Key probes behind OFFSET 0 fences: one chunk and one page lookup per
+        -- ANN row, so the plan is bounded by the window whatever the scope
+        -- size or page-filter estimate. A plain join let the planner
+        -- materialize the whole scope's chunk-page join under the ANN loop
+        -- and rescan it per row, spilling past work_mem on large scopes (#6728).
+        CROSS JOIN LATERAL (SELECT * FROM content_chunks c WHERE c.id = ann.id OFFSET 0) cc
+        CROSS JOIN LATERAL (SELECT ${INDEX_WALK_PAGE_COLUMNS.map(c => `pg.${c}`).join(', ')} FROM pages pg WHERE pg.id = cc.page_id OFFSET 0) p
         CROSS JOIN LATERAL (SELECT src.archived FROM sources src WHERE src.id = p.source_id OFFSET 0) s
         WHERE true
           ${pageFilters.join('\n          ')}
@@ -401,7 +439,7 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
               ${hardExcludeClause}
               ${pageVisibilityClause}
           ))
-          AND ${chunkGenerationProbe('cc')}
+          AND ${chunkGenerationProbe('cc', input.chunkManifest ?? true)}
           AND cc.${col} IS NOT NULL ${modalityFilter}
           ${chunkFilters.join('\n          ')}
           ${relaxedGeneration}

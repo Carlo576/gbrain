@@ -11,7 +11,9 @@
  * (ids and tiers only, never claim text). The checked supersede's own
  * before/after record lives in after_state.supersede.
  */
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import { beliefStreamSlugs, beliefTransaction } from '../belief/writers.ts';
 import {
   applyProposalAction, type PairProposal, type PairProposalStore, type ProposalActionResult,
 } from '../facts/proposal-supersede.ts';
@@ -92,10 +94,13 @@ export async function recordContestedTake(tx: BrainEngine, input: { sourceId: st
  * meaning is untouched: nothing was expired. A retry reuses the same proposal.
  */
 export async function forgetRequiresOwner(engine: BrainEngine, input: { sourceId: string; factId: number; factTier: TrustTier; writerTier: TrustTier; principal: Principal; reason: string | null }): Promise<OperationError> {
-  const { id } = await engine.transaction(tx => withWriteAttribution(tx, { requestId: null, principal: input.principal }, () => insertTrustProposal(tx, {
+  // W1 #6783 §6.2: the refusal's own transaction records trust.contested on the fact, so a refused request still leaves a record.
+  const trust = effectiveWriteTrust({ channel: input.writerTier, origin: { channel: 'mcp:forget' } });
+  const { id } = await beliefTransaction(engine, { sourceId: input.sourceId, slugs: await beliefStreamSlugs(engine, 'facts', [input.factId]),
+    publicationId: randomUUID(), op: 'forget', remote: true, cause: { refused: 'forget_requires_owner' } }, tx => insertTrustProposal(tx, {
     action: 'forget', sourceId: input.sourceId, target: { table: 'facts', id: input.factId }, proposer: 'remote_forget',
     before: { guard: 'remote_forget', fact: { id: input.factId, tier: input.factTier }, writer_tier: input.writerTier, ...(input.reason ? { has_reason: true } : {}) },
-  })));
+  }), (tx, run) => withWriteAttribution(tx, { requestId: null, principal: input.principal, trust }, run));
   const ref = trustProposalRef(id);
   // Frozen MEMORY_VERBS v1 pair: `error` stays scope_denied, `code` is the canonical forget_requires_owner.
   const error = verbError('scope_denied',

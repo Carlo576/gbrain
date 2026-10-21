@@ -107,6 +107,15 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
@@ -126,6 +135,15 @@
           }
         ],
         "sourceIds+excludePrivate": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 0,
             "unsafeOptions": {
@@ -158,6 +176,15 @@
       "getChunkWindows": {
         "default": [
           {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 8,
             "unsafeOptions": {
               "cancelFence": false,
@@ -168,6 +195,15 @@
           }
         ],
         "scopedPrivateSafe": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 9,
             "unsafeOptions": {
@@ -181,6 +217,15 @@
       },
       "getChunks": {
         "default": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 0,
             "unsafeOptions": {
@@ -211,6 +256,15 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
@@ -221,6 +275,15 @@
           }
         ],
         "includeEmbedding": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 0,
             "unsafeOptions": {
@@ -251,6 +314,15 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
@@ -271,6 +343,15 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
@@ -281,6 +362,15 @@
           }
         ],
         "sourceIds": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 0,
             "unsafeOptions": {
@@ -1265,12 +1355,12 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 0,
-            "via": "tagged"
-          },
-          {
-            "paramCount": 1,
-            "via": "tagged"
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 8,
@@ -1310,12 +1400,12 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 0,
-            "via": "tagged"
-          },
-          {
-            "paramCount": 1,
-            "via": "tagged"
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 10,
@@ -1339,12 +1429,12 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 0,
-            "via": "tagged"
-          },
-          {
-            "paramCount": 1,
-            "via": "tagged"
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 7,
@@ -1366,12 +1456,12 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 0,
-            "via": "tagged"
-          },
-          {
-            "paramCount": 1,
-            "via": "tagged"
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 8,
@@ -1850,7 +1940,25 @@
             "via": "tagged"
           },
           {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1874,7 +1982,25 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2057,6 +2183,15 @@
       },
       "migrateFactsToCanonical": {
         "default": [
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 6,
             "via": "tagged"
@@ -2428,6 +2563,15 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
@@ -2564,6 +2708,15 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
@@ -2639,7 +2792,7 @@
       "traverseGraph": {
         "default": [
           {
-            "paramCount": 3,
+            "paramCount": 4,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2650,7 +2803,7 @@
         ],
         "excludePrivate": [
           {
-            "paramCount": 3,
+            "paramCount": 4,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2661,7 +2814,7 @@
         ],
         "frontierCap": [
           {
-            "paramCount": 4,
+            "paramCount": 5,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2672,7 +2825,7 @@
         ],
         "sourceId": [
           {
-            "paramCount": 6,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2683,7 +2836,7 @@
         ],
         "sourceIds": [
           {
-            "paramCount": 6,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2696,7 +2849,7 @@
       "traversePaths": {
         "default": [
           {
-            "paramCount": 10,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2709,7 +2862,7 @@
       "traversePathsDetailed": {
         "both": [
           {
-            "paramCount": 10,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2720,7 +2873,7 @@
         ],
         "both+sourceIds+excludePrivate": [
           {
-            "paramCount": 14,
+            "paramCount": 12,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2731,7 +2884,7 @@
         ],
         "default": [
           {
-            "paramCount": 10,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2742,7 +2895,7 @@
         ],
         "in": [
           {
-            "paramCount": 10,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2753,7 +2906,7 @@
         ],
         "out+sourceId+linkType": [
           {
-            "paramCount": 13,
+            "paramCount": 12,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -3437,6 +3590,15 @@
               "simple": false
             },
             "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
           }
         ],
         "dryRun": [
@@ -3455,6 +3617,15 @@
         "blankBody": [
           {
             "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -3546,6 +3717,15 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 18,
             "unsafeOptions": {
               "cancelFence": false,
@@ -3595,6 +3775,15 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
               "prepare": true,
               "simple": false
             },
@@ -3804,6 +3993,15 @@
       "restorePage": {
         "default": [
           {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
@@ -3814,6 +4012,15 @@
           }
         ],
         "sourceId": [
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 2,
             "unsafeOptions": {
@@ -4040,6 +4247,23 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 10,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
               "simple": false
@@ -4126,9 +4350,44 @@
               "simple": false
             },
             "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
           }
         ],
         "noop": [
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 10,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 3,
             "unsafeOptions": {

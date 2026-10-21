@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import type { Express, Request, Response } from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { DEFAULT_MAX_REQUEST_BODY_SIZE } from '@modelcontextprotocol/sdk/server/requestBody.js';
 import { ListToolsRequestSchema, CallToolRequestSchema, type CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { opAllowedForBoundClient } from '../core/operations.ts';
@@ -43,6 +44,7 @@ import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import { executeRawJsonb } from '../core/sql-query.ts';
+import { withRequestConfigSnapshot } from '../core/config-snapshot.ts';
 import { withBearerScopeHint } from './serve-http-oauth.ts';
 import type { ServeHttpContext } from './serve-http.ts';
 
@@ -122,7 +124,12 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
   // read-only; grantScopes still caps each grant to the client row's scope.
   app.post('/mcp', withBearerScopeHint(
     requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read', 'write'],
-  ), async (req: Request, res: Response) => {
+  ), (req: Request, res: Response) => withRequestConfigSnapshot(engine, () => handleMcpPost(req, res)));
+
+  // #6721: one config snapshot serves every config read of one POST /mcp (the
+  // surface, row-shape and writeback reads below, tools/list and a read op's
+  // dispatch); dispatch reads live for a write op (config-snapshot.ts).
+  async function handleMcpPost(req: Request, res: Response): Promise<void> {
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 
@@ -167,7 +174,7 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
     const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows, thinClient };
     const server = createMcpRequestServer(ctx, state, writeback);
     await serveMcpRequest(server, req, res);
-  });
+  }
 }
 
 function createMcpRequestServer(
@@ -396,6 +403,7 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
       // WP1/D7: network transport — the dispatch-layer localOnly
       // backstop keys off this marker.
       transport: 'http',
+      inboundFrameBytes: DEFAULT_MAX_REQUEST_BODY_SIZE,
       ...(sessionId ? { sessionId } : {}),
       takesHoldersAllowList: tokenAllowList,
       sourceId: tokenSourceId,

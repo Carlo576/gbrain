@@ -20,8 +20,21 @@ export function captureOpNotice(n: Notice): void {
 
 /** #6696 (A4): a local write's output carries the capacity notices (60 s snapshot, hourly per scope); a failed read adds none. */
 export async function captureCapacityNotices(engine: import('../core/engine.ts').BrainEngine): Promise<void> {
-  const { capacityNotices } = await import('../core/persistence/capacity-snapshot.ts');
-  for (const notice of await capacityNotices(engine).catch(() => [])) pending.push(notice);
+  const { capacityNotices, CAPACITY_READ_WAIT_MS } = await import('../core/persistence/capacity-snapshot.ts');
+  for (const notice of await capacityNotices(engine, { throttle: true, deadlineAt: Date.now() + CAPACITY_READ_WAIT_MS }).catch(() => [])) pending.push(notice);
+}
+
+/**
+ * #7171: a degraded search/query (a keyword or vector arm that failed or timed out) names itself on the CLI the way
+ * MCP's dispatch already does, so a lost arm is never read as "no matches". Lazy: only search and query load it.
+ */
+export function captureRetrievalNotices(
+  op: string, result: unknown, retrieval: Record<string, unknown> | null, params: Record<string, unknown>,
+  config: import('../core/config.ts').GBrainConfig | null | undefined,
+): void {
+  if (op !== 'search' && op !== 'query') return;
+  const { recallInteropNotices } = require('../core/interop-notices.ts') as typeof import('../core/interop-notices.ts');
+  pending.push(...recallInteropNotices(op, result, { retrieval: retrieval ?? {} }, params, { config, transport: 'cli' }));
 }
 
 /** Drain the captured notices into the result (`--json` objects) and/or a stderr string. */

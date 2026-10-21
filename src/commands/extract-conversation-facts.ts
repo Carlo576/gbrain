@@ -76,9 +76,9 @@ import {
   type ExtractedFact,
 } from '../core/facts/extract.ts';
 import { configureGatewayIfUninitialized, isAvailable, withBudgetTracker } from '../core/ai/gateway.ts';
-import { insertDerivedFacts, writeDerivedFacts } from '../core/persistence/derived-facts.ts';
+import { writeDerivedFacts } from '../core/persistence/derived-facts.ts';
 import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
-import { clearConversationFacts, enqueueManagedPage, flushManagedBatch, managedConversationPublisher, startManagedPage, stopsRun, type ManagedConversationPublisher } from '../core/facts/conversation-publication.ts';
+import { countConversationFacts, enqueueManagedPage, flushManagedBatch, managedConversationPublisher, publishConversationFacts, startManagedPage, stopsRun, type ConversationScope, type ManagedConversationPublisher } from '../core/facts/conversation-publication.ts';
 import { ConversationRunClaims, listConversationPagesBySlug } from '../core/facts/conversation-enumeration.ts';
 import { BudgetTracker, BudgetExhausted, loadPricingOverrides, type BudgetReason, type NoPricingGuidance } from '../core/budget/budget-tracker.ts';
 import { noPricingMessage } from '../core/budget/no-pricing.ts';
@@ -111,6 +111,8 @@ import {
   mergeSaveTimeResolutionCounts,
   resolveExtractedEntitiesForSave,
 } from '../core/entities/resolve-on-save.ts';
+import { CONVERSATION_ENTITY_HINTS_CAP, conversationEntityHints } from '../core/facts/conversation-entity-hints.ts';
+import { inferConversationSubjects } from '../core/facts/conversation-subject-infer.ts';
 
 // Re-exported verbatim so existing importers (this file's own helpers below
 // and this file's tests) keep working unchanged; doctor.ts, jobs.ts,
@@ -372,7 +374,8 @@ import {
   parseConversation,
   type ParseConversationOpts as OrchestratorParseOpts,
 } from '../core/conversation-parser/parse.ts';
-import { ConversationBodyTooLargeError, CONVERSATION_BODY_MAX_BYTES, readConversationBodyForParsing } from '../core/conversation-parser/body.ts';
+import { ConversationBodyTooLargeError, CONVERSATION_BODY_MAX_BYTES, readConversationInput } from '../core/conversation-parser/body.ts';
+import { CONVERSATION_WINDOW_BYTES, type ConversationWindow } from '../core/page-body/segment-conversation.ts';
 import { setExtractionReceipt } from '../core/extraction-watermark.ts';
 import { conversationSkip } from '../core/facts/conversation-skip.ts';
 import { runLlmFallback } from '../core/conversation-parser/llm-fallback.ts';
@@ -529,19 +532,31 @@ function filterOutSlug(entries: string[], sourceId: string, slug: string): strin
 // Body cap (Eng A2).
 // ---------------------------------------------------------------------------
 
-/** The body cap, pre-parse: a skip leaves a durable receipt (doctor: extraction_input_truncated); a page under the cap clears an earlier one. */
+/**
+ * The body cap, pre-parse: a skip leaves a durable receipt (doctor: extraction_input_truncated); a page under the cap
+ * clears an earlier one. A segmented page over the window cap is extracted from its newest window only when it has no
+ * conversation facts (the run clears them all; lossless until PR 4's anchors): one with any arrives unread (window.priorFacts).
+ */
 async function skippedForSize(state: ExtractCoreState, snapshot: ConversationPageSnapshot): Promise<boolean> {
   const origin = snapshot.oversizedSidecarBytes === undefined ? 'page' : 'sidecar';
   const bytes = snapshot.oversizedSidecarBytes ?? Buffer.byteLength(snapshot.body, 'utf8');
   const over = bytes > MAX_PAGE_BODY_BYTES;
-  if (over) {
+  const window = snapshot.window;
+  const priorFacts = window?.priorFacts ?? 0;
+  if (over || priorFacts > 0) {
     state.result.pages_skipped_too_large++;
-    process.stderr.write(`[extract-conversation-facts] SKIP ${snapshot.page.slug}: ${origin === 'sidecar' ? 'raw_transcript sidecar ' : ''}`
-      + `${(bytes / 1024 / 1024).toFixed(1)}MB exceeds ${MAX_PAGE_BODY_BYTES / 1024 / 1024}MB cap\n`);
+    process.stderr.write(`[extract-conversation-facts] SKIP ${snapshot.page.slug}: ${over ? `${origin === 'sidecar' ? 'raw_transcript sidecar ' : ''}`
+      + `${(bytes / 1024 / 1024).toFixed(1)}MB exceeds ${MAX_PAGE_BODY_BYTES / 1024 / 1024}MB cap` : `${(window!.totalBytes / 1024 / 1024).toFixed(1)}MB is over the `
+      + `${CONVERSATION_WINDOW_BYTES / 1024 / 1024}MB window and its ${priorFacts} conversation fact(s) may lie outside it; they were kept`}\n`);
   }
   if (!state.dryRun) await setExtractionReceipt(state.engine, snapshot.page.id, 'conversation_facts', over
-    ? { kind: 'skipped_too_large', pipeline: 'conversation_facts', processed_chars: 0, total_bytes: bytes, cap_bytes: MAX_PAGE_BODY_BYTES, origin } : null);
-  return over;
+    ? { kind: 'skipped_too_large', pipeline: 'conversation_facts', processed_chars: 0, total_bytes: bytes, cap_bytes: MAX_PAGE_BODY_BYTES, origin }
+    : !window ? null : priorFacts > 0
+      ? { kind: 'skipped_too_large', pipeline: 'conversation_facts', processed_chars: 0, total_bytes: window.totalBytes, cap_bytes: CONVERSATION_WINDOW_BYTES,
+        origin: 'page', window_rule: 'prior_facts_kept', prior_facts: priorFacts }
+      : { kind: 'tail_window', pipeline: 'conversation_facts', processed_chars: snapshot.body.length, total_bytes: window.totalBytes,
+        cap_bytes: CONVERSATION_WINDOW_BYTES, origin: 'page', window_rule: 'no_prior_facts' });
+  return over || priorFacts > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -619,29 +634,15 @@ function logLockBusyRateLimited(sourceId: string, slug: string): void {
 }
 
 /**
- * D11: delete-orphans-first replay safety. Removes any facts row written
- * by a prior crashed / killed / partial run for this (sourceId, slug)
- * pair, scoped to fact rows with this command's source-prefix so we
- * never touch facts written by other paths (extract.ts, facts/absorb,
- * markdown fences, etc.).
- *
- * The terminal audit row (source=TERMINAL_AUDIT_SOURCE) is ALSO deleted
- * here — if a prior run wrote it after partial inserts (the
- * pre-v0.41.15.0 bug class codex caught), we want a clean slate. A
- * fresh run will re-write the terminal row only after every segment's
- * insertFacts succeeds.
- *
- * Returns the number of rows deleted (surfaced in the result counter
- * for operator observability; non-zero means a prior run crashed).
+ * Unmanaged brains: publishes one page's buffered rows (facts and its outcome
+ * row, when the run reached one) in one maintenance transaction, which
+ * retires the prior extractor batch only for a complete replacement (#7013,
+ * `publishConversationFacts`). Returns the rows removed from the page's
+ * active batch and the facts inserted.
  */
-async function deleteOrphanFactsForPage(
-  engine: BrainEngine,
-  sourceId: string,
-  slug: string,
-): Promise<number> {
-  // A cleanup failure is authoritative: callers must not write a terminal or
-  // non-extractable marker while facts from an older snapshot may remain.
-  return writeDerivedFacts(engine, sourceId, slug, db => clearConversationFacts(db, sourceId, slug));
+function publishPageFacts(state: ExtractCoreState, slug: string, rows: Array<NewFact & { row_num: number; source_markdown_slug: string }>,
+  scope: ConversationScope): Promise<{ deleted: number; facts_inserted: number }> {
+  return writeDerivedFacts(state.engine, state.sourceId, slug, db => publishConversationFacts(db, state.sourceId, slug, rows, { scope }));
 }
 
 // ---------------------------------------------------------------------------
@@ -717,6 +718,8 @@ export type DurableExtractionOutcome = 'complete' | 'non_extractable';
 interface ConversationPageSnapshot {
   page: Page;
   body: string;
+  /** A segmented page over the window cap: `body` is its newest window. */
+  window?: ConversationWindow;
   versionToken: string;
   /** The `raw_transcript` sidecar was over the cap and not read; `body` is empty. */
   oversizedSidecarBytes?: number;
@@ -746,15 +749,15 @@ function regularPageVersionToken(page: Page): string {
   return `page-${hash}-${effectiveDate}`;
 }
 
-function snapshotVersionToken(page: Page, body: string): string {
+function snapshotVersionToken(page: Page, input: { body: string; sidecar?: true }): string {
   if (!hasRawTranscriptSidecar(page)) return regularPageVersionToken(page);
-  // Sidecar contents can change without touching pages.updated_at. Hash the
-  // exact parser input plus parser-relevant page metadata so those edits reopen
-  // the page without a schema migration.
+  // Sidecar contents can change without touching pages.updated_at. Hash the exact parser input plus parser-relevant page metadata so those
+  // edits reopen the page without a schema migration. A segmented page parsing its own body hashes content_hash, never the input the prior-fact guard empties.
+  const parserInput = page.body_storage === 'segmented' && !input.sidecar ? { page: regularPageVersionToken(page) } : { body: input.body };
   return `sidecar-${createHash('sha256')
     .update(
       JSON.stringify({
-        body,
+        ...parserInput,
         title: page.title,
         type: page.type,
         frontmatter: page.frontmatter,
@@ -769,8 +772,8 @@ async function preparePageSnapshot(
   page: Page,
 ): Promise<ConversationPageSnapshot> {
   try {
-    const body = await readConversationBodyForParsing(engine, page);
-    return { page, body, versionToken: snapshotVersionToken(page, body) };
+    const input = await readConversationInput(engine, page, { priorFacts: () => countConversationFacts(engine, page.source_id, page.slug) });
+    return { page, body: input.body, ...(input.window ? { window: input.window } : {}), versionToken: snapshotVersionToken(page, input) };
   } catch (error) {
     if (!(error instanceof ConversationBodyTooLargeError)) throw error;
     return { page, body: '', versionToken: `sidecar-oversized-${error.bytes}-${error.mtimeMs}`, oversizedSidecarBytes: error.bytes };
@@ -879,7 +882,8 @@ async function processPage(
   // `parseConversationMessages(body)` shape only saw the body, which
   // meant Telegram-bracket pages with frontmatter dates landed at
   // 1970-01-01. Now they pick up the correct date.
-  const parseResult = parseConversation(body, { page });
+  const fallbackDate = snapshot.window?.fallbackDate ?? undefined;
+  const parseResult = parseConversation(body, { page, ...(fallbackDate ? { fallbackDate } : {}) });
   let messages = parseResult.messages;
   if (parseResult.timezone_warning) {
     process.stderr.write(parseResult.timezone_warning + '\n');
@@ -926,7 +930,7 @@ async function processPage(
       body,
       engine: state.engine,
       signal: state.signal,
-      fallbackDate: deriveDateContext({ page }).fallbackDate,
+      fallbackDate: deriveDateContext({ page, ...(fallbackDate ? { fallbackDate } : {}) }).fallbackDate,
       propagateError: (error) =>
         error instanceof BudgetExhausted ||
         (state.signal?.aborted === true && isAbortError(error)),
@@ -978,12 +982,11 @@ async function processPage(
         if (state.managed) {
           // Counted when its batch publishes.
           const managed = await startManagedPage(state, snapshot, sinceIso, 0);
-          if ('start' in managed) await enqueueManagedPage(state, snapshot, managed.start, [nonExtractableAuditFact(page.slug, 0, snapshot.versionToken, reason)], null);
+          if ('start' in managed) await enqueueManagedPage(state, snapshot, managed.start, [nonExtractableAuditFact(page.slug, 0, snapshot.versionToken, reason)], null, 'full');
           return { newEndIso: null };
         } else {
-          state.result.orphan_facts_cleaned += await deleteOrphanFactsForPage(state.engine, state.sourceId, page.slug);
-          const rowNum = await peekRowNumStart(state.engine, state.sourceId, page.slug);
-          await writeDerivedFacts(state.engine, state.sourceId, page.slug, db => db.insertFacts([nonExtractableAuditFact(page.slug, rowNum, snapshot.versionToken, reason)], { source_id: state.sourceId })); // gbrain-allow-direct-insert: durable non-extractable audit outcome prevents repeated scans while remaining distinct from successful extraction
+          // #7013: the durable not-extractable outcome stops repeated scans; the page's prior facts stay.
+          state.result.orphan_facts_cleaned += (await publishPageFacts(state, page.slug, [nonExtractableAuditFact(page.slug, 0, snapshot.versionToken, reason)], 'full')).deleted;
         }
         state.result.pages_marked_non_extractable++;
       }
@@ -1001,28 +1004,17 @@ async function processPage(
 
   const managed = state.managed ? await startManagedPage(state, snapshot, sinceIso, segments.length) : null;
   if (managed && 'done' in managed) return managed.done;
-  // D11: delete-orphans-first replay safety. Wipes any facts written by
-  // a prior crashed / killed / partial run for this (sourceId, slug)
-  // pair before we re-extract. The lock we hold (D2 + D12 refreshing
-  // lock above the caller) guarantees no other worker is writing to
-  // this page right now, so the DELETE+INSERT pair is safe. A managed brain
-  // keeps the prior batch until its receipted request replaces it below.
-  const cleaned = state.managed ? 0 : await deleteOrphanFactsForPage(state.engine, state.sourceId, page.slug);
-  if (cleaned > 0) {
-    state.result.orphan_facts_cleaned += cleaned;
-    process.stderr.write(
-      `[extract-conversation-facts] cleaned ${cleaned} orphan fact(s) for ${page.slug} from prior partial run\n`,
-    );
-  }
-
-  // Page-global row_num, above every row the cleanup kept (retired or referenced history,
-  // fence rows); 0 on a page with none. A managed batch is renumbered under its lock.
-  let rowNum = state.managed ? 0 : await peekRowNumStart(state.engine, state.sourceId, page.slug);
+  // #7013: the page's rows are buffered and published once, after every
+  // segment's extraction (a managed brain in its receipted batch, an
+  // unmanaged one in one transaction below); the prior batch stays until a
+  // complete replacement retires it, so a failed, partial or empty run never
+  // removes it. Row numbers are reassigned under the page lock on publish.
+  let rowNum = 0;
   let newestEnd: string | null = null;
   let segmentsThisPage = 0;
-  let pageInsertedTotal = 0;
-  const managedRows: Array<NewFact & { row_num: number; source_markdown_slug: string }> = [];
+  const pageRows: Array<NewFact & { row_num: number; source_markdown_slug: string }> = [];
   const pageResolution = emptySaveTimeResolutionCounts();
+  const entityHints = await conversationEntityHints(state.engine, state.sourceId, page.slug, state.factVisibility); // #6731
 
   for (const seg of segments) {
     if (state.segmentLimit > 0 && segmentsThisPage >= state.segmentLimit) break;
@@ -1037,23 +1029,12 @@ async function processPage(
     // per-segment extraction failure aborts the page rather than silently
     // dropping facts.
     let extracted: ExtractedFact[];
+    const input: ExtractInput = { turnText: text, sessionId, source: PER_SEGMENT_SOURCE_PREFIX, engine: state.engine, abortSignal: state.signal,
+      entityHints, entityHintsCap: CONVERSATION_ENTITY_HINTS_CAP };
     if (state.extractor) {
-      extracted = await state.extractor({
-        turnText: text,
-        sessionId,
-        source: PER_SEGMENT_SOURCE_PREFIX,
-        engine: state.engine,
-        abortSignal: state.signal,
-      });
+      extracted = await state.extractor(input);
     } else {
-      const extraction = await extractFactsFromTurnWithOutcome({
-        turnText: text,
-        sessionId,
-        source: PER_SEGMENT_SOURCE_PREFIX,
-        engine: state.engine,
-        abortSignal: state.signal,
-        observationDate: segmentObservationDate(page, seg.startIso),
-      });
+      const extraction = await extractFactsFromTurnWithOutcome({ ...input, observationDate: segmentObservationDate(page, seg.startIso) });
       if (!extraction.ok) {
         // #3669 — rethrow BudgetExhausted UNWRAPPED. Wrapping it in a plain
         // Error strips the BUDGET_EXHAUSTED tag, so the worker pool's D13
@@ -1095,7 +1076,7 @@ async function processPage(
       // (above) ran every fact through the shipped resolver cascade (#3729/#4052),
       // so master's per-row resolveEntitySlug mapper (#4567's independent fix for
       // the same issue) is superseded rather than layered on top.
-      const rows = extracted.map((fact, i) => ({
+      const rows = await inferConversationSubjects(state.engine, state.sourceId, state.factVisibility, extracted.map((fact, i) => ({ // #6764
         ...fact, visibility: state.factVisibility,
         row_num: rowNum + i,
         source_markdown_slug: page.slug,
@@ -1107,14 +1088,8 @@ async function processPage(
         ...segmentValidFrom(fact.valid_from, seg.startIso),
         context:
           fact.context ?? `from ${page.slug} segment ${seg.startIso}..${seg.endIso}`,
-      }));
-      if (state.managed) {
-        managedRows.push(...rows);
-      } else {
-        const ins = await insertDerivedFacts(state.engine, state.sourceId, page.slug, rows); // canonical bulk extraction path for conversation pages (no `## Facts` fence: the chat log is the source of truth), through the write gate
-        pageInsertedTotal += ins.inserted;
-        state.result.facts_inserted += ins.inserted;
-      }
+      })));
+      pageRows.push(...rows);
     }
     rowNum += extracted.length;
     mergeSaveTimeResolutionCounts(pageResolution, segmentResolution);
@@ -1130,23 +1105,23 @@ async function processPage(
   // page whose segment count equals --segment-limit exactly, which
   // previously missed the terminal row and re-extracted on every run.
   const fullyProcessed = segmentsThisPage === segments.length;
+  const inScope = (list: typeof segments) => list.reduce((n, seg) => n + seg.messages.length, 0);
+  const scope: ConversationScope = !fullyProcessed ? 'partial' : inScope(segments) < inScope(allSegments) ? 'window' : 'full';
   if (
     fullyProcessed &&
     newestEnd !== null &&
     await snapshotIsCurrent(state.engine, state.sourceId, snapshot)
   ) {
-    // A terminal insert is part of the page transaction contract. Propagate
-    // failure so bulk accounting, CLI exit status, cycle status, and rollups all
-    // report the page as unfinished. A managed brain publishes it with the
-    // page's facts in one transaction.
-    const terminal = terminalAuditFact(page.slug, rowNum, snapshot.versionToken);
-    if (state.managed) managedRows.push(terminal);
-    else await writeDerivedFacts(state.engine, state.sourceId, page.slug, db => db.insertFacts([terminal], { source_id: state.sourceId })); // gbrain-allow-direct-insert: page-level TERMINAL audit row (Codex C7 / E16) marks extraction completion in the durable facts table — there's no fence equivalent because this is internal audit state, not user-facing knowledge
-    rowNum++;
+    // The terminal row publishes in the same transaction as the page's facts.
+    // A publication failure propagates, so bulk accounting, CLI exit status,
+    // cycle status, and rollups all report the page as unfinished.
+    pageRows.push(terminalAuditFact(page.slug, rowNum, snapshot.versionToken));
   } else if (fullyProcessed && newestEnd !== null) {
     process.stderr.write(
       `[extract-conversation-facts] ${page.slug} changed during extraction; leaving it unfinished for replay\n`,
     );
+    // An unmanaged brain keeps what the run extracted as a partial batch, which never retires prior facts (#7013).
+    if (!state.managed) state.result.orphan_facts_cleaned += (await publishPageFacts(state, page.slug, pageRows, 'partial')).deleted;
     // #4869: no terminal, no checkpoint — this claim did not reach a durable
     // outcome, so it counts as failed (cycle 'warn'), not processed.
     state.result.pages_failed++; recordFailedPage(state.result, page.slug, 'the page changed during extraction; left unfinished for replay');
@@ -1154,7 +1129,14 @@ async function processPage(
   }
 
   // A managed page is counted, and its checkpoint set, when its batch publishes.
-  if (managed && newestEnd !== null) { await enqueueManagedPage(state, snapshot, managed.start, managedRows, newestEnd); return { newEndIso: null }; }
+  if (managed && newestEnd !== null) { await enqueueManagedPage(state, snapshot, managed.start, pageRows, newestEnd, scope); return { newEndIso: null }; }
+
+  const published = await publishPageFacts(state, page.slug, pageRows, scope);
+  state.result.facts_inserted += published.facts_inserted;
+  state.result.orphan_facts_cleaned += published.deleted;
+  if (published.facts_inserted < pageRows.filter(row => row.source !== TERMINAL_AUDIT_SOURCE).length) {
+    process.stderr.write(`[extract-conversation-facts] ${page.slug}: kept its prior facts; this ${scope} run's facts were not published over them (#7013)\n`);
+  }
 
   if (newestEnd !== null) {
     // v0.41.15.0 (codex #5/#6): per-page atomic checkpoint write. Mutate
@@ -1166,7 +1148,7 @@ async function processPage(
   }
 
   process.stderr.write(
-    `[extract-conversation-facts] ${page.slug}: ${pageInsertedTotal} facts inserted across ${segmentsThisPage} segments ` +
+    `[extract-conversation-facts] ${page.slug}: ${published.facts_inserted} facts inserted across ${segmentsThisPage} segments ` +
     `entity_resolution_counts=${formatSaveTimeResolutionCounts(pageResolution.counts)}\n`,
   );
 
@@ -1657,32 +1639,6 @@ async function writeRunReceiptAndRollup(
   });
 }
 
-/**
- * Look up the max row_num already in facts for this (source_id, slug),
- * so the page-global accumulator continues from the right place on resume.
- */
-async function peekRowNumStart(
-  engine: BrainEngine,
-  sourceId: string,
-  slug: string,
-): Promise<number> {
-  try {
-    const rows = await engine.executeRaw<{ max_row: number | null }>(
-      `SELECT COALESCE(MAX(row_num), -1) AS max_row
-         FROM facts
-        WHERE source_id = $1 AND source_markdown_slug = $2`,
-      [sourceId, slug],
-    );
-    const maxRow = rows[0]?.max_row ?? -1;
-    return Number(maxRow) + 1;
-  } catch {
-    // Pre-migration brains may not have source_markdown_slug populated.
-    // Fall back to 0; insertFacts will fail with a clearer error if
-    // there's a real collision.
-    return 0;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // CLI parsing + handler.
 // ---------------------------------------------------------------------------
@@ -1982,6 +1938,7 @@ export async function runExtractConversationFacts(
       `in ${sourceIds.length} source(s). ` +
       `Spent ~$${totalSpent.toFixed(4)}.`,
     );
+    if (parsed.dryRun && parsed.slugs?.length) console.log(`  Targets: ${parsed.slugs.join(', ')}`); // #6764: the preview names what the paid run would re-extract
     if (aggregate.pages_skipped > 0) {
       console.log(`  Skipped ${aggregate.pages_skipped} page(s) without eligible segments or outside the selected types:`);
       console.log(`    ${aggregate.pages_skipped_unparsed} with no parseable speaker turns (retryable); ${aggregate.pages_skipped_type_mismatch} with a type mismatch; ${aggregate.pages_skipped_insufficient_turns} with insufficient turns; ${aggregate.pages_skipped_since} with no eligible segments after --since; ${aggregate.pages_skipped_unrecognized_speaker} declined for speaker attribution.`);

@@ -11,6 +11,9 @@ import { isFactWithdrawn, recordFactWithdrawal, type WithdrawalCommit } from '..
 import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { inferFactSubject, isEntityInferenceEnabled, type InferredVia } from '../facts/subject-infer.ts';
 import { parseFactsFence } from '../facts-fence.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
+import { segmentedRememberRefusal } from './verb-errors.ts';
+import { materializedPage, segmentedOverCeiling } from './segmented-apply.ts';
 import { excludesPrivateWrites } from './page-visibility.ts';
 import { emitFenceNotice, initializeLocalPersistence, requestPrincipalForContext } from './page-mutations.ts';
 import { authorizeStoredRequest, submissionAuthority } from './authority.ts';
@@ -26,6 +29,7 @@ import { isTerminal, type WriteRequest } from './model.ts';
 import { prepareMemoryMutation } from './memory-prepare.ts';
 import { retryWriteAdmission } from './admission-retry.ts';
 import { privateProvenanceFilterFragment, resolveExcludePrivatePages } from '../search/private-visibility.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 
 export { prepareMemoryMutation } from './memory-prepare.ts';
 /** Only semantic appends without an explicit caller revision can be recomputed. */
@@ -86,8 +90,12 @@ async function planRememberTarget(ctx: OperationContext, sourceId: string, sourc
       `Entity page ${slug} in source ${sourceId} is deleted or not visible to this caller, so nothing was saved. Remember the fact against a visible entity, or without an entity (it is then filed under memory/unattributed).`);
   }
   if (inferred && !snapshot) throw new InferredTargetRejected('NO_ENTITY');
+  // Wave B: a segmented entity page over the single-string ceiling cannot take a fence row; named or inferred, the save refuses
+  // before admission instead of misfiling it. Below the ceiling an inferred target's checks read the page back whole, as preparation does.
+  if (entitySlug !== null && snapshot && segmentedOverCeiling(snapshot.page)) throw segmentedRememberRefusal(slug, sourceId, inferred !== null);
+  const whole = inferred && snapshot && isSegmentedPage(snapshot.page) ? await materializedPage(ctx.engine, snapshot.page) : snapshot?.page;
   if (inferred && (await isFactWithdrawn(ctx.engine, sourceId, inferred.visibility, inferred.fact, slug)
-    || parseFactsFence(snapshot!.page.compiled_truth).warnings.length)) throw new InferredTargetRejected('ENTITY_LINK_FAILED');
+    || parseFactsFence(whole!.compiled_truth).warnings.length)) throw new InferredTargetRejected('ENTITY_LINK_FAILED');
   // Preserve the stub guard: a fallback name remains DB-only until a real
   // entity page exists. No placeholder page is created by remember.
   const fence = entitySlug !== null && snapshot !== null;
@@ -116,7 +124,7 @@ async function planRememberTarget(ctx: OperationContext, sourceId: string, sourc
     const { serializePageToMarkdown } = await import('../markdown.ts');
     try {
       await prepareFileTarget(ctx.engine, { source_id: sourceId, worktree_id: binding.worktree_id, slug }, snapshot,
-        serializePageToMarkdown(snapshot.page, snapshot.tags));
+        serializePageToMarkdown(whole!, snapshot.tags));
     } catch {
       throw new InferredTargetRejected('ENTITY_LINK_FAILED');
     }
@@ -142,6 +150,7 @@ async function inferRememberTarget(ctx: OperationContext, sourceId: string, sour
     return { target, via: inferred.via };
   } catch (error) {
     if (error instanceof InferredTargetRejected) return { warning: error.warning };
+    if (error instanceof OperationError && error.canonicalCode === 'page_body_segmented') throw error;
     if (error instanceof OperationError) return null;
     throw error;
   }
@@ -244,8 +253,10 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
   // Retry the whole withdrawal, so source/principal guards and the connection
   // are released before backoff. Admission must not retry a nested savepoint.
   let withdrawn: WithdrawalCommit['pages'] = [];
+  const beliefReport = { appended: 0 };
   const done = await retryWriteAdmission(requestId, remaining => ctx.engine.transaction(async tx => {
     withdrawn = [];
+    beliefReport.appended = 0;
     await declareDurablePersistence(tx, `${Math.min(1000, remaining)}ms`, `${remaining}ms`);
     // Brain row -> source -> current grant -> counters/request -> sorted page keys -> facts.
     // Do not acquire a shared source lock first and upgrade it after admission.
@@ -275,7 +286,7 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
     return withCoordinatedWrite(tx, [sourceId], async () => {
       // Even an expired legacy fact acquires a ledger so a stale import cannot
       // reactivate it. Internal affected-page identities never enter the receipt.
-      withdrawn = (await recordFactWithdrawal(tx, id, sourceId, ctx.remote !== false, { requestId: row.id, semanticReview, excludePrivate })).pages;
+      withdrawn = (await recordFactWithdrawal(tx, id, sourceId, ctx.remote !== false, { requestId: row.id, semanticReview, excludePrivate, beliefReport })).pages;
       if (reason) await tx.executeRaw(`UPDATE facts SET context=concat_ws(' | ',NULLIF(context,''),$3::text)
         WHERE id=$1 AND source_id=$2`, [id, sourceId, `forgotten: ${reason}`]);
       if (operation === 'forget_fact' && fact.expired_at !== null) {
@@ -287,6 +298,7 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
       return completeWrite(tx, row, 'committed', { ...outcome, persistence: { mode: 'database' } });
     }, requestAttribution(row));
   }), undefined, error => ctx.engine.reconnect({ error }));
+  if (beliefReport.appended && done.state === 'committed') await markBeliefCommits(ctx.engine, [done.id]).catch(() => undefined);
   // The commit removed the withdrawn pages' chunks. Rebuild them before
   // acknowledging: a CLI process exits without a resident projection worker.
   // A failed rebuild stays queued as durable projection work.

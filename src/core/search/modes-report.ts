@@ -66,6 +66,8 @@ export const KNOB_DESCRIPTIONS: Record<keyof ModeBundle, string> = {
   relational_planner: 'Multi-hop planner: questions chaining 2-3 typed relations walk typed hop chains with evidence (also keyless recall)',
   relational_orient_onehop: 'Typed one-hop walks read edges written on either page by the relation type signature (opt-in; null = follow relational_planner)',
   relational_chain_slots: 'When a multi-hop chain fired, up to this many chain rows (answers, then evidence pages) lead page 1 (0..10; 0 = single evidence slot)',
+  collapse: 'Result-time collapse: same-slug twins in other sources, redirect stubs and copies of one document fold into the best row (listed in collapsed)',
+  rank_priors: 'Rank priors after the reranker: organization over person when no person is named, weak OCR matches, dated over undated rows on when-questions',
   diverse_pool_depth: 'Session-diverse pool before the reranker: each arm fetches at least N candidates, one row per session, the reranker reads at least N (0..100; 0 = off)',
   // Ranker wave (Phase E2) arm-confidence fusion
   keyword_arm_confidence_floor: 'Keyword-arm confidence floor: below this margin ratio the keyword + title lists fuse at half weight (null = off; (0, 1])',
@@ -107,8 +109,8 @@ export const MODES_REPORT_PER_CALL_NOTE =
   'Resolved from config overrides + the active mode bundle. Per-call SearchOpts ' +
   'overrides on individual searches are not shown — a call that passes its own ' +
   'knobs (e.g. expand, autocut, relational) wins for that call only. The `query` ' +
-  'op expands when the resolved `expansion` row below is on (the tokenmax ' +
-  'default; `search.expansion` overrides it) unless the call passes `expand` ' +
+  'op expands when the resolved `expansion` row below is on (off in every ' +
+  'mode by default; `search.expansion` overrides it) unless the call passes `expand` ' +
   '(`--expand` / `expand: true` forces it, `--no-expand` / `expand: false` ' +
   'skips it), while `search` never expands. Expansion needs configured embedding and expansion ' +
   'providers; requested expansion is not proof a provider ran. A configured ' +

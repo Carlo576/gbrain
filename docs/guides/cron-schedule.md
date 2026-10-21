@@ -75,8 +75,13 @@ those (`maintenance_lock_busy`) and the holder runs them.
 
 # Autopilot health gate — daily at 7 AM. The exit code is the signal:
 # 0 fresh (or nothing installed), 1 needs attention (stale heartbeat,
-# never ran, or paused), 2 the daemon took itself out of rotation.
-# Status is filesystem-only, so it works even during a DB outage.
+# never ran, paused, or brain-wide maintenance stalled: no completed pass
+# for 3 global intervals while its jobs fail or a phase keeps blocking it,
+# or passes stamping past a phase that failed 3+ passes in a row),
+# 2 the daemon took itself out of rotation. Status is filesystem-only (the
+# daemon writes the maintenance verdict each tick), so it works even during
+# a DB outage. On a stall: gbrain doctor --only global_maintenance_stalled
+# names the phase and the command to run.
 0 7 * * * gbrain autopilot --status >> /tmp/gbrain-autopilot-health.log 2>&1 || your-notify "gbrain autopilot needs attention"
 
 # Dream cycle — nightly at 2 AM
@@ -138,8 +143,13 @@ per-transcript synthesis subagents. The dials:
 - `dream.triage.threshold` (default 0.5) — the score bar, and the first of the
   two ways a transcript passes the gate (the verified-segment rescue below is
   the second). Scores are cached, so retuning it re-gates instantly with
-  **zero** new LLM calls. Raise it if too much routine content synthesizes;
-  lower it if real signal is being skipped.
+  **zero** new LLM calls. Lower it if real signal is being skipped. Raising it
+  alone may not cut volume (#6753): the rescue band below is
+  `[rescue_floor, threshold)`, so it widens with the threshold, and
+  transcripts that stop passing directly can still pass through the rescue.
+  To cut volume, raise `dream.triage.rescue_floor` or
+  `dream.triage.rescue_min_segments` along with it (`0` turns the rescue
+  off), and compare `details.triage.rescue_fired` before and after.
 - `models.dream.triage` — the triage model (default: utility tier / Haiku).
 - `dream.triage.max_chars` (default 24000, floor 1000) — per-transcript
   sample window (head/middle/tail) sent to the judge. Not part of cache
@@ -175,6 +185,20 @@ per-transcript synthesis subagents. The dials:
   still apply; a value that is not a JSON array is ignored with one stderr
   line and the phase scans every type. Note that a page with no `type` has
   no type to match, so it is excluded whenever the list is set.
+  A page whose reply is a complete empty array (`[]`, even with an
+  explanation after it) gets a "no gradeable claims" tombstone and is not
+  sent again while its content is unchanged; a reply that is truncated,
+  prose only, or empty and then followed by takes is retried next cycle.
+  There is no per-page force flag: the tombstone is keyed by a hash of the
+  page body, so any edit to the body re-extracts the page on the next cycle,
+  and that is the only way to send one tombstoned page again.
+  A page the model refuses the same way in 3 cycles (a prompt too long for
+  the model, a content block) gets a separate failure tombstone and is
+  skipped while its body and the prompt version are unchanged; pages that
+  failed before are retried after the fresh ones, so they never block the
+  rest. `gbrain takes propose --failed` lists held pages and
+  `gbrain takes propose --retry-failed [--slug <slug>]` releases them.
+  Timeouts, rate limits and other transient errors are never held.
 - `dream.synthesize.attribution_rules` and `dream.propose_takes.attribution_rules`
   (default off) — extra prompt rules from #5425: keep who proposed what and
   later corrections explicit; an assistant-authored judgment is not the

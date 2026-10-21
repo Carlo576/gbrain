@@ -29,6 +29,8 @@ export const CONTRACT_VERSION = 1 as const;
 export type Effect = 'paid' | 'destructive' | 'credentials' | 'egress' | 'persistent_install';
 export type Actor = 'agent' | 'user' | 'host_admin' | 'provider';
 export type Next = 'run' | 'ask_user' | 'tell_user_to_run' | 'wait' | 'report';
+/** A fix expected to run longer than this is the user's or host admin's (`tell_user_to_run`), never the agent's. */
+export const AGENT_TOOL_LIMIT_MS = 120_000;
 export type Transport = 'cli' | 'stdio' | 'http';
 export type Surface = 'verbs' | 'starter' | 'full';
 export type ErrorClass = 'caller' | 'consent' | 'retryable' | 'unavailable' | 'server' | 'host_only';
@@ -431,8 +433,8 @@ export function buildEnvelope(p: EnvelopeParts, ctx: RenderContext): AgentEnvelo
     ...(p.why !== undefined ? { why: p.why } : {}),
     ...(fix ? { fix } : {}),
     docs_cmd: ['gbrain', 'errors', p.code],
-    class: codeClass(p.code),
-    retryable: p.retryable ?? codeRetryable(p.code),
+    class: codeClass(p.code, p.reason),
+    retryable: p.retryable ?? codeRetryable(p.code, p.reason),
     ...(notices ? { notices } : {}),
     contract_version: CONTRACT_VERSION,
   };
@@ -848,7 +850,7 @@ export function projectionConflictLine(e: unknown, command: string): string | nu
 /** Pure: callers write the strings. TTY order: `Error [code]: msg` / `Fix:` / `Why:` / `Docs:`. */
 export function renderCliError(e: unknown, opts: { json: boolean; command: string; tty: boolean }): CliErrorRender {
   const env = toAgentError(e, { transport: 'cli', command: opts.command, render: cliRenderContext() });
-  const exitCode = exitCodeForCode(env.code);
+  const exitCode = exitCodeForCode(env.code, env.reason);
   if (opts.json) return { stdout: `${JSON.stringify(env, null, 2)}\n`, exitCode };
   const lines = [`Error [${env.code}]: ${env.message}`];
   const relay = env.fix && !env.fix.command && env.fix.mcp ? `call ${env.fix.mcp.tool} over MCP with ${JSON.stringify(env.fix.mcp.arguments)}` : undefined;

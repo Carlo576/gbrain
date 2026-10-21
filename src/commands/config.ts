@@ -1,6 +1,7 @@
 import type { GBrainConfig } from '../core/config.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, loadConfigWithEngine } from '../core/config.ts';
+import { isLegacyModelKey, reportLegacyModelWrite, unsetModelFilePin } from './config/model-pin-shadow.ts';
 import {
   getEmbeddingColumnRegistry,
   validateColumnKey,
@@ -66,7 +67,7 @@ const FILE_PLANE_DOTTED_KEYS: ReadonlySet<string> = new Set([
   // #5232: the CLI resolves its write wait before choosing a transport, engine-free.
   'persistence.write_wait_ms',
   // Engine graduation opt-out: the pre-connect migrate router reads it engine-free.
-  'migrate.graduation',
+  'migrate.graduation', 'doctor.default_budget_ms', // #6803: the CLI doctor reads it pre-connect (commands/doctor/default-budget.ts)
 ]);
 
 /** #5489: every self_upgrade.* reader (cli.ts startup check, autopilot,
@@ -108,7 +109,7 @@ async function unsetFilePlaneKey(key: string): Promise<boolean> {
   const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
   const cfg = loadConfigFileOnly();
   const dot = key.indexOf('.');
-  const top = key.slice(0, dot) as 'push' | 'hooks' | 'backup' | 'mcp' | 'self_upgrade' | 'persistence' | 'migrate';
+  const top = key.slice(0, dot) as 'push' | 'hooks' | 'backup' | 'mcp' | 'self_upgrade' | 'persistence' | 'migrate' | 'doctor';
   const leaf = key.slice(dot + 1);
   const branch = cfg?.[top] as Record<string, unknown> | undefined;
   if (!cfg || !branch || !(leaf in branch)) return false;
@@ -378,6 +379,11 @@ const setLineGrammarConfig = async (engine: BrainEngine, key: string, value: str
 
 async function setConfigWithDecideHooks(engine: BrainEngine, key: string, value: string, force = false): Promise<void> {
   if (await setLineGrammarConfig(engine, key, value)) return;
+  if (key === 'sync.admission') return (await import('./config/sync-admission-value.ts')).setSyncAdmissionValue(engine, value);
+  if (/^sync\.max_delete(s|_ratio)(\.source\..+)?$/.test(key) || key === 'purge.retention_hours') {
+    const err = (await import('../core/sync-reconcile.ts')).deleteSafetyConfigRefusal(key, value);
+    if (err) { console.error(`[config] ${err}`); process.exit(1); }
+  }
   if (key.startsWith('decide.')) {
     const { validateDecideConfigValue } = await import('../core/ai/decide/config.ts');
     const err = validateDecideConfigValue(key, value);
@@ -397,6 +403,8 @@ async function setConfigWithDecideHooks(engine: BrainEngine, key: string, value:
     if (err) { console.error(`[config] ${err}`); process.exit(1); }
   }
   if (key.startsWith('loops.')) (await import('./config/loops-values.ts')).refuseInvalidLoopsConfigValue(key, value);
+  if (key === 'sync.slug_conflicts.auto_remove') { const err = (await import('../core/repair/slug-autoheal.ts')).slugAutoRemoveValueRefusal(value); if (err) { console.error(`[config] ${err}`); process.exit(1); } }
+  if (key === 'sync.origin_twins.auto_resolve') { const err = (await import('../core/repair/origin-twins-heal.ts')).originAutoResolveValueRefusal(value); if (err) { console.error(`[config] ${err}`); process.exit(1); } }
   if (key.startsWith('search.')) (await import('./config/keyword-timeout-value.ts')).refuseInvalidKeywordTimeoutValue(key, value);
   if (key === 'persistence.max_claim_ms') {
     const { validateMaxClaimConfigValue } = await import('../core/persistence/claim-phase.ts');
@@ -546,8 +554,8 @@ async function setFilePlaneKey(key: string, value: string, tail: string[]): Prom
     cfg.backup = { ...(cfg.backup ?? {}), check_enabled: on };
     saveConfig(cfg);
     console.log(`Set ${key} = ${on} (file plane: ~/.gbrain/config.json)`);
-  } else if (key === 'persistence.write_wait_ms') {
-    await setFileWriteWait(cfg, value, saveConfig);
+  } else if (key === 'persistence.write_wait_ms') { await setFileWriteWait(cfg, value, saveConfig);
+  } else if (key === 'doctor.default_budget_ms') { (await import('./doctor/default-budget.ts')).setDoctorDefaultBudget(cfg, value, saveConfig);
   } else if (key === 'migrate.graduation') {
     const on = isConfigTruthy(value);
     cfg.migrate = { ...(cfg.migrate ?? {}), graduation: on };
@@ -678,8 +686,9 @@ Subcommands:
   get <key> [--raw]            Print one value (--raw: no secret redaction)
   set <key> <value>            Write a value. --force accepts an unknown key;
                                --coverage-override (or --yes) passes the embedding
-                               coverage gate; --yes accepts a disclosure prompt
-  unset <key>                  Remove one key
+                               coverage gate; --yes accepts a disclosure prompt;
+                               chat_model/expansion_model warn when outranked (--json)
+  unset <key>                  Remove one key (a model key with --file: its config.json pin)
   unset --pattern <prefix>     Remove every key under a prefix`;
 
 export function printUsage(): void {
@@ -767,6 +776,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       await unsetEmbeddingDisabled(engine);
       return;
     }
+    if (isLegacyModelKey(key) && args.includes('--file')) return unsetModelFilePin(key);
     if (MEMORY_DUAL_PLANE_KEYS.has(key) || key === BRAIN_AUDIENCE_KEY) {
       // Dual-plane delete, mirroring the dual-plane set: file mirror AND the
       // authoritative DB row both go. "Not found" only when neither had it.
@@ -882,6 +892,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   const key = positionals[1];
   const value = positionals[2];
   if ((action === 'get' || action === 'set') && key) (await import('../core/questions/auto-think-migration.ts')).noteAutoThinkReplacement(key);
+  if ((action === 'get' || action === 'set') && key && await (await import('../core/sync-config-keys.ts')).handleSyncKeyConfig(engine, action, key)) return; // #6712 PR 2
 
   if (action === 'get' && (key === EMBEDDING_DISABLED_KEY || key === 'schema_pack')) {
     const effective = key === 'schema_pack' ? await effectiveSchemaPack(engine) : await effectiveEmbeddingDisabled(engine);
@@ -968,7 +979,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     // sitting in the value slot can't slip through as literal config
     // content.
     const tail = args.slice(2);
-    const unknownFlags = tail.filter(a => a.startsWith('-') && !CONFIG_SET_KNOWN_FLAGS.includes(a));
+    const unknownFlags = tail.filter(a => a.startsWith('-') && !CONFIG_SET_KNOWN_FLAGS.includes(a) && !(a === '--json' && isLegacyModelKey(key)));
     if (unknownFlags.length > 0) {
       for (const flag of unknownFlags) {
         console.error(`[config] unknown flag: ${flag}`);
@@ -1209,8 +1220,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     if (key.startsWith('provider_chat_options.')) await import('../core/config-db-merge.ts').then(m => m.assertProviderChatOptionsSetValue(key, value)).catch((error: Error) => { console.error(`[config] ${error.message}`); process.exit(1); });
     // #5470: every admission parses the journal caps; a malformed value
     // would refuse all managed writes, so reject it here.
-    const { JOURNAL_CONFIG_KEYS, parseJournalConfigValue } = await import('../core/persistence/limits.ts');
-    if (JOURNAL_CONFIG_KEYS.includes(key)) {
+    const { JOURNAL_CONFIG_KEYS, UPLOAD_CONFIG_KEYS, parseJournalConfigValue } = await import('../core/persistence/limits.ts');
+    if (JOURNAL_CONFIG_KEYS.includes(key) || UPLOAD_CONFIG_KEYS.includes(key)) {
       try { parseJournalConfigValue(key, value); }
       catch (error) { console.error(`[config] ${(error as Error).message}`); process.exit(1); }
     }
@@ -1435,10 +1446,9 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     }
 
     await setConfigWithDecideHooks(engine, key, value, forceFlag);
-    // v0.36.x #892: redact sensitive values in confirmation output. API
-    // keys / tokens / passwords are commonly set from terminals with
-    // scrollback; echoing the raw value to stderr leaks the secret.
-    console.log(`Set ${key} = ${redactConfigValue(key, value)}`);
+    // #892: keep credentials out of confirmation output and scrollback. #6795: a model pin says whether it took effect.
+    if (isLegacyModelKey(key)) await reportLegacyModelWrite(engine, key, value, tail.includes('--json'));
+    else console.log(`Set ${key} = ${redactConfigValue(key, value)}`);
     if (key === 'facts.default_visibility') await restampVisibilityPosture(value);
 
     // v0.40.3.0 (D3 + Phase 2B): mode-switch UX. Fires only on

@@ -24,13 +24,16 @@ import { compareVersions } from '../migration-ledger.ts';
 import { classifySyncFault, SYNC_FAULT_TABLE, type SyncFaultClass, type SyncSafeAction } from './sync-fault-class.ts';
 import { isSyncKnockOn, knockOnRoot, SYNC_CURSOR_FENCE_ORIGIN, SYNC_KNOCK_ON_ORIGIN, cursorFenceCause, syncKnockOnSql } from './sync-knock-on.ts';
 import { writeFailureDiagnostic } from './verb-errors.ts';
+import { publicCategory, type PublicCategory } from './public-category.ts';
 
 export type TerminalCategory =
   | 'recovery_pending' | 'recovery_blocked'
   | 'knock_on' | 'run_replaced' | 'outside_fence'
   | 'operator_cancelled' | 'caller_conflict' | 'file_conflict' | 'canonical_file_missing' | 'fence_unrenderable'
   | 'writer_guard' | 'database_refusal' | 'owner_exception' | 'legacy_publication_refusal'
-  | 'sync_fault' | 'transport' | 'caller_refusal' | 'gbrain_defect' | 'diagnosis_required';
+  | 'sync_fault' | 'transport' | 'caller_refusal' | 'gbrain_defect' | 'diagnosis_required'
+  // #6904: the write met a missing relation or column (42P01 / 42703); the schema is behind this build or lost a table.
+  | 'schema_missing';
 
 /** The receipt columns the classifier reads; every one but `intent_kind` and `error_message` survives compaction. */
 export interface TerminalInput {
@@ -52,10 +55,17 @@ export interface TerminalInput {
   error_message?: string | null;
   /** A reader that computed `terminalKnockOnSql` passes its answer, so the SQL twin and this verdict cannot disagree. */
   knock_on?: boolean;
+  /**
+   * #6904: whether the brain's schema is behind this build now (`readSchemaBehind`), which picks a `schema_missing` verdict's
+   * fix: apply-migrations when behind, the missing-tables check when at head. Absent or null: unknown, the fix is a doctor read.
+   */
+  schema_behind?: boolean | null;
 }
 
 export interface TerminalVerdict {
   category: TerminalCategory;
+  /** #6712 PR 2: the closed public vocabulary beside `category` (`public-category.ts`); total. */
+  public_category: PublicCategory;
   /** The code the verdict is keyed on: the row's `error_code`, or the refinement its origin names. */
   code: string;
   origin: string | null;
@@ -102,12 +112,22 @@ export function terminalVerifyArgv(sourceId: string): string[] { return failures
 export function terminalInspectArgv(requestId: string): string[] { return ['gbrain', 'write-request', requestId, '--json']; }
 
 function syncRetry(sourceId: string, why: string): Action {
-  return { argv: ['gbrain', 'sync', '--source', sourceId, '--no-pull', '--retry-failed', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why,
+  return { argv: ['gbrain', 'sync', '--source', sourceId, '--no-pull', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why,
     verify: { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'] }, docs: 'docs/guides/sync-unblock-runbook.md' };
 }
 function inspect(sourceId: string, why: string, userMessage?: string): Action {
   return { argv: statusArgv(sourceId), consent: [], actor: userMessage ? 'host_admin' : 'agent', requires_exclusive: false, why,
     ...(userMessage ? { user_message: userMessage } : {}), verify: { argv: failuresArgv(sourceId) }, docs: 'docs/guides/troubleshooting.md#terminal-write-failures' };
+}
+
+/**
+ * #6712 PR 2 (L4): the file-drift preview over every page still drifted since `since` (a concrete instant, never an age),
+ * the fix of a group of drift conflicts on several pages; a single page keeps its `--slug` preview.
+ */
+export function driftSinceAction(sourceId: string, since: string): Action {
+  return { argv: ['gbrain', 'repair', 'file-drift', '--source', sourceId, '--all-drifted', '--since', since, '--prefer', 'database'], consent: [], actor: 'agent', requires_exclusive: false,
+    why: `Previews keeping the database copy of every page still drifted since ${since} and writes nothing (it refuses a mix of drift classes and names --class for each); --prefer file previews importing the files instead. Decide with the user, then apply with the printed plan hash.`,
+    verify: { argv: failuresArgv(sourceId) }, docs: 'docs/guides/write-refusals.md#file_database_drift' };
 }
 
 function build(input: TerminalInput): string | null {
@@ -120,7 +140,7 @@ function stringField(detail: Record<string, unknown> | null | undefined, key: st
   return typeof value === 'string' ? value : null;
 }
 
-type Partial_ = Omit<TerminalVerdict, 'defect' | 'fixed_in' | 'historical' | 'escalate'> & { escalate?: string };
+type Partial_ = Omit<TerminalVerdict, 'defect' | 'fixed_in' | 'historical' | 'escalate' | 'public_category'> & { escalate?: string };
 
 /** The read-time verdict for one terminal receipt that did not commit; null for a committed receipt with no recovery record. */
 export function classifyTerminal(input: TerminalInput): TerminalVerdict | null {
@@ -129,7 +149,7 @@ export function classifyTerminal(input: TerminalInput): TerminalVerdict | null {
   const fixedIn = (TERMINAL_FIXED_IN as Partial<Record<TerminalCategory, string>>)[verdict.category] ?? null;
   const ran = build(input);
   const historical = fixedIn !== null && (verdict.category === 'legacy_publication_refusal' || (ran !== null && compareVersions(ran, fixedIn) < 0));
-  return { ...verdict, escalate: verdict.escalate ?? escalateOf(verdict.code), defect: DEFECTS.has(verdict.category), fixed_in: fixedIn, historical };
+  return { ...verdict, public_category: publicCategory(verdict), escalate: verdict.escalate ?? escalateOf(verdict.code), defect: DEFECTS.has(verdict.category), fixed_in: fixedIn, historical };
 }
 
 function fromTable(category: TerminalCategory, code: string, origin: string | null, action: Action, detail?: string | null, message?: string | null): Partial_ {
@@ -198,6 +218,10 @@ function route(input: TerminalInput): Partial_ {
         'Read recent_failures[].error_detail from gbrain sources writer status --probe --json on the brain host, check doctor managed_guard_schema_drift, then retry the write with a new request id (gbrain repair failed-writes replays caller writes).'),
       argv: ['gbrain', 'sources', 'writer', 'status', '--source', source, '--probe', '--json'] } };
   }
+  // #6904: a missing relation or column, classified at publication, or recorded as an owner exception by an older build (its errno).
+  if (reason === 'schema_missing' || (origin === 'owner_exception' && ['42P01', '42703'].includes(stringField(detail, 'errno') ?? ''))) {
+    return schemaMissingVerdict(input, code, origin, stringField(detail, 'missing'));
+  }
   if (origin === 'owner_exception') {
     return { category: 'owner_exception', code, origin, class: 'systemic', safe_actions: ['upgrade'], needs_human: true,
       human_reason: 'The owner raised an unexpected exception while running this write: a gbrain defect.',
@@ -230,23 +254,41 @@ function route(input: TerminalInput): Partial_ {
   if (code === 'source_changed') {
     const known = stringField(detail, 'reason') ?? (input.error_message ? writeFailureDiagnostic(code, input.error_message).reason : null);
     if (!known || known === 'source_changed') return diagnosis(input, code, origin, `The write was refused source_changed with no recorded cause${input.compacted ? ' (its receipt was compacted)' : ''}.`);
+    // #6712 PR 2 (L4): the recorded reason picks the exit; the verdict text is the fault table's row for it.
+    const row = (key: string) => { const v = classifySyncFault({ code, detail: key }); return { class: v.class, safe_actions: v.safe_actions, needs_human: v.needs_human, human_reason: v.human_reason, escalate: escalateOf(key) }; };
     if (known === 'file_database_drift' || known === 'canonical_path_occupied' || known === 'unbound_source') {
-      return { category: 'file_conflict', code, origin: origin ?? known, class: 'page', safe_actions: ['reconcile'], needs_human: true,
-        human_reason: 'The page\'s Git file and its database copy differ; a person chooses which version wins.', escalate: 'always: the file and the database page diverge',
-        action: { argv: ['gbrain', 'sources', 'reconcile', source, input.slug, '--preview'], consent: [], actor: 'agent', requires_exclusive: false,
-          why: 'Previews both versions of the page and writes nothing; apply the resolved preview, then resubmit the write with a new request id.',
+      return { category: 'file_conflict', code, origin: origin ?? known, ...row('file_database_drift'),
+        action: { argv: ['gbrain', 'repair', 'file-drift', '--source', source, '--slug', input.slug, '--prefer', 'database'], consent: [], actor: 'agent', requires_exclusive: false,
+          why: `Previews keeping the database copy of ${input.slug} and rewriting its file, and writes nothing; --prefer file previews importing the file instead. Decide with the user, apply with the printed plan hash, then resubmit the write with a new request id.`,
           verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#file_database_drift' } };
     }
     if (known === 'canonical_file_missing') {
-      return { category: 'canonical_file_missing', code, origin: origin ?? known, class: 'page', safe_actions: ['repair'], needs_human: true,
-        human_reason: 'The page\'s canonical file is gone but the database page is still live (a ghost page); a person chooses to restore the file or remove the page.',
-        escalate: 'always: no sync can import a file that is not there',
+      return { category: 'canonical_file_missing', code, origin: origin ?? known, ...row('canonical_file_missing'),
         action: { argv: ['gbrain', 'repair', 'ghost-pages', '--source', source], consent: [], actor: 'agent', requires_exclusive: false,
           why: 'Previews the live pages whose canonical file is missing and writes nothing; apply only after the user agrees, or restore the file and sync.',
           verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#canonical_file_missing' } };
     }
-    if (known === 'source_binding_changed' || known === 'unsafe_file_target') return diagnosis(input, code, known, `The write was refused source_changed (${known}).`);
+    if (known === 'source_binding_changed' || known === 'unsafe_file_target') {
+      const v = row(known);
+      return { category: 'diagnosis_required', code, origin: known, ...v,
+        action: inspect(source, `The write was refused source_changed (${known}). Writer status shows the source binding and its checkout, read-only.`, v.human_reason) };
+    }
     return fromTable('sync_fault', code, origin ?? known, syncRetry(source, `The file changed under the write (${known}); a sync imports the current bytes.`), known === 'pinned_git_worktree_conflict' ? known : 'source_changed');
+  }
+  // #6834: a checkpoint or fact-batch completion receipt names a bookkeeping slug, never a page; reading it finds nothing.
+  // A compacted receipt keeps no intent kind; its operation and slug still identify the bookkeeping request.
+  const bookkeeping = (kind: string, operation: string, slug: string) => input.slug === slug && (input.intent_kind ? input.intent_kind === kind : input.operation === operation);
+  if (code === 'revision_conflict' && bookkeeping('managed_sync_checkpoint', 'submit_job', '__managed_sync_checkpoint__')) {
+    return { category: 'caller_conflict', code, origin, class: 'systemic', safe_actions: ['retry'], needs_human: false, escalate: escalateOf(code),
+      action: { argv: ['gbrain', 'sync', 'status', '--source', source, '--json'], consent: [], actor: 'agent', requires_exclusive: false,
+        why: 'A sync checkpoint was refused (__managed_sync_checkpoint__ is bookkeeping, not a page). Sync status names the step that finishes or retires its run, read-only; a later checkpoint of the source supersedes this receipt.',
+        verify: { argv: failuresArgv(source) }, docs: 'docs/guides/repair.md#managed-sync-orphans' } };
+  }
+  if (code === 'revision_conflict' && bookkeeping('managed_facts_complete', 'extract_facts', '__managed_facts_complete__')) {
+    return { category: 'caller_conflict', code, origin, class: 'systemic', safe_actions: ['none'], needs_human: false, escalate: 'never: the batch\'s committed facts stay',
+      action: { argv: terminalInspectArgv(input.request_id ?? '<request_id>'), consent: [], actor: 'agent', requires_exclusive: false,
+        why: 'A fact-extraction batch was not recorded complete because some of its per-entity requests did not commit (__managed_facts_complete__ is bookkeeping, not a page). The receipt is read-only history; run the extraction again only if facts are still missing.',
+        verify: { argv: failuresArgv(source) } } };
   }
   if (code === 'revision_conflict' || code === 'page_identity_changed') {
     return { category: 'caller_conflict', code, origin, class: 'page', safe_actions: ['retry'], needs_human: false, escalate: escalateOf(code),
@@ -272,6 +314,28 @@ function route(input: TerminalInput): Partial_ {
     escalate: 'never: the caller saw the refusal and its fix',
     action: { argv: terminalInspectArgv(input.request_id ?? '<request_id>'), consent: [], actor: 'agent', requires_exclusive: false,
       why: `The caller's write was refused ${code} and the caller saw why; the receipt carries the diagnosis, read-only.`, verify: { argv: failuresArgv(source) } } };
+}
+
+/** #6904: the schema-missing verdict; the fix depends on whether the schema is behind this build right now. */
+function schemaMissingVerdict(input: TerminalInput, code: string, origin: string | null, missing: string | null): Partial_ {
+  const what = missing ? `the ${missing} relation or column` : 'a relation or column';
+  const verify = { argv: ['gbrain', 'doctor', '--json'] };
+  const base = { category: 'schema_missing' as const, code, origin, class: 'systemic' as const };
+  if (input.schema_behind === true) {
+    return { ...base, safe_actions: ['migrate'], needs_human: false, escalate: 'the schema is still behind after gbrain apply-migrations --yes (doctor schema_version names the failing migration)',
+      action: { argv: ['gbrain', 'apply-migrations', '--yes'], consent: [], actor: 'agent', requires_exclusive: true,
+        why: `The write needed ${what}, which a pending migration adds: the brain schema is behind this gbrain build. Apply the migrations as the database role that owns the gbrain tables, then resubmit the write with a new request id.`,
+        verify, docs: 'docs/guides/write-refusals.md#schema_behind' } };
+  }
+  if (input.schema_behind === false) {
+    const human = `The write needed ${what}, but the schema version is at head: a table or column is missing outside a migration (an older backup restored, a table dropped by hand, or a migration recorded without its change). Doctor's schema_missing_tables check names what is missing and gbrain repair missing-tables previews recreating it; decide with the user before applying.`;
+    return { ...base, safe_actions: ['repair'], needs_human: true, human_reason: human, escalate: 'always: the schema is at head and still lacks what the write needs',
+      action: { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', requires_exclusive: false, ask_user: true, user_message: human,
+        why: "Read-only: doctor's schema_missing_tables check lists the missing tables and columns and names the gbrain repair missing-tables preview.", verify } };
+  }
+  return { ...base, safe_actions: ['none'], needs_human: false, escalate: 'doctor reports the schema at head and the write still fails on a missing relation or column',
+    action: { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+      why: `The write needed ${what}. Read-only: when doctor's schema_version reports the schema behind, run gbrain apply-migrations --yes as the database role that owns the gbrain tables and resubmit; when it is at head, its schema_missing_tables check names what is missing (gbrain repair missing-tables previews it).` } };
 }
 
 function faultAction(code: string, input: TerminalInput): Action {
@@ -303,14 +367,51 @@ export const PAGE_REMOVAL_OPERATIONS: readonly string[] = ['delete_page', 'purge
  * The supersession rule of `gbrain repair failed-writes`, as a predicate over a candidate later request `c` of the
  * failed request `r` (both `persistence_requests` aliases): the same intent committed, failed or still pending; a later
  * page removal committed or pending; for a `put_page`, any later write committed or pending, or a later caller
- * `put_page` that failed (the newer content). Literal strings only; NULL-safe for a compacted `c` (no intent).
+ * `put_page` that failed (the newer content); #6834: for a refused sync checkpoint, any later committed checkpoint of the
+ * source (both read by kind; a compacted row, which keeps no kind, by its operation); #6824: for a refused connector
+ * write, a later committed connector retry whose recorded `retryOf` lineage reaches it (connectorRetrySql). `r` must
+ * expose `id`. Literal strings only; NULL-safe for a compacted `c` (no intent).
  */
 export function supersessionSql(r: string, c: string): string {
   const removals = PAGE_REMOVAL_OPERATIONS.map(op => `'${op}'`).join(',');
   return `(${c}.source_id=${r}.source_id AND ${c}.slug=${r}.slug AND ${c}.sequence>${r}.sequence AND (
     (${c}.digest=${r}.digest AND ${c}.state IN ('committed','failed','queued','running','recovering'))
     OR (${c}.state IN ('committed','queued','running','recovering') AND (${c}.operation IN (${removals}) OR ${r}.operation='put_page'))
-    OR (${r}.operation='put_page' AND ${c}.state='failed' AND ${c}.operation='put_page' AND COALESCE(NOT (${c}.intent ? 'kind'), false))))`;
+    OR (${r}.slug='__managed_sync_checkpoint__' AND ${r}.operation='submit_job' AND ${c}.state='committed' AND ${c}.operation='submit_job'
+      AND COALESCE((SELECT k.intent->>'kind' FROM persistence_requests k WHERE k.id=${r}.id),'managed_sync_checkpoint')='managed_sync_checkpoint'
+      AND COALESCE(${c}.intent->>'kind','managed_sync_checkpoint')='managed_sync_checkpoint')
+    OR (${r}.operation='put_page' AND ${c}.state='failed' AND ${c}.operation='put_page' AND COALESCE(NOT (${c}.intent ? 'kind'), false))
+    OR ${connectorRetrySql(r, c)}))`;
+}
+
+/** Hops a connector retry's `retryOf` lineage is followed back; a longer chain leaves the refusal unresolved (fail closed). */
+export const CONNECTOR_RETRY_LINEAGE_MAX_DEPTH = 32;
+const CONNECTOR_WRITE_KINDS = `'connector_v2_import','connector_v2_delete','connector_v2_checkpoint'`;
+const UUID_TEXT = `'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'`;
+
+/**
+ * #6824: a connector retry records `retryBase`/`retryOf`/`retryAttempt` in its intent, so its digest never equals the
+ * refusal it replaces. A committed retry `c` (read whole as `cc` by its unique sequence) supersedes the refused `r`
+ * (read whole as `k` by id; callers may pass narrow row aliases) only when every hop of its
+ * recorded `retryOf` chain, back to `r`, has the same principal, source and incarnation, operation, slug and connector
+ * intent kind, at a lower sequence, within CONNECTOR_RETRY_LINEAGE_MAX_DEPTH hops. Another refusal of the same item with
+ * no recorded link is not proof. Each hop is one lookup on the (principal_kind, principal_id, request_id) unique index.
+ */
+function connectorRetrySql(r: string, c: string): string {
+  return `(${r}.operation='submit_job' AND ${c}.operation='submit_job' AND ${c}.state='committed' AND COALESCE(${c}.intent ? 'retryOf', false)
+      AND EXISTS (SELECT 1 FROM persistence_requests k, persistence_requests cc WHERE k.id=${r}.id AND cc.sequence=${c}.sequence
+        AND k.intent->>'kind' IN (${CONNECTOR_WRITE_KINDS})
+        AND cc.intent->>'kind'=k.intent->>'kind' AND cc.principal_kind=k.principal_kind AND cc.principal_id=k.principal_id
+        AND cc.source_incarnation=k.source_incarnation
+        AND EXISTS (WITH RECURSIVE lineage(request_id, sequence, intent, depth) AS (
+            SELECT cc.request_id, cc.sequence, cc.intent, 0
+            UNION ALL
+            SELECT p.request_id, p.sequence, p.intent, l.depth+1 FROM lineage l JOIN persistence_requests p
+              ON p.principal_kind=k.principal_kind AND p.principal_id=k.principal_id
+              AND p.request_id=CASE WHEN l.intent->>'retryOf' ~ ${UUID_TEXT} THEN (l.intent->>'retryOf')::uuid END
+            WHERE l.depth<${CONNECTOR_RETRY_LINEAGE_MAX_DEPTH} AND p.sequence<l.sequence AND p.source_id=k.source_id
+              AND p.source_incarnation=k.source_incarnation AND p.operation=k.operation AND p.slug=k.slug AND p.intent->>'kind'=k.intent->>'kind')
+          SELECT 1 FROM lineage WHERE request_id=k.request_id)))`;
 }
 
 /** The order that picks the most telling superseding request: the same intent committed, then the same intent, then the oldest later write. */
@@ -325,4 +426,16 @@ export function dispositionOf(later: { state: string; same_intent: boolean } | n
   if (later.same_intent && later.state === 'committed') return 'already_written';
   if (later.same_intent) return 'duplicate';
   return 'superseded';
+}
+
+/**
+ * #6712 PR 2 (L5): the verdict of a fault recorded without its receipt at hand (a hold, a managed-sync failure row, a run
+ * stop), read as the failed receipt it stands for, so `last_error`, holds and doctor's `sync_failures` render the same
+ * `category` / `public_category` as the receipt itself.
+ */
+export function classifyRecordedFault(input: { source_id: string; code: string; slug?: string | null; request_id?: string | null;
+  error_detail?: Record<string, unknown> | null; message?: string | null }): TerminalVerdict {
+  return classifyTerminal({ source_id: input.source_id, slug: input.slug ?? '', operation: 'submit_job', state: 'failed', error_code: input.code,
+    error_detail: input.error_detail ?? null, recovery: null, blocked_reason: null, compacted: false, error_message: input.message ?? null,
+    ...(input.request_id ? { request_id: input.request_id } : {}) })!;
 }

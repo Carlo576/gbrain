@@ -17,6 +17,7 @@
 import type { BrainEngine } from '../engine.ts';
 import { derivedRowsFrom, type DerivationRef } from '../facts/derivation-inputs.ts';
 import { readManagedMode } from '../persistence/managed-mode.ts';
+import { appendRetierEvents, retierInputCauses } from '../belief/retier.ts';
 import { compareTrust, storedTrustTier, trustRankSql, trustTierFromRankSql, type TrustTier } from './tier.ts';
 
 const TIERED = ['facts', 'takes', 'pages', 'timeline_entries'] as const;
@@ -82,5 +83,7 @@ export async function propagateTierLowering(tx: BrainEngine, inputs: readonly De
   }
   const { queueTierProjection } = await import('./page-write.ts');
   for (const row of lowered) if (row.table !== 'timeline_entries') await queueTierProjection(tx, row.table, row.id);
+  // W1 #6783 §6.3: each lowered dependent gets its own trust.retiered, citing the inputs' events as its cause.
+  if (lowered.length) await appendRetierEvents(tx, lowered, { op: 'trust.propagation', inputs: await retierInputCauses(tx, inputs.map(i => ({ table: i.table, id: Number(i.id) }))) });
   return lowered;
 }

@@ -18,6 +18,8 @@ import { __testing } from '../src/core/cycle/synthesize.ts';
 import type { PageInput } from '../src/core/types.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { lintContent } from '../src/commands/lint.ts';
+import { parseMarkdown } from '../src/core/markdown.ts';
 
 type SummaryWriter = (
   engine: BrainEngine,
@@ -45,6 +47,7 @@ async function renderSummary(writtenSlugs: string[]): Promise<{ body: string; ma
     getConfig: async (_key: string) => null,
     // The summary write runs in a maintenance transaction; the stub is its own transaction engine.
     executeRaw: async () => [],
+    addTag: async () => {},
     transaction: async <T>(fn: (tx: BrainEngine) => Promise<T>) => fn(engine),
   } as unknown as BrainEngine;
   try {
@@ -72,6 +75,15 @@ async function renderSummary(writtenSlugs: string[]): Promise<{ body: string; ma
     rmSync(brainDir, { recursive: true, force: true });
   }
 }
+
+describe('dream-cycle summary temporal frontmatter (#6773)', () => {
+  // Contributed by @lubosxyz (#6773): dream provenance keys are not temporal keys, so the summary failed missing-created.
+  test('the summary records created as its own cycle date and passes lint', async () => {
+    const { markdown } = await renderSummary(['wiki/originals/ideas/example-output']);
+    expect(parseMarkdown(markdown).frontmatter.created).toBe('2026-08-20');
+    expect(lintContent(markdown, 'dream-cycle-summaries/2026-08-20.md')).toEqual([]);
+  });
+});
 
 describe('dream-cycle summary graph bounds (#4337)', () => {
   test('more than 2,000 outputs produce one deterministic bounded sample with recoverable provenance', async () => {

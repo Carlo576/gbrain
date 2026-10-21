@@ -567,7 +567,7 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
 # runs each question as an agent's stdio MCP call would (remote, stdio, source
 # `default`), at the operation's own default limit and under the brain's resolved
 # search mode, so a receipt reproduces from a tagged gbrain. `query` expands by the
-# mode (on only in tokenmax) unless --op-expand on|off says otherwise. Each row's
+# mode (off by default in all three modes) unless --op-expand on|off says otherwise. Each row's
 # `via_operation` records the context, the `expand` sent, model calls per
 # touchpoint, latency, the CRAG grade and the expansion outcome;
 # run_config.via_operation_summary has the tree, p50/p95 latency and model calls
@@ -765,7 +765,24 @@ reader pins and the judge pins all land on one receipt.
   `--yes` (exit 2); at run time the lane soft-stops at the cap and stamps the
   remaining rows `judge_skipped: "budget"`. An unpriced judge model requires
   `--max-usd off`. Reader spend is not metered here — wrap a paid receipt in
-  `scripts/eval-spend-guard.sh`.
+  `scripts/eval-spend-guard.sh`. The guard runs the command in its own
+  process group and stops the whole group (helpers and grandchildren
+  included) on interruption, after the kill grace, and when the command
+  exits leaving processes behind. A process group cannot read the terminal,
+  so a terminal stdin is replaced with EOF and the guard prints a notice;
+  pipe or redirect input if the command needs any (piped and file stdin pass
+  through). No eval entrypoint reads stdin; a TTY-only Ctrl-C grace window
+  (such as `eval suspected-contradictions`' cost notice) proceeds as it does
+  off a terminal, and Ctrl-C reaches the guard, which stops the run. While
+  the command runs, the guard keeps a lease in `<ledger>.leases/`. If a
+  guard is SIGKILLed and its process group may still be running, the next
+  guard on that host reports it on stderr with the lease path, the pgid and
+  the commands to inspect (`ps -o pid,pgid,cmd -g <pgid>`) and stop it
+  (`kill -TERM -- -<pgid>`), and records a cost-0 `status: "unknown"`
+  ledger row, once. It stops nothing itself, and that run's reservation
+  stays counted at the estimate. The lease is kept as `<lease>.reported`
+  and retired by a later guard once the group has exited (or by
+  `rm <lease>.reported`).
 
 Row fields with `--judge`: exactly one of `judge_correct` / `judge_error`
 (+ `judge_error_detail`) / `judge_skipped`, plus `judge_model`,

@@ -57,7 +57,11 @@ export type CheckCategory = 'brain' | 'skill' | 'ops' | 'meta';
 export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'abandoned_threads',
   'atom_provenance_drift',
+  // #7013: atoms an empty managed re-extraction retired that atoms-restore can bring back (doctor/checks/atom-retirements.ts).
+  'atom_retirements_restorable',
   'captured_facts_active',
+  // #7125: facts whose stored text holds a pre-fix sanitizer redaction marker (doctor/checks/facts-redaction-marker.ts).
+  'facts_redaction_marker',
   'conversation_label_facts',
   'conversation_outcomes_stale',
   'connector_checkpoints',
@@ -75,9 +79,12 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'ontology_facts_fenced',
   'orphan_persistence_bindings',
   'foreign_ownership_marker',
+  'coordination_lock_location',
   'safe_index_pending',
   'self_capture',
   'brain_score',
+  // W1: belief ledger coverage intervals, drift, orphan lifetimes and unsafe restores.
+  'belief_ledger_coverage',
   'calibration_freshness',
   'child_table_orphans',
   'chronicle_projection_health',
@@ -154,6 +161,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_ratio',
   'oversized_pages',
   'parked_effects',
+  // #6741: managed purges parked after repeated failures (doctor/checks/purge-parks.ts).
+  'purge_parked_pages',
   'partial_embedding',
   'pglite_scratch_probe',
   'quarantined_pages',
@@ -174,6 +183,10 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #5984: unfinished managed sync cursors, their remaining entries and indexing ETA.
   'managed_sync_backlog',
   'sync_freshness',
+  // #6858 ask 6: p95 commit→searchable of managed sources over 24 h (doctor/checks/managed-sync-latency.ts).
+  'managed_sync_latency',
+  // GBRA-133 PR 2a: the resident that syncs each local source on commit, or none with the fix (doctor/checks/commit-notifier.ts).
+  'commit_notifier',
   // #5063: source checkouts with commits not on their upstream or stale uncommitted changes.
   'git_convergence',
   // #5186: an ownership marker committed to a source checkout's Git index.
@@ -194,8 +207,18 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'undeclared_db_only_pages',
   // #6696 B5: live pages whose canonical file is missing on the owner host (doctor/checks/ghost-pages.ts).
   'ghost_pages',
+  // #6948: files recorded by several live pages (origin twins) and the pages_live_origin_key index (doctor/checks/origin-twins.ts).
+  'origin_twins',
+  // #6729: inexact renames whose identity sync did not keep, until the pair gets a disposition (doctor/checks/rename-identity-downgrades.ts).
+  'rename_identity_downgrades',
   // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
   'missing_recorded_files',
+  // #7130: soft-deleted pages a managed sync removed although Git never held their file (doctor/checks/uncommitted-sync-deletions.ts).
+  'uncommitted_sync_deletions',
+  // #6865: committed files of a managed Git source with no page and no hold, from the stored detector result (doctor/checks/unindexed-files.ts).
+  'unindexed_files',
+  // #6712: live pages whose database-only edit an incremental sync overwrote without a hold (doctor/checks/overwritten-edits.ts).
+  'sync_overwritten_db_edits',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',
@@ -263,6 +286,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'google_file_modes',
   // #5012 item 9: a Google source's configured calendar was unreadable at its last sync (doctor/checks/google-calendar.ts).
   'google_calendar_readable',
+  // #7073: a Google source's last sync could not reach a service (API disabled, scope not granted) (doctor/checks/google-api-access.ts).
+  'google_api_access',
   'google_oauth',
   'home_dir_in_worktree',
   'index_audit',
@@ -272,6 +297,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_clones',
   'persistence_capacity',
   'persistence_compaction',
+  // #6712 PR 2: the managed-sync soak counters (interventions, content decisions), informational.
+  'sync_soak_counters',
   'persistence_counter_drift',
   'worktree_refresh_stuck',
   'managed_guard_schema_drift',
@@ -285,6 +312,12 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'stale_frontmatter_keys',
   'maintenance_write_drift',
   'managed_sync_not_moving',
+  // #6858: a managed sync run stopped on a page that did not commit, failed past an hour (doctor/checks/managed-sync-blocked.ts).
+  'managed_sync_blocked',
+  // #6712 PR 4a: the read-only convergence shadow's counts (doctor/checks/managed-sync-convergence.ts).
+  'managed_sync_convergence',
+  // #6712 PR 4b: sync.admission is not normal, so managed sync admits less than it classifies (doctor/checks/sync-admission.ts).
+  'sync_admission_restricted',
   'persistence_session_timeouts',
   // #6317: consumer heartbeat rows and host identity (doctor/checks/persistence-consumers.ts).
   'two_consumers_on_host',
@@ -296,6 +329,7 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'vector_plan',
   'keyword_plan',
   'writer_version',
+  'segmented_storage',
   'pgbouncer_prepare',
   'pglite_data_dir',
   // #6573: a local IPC socket path over the platform's AF_UNIX budget (doctor/checks/local-ipc.ts).
@@ -314,7 +348,11 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'queue_health',
   // #4578: brain-wide maintenance jobs dying at their deadline.
   'global_maintenance_timeouts',
+  // GBRA-130 C-6: no completed brain-wide pass while jobs fail or a phase keeps blocking it.
+  'global_maintenance_stalled',
   'embed_backfill_stalled',
+  // #7117: the content-drift sweep's latest batch failed.
+  'content_drift_sweep',
   'connector_account_mismatch',
   // #5157: queued jobs from before the v0.50 authority cutover block every worker.
   'legacy_job_authority',
@@ -352,6 +390,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
 export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   // The one-time behavior-change disclosure, readable again here (read-only).
   'behavior_changes',
+  // #7142: checks with no result from the last 24 h on a quick-tier or capped run (doctor/last-known.ts).
+  'doctor_last_known',
   // Agent operator wave E11: recent agent dead ends from the agent-contract event log.
   'agent_contract',
   'cycle_phase_scope',
@@ -371,11 +411,15 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #5216: the resumable pages.knowledge_revision backfill (resumed by apply-migrations --force-schema).
   'revision_backfill',
   'schema_columns',
+  // #6911: tables the applied migrations created that are missing (repair missing-tables recreates rebuildable caches).
+  'schema_missing_tables',
   'schema_pack_active',
   'schema_pack_consistency',
   'schema_pack_source_drift',
   'schema_version',
   'slug_fallback_audit',
+  // #6712 PR 2: retired sync.* keys stored on the brain and no longer applied.
+  'sync_config_keys',
   'timeline_dedup_index',
   'type_proliferation',
   'upgrade_errors',

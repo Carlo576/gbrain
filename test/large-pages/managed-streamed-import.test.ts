@@ -4,15 +4,20 @@
  *
  * 1. Protects: on a managed brain with `pages.segmented_storage` on, a file
  *    over PAGE_MAX_BYTES inside the canonical root imports through its owner
- *    with an intent that holds a `body_ref` (sha256, bytes) and no content; the
- *    page round-trips byte-identical from its manifest, `content_hash` equals
- *    `contentHash`, and the canonical file is left untouched. A file within
+ *    with an intent that holds a `body_ref` (sha256, bytes) and no content; it
+ *    replies at commit with `searchable: 'pending'` (#7106: a new page over 4 MiB
+ *    is projected after commit) and seals once the build the owner tracks ends
+ *    (the consumer's stop waits for it); the page round-trips byte-identical
+ *    from its manifest, `content_hash` equals `contentHash`, and the canonical
+ *    file is left untouched. A file within
  *    the ceiling stages its segments in the owner's preparation (the writer
  *    guard admits it) and publishes segmented. Segment GC on a managed brain
  *    collects an abandoned preparation's staged rows under the guard. A file that
  *    changes between admission and preparation publishes nothing; a request_id
  *    replayed with other bytes is `idempotency_conflict`; with the switch off
- *    the refusal is the one before Wave B.
+ *    the refusal is the one before Wave B. With the switch on a file-backed
+ *    source takes a page over 24 MiB only by import of its own canonical
+ *    file, never by a managed write of new content.
  * 2. Fails when: the journal carries the body, the preparer skips the hash
  *    check, the publication rewrites the canonical file, or the switch-off
  *    refusal changes.
@@ -97,7 +102,8 @@ describe('managed import over the single-string ceiling', () => {
       writeFileSync(file, content);
       const before = statSync(file);
       const result = await importManagedFile(engine, file, 'notes/huge.md', { sourceId: f.sourceId, noEmbed: true });
-      expect(result).toMatchObject({ slug: 'notes/huge', status: 'imported' });
+      expect(result).toMatchObject({ slug: 'notes/huge', status: 'imported', searchable: 'pending', projection: 'pending' });
+      await disposePersistenceConsumer(engine);
       const parsed = parseMarkdown(content, 'notes/huge.md');
       const { page, body, hash } = await reconstructedPage(engine, 'notes/huge', f.sourceId);
       expect(page.body_storage).toBe('segmented');
@@ -108,9 +114,10 @@ describe('managed import over the single-string ceiling', () => {
       const after = statSync(file);
       expect(after.mtimeMs).toBe(before.mtimeMs);
       expect(sha256(readFileSync(file))).toBe(sha256(Buffer.from(content)));
-      const [request] = await engine.executeRaw<{ intent_bytes: string; intent: Record<string, unknown>; state: string }>(
-        `SELECT intent_bytes::text AS intent_bytes, intent, state FROM persistence_requests WHERE source_id=$1 AND slug=$2`, [f.sourceId, 'notes/huge']);
+      const [request] = await engine.executeRaw<{ intent_bytes: string; intent: Record<string, unknown>; state: string; outcome: Record<string, unknown> }>(
+        `SELECT intent_bytes::text AS intent_bytes, intent, state, outcome FROM persistence_requests WHERE source_id=$1 AND slug=$2`, [f.sourceId, 'notes/huge']);
       expect(request!.state).toBe('committed');
+      expect(request!.outcome).toMatchObject({ searchable: 'pending', projection: 'pending' });
       expect(Number(request!.intent_bytes)).toBeLessThan(16 * 1024);
       expect(request!.intent.content).toBeUndefined();
       expect(request!.intent.body_ref).toMatchObject({ kind: 'input_file', sha256: sha256(Buffer.from(content)), bytes: Buffer.byteLength(content) });
@@ -188,6 +195,32 @@ describe('managed import over the single-string ceiling', () => {
       expect((await preparePageAdmission(ctx, { operation: 'put_page', params: params('a'.repeat(64)), managedFileImport: true })).prior?.request_id).toBe(requestId);
     }
   }), 120_000);
+
+  test('switch on: a file over 24 MiB imports only from its place in the canonical root; put_page content stays within 24 MiB', async () => withEnv(env, async () => {
+    for (const engine of engines) {
+      await disposePersistenceConsumer(engine);
+      await engine.setConfig('pages.segmented_storage', 'on');
+      const f = await fixture(engine);
+      const outside = join(home, `${f.sourceId}-outside.md`);
+      writeFileSync(outside, content);
+      await expect(importManagedFile(engine, outside, 'notes/outside.md', { sourceId: f.sourceId, noEmbed: true }))
+        .rejects.toMatchObject({ code: 'invalid_params', message: `File too large (${Buffer.byteLength(content)} bytes, max ${PAGE_MAX_BYTES}): a file over the single-string import limit `
+          + `imports only from its place inside the source root. Move it to ${join(f.root, 'notes/outside.md')} and import it there.` });
+      expect(await engine.getPage('notes/outside', { sourceId: f.sourceId })).toBeNull();
+
+      const file = join(f.root, 'notes/inside.md');
+      writeFileSync(file, content);
+      const before = statSync(file);
+      expect(await importManagedFile(engine, file, 'notes/inside.md', { sourceId: f.sourceId, noEmbed: true })).toMatchObject({ slug: 'notes/inside', status: 'imported' });
+      expect((await reconstructedPage(engine, 'notes/inside', f.sourceId)).page.body_storage).toBe('segmented');
+      expect(statSync(file).mtimeMs).toBe(before.mtimeMs);
+
+      const ctx = { engine, remote: false, sourceId: f.sourceId } as OperationContext;
+      await expect(preparePageAdmission(ctx, { operation: 'put_page', params: { slug: 'notes/put-huge', content, source_id: f.sourceId, request_id: randomUUID() } }))
+        .rejects.toMatchObject({ code: 'request_too_large' });
+      expect(await engine.getPage('notes/put-huge', { sourceId: f.sourceId })).toBeNull();
+    }
+  }), 600_000);
 
   test('switch off: the refusal is the one before segmented storage', async () => withEnv(env, async () => {
     for (const engine of engines) {

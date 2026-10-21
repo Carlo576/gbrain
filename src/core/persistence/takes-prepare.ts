@@ -7,6 +7,7 @@ import { isValidHolder, parseTakesFence, upsertTakeRow, supersedeRow, type Parse
 import { takesPreparation as edit, TakesWriteError } from '../takes-write.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { preparePageMutation } from './page-prepare.ts';
+import { wholeBodySnapshot } from './segmented-apply.ts';
 import { authorizeTakeHolder } from './authority.ts';
 import type { WriteRequest } from './model.ts';
 import type { PreparedMutation } from './coordinator.ts';
@@ -28,6 +29,7 @@ import { requestAttribution } from './attribution.ts';
 import { withWriteAttribution } from './context.ts';
 import { decideTakeWrite, recordFlaggedRow, recordWriteGateHold } from '../write-gate-store.ts';
 import { writeGateRejectedError } from '../write-gate.ts';
+import { beliefTransaction } from '../belief/writers.ts';
 
 /** Server-derived values are frozen after replay lookup, before admission. */
 export async function normalizeTakesIntent(ctx: OperationContext, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -78,8 +80,11 @@ function fail(error: unknown): never {
  * request) and returns the refusal carrying its ref; nothing was removed. A retry reuses the proposal.
  */
 async function takeRemovalRequiresOwner(engine: BrainEngine, row: WriteRequest, take: { id: number; tier: TrustTier; rowNum: number }, writer: TrustTier): Promise<OperationError> {
-  const [ref] = await engine.transaction(tx => withWriteAttribution(tx, requestAttribution(row), () => contestHeldRows(tx, { sourceId: row.source_id, slug: row.slug,
-    table: 'takes', proposer: 'takes_remove', writer, rows: [{ id: take.id, tier: take.tier, change: 'removed' }] })));
+  // W1 #6783 §6.2: the refusal's own transaction records trust.contested on the take.
+  const [ref] = await beliefTransaction(engine, { sourceId: row.source_id, slugs: [row.slug], publicationId: row.id, op: row.operation,
+    remote: row.authority.remote !== false, cause: { refused: 'forget_requires_owner' } }, tx => contestHeldRows(tx, { sourceId: row.source_id, slug: row.slug,
+    table: 'takes', proposer: 'takes_remove', writer, rows: [{ id: take.id, tier: take.tier, change: 'removed' }] }),
+  (tx, run) => withWriteAttribution(tx, { ...requestAttribution(row), trust: requestChannelTrust(row) ?? undefined }, run));
   const error = opError('forget_requires_owner', `Take row #${take.rowNum} on ${row.slug} is ${take.tier}; this write cannot remove it. Proposal ${ref} asks the owner.`,
     `Do not retry. Tell the user take row #${take.rowNum} on ${row.slug} needs their decision: they can remove it with gbrain trust confirm ${ref} on the brain host.`);
   error.fix = tierRaiseFix(['gbrain', 'trust', 'confirm', ref!], 'Removing a take the owner confirmed or curated is their decision; the confirm prompt applies the removal.',
@@ -91,11 +96,13 @@ export async function prepareTakesMutation(engine: BrainEngine, row: WriteReques
   try { return await prepare(engine,row,config); } catch (error) { return fail(error); }
 }
 async function prepare(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
-  const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
-  if (!snapshot || snapshot.page.id !== row.page_id) throw takesRefusal('page_identity_changed','The accepted page no longer exists.',row,
+  const stored = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
+  if (!stored || stored.page.id !== row.page_id) throw takesRefusal('page_identity_changed','The accepted page no longer exists.',row,
     `Page ${row.slug} was deleted or replaced after the takes request was accepted.`);
   const p = row.intent!;
-  if (p.expected_revision !== undefined) assertPageRevision(snapshot,engineMutationPrecondition(parseMutationPrecondition(p)));
+  if (p.expected_revision !== undefined) assertPageRevision(stored,engineMutationPrecondition(parseMutationPrecondition(p)));
+  // Wave B: a segmented page within 24 MiB is read back whole and written as a normal put; a larger one refuses.
+  const snapshot = (await wholeBodySnapshot(engine, stored, row.operation))!;
   // #6188 (D19, D20): takes_add / takes_update normalize the stored takes fence in this write; every other
   // takes write refuses typed `target_fence_malformed` (location only) while the fence does not compile.
   const appends = row.operation === 'takes_add' || row.operation === 'takes_update';

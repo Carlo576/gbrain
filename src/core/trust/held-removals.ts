@@ -29,6 +29,8 @@ import { storedTrustTier } from './tier.ts';
 import { assertInlineBody } from '../page-body/page-shape.ts';
 import { materializeSegmentedBody } from '../page-body/ingest.ts';
 import { segmentedOverCeiling } from '../persistence/segmented-apply.ts';
+import { withBeliefBatch } from '../belief/ledger.ts';
+import { markBeliefCommits } from '../belief/append.ts';
 
 interface HeldPageRow { id: number; page_id: number; source_id: string; slug: string; body_storage: 'inline' | 'segmented' | null; body_bytes: number | null; compiled_truth: string | null; timeline: string | null }
 
@@ -75,11 +77,15 @@ export async function acceptHeldRemoval(engine: BrainEngine, proposal: TrustProp
   const writer = { tier: storedTrustTier(proposal.before_state.writer_tier), origin: { channel: `trust_accept:${proposal.proposer}` } };
   const attribution = ctx.decidedBy ? principalAttribution(ctx.decidedBy) : await maintenanceAttribution(engine);
   const managed = await managedPersistenceEnabled(engine);
+  const publicationId = crypto.randomUUID();
+  const report = { appended: 0 };
   const applied = await engine.transaction(async tx => {
     const run = async () => {
       await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug }]);
       if (!await transitionTrustProposal(tx, proposal.id, 'pending', 'accepted', { decidedBy: ctx.decidedBy })) return false;
-      await withWriteTrust(tx, writer, async () => {
+      // W1 #6783 §6.2: the accepted removal is the take's retraction, recorded at its preimage tier with the writer's tier beside it.
+      await withWriteTrust(tx, writer, () => withBeliefBatch(tx, { sourceId: row.source_id, slugs: [row.slug], publicationId, op: 'trust_accept', remote: false, report,
+        cause: { proposal: `tp${proposal.id}` } }, async () => {
         if (table === 'takes') {
           if (fenceRow) await tx.addTakesBatch([takesPreparation.toCanonicalBatchInput(row.page_id, fenceRow)]);
           else await tx.executeRaw('DELETE FROM takes WHERE id = $1', [row.id]);
@@ -87,12 +93,13 @@ export async function acceptHeldRemoval(engine: BrainEngine, proposal: TrustProp
           await tx.executeRaw('DELETE FROM timeline_entries WHERE id = $1', [row.id]);
           await reprojectTimelineRow(tx, row.page_id, body, row.slug, { date: String(row.date), source: row.source as string | null, summary: String(row.summary) });
         }
-      });
+      }));
       await queuePageProjection(tx, row.source_id, row.slug, 'trust_tier_changed');
       return true;
     };
     return managed ? withCoordinatedWrite(tx, [row.source_id], run, attribution) : withWriteAttribution(tx, attribution, run);
   });
+  if (report.appended) await markBeliefCommits(engine, [publicationId]).catch(() => undefined);
   return applied ? decisionResult(proposal, 'accept', 'accepted', { detail: { [table === 'takes' ? 'take_id' : 'timeline_entry_id']: String(row.id) } })
     : decisionResult(proposal, 'accept', 'refused', { reason: (await getTrustProposal(engine, proposal.id))?.status ?? 'not_found' });
 }

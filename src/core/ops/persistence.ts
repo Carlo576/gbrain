@@ -118,15 +118,20 @@ async function publicReceipt(ctx: OperationContext, row: WriteRequest, facts?: W
   const terminal = isTerminalOrRecovering(row) ? (await import('../persistence/terminal-classify.ts')).classifyTerminal({ request_id: row.request_id, source_id: row.source_id,
     slug: row.slug, operation: row.operation, state: row.state, error_code: row.error_code, error_detail: row.error_detail ?? null, recovery: row.recovery,
     blocked_reason: row.blocked_reason, compacted: row.compacted, publication_started: row.publication_started, error_message: row.error_message,
-    intent_kind: typeof row.intent?.kind === 'string' ? row.intent.kind : null, build: (row as { admitter_version?: string | null }).admitter_version ?? null }) : null;
+    intent_kind: typeof row.intent?.kind === 'string' ? row.intent.kind : null, build: (row as { admitter_version?: string | null }).admitter_version ?? null,
+    schema_behind: await (await import('../persistence/schema-admission.ts')).readSchemaBehind(ctx.engine) }) : null;
   const { cliRenderContext, renderAction } = await import('../agent-output.ts');
   const render = ctx.remote === false ? cliRenderContext() : { transport: 'stdio' as const, isCallable: () => false, preapproved: () => false };
+  const { liveSearchable } = await import('../persistence/searchable.ts');
   return {
     ...publicWriteReceipt(receiptFor(row, facts)),
     operation: row.operation, source_id: row.source_id, slug: row.slug,
+    ...await liveSearchable(ctx, { request_id: row.request_id, state: row.state, source_id: row.source_id, slug: row.slug, searchable: row.outcome?.searchable }),
     ...(mismatch ? { owner_build: mismatch } : {}),
+    // #7112: the owner-side detail (an owner exception's class, errno, frame, redacted database error text and statement) for a trusted local reader only.
+    ...(ctx.remote === false && row.error_detail ? { error_detail: row.error_detail } : {}),
     ...(diagnostic ? { write_error: row.error_code, write_error_message: diagnostic.message, write_error_reason: diagnostic.reason, suggestion: diagnostic.suggestion } : {}),
-    ...(terminal ? { diagnosis: { category: terminal.category, code: terminal.code, class: terminal.class, safe_actions: terminal.safe_actions, needs_human: terminal.needs_human,
+    ...(terminal ? { diagnosis: { category: terminal.category, public_category: terminal.public_category, code: terminal.code, class: terminal.class, safe_actions: terminal.safe_actions, needs_human: terminal.needs_human,
       ...(terminal.human_reason ? { human_reason: terminal.human_reason } : {}), escalate: terminal.escalate, historical: terminal.historical,
       fix: renderAction(terminal.action, render) } } : {}),
     ...(withdrawn ? { withdrawn } : {}),

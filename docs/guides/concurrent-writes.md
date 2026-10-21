@@ -346,6 +346,11 @@ Receipts include `request_id`, `state`, and `retry_after_ms`, with optional
 revision, outcome, persistence status, and timestamps. Terminal receipts have
 `retry_after_ms: null`. Private queued content, credential hashes, and recovery
 bytes are never part of the receipt.
+A committed write of a page stored in segments also says whether search sees
+it yet: `searchable: true`, or `searchable: "pending"` with
+`searchable_retry_after_ms` and `searchable_fix` (read the receipt again) while
+its chunks are built after commit; see
+[when a segmented write is searchable](memory-boundaries.md#segmented-searchable).
 
 Nonterminal receipts may include a validated `diagnostic` with `age_ms`,
 `assessment` (`pending`, `blocked`, or `stalled`), a closed `reason`, and
@@ -498,6 +503,12 @@ on providers. `withdrawal_capacity` or `withdrawal_provenance` refuses the
 attempt before ledger, expiry, revision or chunk changes. Matching malformed
 fences need canonical repair.
 
+A facts fence that crosses a forced segment cut is read whole and checked in
+one batch, so one such fence over 16,384 rows (or 8 MiB of rows to check)
+refuses `withdrawal_capacity` with reason `split_fence_rows`, naming the page
+and the fence's row count. Split that fence into fences of at most 16,384 rows,
+write the page again, then retry.
+
 When the claim itself is carried by more than 256 pages, the refusal names the
 matched count and up to 20 matched pages. Reduce the matched set, then retry:
 forget the entity-scoped copies of the fact first (each withdrawal changes only
@@ -531,11 +542,11 @@ If its recorded file bytes no longer match, preserve the file and receipt and
 resolve the conflict on the owner; do not delete recovery records.
 
 If a sync cursor was already invalidated, keep its failure visible until the
-owner has checked the canonical content. Then explicitly re-enumerate with the
-same source and processing options:
+owner has checked the canonical content. Then rerun the plain sync with the
+same source and processing options; it retries what the previous run recorded:
 
 ```bash
-gbrain sync --source example-source --no-pull --no-embed --no-extract --retry-failed
+gbrain sync --source example-source --no-pull --no-embed --no-extract
 ```
 
 Use `--no-embed` and `--no-extract` here only if they were the original sync
@@ -860,7 +871,7 @@ Default admission limits are enforced atomically:
 | Queued intent bytes | 32 MiB | 256 MiB |
 | Lifetime request IDs | 2,000,000 | 8,000,000 |
 | Terminal receipt reservation | 16 GiB | 64 GiB |
-| Recovery bytes | — | 1 GiB, also 256 MiB per worktree |
+| Recovery bytes | — | 1 GiB, also 256 MiB per worktree (with `pages.segmented_storage on`: twice `pages.max_bytes` plus 2 MiB, at least 256 MiB) |
 
 Completion space is reserved at admission. Beforeimage/recovery bytes are
 reserved before filesystem publication. Reaching a limit refuses additional
@@ -955,8 +966,15 @@ Two read-only doctor checks watch the receipt-bytes accounting:
   (brain and every principal) with what the receipts hold
   (`terminal_reservation` per request plus lifecycle receipts) in one
   statement, and reports `persistence.true_up.clamped`, the number of
-  settle-time decrements that were clamped at zero. A positive delta charges
-  capacity no receipt holds; a negative one under-counts. It changes nothing.
+  settle-time decrements that were clamped at zero. Each drifting scope in
+  `details.drift` names its `direction`: `overcharge` (a positive delta) is a
+  bounded charge against write capacity that no receipt holds, so writes are
+  refused a little early and no data is lost; `undercount` (a negative delta)
+  lets writes use capacity the receipts already reserve. `receipts_by_kind`
+  splits the receipt side into `requests` and `topology_changes` (rows and
+  bytes), and `details.incident` is `current` because the comparison is
+  live. It changes nothing, and there is no reconcile repair yet: report a
+  persistent drift with `gbrain doctor --only persistence_counter_drift --json`.
 - `persistence_compaction` reads `persistence.maintenance.last_compaction`,
   the record each resident consumer's compaction pass writes (`at`,
   `host_id`, `compacted`, `freed_bytes`, `skipped_by_reason`), and warns when

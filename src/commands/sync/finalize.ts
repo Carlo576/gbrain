@@ -27,13 +27,14 @@ import {
 import { shouldLogIngest } from '../import.ts';
 import type { SyncResult } from '../sync.ts';
 import { settleLegacyHolds } from './holds.ts';
+import { gitlinkFields } from './unsupported-paths.ts';
 import { sweepOrphanedRenameSentinels } from './rename-reconcile.ts';
 import { partial, flushCheckpoint } from './sync-run.ts';
 import type { SyncPlan, SyncRun } from './sync-run.ts';
 
 export async function finishWithoutChanges(
   engine: BrainEngine,
-  plan: Pick<SyncPlan, 'opts' | 'company' | 'gitContextRoot' | 'lastCommit' | 'pin' | 'pullFailed' | 'ckpt' | 'malformedSkipped' | 'totalChanges' | 'holds'>,
+  plan: Pick<SyncPlan, 'opts' | 'company' | 'gitContextRoot' | 'lastCommit' | 'pin' | 'pullFailed' | 'ckpt' | 'malformedSkipped' | 'totalChanges' | 'holds' | 'gitlinks'>,
   swept: number,
 ): Promise<SyncResult | undefined> {
   const { opts, company, gitContextRoot, lastCommit, pin, pullFailed, ckpt, malformedSkipped, totalChanges } = plan;
@@ -91,6 +92,7 @@ export async function finishWithoutChanges(
       embedded: 0,
       pagesAffected: [],
       ...(malformedSkipped.length > 0 ? { malformedSkipped: malformedSkipped.length } : {}),
+      ...gitlinkFields(plan),
     };
   }
   return undefined;
@@ -215,7 +217,17 @@ export async function finalizeIncrementalSync(
     ...(typeWarningsEnabled && typeWarnings.length > 0 ? { type_warnings: typeWarnings } : {}),
     ...(uncommittedDrift ? { uncommitted: uncommittedDrift } : {}),
     ...(extractError ? { extract_error: extractError } : {}),
+    ...identityDowngradesOf(plan),
+    ...gitlinkFields(plan),
   };
+}
+
+/** #6729: the inexact renames this run split into a delete plus an add, in the source's origin form (recorded by `performSync`). */
+function identityDowngradesOf(plan: Pick<SyncPlan, 'manifest' | 'inScope' | 'isSelectedForRun' | 'syncOpts' | 'modePath'>): Pick<SyncResult, 'identityDowngrades'> {
+  const selected = (path: string) => plan.inScope(path) && plan.isSelectedForRun(path, plan.syncOpts);
+  const pairs = (plan.manifest.downgradedRenames ?? []).filter(pair => selected(pair.from) || selected(pair.to))
+    .map(pair => ({ ...pair, from: plan.modePath(pair.from), to: plan.modePath(pair.to) }));
+  return pairs.length ? { identityDowngrades: pairs } : {};
 }
 
 /** v0.42.x (#1794, T3): pin-reachability gate; records a `<head>` sentinel on a rewrite. */
@@ -323,6 +335,12 @@ async function applyBookmarkGate(
     commit: pin,
     skipFailed: !company && opts.skipFailed === true,
     ...(company ? { threshold: 0 } : {}),
+    // GBRA-130 A-18: files of this drain imported this run or banked by an
+    // earlier run of it (an infra code on one file while others import goes
+    // chronic, also across resumes) and the import breaker's verdict (a run
+    // where most files failed counts no attempt and auto-skips nothing).
+    imported: run.filesImported + run.bankedImports,
+    systemic: run.itemRun.systemic() !== null,
     advance,
   });
   // #3479 blocker 2 — self-heal for orphaned `<rename:…>` sentinels: a
@@ -383,6 +401,15 @@ async function applyBookmarkGate(
         `\nSync blocked: a rename left a stale duplicate that could not be removed:\n` +
         `${renameDetail || codeBreakdown}\n\n` +
         renameRemedy,
+      );
+    } else if (run.itemRun.systemic()) {
+      const fileFailCount = failedFiles.filter(f => isSkippablePath(f.path)).length;
+      serr(
+        `\nSync blocked: ${fileFailCount} file(s) failed, most of the files this run tried; this looks like ` +
+        `a shared cause, so no attempt was counted and nothing auto-skips:\n` +
+        `${codeBreakdown}\n${formatFailedFileList(failedFiles)}\n\n` +
+        `Fix the shared cause (permissions, the embedding provider, the database) and re-run 'gbrain sync', ` +
+        `or acknowledge these files with 'gbrain sync --skip-failed${opts.sourceId ? ` --source ${opts.sourceId}` : ''}'.`,
       );
     } else {
       const fileFailCount = failedFiles.filter(f => isSkippablePath(f.path)).length;

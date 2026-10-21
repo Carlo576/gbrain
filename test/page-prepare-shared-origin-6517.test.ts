@@ -33,6 +33,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operations, OperationError, type OperationContext } from '../src/core/operations.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { shadowConvergence } from '../src/core/persistence/sync-pass.ts';
 import { readReconcileState } from '../src/core/persistence/reconcile-state.ts';
 import { registerLocalWriter, withVerifiedLocalRegistration } from '../src/core/persistence/identity.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
@@ -43,6 +44,7 @@ import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { dropOriginIndex } from './helpers/origin-index.ts';
 import { repairRunner } from '../src/core/repair/registry.ts';
 import { resolveRepairScope } from '../src/core/repair/core.ts';
 
@@ -84,8 +86,12 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 delete of a s
     expect((await withEnv(env, () => performManagedSync(engine, opts))).status).toBe('first_sync');
     expect((await page(id, names.file))?.source_path).toBe(`${names.file}.md`);
     const sourcePath = twin === 'uri' ? null : twin === 'dot-path' ? `./${names.file}.md` : `${names.file}.md`;
-    await engine.transaction(tx => withCoordinatedWrite(tx, [id], () => tx.putPage(names.twin, { type: 'note', title: 'Twin', compiled_truth: `A twin recording ${names.file}.`,
-      timeline: '', frontmatter: {}, content_hash: `twin-${names.file}`, source_path: sourcePath, source_uri: twin === 'uri' ? pathToFileURL(file).href : null }, { sourceId: id }), TEST_WRITE_ATTRIBUTION));
+    // #6948: no writer records a held origin on a second page any more, so the twin's origin is set as legacy data left it.
+    await engine.transaction(tx => withCoordinatedWrite(tx, [id], async () => {
+      await tx.putPage(names.twin, { type: 'note', title: 'Twin', compiled_truth: `A twin recording ${names.file}.`,
+        timeline: '', frontmatter: {}, content_hash: `twin-${names.file}`, source_uri: twin === 'uri' ? pathToFileURL(file).href : null }, { sourceId: id });
+      if (sourcePath) await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2', [id, names.twin, sourcePath]);
+    }, TEST_WRITE_ATTRIBUTION));
     return { id, root, file, bytes, opts, names };
   }
   const coordinated = (sourceId: string, sql: string, params: unknown[]) => engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], () => tx.executeRaw(sql, params), TEST_WRITE_ATTRIBUTION));
@@ -95,6 +101,8 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 delete of a s
   beforeAll(async () => {
     if (backend === 'pglite') { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }
     else { const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!); engine = pg.engine; closePostgres = pg.close; }
+    // Shared origins exist only on brains written before #6948, whose pages_live_origin_key index is pending.
+    await dropOriginIndex(engine);
   }, 120_000);
   afterAll(async () => {
     installFaultHook(undefined);
@@ -130,7 +138,7 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 delete of a s
     expect((await page(f.id, 'alpha-twin'))!.deleted_at).not.toBeNull();
   }, 120_000);
 
-  test('[R8] deleting the page the file was synced into keeps the file for the twin; sync holds the twin file_drift and repair file-drift --prefer file imports the file', async () => {
+  test('[R8] deleting the page the file was synced into keeps the file for the twin; a full sync leaves the twin legacy_unverified and repair file-drift --prefer file imports the file', async () => {
     const f = await twins('path');
     const result = await (await del(f.id, 'alpha'))();
     expect(result).toMatchObject({ state: 'committed', status: 'soft_deleted', write_through: { written: false, skipped: 'shared_origin' } });
@@ -143,15 +151,16 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 delete of a s
     // The kept file still holds the deleted page's text and is unchanged in git, so an incremental sync has nothing to import.
     expect((await withEnv(env, () => performManagedSync(engine, f.opts))).status).toBe('up_to_date');
     expect((await page(f.id, 'alpha-twin'))!.compiled_truth).toBe('A twin recording alpha.');
-    // #6712 PR 1 (eng-review finding): the twin has no import record and differs from the file, so a tree walk holds it
-    // file_drift instead of overwriting it; the hold's fix leads with the same repair as the receipt.
-    const held = await withEnv(env, () => performManagedSync(engine, { ...f.opts, full: true }));
-    expect(held.managedWrite).toBeUndefined();
-    expect((held.held ?? []).map(item => [item.path, item.code, item.slug])).toEqual([['alpha.md', 'file_drift', 'alpha-twin']]);
-    const fix = held.held![0]!.fix;
-    expect(fix.argv).toEqual(repair);
-    // No fix text the run returns (the hold's fix, its follow-up steps, the run's next steps) tells the survivor to run --full.
-    expect(JSON.stringify(held)).not.toContain('--full');
+    // #6712 PR 4b (design v3.2 §2.3 row 17, §2.7): the twin has no import record, no proof and a file unchanged since the
+    // baseline, so a full pass settles it legacy_unverified, counted and never overwritten; it surfaces as a Decision only if
+    // the file then changes. The receipt's repair above stays the way to import the file into the survivor.
+    const full = await withEnv(env, () => performManagedSync(engine, { ...f.opts, full: true }));
+    expect(full).toMatchObject({ status: 'synced', filesImported: 0, pass: { kind: 'full', outcome: 'synced' } });
+    expect(full.managedWrite).toBeUndefined();
+    expect(full.held ?? []).toEqual([]);
+    expect((await withEnv(env, () => shadowConvergence(engine, { sourceId: f.id })))?.counts).toEqual({ legacy_unverified: 1 });
+    // Nothing the run returns tells the survivor to run --full.
+    expect(JSON.stringify(full)).not.toContain('--full');
     expect((await page(f.id, 'alpha-twin'))!.compiled_truth).toBe('A twin recording alpha.');
     const logger = { info() {}, warn() {}, error() {} };
     await withEnv(env, async () => {
