@@ -16,7 +16,7 @@
         ],
         "category_scores": {
           "brain": 45,
-          "meta": 95,
+          "meta": 100,
           "ops": 100,
           "skill": 95
         },
@@ -506,10 +506,10 @@
                     "days_to_exhaustion": null,
                     "exhaustion_date": null,
                     "limit": 68719476736,
-                    "max_day_7d": 198780,
-                    "net_per_day_7d": 58870,
+                    "max_day_7d": "<path-dependent-bytes>",
+                    "net_per_day_7d": "<path-dependent-bytes>",
                     "pct": 0,
-                    "per_day_7d": 196014,
+                    "per_day_7d": "<path-dependent-bytes>",
                     "reclaimable_bytes": "<path-dependent-bytes>",
                     "recommended_limit": 137438953472,
                     "resource": "terminal_bytes",
@@ -517,7 +517,7 @@
                     "spike_day": null,
                     "status": "ok",
                     "under_reserved_receipts": 0,
-                    "used": 198780,
+                    "used": "<path-dependent-bytes>",
                     "window_days": 1
                   },
                   {
@@ -543,10 +543,10 @@
                     "days_to_exhaustion": null,
                     "exhaustion_date": null,
                     "limit": 17179869184,
-                    "max_day_7d": 198780,
-                    "net_per_day_7d": 58870,
+                    "max_day_7d": "<path-dependent-bytes>",
+                    "net_per_day_7d": "<path-dependent-bytes>",
                     "pct": 0,
-                    "per_day_7d": 196014,
+                    "per_day_7d": "<path-dependent-bytes>",
                     "reclaimable_bytes": "<path-dependent-bytes>",
                     "recommended_limit": 34359738368,
                     "resource": "terminal_bytes",
@@ -554,7 +554,7 @@
                     "spike_day": null,
                     "status": "ok",
                     "under_reserved_receipts": 0,
-                    "used": 198780,
+                    "used": "<path-dependent-bytes>",
                     "window_days": 1
                   }
                 ],
@@ -749,20 +749,14 @@
           {
             "category": "meta",
             "details": {
-              "code": "page_type_undeclared",
               "docs": "docs/architecture/schema-packs.md#undeclared-page-types",
               "per_source": [
                 {
                   "pack": "gbrain-base-v2",
                   "source_id": "notes",
                   "total": 19,
-                  "undeclared": 1,
-                  "undeclared_types": [
-                    {
-                      "count": 1,
-                      "type": "2024"
-                    }
-                  ],
+                  "undeclared": 0,
+                  "undeclared_types": [],
                   "untyped": 0
                 },
                 {
@@ -777,10 +771,9 @@
               "unresolved_sources": []
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Source `notes`: 1 page(s) use 1 type(s) pack `gbrain-base-v2` neither declares nor aliases: '2024' (1). List them with `gbrain schema review-orphans --source notes`, then declare the type (`gbrain schema add-type <type>`, which takes its primitive and prefix) or retype the pages to a declared type.",
+            "message": "All pages match the active schema pack across every source.",
             "name": "schema_pack_consistency",
-            "status": "warn"
+            "status": "ok"
           },
           {
             "category": "brain",
@@ -1269,7 +1262,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "message": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "message": "Brain score 25/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 15/15, orphans 0/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn"
           },
@@ -2083,14 +2076,14 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No quarantined pages",
+            "message": "No unacknowledged quarantined pages",
             "name": "quarantined_pages",
             "status": "ok"
           },
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No flagged pages",
+            "message": "No unacknowledged flagged pages",
             "name": "flagged_pages",
             "status": "ok"
           },
@@ -2109,13 +2102,13 @@
           {
             "category": "brain",
             "details": {
-              "count": 18,
+              "count": 16,
               "exact": true,
               "partial": false
             },
             "elapsed_ms": "<volatile>",
             "fix_unavailable_reason": "unstructured",
-            "message": "18 frontmatter issue(s). notes: 17 (YAML_PARSE=8, EMPTY_FRONTMATTER=1, MISSING_CLOSE=2, NESTED_QUOTES=1, NON_STRING_FIELD=2, NULL_BYTES=2, SLUG_MISMATCH=1); plain: 1 (YAML_PARSE=1). Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes",
+            "message": "16 frontmatter issue(s). notes: 15 (YAML_PARSE=8, EMPTY_FRONTMATTER=1, MISSING_CLOSE=2, NESTED_QUOTES=1, NULL_BYTES=2, SLUG_MISMATCH=1); plain: 1 (YAML_PARSE=1). Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes",
             "name": "frontmatter_integrity",
             "status": "warn"
           },
@@ -4146,7 +4139,7 @@
         "db_url_source": null,
         "elapsed_ms": "<volatile>",
         "engine": "postgres",
-        "health_score": 35,
+        "health_score": 40,
         "schema_version": 2,
         "status": "unhealthy",
         "tier": "standard",
@@ -4214,7 +4207,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "fix": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "fix": "Brain score 25/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 15/15, orphans 0/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn",
             "tier": "symptom"
@@ -4284,7 +4277,7 @@
             "tier": "symptom"
           },
           {
-            "fix": "18 frontmatter issue(s). notes: 17 (YAML_PARSE=8, EMPTY_FRONTMATTER=1, MISSING_CLOSE=2, NESTED_QUOTES=1, NON_STRING_FIELD=2, NULL_BYTES=2, SLUG_MISMATCH=1); plain: 1 (YAML_PARSE=1). Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes",
+            "fix": "16 frontmatter issue(s). notes: 15 (YAML_PARSE=8, EMPTY_FRONTMATTER=1, MISSING_CLOSE=2, NESTED_QUOTES=1, NULL_BYTES=2, SLUG_MISMATCH=1); plain: 1 (YAML_PARSE=1). Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes",
             "name": "frontmatter_integrity",
             "status": "warn",
             "tier": "symptom"
@@ -4354,12 +4347,6 @@
             },
             "fix": "8 file(s) in Git sources are held and not imported; the rest of each sync continues. notes: 8 held (0 page(s) keep an older revision, 8 file(s) have no page), first: fences/llm.md [invalid_fence/no_header], fences/manual.md [invalid_fence/takes_kind_unsupported], fm/dash-line.md [invalid_frontmatter/needs_interpretation], fm/duplicate-key.md [invalid_frontmatter/needs_interpretation], fm/indented-close.md [invalid_frontmatter/yaml_parse]. A page whose newer file is held is read-only for put_page until the file is repaired, so do not retry a refused write. Inspect with gbrain sources status notes; then notes: preview the frontmatter and other fixes with gbrain repair frontmatter --source notes (writes nothing until a hash-bound apply); nothing repairs the fence and slug-conflict holds by itself (no maintenance run is active), so preview the content repairs with gbrain repair content --source notes (read-only, no model call: it lists each held file with its planned repair or the exact edit, kind by kind, and prints the apply command with --expect <hash>[,<hash>]), then run the apply command it prints.",
             "name": "git_held_files",
-            "status": "warn",
-            "tier": "symptom"
-          },
-          {
-            "fix": "Source `notes`: 1 page(s) use 1 type(s) pack `gbrain-base-v2` neither declares nor aliases: '2024' (1). List them with `gbrain schema review-orphans --source notes`, then declare the type (`gbrain schema add-type <type>`, which takes its primitive and prefix) or retype the pages to a declared type.",
-            "name": "schema_pack_consistency",
             "status": "warn",
             "tier": "symptom"
           },
@@ -4470,7 +4457,7 @@
         ],
         "category_scores": {
           "brain": 45,
-          "meta": 95,
+          "meta": 100,
           "ops": 100,
           "skill": 95
         },
@@ -4960,10 +4947,10 @@
                     "days_to_exhaustion": null,
                     "exhaustion_date": null,
                     "limit": 68719476736,
-                    "max_day_7d": 198780,
-                    "net_per_day_7d": 58870,
+                    "max_day_7d": "<path-dependent-bytes>",
+                    "net_per_day_7d": "<path-dependent-bytes>",
                     "pct": 0,
-                    "per_day_7d": 196014,
+                    "per_day_7d": "<path-dependent-bytes>",
                     "reclaimable_bytes": "<path-dependent-bytes>",
                     "recommended_limit": 137438953472,
                     "resource": "terminal_bytes",
@@ -4971,7 +4958,7 @@
                     "spike_day": null,
                     "status": "ok",
                     "under_reserved_receipts": 0,
-                    "used": 198780,
+                    "used": "<path-dependent-bytes>",
                     "window_days": 1
                   },
                   {
@@ -4997,10 +4984,10 @@
                     "days_to_exhaustion": null,
                     "exhaustion_date": null,
                     "limit": 17179869184,
-                    "max_day_7d": 198780,
-                    "net_per_day_7d": 58870,
+                    "max_day_7d": "<path-dependent-bytes>",
+                    "net_per_day_7d": "<path-dependent-bytes>",
                     "pct": 0,
-                    "per_day_7d": 196014,
+                    "per_day_7d": "<path-dependent-bytes>",
                     "reclaimable_bytes": "<path-dependent-bytes>",
                     "recommended_limit": 34359738368,
                     "resource": "terminal_bytes",
@@ -5008,7 +4995,7 @@
                     "spike_day": null,
                     "status": "ok",
                     "under_reserved_receipts": 0,
-                    "used": 198780,
+                    "used": "<path-dependent-bytes>",
                     "window_days": 1
                   }
                 ],
@@ -5203,20 +5190,14 @@
           {
             "category": "meta",
             "details": {
-              "code": "page_type_undeclared",
               "docs": "docs/architecture/schema-packs.md#undeclared-page-types",
               "per_source": [
                 {
                   "pack": "gbrain-base-v2",
                   "source_id": "notes",
                   "total": 19,
-                  "undeclared": 1,
-                  "undeclared_types": [
-                    {
-                      "count": 1,
-                      "type": "2024"
-                    }
-                  ],
+                  "undeclared": 0,
+                  "undeclared_types": [],
                   "untyped": 0
                 },
                 {
@@ -5231,10 +5212,9 @@
               "unresolved_sources": []
             },
             "elapsed_ms": "<volatile>",
-            "fix_unavailable_reason": "unstructured",
-            "message": "Source `notes`: 1 page(s) use 1 type(s) pack `gbrain-base-v2` neither declares nor aliases: '2024' (1). List them with `gbrain schema review-orphans --source notes`, then declare the type (`gbrain schema add-type <type>`, which takes its primitive and prefix) or retype the pages to a declared type.",
+            "message": "All pages match the active schema pack across every source.",
             "name": "schema_pack_consistency",
-            "status": "warn"
+            "status": "ok"
           },
           {
             "category": "brain",
@@ -5723,7 +5703,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "message": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "message": "Brain score 25/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 15/15, orphans 0/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn"
           },
@@ -6537,14 +6517,14 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No quarantined pages",
+            "message": "No unacknowledged quarantined pages",
             "name": "quarantined_pages",
             "status": "ok"
           },
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No flagged pages",
+            "message": "No unacknowledged flagged pages",
             "name": "flagged_pages",
             "status": "ok"
           },
@@ -6563,13 +6543,13 @@
           {
             "category": "brain",
             "details": {
-              "count": 20,
+              "count": 18,
               "exact": true,
               "partial": false
             },
             "elapsed_ms": "<volatile>",
             "fix_unavailable_reason": "unstructured",
-            "message": "20 frontmatter issue(s). notes: 19 (YAML_PARSE=9, EMPTY_FRONTMATTER=1, NESTED_QUOTES=2, MISSING_CLOSE=2, NON_STRING_FIELD=2, NULL_BYTES=2, SLUG_MISMATCH=1); plain: 1 (YAML_PARSE=1). Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes",
+            "message": "18 frontmatter issue(s). notes: 17 (YAML_PARSE=9, EMPTY_FRONTMATTER=1, NESTED_QUOTES=2, MISSING_CLOSE=2, NULL_BYTES=2, SLUG_MISMATCH=1); plain: 1 (YAML_PARSE=1). Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes",
             "name": "frontmatter_integrity",
             "status": "warn"
           },
@@ -8600,7 +8580,7 @@
         "db_url_source": null,
         "elapsed_ms": "<volatile>",
         "engine": "postgres",
-        "health_score": 35,
+        "health_score": 40,
         "schema_version": 2,
         "status": "unhealthy",
         "tier": "standard",
@@ -8668,7 +8648,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "fix": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "fix": "Brain score 25/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 15/15, orphans 0/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn",
             "tier": "symptom"
@@ -8738,7 +8718,7 @@
             "tier": "symptom"
           },
           {
-            "fix": "20 frontmatter issue(s). notes: 19 (YAML_PARSE=9, EMPTY_FRONTMATTER=1, NESTED_QUOTES=2, MISSING_CLOSE=2, NON_STRING_FIELD=2, NULL_BYTES=2, SLUG_MISMATCH=1); plain: 1 (YAML_PARSE=1). Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes",
+            "fix": "18 frontmatter issue(s). notes: 17 (YAML_PARSE=9, EMPTY_FRONTMATTER=1, NESTED_QUOTES=2, MISSING_CLOSE=2, NULL_BYTES=2, SLUG_MISMATCH=1); plain: 1 (YAML_PARSE=1). Fix: gbrain repair frontmatter --source <id> previews the line fix for every file it can repair (and names the manual fix for the rest, such as a missing opening ---); on an unmanaged checkout gbrain frontmatter validate <source-path> --fix applies the same safe fixes",
             "name": "frontmatter_integrity",
             "status": "warn",
             "tier": "symptom"
@@ -8808,12 +8788,6 @@
             },
             "fix": "8 file(s) in Git sources are held and not imported; the rest of each sync continues. notes: 8 held (0 page(s) keep an older revision, 8 file(s) have no page), first: fences/llm.md [invalid_fence/no_header], fences/manual.md [invalid_fence/takes_kind_unsupported], fm/dash-line.md [invalid_frontmatter/needs_interpretation], fm/duplicate-key.md [invalid_frontmatter/needs_interpretation], fm/indented-close.md [invalid_frontmatter/yaml_parse]. A page whose newer file is held is read-only for put_page until the file is repaired, so do not retry a refused write. Inspect with gbrain sources status notes; then notes: preview the frontmatter and other fixes with gbrain repair frontmatter --source notes (writes nothing until a hash-bound apply); nothing repairs the fence and slug-conflict holds by itself (no maintenance run is active), so preview the content repairs with gbrain repair content --source notes (read-only, no model call: it lists each held file with its planned repair or the exact edit, kind by kind, and prints the apply command with --expect <hash>[,<hash>]), then run the apply command it prints.",
             "name": "git_held_files",
-            "status": "warn",
-            "tier": "symptom"
-          },
-          {
-            "fix": "Source `notes`: 1 page(s) use 1 type(s) pack `gbrain-base-v2` neither declares nor aliases: '2024' (1). List them with `gbrain schema review-orphans --source notes`, then declare the type (`gbrain schema add-type <type>`, which takes its primitive and prefix) or retype the pages to a declared type.",
-            "name": "schema_pack_consistency",
             "status": "warn",
             "tier": "symptom"
           },

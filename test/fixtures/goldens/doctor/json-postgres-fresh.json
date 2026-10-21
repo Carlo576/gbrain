@@ -490,10 +490,10 @@
                   "days_to_exhaustion": null,
                   "exhaustion_date": null,
                   "limit": 68719476736,
-                  "max_day_7d": 19163,
-                  "net_per_day_7d": 2845,
+                  "max_day_7d": "<path-dependent-bytes>",
+                  "net_per_day_7d": "<path-dependent-bytes>",
                   "pct": 0,
-                  "per_day_7d": 19163,
+                  "per_day_7d": "<path-dependent-bytes>",
                   "reclaimable_bytes": "<path-dependent-bytes>",
                   "recommended_limit": 137438953472,
                   "resource": "terminal_bytes",
@@ -501,7 +501,7 @@
                   "spike_day": null,
                   "status": "ok",
                   "under_reserved_receipts": 0,
-                  "used": 19163,
+                  "used": "<path-dependent-bytes>",
                   "window_days": 1
                 },
                 {
@@ -527,10 +527,10 @@
                   "days_to_exhaustion": null,
                   "exhaustion_date": null,
                   "limit": 17179869184,
-                  "max_day_7d": 19163,
-                  "net_per_day_7d": 2845,
+                  "max_day_7d": "<path-dependent-bytes>",
+                  "net_per_day_7d": "<path-dependent-bytes>",
                   "pct": 0,
-                  "per_day_7d": 19163,
+                  "per_day_7d": "<path-dependent-bytes>",
                   "reclaimable_bytes": "<path-dependent-bytes>",
                   "recommended_limit": 34359738368,
                   "resource": "terminal_bytes",
@@ -538,7 +538,7 @@
                   "spike_day": null,
                   "status": "ok",
                   "under_reserved_receipts": 0,
-                  "used": 19163,
+                  "used": "<path-dependent-bytes>",
                   "window_days": 1
                 }
               ],
@@ -1859,14 +1859,14 @@
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
-          "message": "No quarantined pages",
+          "message": "No unacknowledged quarantined pages",
           "name": "quarantined_pages",
           "status": "ok"
         },
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
-          "message": "No flagged pages",
+          "message": "No unacknowledged flagged pages",
           "name": "flagged_pages",
           "status": "ok"
         },
