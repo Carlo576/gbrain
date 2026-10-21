@@ -21,13 +21,15 @@ import { expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { reembedPageWithContextualRetrieval } from '../../src/core/contextual-retrieval-service.ts';
-import { SYNOPSIS_DOC_MAX_CHARS, estimateSynopsisCallUsd, segmentSynopsisWindows, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
+import { DEFAULT_SYNOPSIS_MODEL, SYNOPSIS_DOC_MAX_CHARS, segmentSynopsisWindows, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
 import { embeddingInputHash } from '../../src/core/embedding-input-hash.ts';
 import { embeddingInputContext, embeddingWriteTarget } from '../../src/core/page-state/projections.ts';
 import { segmentSynopsisInputHashes, segmentSynopsisLead } from '../../src/core/page-body/segment-synopsis.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
+import { PAGE_DERIVATION_CAP_KEY } from '../../src/core/page-spend.ts';
+import { reservationCostUsd } from '../../src/core/budget/reservation-cost.ts';
 import { chunkGenerationFilter } from '../../src/core/search/safe-chunks.ts';
-import { __setEmbedTransportForTests } from '../../src/core/ai/gateway.ts';
+import { __setChatTransportForTests, __setEmbedTransportForTests, type ChatOpts, type ChatResult } from '../../src/core/ai/gateway.ts';
 import { embedStalePages } from '../../src/core/embed-stale.ts';
 import { pageEmbeddingLeaseProbe } from '../../src/core/page-embedding-lease.ts';
 import { installSegmentedVectors, readSegmentedEmbedPage } from '../../src/core/page-body/segmented-embedding.ts';
@@ -61,14 +63,11 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
   const calls: GeneratePerChunkSynopsisArgs[] = [];
   let segmentReads = 0;
   let refuse: ((args: GeneratePerChunkSynopsisArgs) => boolean) | null = null;
-  let fail: ((args: GeneratePerChunkSynopsisArgs) => GeneratePerChunkSynopsisResult | null) | null = null;
   let onSynopsis: ((args: GeneratePerChunkSynopsisArgs) => Promise<void>) | null = null;
   const generateSynopsis = async (args: GeneratePerChunkSynopsisArgs): Promise<GeneratePerChunkSynopsisResult> => {
     calls.push(args);
     await onSynopsis?.(args);
     if (refuse?.(args)) return { kind: 'refusal', detail: 'fixture refusal' };
-    const failed = fail?.(args);
-    if (failed) return failed;
     return { kind: 'success', synopsis: `Synopsis of chunk ${args.chunkIndex}.` };
   };
   const counting = (engine: BrainEngine): BrainEngine => new Proxy(engine, {
@@ -93,7 +92,10 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
   const synopsisRows = async (pageId: number) => opts.getBrain().engine.readSegmentDerivations(pageId, { kind: 'synopsis' });
   const nonCode = (rows: ChunkRow[]) => rows.filter(c => c.chunk_source !== 'fenced_code');
   /** The cap is set high enough for a whole 2.3 MB page at the upper-bound estimate (uncached prompts at list price). */
-  const roomyCap = () => opts.getBrain().engine.setConfig(PAGE_EMBED_CAP_KEY, '1000');
+  const roomyCap = async () => {
+    await opts.getBrain().engine.setConfig(PAGE_EMBED_CAP_KEY, '1000');
+    await opts.getBrain().engine.setConfig(PAGE_DERIVATION_CAP_KEY, '1000');
+  };
 
   test('append invalidation: a segmented page leaves the title tier, a rerun does no work, an append pays only for the windows it changed', async () => {
     const brain = opts.getBrain();
@@ -181,8 +183,9 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     const slug = 'notes/synopsis-capped';
     await brain.seed(slug, page(days(1_300_000).body));
     const { id } = await pageRow(slug);
-    await brain.engine.executeRaw(`INSERT INTO page_embedding_budget (page_id, cap_usd, spent_usd) VALUES ($1, 1, 1)
-      ON CONFLICT (page_id) DO UPDATE SET cap_usd = 1, spent_usd = 1`, [id]);
+    await brain.engine.setConfig(PAGE_DERIVATION_CAP_KEY, '1');
+    await brain.engine.executeRaw(`INSERT INTO page_derivation_spend (page_id, family, spent_usd) VALUES ($1, 'synopsis', 1)
+      ON CONFLICT (page_id, family) DO UPDATE SET spent_usd = 1`, [id]);
     const before = await pageRow(slug);
     reset();
     expect(await run(slug)).toEqual({ kind: 'skipped', reason: 'budget_limited' });
@@ -190,7 +193,7 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     expect(await pageRow(slug)).toEqual(before);
     expect((await chunks(slug)).some(c => c.vector !== null)).toBe(false);
 
-    await brain.engine.executeRaw('UPDATE page_embedding_budget SET cap_usd = 1000 WHERE page_id = $1', [id]);
+    await roomyCap();
     reset();
     const all = await chunks(slug);
     expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: all.length });
@@ -371,7 +374,7 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     }
     const cappedSlug = 'notes/synopsis-doctor-capped';
     await brain.seed(cappedSlug, page(days(1_300_000).body + '\nDoctor cap fixture.\n'));
-    await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, '0.000001');
+    await brain.engine.setConfig(PAGE_DERIVATION_CAP_KEY, '0.000001');
     try {
       reset();
       expect(await run(cappedSlug)).toEqual({ kind: 'skipped', reason: 'budget_limited' });
@@ -388,53 +391,68 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     expect(check.status).not.toBe('warn');
   }, 300_000);
 
-  const ledger = async (pageId: number) => (await opts.getBrain().engine.executeRaw<{ spent: number | string; reserved: number | string }>(
-    'SELECT spent_usd AS spent, reserved_usd AS reserved FROM page_embedding_budget WHERE page_id = $1', [pageId])).map(r => ({ spent: Number(r.spent), reserved: Number(r.reserved) }))[0]!;
-  const callUsd = (calls: readonly GeneratePerChunkSynopsisArgs[]) => calls.reduce((n, c) => n + estimateSynopsisCallUsd(c.model!, c.documentText, c.chunkText, c.maxTokens), 0);
+  const ledger = async (pageId: number, table: 'page_derivation_spend' | 'page_embedding_budget') => (await opts.getBrain().engine.executeRaw<{ spent: number | string; reserved: number | string }>(
+    `SELECT spent_usd AS spent, reserved_usd AS reserved FROM ${table} WHERE page_id = $1${table === 'page_derivation_spend' ? " AND family = 'synopsis'" : ''}`, [pageId]))
+    .map(r => ({ spent: Number(r.spent), reserved: Number(r.reserved) }))[0] ?? null;
+  /** The real synopsis call (generatePerChunkSynopsis) through the gateway's chat transport: usage on a priced model, a quarter token per input character and 20 output tokens. */
+  const runPaid = (slug: string, answer: (o: ChatOpts) => ChatResult | Error, answered: ChatResult[]) => {
+    __setChatTransportForTests(async (o: ChatOpts) => {
+      const out = answer(o);
+      if (out instanceof Error) throw out;
+      answered.push(out);
+      return out;
+    });
+    return reembedPageWithContextualRetrieval({ engine: opts.getBrain().engine, pageSlug: slug, sourceId: 'default', globalMode: 'per_chunk_synopsis', chunkConcurrency: 4 })
+      .finally(() => __setChatTransportForTests(null));
+  };
+  const paidAnswer = (o: ChatOpts): ChatResult => {
+    const chars = o.messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length), 0) + (o.system?.length ?? 0);
+    return { text: 'A short synopsis of the chunk.', blocks: [], stopReason: 'end', model: DEFAULT_SYNOPSIS_MODEL, providerId: 'anthropic',
+      usage: { input_tokens: Math.ceil(chars / 4), output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 } };
+  };
+  const answeredUsd = (answered: readonly ChatResult[]) => answered.reduce((n, a) => n + reservationCostUsd(a.model, 'chat', a.usage.input_tokens, a.usage.output_tokens)!, 0);
 
-  test('spend: a window whose synopsis fails books only the calls the provider may have billed (a rate-limited call is not), never its embedding', async () => {
+  test('spend: a window whose synopsis is rate limited books the calls the provider answered and never the rejected one or an embedding; the embedding ledger is untouched', async () => {
     const brain = opts.getBrain();
     await roomyCap();
     const slug = 'notes/synopsis-spend-synopsis-failure';
     await brain.seed(slug, page(days(1_300_000).body + '\nSpend fixture one.\n'));
     const { id } = await pageRow(slug);
-    let limited: GeneratePerChunkSynopsisArgs | null = null;
-    fail = args => { if (limited) return null; limited = args; return { kind: 'rate_limit', detail: 'fixture rate limit' }; };
+    const answered: ChatResult[] = [];
+    let rejected = 0;
     reset();
-    try {
-      expect(await run(slug)).toMatchObject({ kind: 'transient_error', cause: 'rate_limit' });
-    } finally {
-      fail = null;
-    }
-    expect(calls.length).toBeGreaterThan(0);
+    const result = await runPaid(slug, o => rejected++ === 0 ? Object.assign(new Error('fixture rate limit'), { status: 429 }) : paidAnswer(o), answered);
+    expect(result).toMatchObject({ kind: 'transient_error', cause: 'rate_limit' });
     expect(brain.embedded.length).toBe(0);
-    const billed = calls.filter(c => c !== limited);
-    const { spent, reserved } = await ledger(id);
-    expect(reserved).toBeCloseTo(0, 12);
-    expect(spent).toBeCloseTo(callUsd(billed), 12);
+    const spend = await ledger(id, 'page_derivation_spend');
+    expect(spend!.reserved).toBeCloseTo(0, 12);
+    expect(spend!.spent).toBeCloseTo(answeredUsd(answered), 12);
+    expect(await ledger(id, 'page_embedding_budget')).toBeNull();
   }, 300_000);
 
-  test('spend: a window whose embedding fails books its synopsis calls and not the embedding', async () => {
+  test('spend: a window whose embedding fails books its answered synopsis calls and not the embedding', async () => {
     const brain = opts.getBrain();
     await roomyCap();
     const slug = 'notes/synopsis-spend-embed-failure';
     await brain.seed(slug, page(days(1_300_000).body + '\nSpend fixture two.\n'));
     const { id } = await pageRow(slug);
     const dims = (await embeddingWriteTarget(brain.engine)).column.dimensions;
+    const answered: ChatResult[] = [];
     __setEmbedTransportForTests((async () => { throw new Error('fixture embedding outage'); }) as never);
     reset();
     try {
-      expect(await run(slug)).toMatchObject({ kind: 'transient_error' });
+      expect(await runPaid(slug, paidAnswer, answered)).toMatchObject({ kind: 'transient_error' });
     } finally {
       __setEmbedTransportForTests((async ({ values }: { values: string[] }) => {
         brain.embedded.push(...values);
         return { embeddings: values.map(() => Array.from({ length: dims }, (_, j) => (j === 0 ? 1 : 0))), usage: { tokens: values.length } };
       }) as never);
     }
-    expect(calls.length).toBeGreaterThan(0);
-    const { spent, reserved } = await ledger(id);
-    expect(reserved).toBeCloseTo(0, 12);
-    expect(spent).toBeCloseTo(callUsd(calls), 12);
+    expect(answered.length).toBeGreaterThan(0);
+    const spend = await ledger(id, 'page_derivation_spend');
+    expect(spend!.reserved).toBeCloseTo(0, 12);
+    expect(spend!.spent).toBeCloseTo(answeredUsd(answered), 12);
+    expect(await ledger(id, 'page_embedding_budget')).toBeNull();
   }, 300_000);
 
   test('an inline page keeps the synopsisBodyHash input', async () => {

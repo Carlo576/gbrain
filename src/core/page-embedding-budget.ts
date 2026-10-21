@@ -37,7 +37,7 @@ import { JUNK_SAMPLE_CHARS, assessJunkWindows, assessSampledJunk } from './conte
 import type { BodyStorage, ManifestRow } from './page-body/types.ts';
 import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { estimateCostFromChars } from './embedding-pricing.ts';
-import { reservationCostUsd, type BudgetKind } from './budget/reservation-cost.ts';
+import { reservationCostUsd, usageCostUsd, type BudgetKind } from './budget/reservation-cost.ts';
 import { BudgetTracker, type PricingOverrides } from './budget/budget-tracker.ts';
 import { getCurrentBudgetTracker, withBudgetTracker } from './ai/gateway.ts';
 import { recordOnTracker } from './ai/budget-record.ts';
@@ -248,11 +248,36 @@ export function estimateFactsExtractionUsd(model: string, chars: number, maxOutp
 const TOUCHPOINT_KIND: Partial<Record<string, BudgetKind>> = { embedding: 'embed', rerank: 'rerank' };
 
 /**
+ * A metered step's tracker, which also sums what the provider billed: every attempt it answered, at its reported usage
+ * (a success without reported usage at its estimate). An attempt that failed with no reported usage carries the
+ * gateway's pessimistic fallback (a rate limit, an auth or server error, a connection that got no answer): the provider
+ * billed nothing, so the page ledger books nothing for it, while the step's caps still count it.
+ */
+class MeteredStepTracker extends BudgetTracker {
+  billedUsd = 0;
+  billedAttempts = 0;
+  unpricedAttempts = 0;
+  constructor(opts: ConstructorParameters<typeof BudgetTracker>[0], private readonly pricing?: PricingOverrides) { super(opts); }
+
+  override record(actual: Parameters<BudgetTracker['record']>[0]): void {
+    const failed = actual.failed === true || (actual.label?.endsWith('.failed') ?? false);
+    if (!(failed && actual.estimated === true)) {
+      const cost = usageCostUsd(actual.modelId, actual.inputTokens, actual.outputTokens ?? 0, actual.kind ?? 'chat', this.pricing);
+      this.billedAttempts++;
+      if (cost === null) this.unpricedAttempts++;
+      else this.billedUsd += cost;
+    }
+    super.record(actual);
+  }
+}
+
+/**
  * Run one paid derivation step on `page` under its family's cap (wave-b spec 8.3): reserve `estimateUsd` (every attempt the
  * step may make), run `call`, and book what its provider calls actually cost, read from a budget tracker scoped to the call.
- * Every attempt the gateway recorded is booked whatever the step's outcome (a truncated, malformed or refused answer, a
- * throw after the provider answered, an abort); an unpriced model books the reservation; a step that recorded no attempt
- * (the provider was never called) books nothing. The attempts are recorded on the caller's tracker too, and the caller's
+ * Every attempt the provider answered is booked whatever the step's outcome (a truncated, malformed or refused answer, a
+ * throw after the provider answered); an attempt that failed with no provider-reported usage (a rate limit, an auth or
+ * server error, an embedding that failed) is not; an unpriced model books the reservation; a step with no billed attempt
+ * (the provider was never called or never answered) books nothing. The attempts are recorded on the caller's tracker too, and the caller's
  * remaining cap bounds them.
  */
 export async function meterPaidCall<T>(engine: BrainEngine, page: BudgetPage, signature: PageSpendSignature, estimateUsd: number,
@@ -262,8 +287,8 @@ export async function meterPaidCall<T>(engine: BrainEngine, page: BudgetPage, si
   if (decision.kind === 'unmetered') return { value: await call() };
   const parent = getCurrentBudgetTracker();
   const parentCap = parent?.cap;
-  const tracker = new BudgetTracker({ label: `page-spend:${signature}`, pricingOverrides: opts.pricingOverrides,
-    ...(parent && parentCap !== undefined ? { maxCostUsd: Math.max(0, parentCap - parent.totalSpent), capSource: parent.capSource } : {}) });
+  const tracker = new MeteredStepTracker({ label: `page-spend:${signature}`, pricingOverrides: opts.pricingOverrides,
+    ...(parent && parentCap !== undefined ? { maxCostUsd: Math.max(0, parentCap - parent.totalSpent), capSource: parent.capSource } : {}) }, opts.pricingOverrides);
   try {
     return { value: await withBudgetTracker(tracker, call) };
   } finally {
@@ -272,8 +297,7 @@ export async function meterPaidCall<T>(engine: BrainEngine, page: BudgetPage, si
       recordOnTracker(parent, { modelId: m.model, requestedModelId: m.requested_model, inputTokens: m.input_tokens, outputTokens: m.output_tokens,
         label: 'page-spend', kind: TOUCHPOINT_KIND[m.touchpoint] ?? 'chat' });
     }
-    const unpriced = models.some(m => m.cost_usd === null);
-    await decision.grant.settle({ ok: models.length > 0, usd: unpriced ? decision.grant.reservedUsd : tracker.totalSpent });
+    await decision.grant.settle({ ok: tracker.billedAttempts > 0, usd: tracker.unpricedAttempts > 0 ? decision.grant.reservedUsd : tracker.billedUsd });
   }
 }
 

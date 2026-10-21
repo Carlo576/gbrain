@@ -8,7 +8,7 @@
  *    embedding model resets the embedding ledger only, never derivation spend or an in-flight derivation reservation;
  *    concurrent reservations never overspend a cap; a settle after its reservation was folded as stale books nothing;
  *    a metered call books the provider-reported cost of every attempt (a throw after the answer included), the
- *    reservation for an unpriced model and nothing when the provider was never called; the estimate honors
+ *    reservation for an unpriced model and nothing when the provider was never called or rejected the attempt unanswered; the estimate honors
  *    pricing.overrides and covers every attempt of a facts extraction.
  * 2. Fails when: derivation spend starves embeddings, an embedding switch forgives or drops derivation spend, a refusal
  *    runs the call, a race overspends, a folded grant is booked twice, or booking ignores what the provider reported.
@@ -239,6 +239,25 @@ describe('per-page spend ledgers', () => {
       __setChatTransportForTests(async () => ({ ...answer(10, 10), model: 'test:unpriced-model' }));
       await meterPaidCall(engine, page, 'atoms:test:unpriced-model', 0.05, () => chat({ model: 'test:unpriced-model', messages: [{ role: 'user', content: 'w' }], maxTokens: 50 }));
       expect(await familyLedger(engine, page.id, 'atoms'), name).toEqual({ spent: 0.05, reserved: 0 });
+      __setChatTransportForTests(null);
+    }
+  });
+
+  test('meterPaidCall books nothing for an attempt the provider rejected before answering (a rate limit), and the answered attempts beside it', async () => {
+    for (const { name, engine } of engines) {
+      const page = await segmentedPage(engine);
+      const ask = () => chat({ model: HAIKU, messages: [{ role: 'user', content: 'window' }], maxTokens: 500 });
+      let rejected = 0;
+      __setChatTransportForTests(async () => {
+        if (rejected++ === 0) throw Object.assign(new Error('fixture rate limit'), { status: 429 });
+        return answer(1000, 200);
+      });
+      const out = await meterPaidCall(engine, page, `synopsis:${HAIKU}`, 0.2, async () => { await ask().catch(() => null); await ask(); return 'done'; });
+      expect({ out, ledger: await familyLedger(engine, page.id, 'synopsis') }, name)
+        .toEqual({ out: { value: 'done' }, ledger: { spent: expect.closeTo(reservationCostUsd(HAIKU, 'chat', 1000, 200)!, 12), reserved: 0 } });
+      __setChatTransportForTests(async () => { throw Object.assign(new Error('fixture rate limit'), { status: 429 }); });
+      await meterPaidCall(engine, page, `atoms:${HAIKU}`, 0.2, () => ask().catch(() => null));
+      expect(await familyLedger(engine, page.id, 'atoms'), name).toEqual({ spent: 0, reserved: 0 });
       __setChatTransportForTests(null);
     }
   });
