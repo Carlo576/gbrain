@@ -654,6 +654,35 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
         .toEqual({ sweep: undefined, rows: [], recorded: 0 });
     }, 600_000);
 
+    test('an import that retired an occurrence before the purge recorded its sweep, still open, keeps the sweep from ending until it commits; then no holder is left', async () => {
+      const claim = 'Purge Example silo code is 3947', planted = 'Alice Example said Purge Example silo code is 3947';
+      await brain.seed('notes/sweep-early-live', prosePage(planted, 68));
+      const live = await storedPage(brain.engine, 'notes/sweep-early-live');
+      await deriveAll(brain.engine, live);
+      expect((await exactHolders(brain.engine, live.id, planted)).length).toBeGreaterThan(0);
+      // More than a batch of rows after the page in key order, so only a whole new walk, not a reread of the last batch, reaches its rows.
+      await candidateRowsPage('notes/sweep-early-pad', 'Purge Example padding row is 0002', 600, 0);
+      const params = await confirmed(await seed('notes/sweep-early-purge', claim));
+      // The import retires every live occurrence of the page (its rows leave the live body) before the purge records its sweep; on Postgres it stays open.
+      const retire = 'UPDATE page_body_manifest SET gen_to = gen_from + 1000000 WHERE page_id = $1 AND gen_to IS NULL AND staging_id IS NULL';
+      let commit = async () => {};
+      if (kind === 'postgres') {
+        const opened = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+        const held = (brain.engine as any).sql.begin(async (tx: any) => { await tx.unsafe(retire, [live.id]); opened.resolve(); await release.promise; });
+        await opened.promise;
+        commit = async () => { release.resolve(); await held; };
+      } else await brain.engine.executeRaw(retire, [live.id]);
+      let first: Record<string, any>, open: Record<string, any>;
+      try {
+        first = (await brain.call('purge_fact', params)).body;
+        open = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+      } finally { await commit(); }
+      expect({ state: first!.state, open: open!.derivation_sweep }).toEqual({ state: 'committed', open: kind === 'postgres' ? 'pending' : undefined });
+      const done = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+      expect({ sweep: done.derivation_sweep, rows: await exactHolders(brain.engine, live.id, planted), recorded: await sweepsRecorded() })
+        .toEqual({ sweep: undefined, rows: [], recorded: 0 });
+    }, 600_000);
+
     /**
      * A source of its own with one page holding one `pipeline` row, the page soft-deleted (so the row is in a sweep's scope), and a sweep recorded for
      * it. `backed`: a live manifest occurrence backs the row, so only the soft delete puts it in the scope.

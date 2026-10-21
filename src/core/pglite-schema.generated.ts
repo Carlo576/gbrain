@@ -1448,9 +1448,6 @@ BEGIN
     src := OLD.source_id;
     page := OLD.page_id;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM page_segment_derivation_purges x WHERE x.source_id = src) THEN
-    RETURN NULL;
-  END IF;
   PERFORM pg_advisory_xact_lock_shared(hashtextextended('gbrain:derivation-scope:' || src, 0));
   INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
     SELECT x.request_id, page FROM page_segment_derivation_purges x WHERE x.source_id = src ON CONFLICT DO NOTHING;
