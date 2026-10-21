@@ -28,6 +28,12 @@ import {
   TRANSCRIPT_IMPORT_VERSION,
 } from '../../src/core/transcripts/render.ts';
 import { buildTranscriptSlug, transcriptFullId, type ParsedSession } from '../../src/core/transcripts/types.ts';
+import { dumpFrontmatterYaml } from '../../src/core/data-frontmatter.ts';
+import { dispatchToolCall } from '../../src/mcp/dispatch.ts';
+import { registerLocalWriter, withVerifiedLocalRegistration } from '../../src/core/persistence/identity.ts';
+import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
+import { TRANSCRIPT_MAX_PARTS } from '../../src/core/transcripts/render.ts';
+import { withEnv } from './with-env.ts';
 
 const NO_PATTERNS = { userPatternsPath: '/nonexistent-patterns.txt' };
 const STARTED = '2026-08-10T08:00:00.000Z';
@@ -107,6 +113,31 @@ async function liveParts(engine: BrainEngine, base: string): Promise<LivePart[]>
     .map(row => ({ slug: row.slug, title: row.title, hash: row.content_hash,
       frontmatter: (typeof row.frontmatter === 'string' ? JSON.parse(row.frontmatter) : row.frontmatter) as Record<string, any> }))
     .sort((a, b) => num(a.slug) - num(b.slug));
+}
+
+/**
+ * A remote agent with read and write scope rewrites a page's `transcript_import` through MCP `put_page`
+ * (`remote: true`, a registered writer, bound to the revision `get_page` returned).
+ */
+async function remoteRewriteImportMeta(engine: BrainEngine, dir: string, slug: string, edit: (ti: Record<string, unknown>) => void): Promise<void> {
+  const page = await engine.getPage(slug, { sourceId: 'default' });
+  const fm = { ...(page!.frontmatter as Record<string, any>) };
+  fm.transcript_import = { ...fm.transcript_import };
+  edit(fm.transcript_import);
+  await withEnv({ GBRAIN_HOME: join(dir, 'home') }, async () => {
+    const registration = await registerLocalWriter(engine, 'stdio', { sourceIds: ['*'], operations: null, scopes: ['read', 'write'], slugPrefixes: null } as never);
+    const ctx = { remote: true, config: { engine: engine.kind }, sourceId: 'default', logger: { info() {}, warn() {}, error() {} },
+      auth: { token: 'fixture', clientId: 'remote-agent-example', scopes: ['read', 'write'], sourceId: 'default' } } as never;
+    const got = await withVerifiedLocalRegistration(engine, registration, () => dispatchToolCall(engine, 'get_page', { slug }, ctx));
+    const revision = JSON.parse((got as { content: Array<{ text: string }> }).content[0]!.text).revision;
+    expect(typeof revision).toBe('string');
+    const put = await withVerifiedLocalRegistration(engine, registration, () => dispatchToolCall(engine, 'put_page',
+      { slug, expected_revision: revision, request_id: randomUUID(), content: `---\n${dumpFrontmatterYaml(fm)}---\n${page!.compiled_truth}\n` }, ctx));
+    expect((put as { isError?: boolean }).isError ?? false).toBe(false);
+  });
+  await disposePersistenceConsumer(engine);
+  const stored = await engine.getPage(slug, { sourceId: 'default' });
+  expect((stored!.frontmatter as Record<string, any>).transcript_import).toEqual(fm.transcript_import);
 }
 
 async function withDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -211,9 +242,9 @@ export function defineTranscriptPartChurnCases(opts: { getEngine: () => BrainEng
     const engine = opts.getEngine();
     const id = `ceiling-${randomUUID().slice(0, 8)}`;
     const base = baseSlugOf(id);
-    const text = Array.from({ length: 6_000 }, (_, i) => `tok-${String(i).padStart(4, '0')}`).join(',');
+    const text = Array.from({ length: 20_000 }, (_, i) => `tok-${String(i).padStart(5, '0')}`).join(',');
     const path = writeSession(dir, id, [{ text }]);
-    await engine.setConfig('pages.max_bytes', '20000');
+    await engine.setConfig('pages.max_bytes', '60000');
     let parts: LivePart[];
     try {
       const r = await ingest(engine, path);
@@ -226,9 +257,9 @@ export function defineTranscriptPartChurnCases(opts: { getEngine: () => BrainEng
     const anchor = '**User** (2026-08-10 8:00 AM): ';
     const fragments: string[] = [];
     for (const page of parts) {
-      expect(page.frontmatter.transcript_import.part_bytes).toBe(18_000);
+      expect(page.frontmatter.transcript_import.part_bytes).toBe(54_000);
       const body = (await engine.getPage(page.slug, { sourceId: 'default' }))!.compiled_truth;
-      expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(18_000);
+      expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(54_000);
       for (const block of body.split('\n\n')) if (block.startsWith(anchor)) fragments.push(block.slice(anchor.length));
     }
     expect(fragments.length).toBe(parts.length);
@@ -261,5 +292,84 @@ export function defineTranscriptPartChurnCases(opts: { getEngine: () => BrainEng
     expect(after.slice(0, n - 1).map(p => p.hash)).toEqual(before.slice(0, n - 1).map(p => p.hash));
     expect(after.slice(0, n - 1).map(p => p.frontmatter.transcript_import.imperatives_flagged)).toEqual(Array(n - 1).fill(undefined));
     expect(after[n - 1]!.frontmatter.transcript_import.imperatives_flagged).toBe(1);
+  }), 180_000);
+
+  test('a remote put_page of transcript_import.part_bytes (120, 60, 40) never steers the layout of the next ingest', () => withDir(async (dir) => {
+    const engine = opts.getEngine();
+    const id = `remote-${randomUUID().slice(0, 8)}`;
+    const base = baseSlugOf(id);
+    let messages = regular(20);
+    expect((await ingest(engine, writeSession(dir, id, messages))).pages).toMatchObject({ imported: 1, errored: 0 });
+    for (const partBytes of [120, 60, 40]) {
+      await remoteRewriteImportMeta(engine, dir, base, ti => { ti.part_bytes = partBytes; delete ti.of; });
+      messages = [...messages, { text: `follow-up after ${partBytes}` }];
+      const r = await ingest(engine, writeSession(dir, id, messages));
+      expect({ pages: r.pages, sessionsErrored: r.sessionsErrored, partsDeleted: r.partsDeleted, cleanScan: r.cleanScan })
+        .toEqual({ pages: { imported: 1, skipped: 0, errored: 0, planned: 0, pending: 0 }, sessionsErrored: 0, partsDeleted: 0, cleanScan: true });
+      const pages = await liveParts(engine, base);
+      expect(pages.map(p => p.slug)).toEqual([base]);
+      expect(pages[0]!.frontmatter.transcript_import).toEqual({ harness: 'openclaw', session_id: id, version: 1, part: 1, of: 1 });
+    }
+  }), 180_000);
+
+  test('a remote part_bytes on a split part is ignored: parts 1..N-1 keep their content_hash', () => withDir(async (dir) => {
+    const engine = opts.getEngine();
+    const id = `remotesplit-${randomUUID().slice(0, 8)}`;
+    const base = baseSlugOf(id);
+    const s0 = regular(30);
+    const n = await seedLegacySplit(engine, writeSession(dir, id, s0));
+    const s1 = [...s0, { text: 'small follow-up A' }];
+    expect((await ingest(engine, writeSession(dir, id, s1))).pages).toMatchObject({ imported: n, errored: 0 });
+    const before = await liveParts(engine, base);
+    for (const slug of [partSlug(base, 1), partSlug(base, 2)]) await remoteRewriteImportMeta(engine, dir, slug, ti => { ti.part_bytes = 120; });
+    const r = await ingest(engine, writeSession(dir, id, [...s1, { text: 'small follow-up B' }]));
+    expect(r.pages).toMatchObject({ imported: 3, skipped: n - 3, errored: 0 });
+    const after = await liveParts(engine, base);
+    expect(after.map(p => p.slug)).toEqual(before.map(p => p.slug));
+    expect(after.slice(0, n - 1).map(p => p.hash)).toEqual(before.slice(0, n - 1).map(p => p.hash));
+    for (const page of after) expect(page.frontmatter.transcript_import.part_bytes).toBe(PART_TARGET_BYTES);
+  }), 180_000);
+
+  test('an importer-written part_bytes outside [45,000, ceiling] is not accepted', () => withDir(async (dir) => {
+    const engine = opts.getEngine();
+    const id = `bounds-${randomUUID().slice(0, 8)}`;
+    const base = baseSlugOf(id);
+    const s0 = regular(30);
+    const n = await seedLegacySplit(engine, writeSession(dir, id, s0));
+    const s1 = [...s0, { text: 'small follow-up' }];
+    expect((await ingest(engine, writeSession(dir, id, s1))).pages).toMatchObject({ imported: n, errored: 0 });
+    for (const part of [1, 2]) {
+      const page = await engine.getPage(partSlug(base, part), { sourceId: 'default' });
+      const fm = { ...(page!.frontmatter as Record<string, any>) };
+      fm.transcript_import = { ...fm.transcript_import, part_bytes: part === 1 ? 120 : 1024 ** 3 };
+      await importFromContent(engine, partSlug(base, part), renderPartContent(fm, page!.compiled_truth), {
+        noEmbed: true, sourceId: 'default', source_kind: 'transcript:openclaw', source_uri: 'fixture', ingested_via: 'cli:transcripts-ingest' });
+    }
+    const r = await ingest(engine, writeSession(dir, id, [...s1, { text: 'another follow-up' }]));
+    expect(r.pages).toMatchObject({ imported: 3, errored: 0 });
+    expect((await liveParts(engine, base)).map(p => p.frontmatter.transcript_import.part_bytes)).toEqual(Array(n).fill(PART_TARGET_BYTES));
+  }), 180_000);
+
+  test('a session that cannot render (no room at the ceiling, or over the part cap) is an errored session, nothing written', () => withDir(async (dir) => {
+    const engine = opts.getEngine();
+    const tiny = `tiny-${randomUUID().slice(0, 8)}`;
+    const many = `many-${randomUUID().slice(0, 8)}`;
+    const manyMessages = Array.from({ length: TRANSCRIPT_MAX_PARTS + 1 }, (_, i) => ({ text: `m${i} ${'y'.repeat(600)}` }));
+    const results = [];
+    for (const [id, maxBytes, messages] of [[tiny, 40, regular(2)], [many, 1_000, manyMessages]] as const) {
+      await engine.setConfig('pages.max_bytes', String(maxBytes));
+      try {
+        results.push(await ingest(engine, writeSession(dir, id, [...messages])));
+      } finally {
+        await engine.unsetConfig('pages.max_bytes');
+      }
+    }
+    for (const [i, r] of results.entries()) {
+      expect({ sessionsErrored: r.sessionsErrored, sessionsImported: r.sessionsImported, cleanScan: r.cleanScan, imported: r.pages.imported })
+        .toEqual({ sessionsErrored: 1, sessionsImported: 0, cleanScan: false, imported: 0 });
+      expect(r.files[0]!.sessions[0]!.error).toMatch(i === 0 ? /leaves no room/ : new RegExp(`over the ${TRANSCRIPT_MAX_PARTS}-part cap`));
+    }
+    expect(await liveParts(engine, baseSlugOf(tiny))).toEqual([]);
+    expect(await liveParts(engine, baseSlugOf(many))).toEqual([]);
   }), 180_000);
 }
