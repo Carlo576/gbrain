@@ -8,9 +8,10 @@
  *    embedding model resets the embedding ledger only, never derivation spend or an in-flight derivation reservation;
  *    concurrent reservations never overspend a cap; a settle after its reservation was folded as stale books nothing;
  *    a metered call books the provider-reported cost of every attempt (a throw after the answer included), the
- *    reservation for an unpriced model, the worst case of an attempt the provider may have billed without reporting
- *    usage (a timeout, an abort, a reset connection, partial usage) so a run of timeouts stops at the cap, and nothing
- *    when the provider was never called or refused the attempt with an error status; concurrent metered calls under one
+ *    reservation for an unpriced model, the worst case of every attempt the provider may have billed (a timeout, an
+ *    abort, a reset, partial or wrapped usage, a 5xx, a proxy's 499 or 504, each entry of a retry wrapper) so a run of
+ *    them stops at the cap, and nothing when the provider was never called or definitively refused the attempt (a 4xx
+ *    on the attempt itself, no usage); a metered call turns the SDK's hidden retries off; concurrent metered calls under one
  *    --max-usd tracker count each other's in-flight attempts; the estimate honors
  *    pricing.overrides and covers every attempt of a facts extraction.
  * 2. Fails when: derivation spend starves embeddings, an embedding switch forgives or drops derivation spend, a refusal
@@ -24,7 +25,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { PAGE_EMBED_CAP_KEY, estimateChatCallUsd, estimateFactsExtractionUsd, meterPaidCall, planPageEmbedding, reservePageSpend, spendGrant,
   type PageSpendSignature } from '../src/core/page-embedding-budget.ts';
 import { PAGE_DERIVATION_CAP_KEY } from '../src/core/page-spend.ts';
-import { __setChatTransportForTests, chat, withBudgetTracker, type ChatResult } from '../src/core/ai/gateway.ts';
+import { __setChatTransportForTests, __setGenerateTextTransportForTests, chat, configureGateway, resetGateway, withBudgetTracker, type ChatResult } from '../src/core/ai/gateway.ts';
 import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
 import { BudgetExhausted, BudgetTracker, parsePricingOverrides } from '../src/core/budget/budget-tracker.ts';
 import { estimateChatInputTokens } from '../src/core/ai/chat-input-estimate.ts';
@@ -266,64 +267,106 @@ describe('per-page spend ledgers', () => {
     }
   });
 
-  test('meterPaidCall books the worst case of an attempt the provider may have billed (a timeout, an abort, a reset connection, partial usage) and nothing for one it refused with an error status', async () => {
+  test('meterPaidCall books every attempt the provider may have billed (a timeout, an abort, a reset, partial or wrapped usage, a 5xx, a 499 or 504, each entry of a retry wrapper) and nothing for one it definitively refused (a 4xx on the attempt itself, no usage)', async () => {
+    const status = (code: number, message = `http ${code}`) => Object.assign(new Error(message), { status: code });
+    const reset = () => Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    const retry = (...errors: Error[]) => Object.assign(new Error(`Failed after ${errors.length} attempts.`), { name: 'AI_RetryError', reason: 'maxRetriesExceeded', errors, lastError: errors.at(-1) });
+    const failures: Array<[string, Error]> = [
+      ['timeout', Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' })],
+      ['abort', Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })],
+      ['reset', reset()],
+      ['partial', Object.assign(new Error('stream interrupted'), { usage: { input_tokens: 1000 } })],
+      ['wrapped usage', Object.assign(status(400), { cause: { usage: { input_tokens: 1000, output_tokens: 300 } } })],
+      ['status only on a cause', Object.assign(new Error('wrapped'), { cause: status(401) })],
+      ['500', status(500)], ['504', status(504)], ['529', status(529)], ['499', status(499)], ['408', status(408)],
+      ['401', status(401)], ['429', status(429)], ['400', status(400)],
+      ['retry reset, reset, 500', retry(reset(), reset(), status(500))],
+      ['retry 408, 408, 529', retry(status(408), status(408), status(529))],
+      ['retry 429, 429, 500', retry(status(429), status(429), status(500))],
+      ['retry 429, 429, 429', retry(status(429), status(429), status(429))],
+    ];
+    const worst = reservationCostUsd(HAIKU, 'chat', estimateChatInputTokens({ messages: [{ content: 'window' }] }), 500)!;
+    const expected: Record<string, number> = {
+      timeout: worst, abort: worst, reset: worst, partial: reservationCostUsd(HAIKU, 'chat', 1000, 500)!,
+      'wrapped usage': reservationCostUsd(HAIKU, 'chat', 1000, 300)!, 'status only on a cause': worst,
+      500: worst, 504: worst, 529: worst, 499: worst, 408: worst, 401: 0, 429: 0, 400: 0,
+      'retry reset, reset, 500': 3 * worst, 'retry 408, 408, 529': 3 * worst, 'retry 429, 429, 500': worst, 'retry 429, 429, 429': 0,
+    };
     for (const { name, engine } of engines) {
       const page = await segmentedPage(engine);
       const ask = () => chat({ model: HAIKU, messages: [{ role: 'user', content: 'window' }], maxTokens: 500 });
-      const failures: Array<[string, Error]> = [
-        ['timeout', Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' })],
-        ['abort', Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })],
-        ['reset', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })],
-        ['partial', Object.assign(new Error('stream interrupted'), { usage: { input_tokens: 1000 } })],
-        ['server', Object.assign(new Error('overloaded'), { status: 529 })],
-        ['auth', Object.assign(new Error('invalid x-api-key'), { status: 401 })],
-      ];
-      const booked: Record<string, { ledger: number; recorded: number }> = {};
+      const booked: Record<string, number> = {};
+      const recorded: Record<string, boolean> = {};
       for (const [kind, error] of failures) {
         const before = (await familyLedger(engine, page.id, 'facts'))?.spent ?? 0;
         const parent = new BudgetTracker({ label: 'probe', auditPath: '/dev/null' });
         __setChatTransportForTests(async () => { throw error; });
         const out = await withBudgetTracker(parent, () => meterPaidCall(engine, page, `facts:${HAIKU}`, 0.2, () => ask().catch(() => 'failed')));
         expect(out, name).toEqual({ value: 'failed' });
-        booked[kind] = { ledger: (await familyLedger(engine, page.id, 'facts'))!.spent - before, recorded: parent.totalSpent };
+        booked[kind] = (await familyLedger(engine, page.id, 'facts'))!.spent - before;
+        recorded[kind] = parent.totalSpent > 0;
       }
       __setChatTransportForTests(null);
-      const worst = reservationCostUsd(HAIKU, 'chat', estimateChatInputTokens({ messages: [{ content: 'window' }] }), 500)!;
-      expect(booked, name).toEqual({
-        timeout: { ledger: expect.closeTo(worst, 12), recorded: expect.closeTo(worst, 12) },
-        abort: { ledger: expect.closeTo(worst, 12), recorded: expect.closeTo(worst, 12) },
-        reset: { ledger: expect.closeTo(worst, 12), recorded: expect.closeTo(worst, 12) },
-        partial: { ledger: expect.closeTo(reservationCostUsd(HAIKU, 'chat', 1000, 500)!, 12), recorded: expect.closeTo(reservationCostUsd(HAIKU, 'chat', 1000, 500)!, 12) },
-        server: { ledger: 0, recorded: expect.closeTo(worst, 12) },
-        auth: { ledger: 0, recorded: expect.closeTo(worst, 12) },
-      });
+      expect(Object.fromEntries(Object.entries(booked).map(([k, v]) => [k, Number(v.toFixed(12))])), name)
+        .toEqual(Object.fromEntries(Object.entries(expected).map(([k, v]) => [k, Number(v.toFixed(12))])));
+      // The caller's tracker still counts every failure at its pessimistic estimate (its caps are unchanged).
+      expect(Object.values(recorded).every(Boolean), name).toBe(true);
       expect((await familyLedger(engine, page.id, 'facts'))!.reserved, name).toBe(0);
     }
   });
 
-  test('timed-out attempts are booked, so a run of them stops at the family cap', async () => {
+  test('a metered call runs with the provider SDK\'s hidden retries off; an unmetered call keeps the SDK default', async () => {
     for (const { name, engine } of engines) {
       const page = await segmentedPage(engine);
-      const ask = () => chat({ model: HAIKU, messages: [{ role: 'user', content: 'window' }], maxTokens: 500 });
-      const worst = reservationCostUsd(HAIKU, 'chat', estimateChatInputTokens({ messages: [{ content: 'window' }] }), 500)!;
-      const cap = 0.0513;
-      await engine.setConfig(PAGE_DERIVATION_CAP_KEY, String(cap));
-      let calls = 0;
-      __setChatTransportForTests(async () => { calls++; throw Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' }); });
-      let steps = 0;
-      let refused = false;
+      configureGateway({ env: { OPENAI_API_KEY: 'sk-fake' } });
+      const seen: unknown[] = [];
+      __setGenerateTextTransportForTests((async (args: { maxRetries?: number }) => {
+        seen.push('maxRetries' in args ? args.maxRetries : 'default');
+        return { content: [{ type: 'text', text: 'ok' }], finishReason: 'stop', usage: { inputTokens: 5, outputTokens: 1 } };
+      }) as never);
       try {
-        while (!refused && steps < 50) {
-          steps++;
-          refused = 'refused' in await meterPaidCall(engine, page, `facts:${HAIKU}`, 0.01, () => ask().catch(() => null));
-        }
+        const ask = () => chat({ model: 'openai:gpt-4o', messages: [{ role: 'user', content: 'window' }], maxTokens: 50 });
+        await meterPaidCall(engine, page, 'facts:openai:gpt-4o', 0.2, ask);
+        await ask();
       } finally {
-        __setChatTransportForTests(null);
-        await engine.setConfig(PAGE_DERIVATION_CAP_KEY, '1');
+        __setGenerateTextTransportForTests(null);
+        resetGateway();
       }
-      const allowed = Math.floor((cap - 0.01) / worst) + 1;
-      expect({ refused, calls, steps, spent: (await familyLedger(engine, page.id, 'facts'))!.spent }, name)
-        .toEqual({ refused: true, calls: allowed, steps: allowed + 1, spent: expect.closeTo(allowed * worst, 12) });
+      expect(seen, name).toEqual([0, 'default']);
+    }
+  });
+
+  test('failed attempts the provider may have billed are booked, so a run of them stops at the family cap: timeouts, retry-wrapped 408s and a 529, wrapped usage', async () => {
+    const worst = reservationCostUsd(HAIKU, 'chat', estimateChatInputTokens({ messages: [{ content: 'window' }] }), 500)!;
+    const status = (code: number) => Object.assign(new Error(`http ${code}`), { status: code });
+    const kinds: Array<[string, () => Error, number]> = [
+      ['timeout', () => Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' }), worst],
+      ['retry 408, 408, 529', () => { const errors = [status(408), status(408), status(529)]; return Object.assign(new Error('Failed after 3 attempts.'), { name: 'AI_RetryError', errors, lastError: errors[2] }); }, 3 * worst],
+      ['wrapped usage', () => Object.assign(status(400), { cause: { usage: { input_tokens: 1000, output_tokens: 300 } } }), reservationCostUsd(HAIKU, 'chat', 1000, 300)!],
+    ];
+    for (const { name, engine } of engines) {
+      for (const [kind, failure, cost] of kinds) {
+        const page = await segmentedPage(engine);
+        const ask = () => chat({ model: HAIKU, messages: [{ role: 'user', content: 'window' }], maxTokens: 500 });
+        const cap = 0.0513;
+        await engine.setConfig(PAGE_DERIVATION_CAP_KEY, String(cap));
+        let calls = 0;
+        __setChatTransportForTests(async () => { calls++; throw failure(); });
+        let steps = 0;
+        let refused = false;
+        try {
+          while (!refused && steps < 50) {
+            steps++;
+            refused = 'refused' in await meterPaidCall(engine, page, `facts:${HAIKU}`, 0.01, () => ask().catch(() => null));
+          }
+        } finally {
+          __setChatTransportForTests(null);
+          await engine.setConfig(PAGE_DERIVATION_CAP_KEY, '1');
+        }
+        const allowed = Math.floor((cap - 0.01) / cost) + 1;
+        expect({ kind, refused, calls, steps, spent: Number((await familyLedger(engine, page.id, 'facts'))!.spent.toFixed(12)) }, name)
+          .toEqual({ kind, refused: true, calls: allowed, steps: allowed + 1, spent: Number((allowed * cost).toFixed(12)) });
+      }
     }
   });
 

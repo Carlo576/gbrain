@@ -134,8 +134,11 @@ function splitOversizedTurn(m: ConversationMessage, pageTitle: string, maxChars:
   return splitTurnText(m.text, budget).map((text) => ({ ...m, text }));
 }
 
-/** A closed window, the tag of the message it starts with and the tag of the message it ends with. */
-export interface TaggedWindow<Tag> { seg: ConversationSegment; tag: Tag; last: Tag }
+/**
+ * A closed window: the tag of the message it starts with and of the message it ends with, and which piece of each
+ * (an oversized turn is split into pieces; 0 for a turn that fits whole).
+ */
+export interface TaggedWindow<Tag> { seg: ConversationSegment; tag: Tag; last: Tag; firstPiece: number; lastPiece: number }
 
 /** What one pushed message did: dropped (filtered out), or accepted, opening a new gap group or not. */
 export type WindowPush<Tag> = { accepted: false; windows: [] } | { accepted: true; startsGroup: boolean; windows: TaggedWindow<Tag>[] };
@@ -157,9 +160,11 @@ export function createWindowStream<Tag>(opts: SplitSegmentsOpts = {}) {
   let cur: ConversationMessage[] = [];
   let curTag: Tag | undefined;
   let lastTag: Tag | undefined;
+  let firstPiece = 0;
+  let lastPiece = 0;
   let held: TaggedWindow<Tag>[] = [];
   const close = (out: TaggedWindow<Tag>[]) => {
-    if (cur.length > 0) held.push({ seg: segmentOf(cur), tag: curTag as Tag, last: lastTag as Tag });
+    if (cur.length > 0) held.push({ seg: segmentOf(cur), tag: curTag as Tag, last: lastTag as Tag, firstPiece, lastPiece });
     cur = [];
     if (groupMessages >= MIN_SEGMENT_MESSAGES) { out.push(...held); held = []; }
   };
@@ -178,12 +183,13 @@ export function createWindowStream<Tag>(opts: SplitSegmentsOpts = {}) {
       lastTs = ts;
       groupMessages++;
       const parts = renderedLength(pageTitle, [m]) <= maxChars ? [m] : splitOversizedTurn(m, pageTitle, maxChars);
-      for (const part of parts) {
+      parts.forEach((part, piece) => {
         if (cur.length >= maxMessages || (cur.length > 0 && renderedLength(pageTitle, [...cur, part]) > maxChars)) close(windows);
-        if (cur.length === 0) curTag = tag;
+        if (cur.length === 0) { curTag = tag; firstPiece = piece; }
         lastTag = tag;
+        lastPiece = piece;
         cur.push(part);
-      }
+      });
       if (groupMessages >= MIN_SEGMENT_MESSAGES && held.length) { windows.push(...held); held = []; }
       return { accepted: true, startsGroup, windows };
     },

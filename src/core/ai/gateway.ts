@@ -3760,6 +3760,8 @@ async function chatAdmitted(opts: ChatOpts, admitted: {
     abortSignal: withDefaultTimeout(opts.abortSignal, opts.timeoutMs ?? AI_CHAT_TIMEOUT_MS),
     providerOptions: Object.keys(providerOptions).length > 0 ? providerOptions : undefined,
     ...(requestHeaders ? { headers: requestHeaders } : {}),
+    // PR 4 (Wave B incremental derivation, transcripts): a metered page step sees every attempt it pays for.
+    ...(tracker?.providerRetries !== undefined ? { maxRetries: tracker.providerRetries } : {}),
   });
 
   try {

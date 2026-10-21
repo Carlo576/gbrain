@@ -72,8 +72,8 @@ export async function extractConversationWindow(run: ConversationWindowRun, page
     if (!extraction.ok) {
       if (extraction.error instanceof BudgetExhausted) throw extraction.error;
       const detail = extraction.error instanceof Error ? `: ${extraction.error.message}` : '';
-      throw Object.assign(new Error(`segment ${seg.startIso}..${seg.endIso} extraction failed (${extraction.reason})${detail}`),
-        { extractionReason: extraction.reason });
+      throw Object.assign(new Error(`segment ${seg.startIso}..${seg.endIso} extraction failed (${extraction.reason})${detail}`,
+        extraction.error === undefined ? undefined : { cause: extraction.error }), { extractionReason: extraction.reason });
     }
     extracted = extraction.facts;
   }

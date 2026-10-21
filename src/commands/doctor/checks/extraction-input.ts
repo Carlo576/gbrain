@@ -38,7 +38,10 @@ const UNREAD_WINDOWS = 'unread_windows';
 const UNREAD_REMEDY = `the run stopped before every window of the page was read (the receipt's reason: the per-page spend cap, a window limit or a skipped window); the next run resumes where it stopped, and when the cap stopped it: gbrain config set ${PAGE_DERIVATION_CAP_KEY} <usd>`;
 const FAILED_WINDOWS = 'failed_windows';
 const FAILED_REMEDY = 'a conversation window failed to extract in run after run and is skipped, so the older windows still get extracted (the sample names the window, its receipt the last error); fix the cause, then gbrain extract-conversation-facts --slug <slug> --force tries it again';
-const remedy = (g: ReceiptGroup): string | null => g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : g.kind === FAILED_WINDOWS ? FAILED_REMEDY : REMEDY[g.pipeline] ?? null;
+const NO_MESSAGES = 'no_messages';
+const NO_MESSAGES_REMEDY = 'the last run parsed no message from parts of the page that had conversation windows (a changed transcript format, or a parser fault), so it kept their facts and settled nothing; check that the page still reads as a conversation, then gbrain extract-conversation-facts --slug <slug>';
+const remedy = (g: ReceiptGroup): string | null => g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : g.kind === FAILED_WINDOWS ? FAILED_REMEDY
+  : g.kind === NO_MESSAGES ? NO_MESSAGES_REMEDY : REMEDY[g.pipeline] ?? null;
 
 const describe = (g: ReceiptGroup): string =>
   `${g.pipeline}/${g.kind}: ${g.pages} page(s) (e.g. ${g.samples.join(', ')}); ${remedy(g) ?? 'see the receipt in page_extraction_state'}`;

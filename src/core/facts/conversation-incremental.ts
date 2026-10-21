@@ -18,13 +18,19 @@
  *     reserved for every attempt and booked at the provider-reported cost), and publishes the facts and rows every
  *     CONVERSATION_FACTS_CHECKPOINT_WINDOWS windows, when it stops (--segment-limit, the cap) and when a window throws
  *     or the run aborts, so finished windows are never paid for twice;
- *   - counts a window whose extraction throws (a per-window error: not an abort, a cap or a provider-wide failure such
- *     as an auth error or a rate limit) against it across runs; the run stops there, and once a window has failed
- *     WINDOW_FAILURE_LIMIT runs it is marked failed (facts 0, a failed_windows receipt doctor lists) and the run moves on
- *     to older windows; a --force run (retryFailed) tries failed windows again;
+ *   - counts a window whose extraction fails for a reason of its own (malformed or truncated output, a refusal or
+ *     content filter, a provider refusal of the window's own input such as a context-length error; never a transport,
+ *     provider, auth, rate-limit, 5xx, timeout or abort failure) against it across runs; the run stops there, and once a
+ *     window has failed WINDOW_FAILURE_LIMIT runs it is marked failed (facts 0, a failed_windows receipt doctor lists)
+ *     and the run moves on to older windows; a failed window keeps the facts of the earlier windows it overlaps until it
+ *     is extracted, and a --force run (retryFailed) tries it again;
+ *   - parses under the grammar a current row recorded, else the one the page's head detects (as the whole-page pass
+ *     picks it), never one recorded under another context or text; a stream that parses no message from occurrences
+ *     that had windows clears nothing and settles nothing (a no_messages receipt, the page counted failed);
  *   - clears facts only when that is safe: an unsettled run clears the facts of windows it extracted again and of
- *     earlier windows whose messages (by position: occurrence and ordinal, never by timestamp, which a transcript
- *     without per-message times shares across every message) a run of current windows covers, nothing else; a settled run (every live window
+ *     earlier windows whose messages (by position: occurrence, ordinal and piece of an oversized message, never by
+ *     timestamp, which a transcript without per-message times shares across every message) a run of current windows
+ *     covers, nothing else; a settled run (every live window
  *     extracted, no --since, the page unchanged) clears the facts of windows that left the page and the unanchored
  *     facts of older full-pass runs, and stamps the page complete.
  * A --since run extracts only the windows after it and never settles the page. A title or gap change re-extracts every
@@ -34,8 +40,9 @@
 import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
 import { deriveDateContext } from '../conversation-parser/parse.ts';
-import { BudgetExhausted, loadPricingOverrides, type PricingOverrides } from '../budget/budget-tracker.ts';
-import { classifyGlobalLlmError } from '../ai/errors.ts';
+import { loadPricingOverrides, type PricingOverrides } from '../budget/budget-tracker.ts';
+import { providerItemRefusal } from '../ai/errors.ts';
+import { truthLead } from '../page-body/segment-blocks.ts';
 import { writeDerivedFacts } from '../persistence/derived-facts.ts';
 import { estimateFactsExtractionUsd, meterPaidCall } from '../page-embedding-budget.ts';
 import { setExtractionReceipt } from '../extraction-watermark.ts';
@@ -46,7 +53,7 @@ import { emptySaveTimeResolutionCounts, mergeSaveTimeResolutionCounts } from '..
 import { conversationEntityHints } from './conversation-entity-hints.ts';
 import { publishConversationFacts, type ConversationFactRow } from './conversation-publication.ts';
 import { recordFailedPage } from './conversation-run-status.ts';
-import { startsConversationRun, streamConversationWindows, type MessagePosition } from './conversation-stream.ts';
+import { detectConversationPattern, startsConversationRun, streamConversationWindows, type MessagePosition } from './conversation-stream.ts';
 import type { ConversationSegment } from './conversation-types.ts';
 import { renderSegmentForExtraction } from './conversation-windows.ts';
 import { extractConversationWindow, nonExtractableAuditFact, regularPageVersionToken, terminalAuditFact, type ConversationWindowRun } from './conversation-window-extract.ts';
@@ -55,7 +62,7 @@ import type { FactVisibility } from './visibility.ts';
 
 const KIND = 'conversation_facts';
 /** Bump when the windowing or the row output changes shape: every occurrence is extracted again once. */
-export const CONVERSATION_FACTS_DERIVATION_VERSION = 1;
+export const CONVERSATION_FACTS_DERIVATION_VERSION = 2;
 /** Windows extracted between two publications of a page's facts and rows. */
 export const CONVERSATION_FACTS_CHECKPOINT_WINDOWS = 8;
 /**
@@ -82,13 +89,18 @@ export interface SegmentedConversationRun extends ConversationWindowRun {
   segmentLimit: number;
 }
 
-/** Where a window's first and last message start: [occurrence id, ordinal, occurrence id, ordinal] (MessagePosition). */
-type Span = [number, number, number, number];
+/** Characters of the page's head the grammar is detected from when no current row records it. */
+const PATTERN_HEAD_CHARS = 64 * 1024;
+/** Where a window's first and last message piece are: [occurrence id, ordinal, piece] twice (MessagePosition). */
+type Span = [number, number, number, number, number, number];
 /** A window an occurrence row records: ordinal, rendered-text sha, facts produced, its span, and why it failed when it did. */
 interface WindowRecord { ordinal: number; sha: string; facts: number; span?: Span; failed?: WindowFailure }
-/** Failed extraction attempts of one window (by rendered-text sha) and the last error. */
-interface WindowFailure { attempts: number; error: string }
-interface RowOutput { windows: WindowRecord[]; starts_group?: boolean; prev?: number | null; pattern?: string | null; retries?: Array<{ sha: string } & WindowFailure> }
+/** Failed extraction attempts of one window (by rendered-text sha), the last error, and (once failed) the keys of the earlier windows whose facts it keeps. */
+interface WindowFailure { attempts: number; error: string; keeps?: string[] }
+/** An earlier window whose facts still stand though no current window holds it yet (an unsettled run left it): its key and span. */
+interface StaleWindow { key: string; span?: Span }
+interface RowOutput { windows: WindowRecord[]; starts_group?: boolean; prev?: number | null; pattern?: string | null; retries?: Array<{ sha: string } & WindowFailure>;
+  stale?: StaleWindow[] }
 /** One window of the stream: `reused` (an earlier run's facts stand), `todo`, `extracted` by this run, or `failed` past the limit. */
 interface StreamWindow { owner: number; seg: ConversationSegment; text: string | null; window: SourceWindow; span: Span;
   state: 'reused' | 'todo' | 'extracted' | 'failed'; facts: number; failed?: WindowFailure }
@@ -98,7 +110,7 @@ type Stop = 'segment_limit' | 'cap_reached' | 'interrupted' | null;
 function rowOutput(row: SegmentDerivationRow | undefined): RowOutput {
   const output = row?.output as Partial<RowOutput> | null | undefined;
   return { windows: Array.isArray(output?.windows) ? output.windows : [], starts_group: output?.starts_group, prev: output?.prev,
-    pattern: output?.pattern ?? null, retries: Array.isArray(output?.retries) ? output.retries : [] };
+    pattern: output?.pattern ?? null, retries: Array.isArray(output?.retries) ? output.retries : [], stale: Array.isArray(output?.stale) ? output.stale : [] };
 }
 
 const keyOf = (occurrenceId: number, w: WindowRecord) => sourceWindowKey({ occurrence_id: occurrenceId, window_ordinal: w.ordinal, window_text_sha: w.sha });
@@ -116,27 +128,56 @@ async function conversationContext(engine: BrainEngine, page: Page, gapMinutes: 
  * with facts standing (reused or extracted). A position orders by its occurrence's place on the page, then its
  * ordinal; a window in an occurrence that left the page is never covered.
  */
-function coveredKeys(windows: readonly StreamWindow[], earlier: ReadonlyArray<{ key: string; span?: Span }>, place: ReadonlyMap<number, number>): string[] {
-  const at = (occurrenceId: number, n: number) => { const p = place.get(occurrenceId); return p === undefined ? null : p * 1_000_000_000 + n; };
-  const runs: Array<[number, number]> = [];
-  let open: [number, number] | null = null;
+function coveredKeys(windows: readonly StreamWindow[], earlier: readonly StaleWindow[], place: ReadonlyMap<number, number>): string[] {
+  const runs: Array<[Point, Point]> = [];
+  let open: [Point, Point] | null = null;
   for (const w of windows) {
     if (w.state !== 'reused' && w.state !== 'extracted') { open = null; continue; }
-    const start = at(w.span[0], w.span[1])!;
-    const end = at(w.span[2], w.span[3])!;
+    const [start, end] = ends(w.span, place) as [Point, Point];
     if (open) open[1] = end;
     else runs.push(open = [start, end]);
   }
   return earlier.filter(e => {
-    const start = e.span ? at(e.span[0], e.span[1]) : null;
-    const end = e.span ? at(e.span[2], e.span[3]) : null;
-    return start !== null && end !== null && runs.some(([a, b]) => a <= start && end <= b);
+    const span = e.span ? ends(e.span, place) : null;
+    return span !== null && runs.some(([a, b]) => before(a, span[0]) && before(span[1], b));
   }).map(e => e.key);
 }
 
-/** Whether a window's extraction error counts against the window: not an abort, a cap, or a provider-wide failure. */
-const windowFailure = (error: unknown, signal: AbortSignal | undefined) =>
-  !signal?.aborted && !(error instanceof BudgetExhausted) && !(error instanceof Error && error.name === 'AbortError') && classifyGlobalLlmError(error) === null;
+/** A message piece's place on the page: [occurrence place, ordinal, piece], ordered lexicographically. */
+type Point = [number, number, number];
+const before = (a: Point, b: Point) => a[0] !== b[0] ? a[0] < b[0] : a[1] !== b[1] ? a[1] < b[1] : a[2] <= b[2];
+/** A span's first and last point, or null when either occurrence left the page. */
+function ends(span: Span, place: ReadonlyMap<number, number>): [Point, Point] | null {
+  const first = place.get(span[0]);
+  const last = place.get(span[3]);
+  return first === undefined || last === undefined ? null : [[first, span[1], span[2]], [last, span[4], span[5]]];
+}
+
+/** Keys of earlier windows whose span overlaps `span` (a failed window keeps their facts). */
+function overlappingKeys(span: Span, earlier: readonly StaleWindow[], place: ReadonlyMap<number, number>): string[] {
+  const mine = ends(span, place);
+  if (!mine) return [];
+  return earlier.filter(e => {
+    const theirs = e.span ? ends(e.span, place) : null;
+    return theirs !== null && before(theirs[0], mine[1]) && before(mine[0], theirs[1]);
+  }).map(e => e.key);
+}
+
+/** extract.ts failure reasons caused by the window itself (its output or its content), which repeat until it changes. */
+const WINDOW_SPECIFIC_REASONS: ReadonlySet<string> = new Set(['malformed_output', 'truncated_output', 'refusal', 'content_filter']);
+
+/**
+ * Whether a window's extraction error counts against the window: a failure of the window's own (WINDOW_SPECIFIC_REASONS,
+ * or a provider refusal of its own input such as a context-length error). A transport, provider, auth, rate-limit,
+ * 5xx, timeout or abort failure, a cap, or an error with no extraction reason never counts.
+ */
+function windowFailure(error: unknown, signal: AbortSignal | undefined): boolean {
+  if (signal?.aborted) return false;
+  const reason = (error as { extractionReason?: unknown } | null)?.extractionReason;
+  if (typeof reason !== 'string') return false;
+  if (WINDOW_SPECIFIC_REASONS.has(reason)) return true;
+  return reason === 'provider_error' && providerItemRefusal((error as { cause?: unknown }).cause) !== null;
+}
 
 /**
  * One segmented page's conversation facts, incrementally (module doc). `gapMinutes` is the page's own
@@ -173,15 +214,17 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   // Earlier windows of the occurrences the stream covers (and of retired ones): reusable by rendered text under the same
   // context, and candidates to clear once the current windows cover their messages.
   const reusable = new Map<string, Array<{ occurrenceId: number; record: WindowRecord }>>();
-  const earlier: Array<{ key: string; span?: Span }> = [];
+  const earlier: Array<StaleWindow & { occurrenceId: number }> = [];
   const failures = new Map<string, WindowFailure>();
-  let pattern = prior.map(row => rowOutput(row).pattern).find(Boolean) ?? null;
+  // The page's grammar: the one a current row recorded (same text, version and context), else the head's (below).
+  let pattern: string | null = plan.current.map(row => rowOutput(row).pattern).find(Boolean) ?? null;
   for (const row of prior) {
     if ((position.get(row.occurrenceId) ?? Infinity) < from) continue;
     const same = row.version === CONVERSATION_FACTS_DERIVATION_VERSION && hex(row.contextHash) === hex(contextHash);
     const output = rowOutput(row);
+    for (const stale of output.stale ?? []) earlier.push({ ...stale, occurrenceId: row.occurrenceId });
     for (const record of output.windows) {
-      earlier.push({ key: keyOf(row.occurrenceId, record), span: record.span });
+      earlier.push({ key: keyOf(row.occurrenceId, record), span: record.span, occurrenceId: row.occurrenceId });
       if (same && !(record.failed && opts.retryFailed)) reusable.set(record.sha, [...(reusable.get(record.sha) ?? []), { occurrenceId: row.occurrenceId, record }]);
     }
     if (same && !opts.retryFailed) for (const { sha, attempts, error } of output.retries ?? []) failures.set(sha, { attempts, error });
@@ -192,7 +235,9 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   const startsGroup = new Map<number, boolean>();
   const ordinals = new Map<number, number>();
   const pageTitle = page.title || page.slug;
+  if (!pattern && from < liveIds.length) pattern = detectConversationPattern(await truthLead(engine, page.id, PATTERN_HEAD_CHARS), page);
   const streamOpts = { page, gapMinutes: opts.gapMinutes, sinceIso: opts.sinceIso, pattern };
+  let parsedMessages = 0;
   const texts = new Map<number, string>();
   const readText = async (i: number) => {
     const cached = texts.get(i);
@@ -206,8 +251,8 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     let start = end - 1;
     while (start > from && !startsConversationRun(occurrences, start, await readText(start), await readText(start - 1), streamOpts)) start--;
     const runWindows: StreamWindow[] = [];
-    const spanOf = (first: MessagePosition, last: MessagePosition): Span => [liveIds[first.owner]!, first.n, liveIds[last.owner]!, last.n];
-    pattern = streamOpts.pattern = await streamConversationWindows(occurrences, start, end, streamOpts, readText, {
+    const spanOf = (first: MessagePosition, last: MessagePosition): Span => [liveIds[first.owner]!, first.n, first.piece, liveIds[last.owner]!, last.n, last.piece];
+    const streamed = await streamConversationWindows(occurrences, start, end, streamOpts, readText, {
       window(first, last, seg) {
         const owner = liveIds[first.owner]!;
         const ordinal = ordinals.get(owner) ?? 0;
@@ -224,6 +269,8 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
       },
       occurrence(index, starts) { startsGroup.set(liveIds[index]!, starts); },
     });
+    pattern = streamOpts.pattern = streamed.pattern;
+    parsedMessages += streamed.messages;
     for (const i of [...texts.keys()]) if (i > start) texts.delete(i);
     windows.unshift(...runWindows);
     return { start, windows: runWindows };
@@ -253,6 +300,8 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
       unchanged = !!now && now.id === page.id && regularPageVersionToken(now) === versionToken;
     }
     const settled = final && unchanged && stop === null && !opts.sinceIso && streamedFrom <= from;
+    const clear = settled ? [] : [...batch.keys, ...coveredKeys(windows, earlier.filter(e => !reused.has(e.key)), position).filter(key => !cleared.has(key))];
+    const gone = new Set([...cleared, ...clear]);
     const owned = new Map<number, StreamWindow[]>();
     for (const w of windows) owned.set(w.owner, [...(owned.get(w.owner) ?? []), w]);
     // Rows of the occurrences this run finished or reached; an occurrence it never reached keeps its row (still unsettled).
@@ -261,24 +310,30 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
       const records: WindowRecord[] = mine.filter(w => w.state !== 'todo').map(w => ({ ordinal: w.window.window_ordinal, sha: w.window.window_text_sha,
         facts: w.facts, span: w.span, ...(w.failed && w.state === 'failed' ? { failed: w.failed } : {}) }));
       const retries = mine.flatMap(w => { const failure = w.state === 'todo' ? failures.get(w.window.window_text_sha) : undefined; return failure ? [{ sha: w.window.window_text_sha, ...failure }] : []; });
-      const failed = records.filter(r => r.failed).map(r => ({ ordinal: r.ordinal, ...r.failed! }));
+      const failed = records.filter(r => r.failed).map(r => ({ ordinal: r.ordinal, attempts: r.failed!.attempts, error: r.failed!.error }));
       const finished = records.length === mine.length;
-      if (!finished && !records.length && occurrenceId !== stopOwner) return [];
+      const recorded = new Set(records.map(r => keyOf(occurrenceId, r)));
+      // Earlier windows of this occurrence whose facts this unsettled run neither replaced nor cleared stay on its row.
+      const stale = settled ? [] : earlier.filter(e => e.occurrenceId === occurrenceId && !reused.has(e.key) && !gone.has(e.key) && !recorded.has(e.key))
+        .map(({ key, span }) => ({ key, span }));
+      if (!finished && !records.length && !stale.length && occurrenceId !== stopOwner) return [];
       return [{ pageId: page.id, kind: KIND, occurrenceId, version: CONVERSATION_FACTS_DERIVATION_VERSION, segmentSha256: live[streamedFrom + k]!.sha256,
         contextHash, state: finished && !opts.sinceIso ? 'done' : 'partial',
-        output: { windows: records, starts_group: startsGroup.get(occurrenceId) ?? false, prev: prevOf(streamedFrom + k), pattern, ...(retries.length ? { retries } : {}) },
+        output: { windows: records, starts_group: startsGroup.get(occurrenceId) ?? false, prev: prevOf(streamedFrom + k), pattern, ...(retries.length ? { retries } : {}), ...(stale.length ? { stale } : {}) },
         receipt: !finished ? { kind: 'unread_windows', pipeline: KIND, reason: stop ?? 'in_progress', windows_read: records.length, windows_total: mine.length }
           : failed.length ? { kind: 'failed_windows', pipeline: KIND, windows: failed } : null }];
     });
-    const keep = settled ? [...liveIds.slice(0, from).flatMap(id => rowOutput(priorRow.get(id)).windows.map(w => keyOf(id, w))),
-      ...windows.map(w => sourceWindowKey(w.window))] : null;
-    const clear = settled ? [] : [...batch.keys, ...coveredKeys(windows, earlier.filter(e => !reused.has(e.key)), position).filter(key => !cleared.has(key))];
+    // A failed window keeps the facts of the earlier windows it overlaps (`keeps`) until it is extracted.
+    const settledWindows = [...liveIds.slice(0, from).flatMap(id => rowOutput(priorRow.get(id)).windows.map(w => ({ key: keyOf(id, w), failed: w.failed }))),
+      ...windows.map(w => ({ key: sourceWindowKey(w.window), failed: w.state === 'failed' ? w.failed : undefined }))];
+    const anyFailed = settledWindows.some(w => w.failed);
+    const keep = settled ? settledWindows.flatMap(w => [w.key, ...(w.failed?.keeps ?? [])]) : null;
     const outcome = !settled ? null : keep!.length ? terminalAuditFact(page.slug, 0, versionToken)
       : nonExtractableAuditFact(page.slug, 0, versionToken, 'fewer than two eligible messages');
     const moves = [...pendingMoves];
     const out = await writeDerivedFacts(engine, sourceId, page.slug, async db => {
       const published = await publishConversationFacts(db, sourceId, page.slug, outcome ? [...batch.rows, outcome] : batch.rows,
-        { scope: 'window', segments: { windows: batch.windows, moves, keep, clear, retireUnanchored: settled } });
+        { scope: 'window', segments: { windows: batch.windows, moves, keep, clear, retireUnanchored: settled && !anyFailed } });
       if (derived.length) await db.upsertSegmentDerivations(derived);
       if (settled) await db.retireSegmentDerivations(page.id, liveIds, { kind: KIND });
       return published;
@@ -317,7 +372,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
           failures.set(sha, failure);
           if (failure.attempts < WINDOW_FAILURE_LIMIT) throw error;
           failures.delete(sha);
-          Object.assign(w, { state: 'failed', failed: failure, text: null });
+          Object.assign(w, { state: 'failed', failed: { ...failure, keeps: overlappingKeys(w.span, earlier.filter(e => !reused.has(e.key)), position) }, text: null });
           stopOwner = null;
           process.stderr.write(`[extract-conversation-facts] ${page.slug}: window ${w.window.window_ordinal} of occurrence ${w.owner} failed ${failure.attempts} runs (${failure.error}); skipped, gbrain doctor lists it, --force retries it\n`);
           continue;
@@ -350,6 +405,15 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     result.resolution_errors += resolution.resolution_errors;
   }
 
+  if (parsedMessages === 0 && earlier.length > 0) {
+    // Occurrences that had windows parsed into no message (a changed format the grammar no longer reads, a parser
+    // fault): clearing or settling would delete every fact they held. Nothing is published; the receipt says why.
+    await setExtractionReceipt(engine, page.id, KIND, { kind: 'no_messages', pipeline: KIND, processed_chars: 0 });
+    process.stderr.write(`[extract-conversation-facts] ${page.slug}: no message parsed from occurrences that had ${earlier.length} window(s); its facts were kept, nothing settled\n`);
+    result.pages_failed++;
+    recordFailedPage(result, page.slug, 'no message parsed from occurrences that had windows; facts kept for replay');
+    return { newestEnd: null };
+  }
   const { unchanged, keep, outcome } = await publish(true);
   await setExtractionReceipt(engine, page.id, KIND, null);
   if (!unchanged) {

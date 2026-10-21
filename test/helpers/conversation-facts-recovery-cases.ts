@@ -9,7 +9,11 @@
  *    whole-page windows and settles only then; a checkpoint write that fails keeps the window moves it carried for the
  *    write that follows, so no re-anchored fact is lost; a window that fails run after run is marked failed after
  *    WINDOW_FAILURE_LIMIT runs and the older windows are extracted, doctor names it and --force retries it.
- * 2. Fails when: coverage is judged by timestamps (one window "covers" every message at the page date), a continuation
+ *    Round 4: a one-window run on oversized turns clears only the pieces that window holds; a page re-imported in
+ *    another chat format is parsed in that format; a run parsing no message where windows were keeps every fact and
+ *    leaves a no_messages receipt; provider-wide failures (auth, 503) never count against a window; a failed window
+ *    keeps the facts of the window it replaced until it is extracted.
+ * 2. Fails when: coverage is judged by timestamps or by a message shared by many pieces, a stale grammar pins the page, (one window "covers" every message at the page date), a continuation
  *    is dropped by re-detecting the grammar per occurrence, moves are dropped before their write commits, or one
  *    failing window stalls every older window of the page.
  */
@@ -27,7 +31,8 @@ import { TERMINAL_AUDIT_SOURCE } from '../../src/core/facts/audit-sources.ts';
 import { extractionInputTruncatedEntry } from '../../src/commands/doctor/checks/extraction-input.ts';
 import type { DoctorContext } from '../../src/commands/doctor/context.ts';
 import type { Check } from '../../src/commands/doctor.ts';
-import { chatDays, chatPage, derivations, extract, factsOf, turns } from './conversation-facts-incremental-cases.ts';
+import { __setChatTransportForTests } from '../../src/core/ai/gateway.ts';
+import { chatDays, chatPage, derivations, extract, factsOf, PAID_MODEL, paidTransport, turns } from './conversation-facts-incremental-cases.ts';
 
 const WORDS = ['launch', 'pricing', 'budget', 'roadmap', 'hiring', 'review', 'contract', 'latency', 'onboarding', 'forecast'];
 const prose = (seed: number, words: number) => Array.from({ length: words }, (_, i) => WORDS[(seed * 7 + i * 3) % WORDS.length]).join(' ');
@@ -173,4 +178,115 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
     const forced = await extract(brain.engine, slug, { force: true });
     expect({ calls: forced.calls, receipts: (await derivations(brain.engine, slug)).receipts.filter(Boolean) }).toEqual({ calls: [stuck!], receipts: [] });
   }, 600_000);
+
+  test('a one-window run on a page of oversized turns clears only the pieces that window holds', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/oversized-turns-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    // Thirty turns of about 100 KB each, a minute apart: each is split into many pieces, one window per few pieces.
+    const lines = ['## 2025-04-01', ''];
+    for (let t = 0; t < 30; t++) lines.push(`**${['Alice Example', 'Bob Example'][t % 2]}** (9:${String(t).padStart(2, '0')} AM): ${prose(t, 14_000)}.`, '');
+    await brain.seed(slug, chatPage('Oversized T1', lines.join('\n')));
+    const all = await extract(brain.engine, slug);
+    const before = await factsOf(brain.engine, slug);
+    expect(before.length).toBe(all.calls.length);
+    expect(before.length).toBeGreaterThan(60);
+    await brain.seed(slug, chatPage('Oversized T2', (await brain.body(slug)).truth));
+    const limited = await extract(brain.engine, slug, { segmentLimit: 1 });
+    const after = await factsOf(brain.engine, slug);
+    expect({ calls: limited.calls.length, after: after.length, cleaned: limited.result.orphan_facts_cleaned, kept: before.filter(f => after.some(a => a.id === f.id)).length })
+      .toEqual({ calls: 1, after: before.length, cleaned: 1, kept: before.length - 1 });
+  }, 600_000);
+
+  test('a page re-imported in another chat format is parsed in its new format, not the grammar its old rows recorded', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/reformatted-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    await brain.seed(slug, chatPage('Reformatted', chatDays(3400, 100, 23)));
+    await extract(brain.engine, slug);
+    const before = await factsOf(brain.engine, slug);
+    expect(before.length).toBeGreaterThan(100);
+    await brain.seed(slug, chatPage('Reformatted', timeless(9000, 3)));
+    const page = (await brain.engine.getPage(slug, { sourceId: 'default' }))!;
+    const truth = (await brain.body(slug)).truth;
+    const expected = splitIntoSegments(parseConversation(truth, { page }).messages, { pageTitle: 'Reformatted' }).map(seg => renderSegmentForExtraction('Reformatted', seg));
+    expect(parseConversation(truth, { page }).matched_pattern_id).toBe('plain-role-no-time');
+    const { calls, result } = await extract(brain.engine, slug);
+    const rows = await derivations(brain.engine, slug);
+    expect({ calls: calls.length, same: [...calls].sort().join('\n') === [...expected].sort().join('\n'), nonExtractable: result.pages_marked_non_extractable,
+      facts: (await factsOf(brain.engine, slug)).length, states: [...new Set(rows.states)] })
+      .toEqual({ calls: expected.length, same: true, nonExtractable: 0, facts: expected.length, states: ['done'] });
+  }, 600_000);
+
+  test('a run that parses no message from occurrences that had windows keeps their facts, settles nothing and leaves a receipt doctor lists', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/unparsed-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    await brain.seed(slug, chatPage('Unparsed', chatDays(3500, 100, 24)));
+    await extract(brain.engine, slug);
+    const before = (await factsOf(brain.engine, slug)).map(f => f.id);
+    const prose = Array.from({ length: 6000 }, (_, i) => `Paragraph ${i} of the notes: the roadmap review moved to next quarter and the budget stays flat.`).join('\n\n');
+    await brain.seed(slug, chatPage('Unparsed', prose));
+    const { calls, result } = await extract(brain.engine, slug);
+    expect({ calls: calls.length, failed: result.pages_failed, nonExtractable: result.pages_marked_non_extractable, cleaned: result.orphan_facts_cleaned,
+      facts: (await factsOf(brain.engine, slug)).map(f => f.id), stamped: await terminalStamps(brain.engine, slug) })
+      .toEqual({ calls: 0, failed: 1, nonExtractable: 0, cleaned: 0, facts: before, stamped: 0 });
+    const check = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
+    const groups = (check.details as { groups: Array<{ pipeline: string; kind: string; samples: string[] }> }).groups;
+    expect(groups.some(g => g.pipeline === 'conversation_facts' && g.kind === 'no_messages' && g.samples.includes(`default:${slug}`))).toBe(true);
+  }, 600_000);
+
+  test('provider-wide failures (an auth error, a 503) never count against a window: it is never marked failed and extracts once the provider recovers', async () => {
+    const brain = opts.getBrain();
+    await caps(brain.engine, 'off');
+    await brain.engine.setConfig('facts.extraction_model', PAID_MODEL);
+    try {
+      for (const [label, failure] of [['auth', () => Object.assign(new Error('invalid x-api-key'), { status: 401 })], ['503', () => Object.assign(new Error('upstream unavailable'), { status: 503 })]] as const) {
+        const slug = `notes/provider-down-${label}-${randomUUID().slice(0, 8)}`;
+        await brain.seed(slug, chatPage('Provider down', chatDays(3600, 100, 25)));
+        let attempts = 0;
+        __setChatTransportForTests(async () => { attempts++; throw failure(); });
+        const runs: Array<{ attempts: number; failed: number }> = [];
+        for (let run = 0; run < WINDOW_FAILURE_LIMIT + 2; run++) {
+          attempts = 0;
+          const result = await extractProductionRun(brain.engine, slug);
+          runs.push({ attempts, failed: result.pages_failed });
+        }
+        const receipts = (await derivations(brain.engine, slug)).receipts.filter(Boolean).map(r => (r as { kind: string }).kind);
+        __setChatTransportForTests(paidTransport);
+        const recovered = await extractProductionRun(brain.engine, slug);
+        const rows = await derivations(brain.engine, slug);
+        expect({ label, runs, receipts, recovered: recovered.pages_failed, states: [...new Set(rows.states)], failedWindows: rows.receipts.filter(r => (r as { kind?: string } | null)?.kind === 'failed_windows').length }).toEqual({
+          label, runs: Array.from({ length: WINDOW_FAILURE_LIMIT + 2 }, () => ({ attempts: 1, failed: 1 })), receipts: ['unread_windows'], recovered: 0, states: ['done'], failedWindows: 0 });
+      }
+    } finally {
+      __setChatTransportForTests(null);
+      await brain.engine.setConfig('facts.extraction_model', '');
+    }
+  }, 600_000);
+
+  test('a window marked failed keeps the facts of the earlier window it replaced until it is extracted', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/failed-keeps-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    await brain.seed(slug, chatPage('Keeps T1', chatDays(3700, 100, 26)));
+    await extract(brain.engine, slug);
+    const before = await factsOf(brain.engine, slug);
+    await brain.seed(slug, chatPage('Keeps T2', (await brain.body(slug)).truth));
+    let stuck = null as string | null;
+    const failOn = (text: string) => { stuck ??= text; return text === stuck; };
+    for (let run = 1; run <= WINDOW_FAILURE_LIMIT; run++) await extract(brain.engine, slug, { failOn });
+    const settled = await factsOf(brain.engine, slug);
+    const survivors = before.filter(f => settled.some(s => s.id === f.id));
+    expect({ facts: settled.length, survivors: survivors.length, stamped: await terminalStamps(brain.engine, slug) }).toEqual({ facts: before.length, survivors: 1, stamped: 1 });
+    const forced = await extract(brain.engine, slug, { force: true });
+    const after = await factsOf(brain.engine, slug);
+    expect({ calls: forced.calls, facts: after.length, survivors: before.filter(f => after.some(a => a.id === f.id)).length }).toEqual({ calls: [stuck!], facts: before.length, survivors: 0 });
+  }, 600_000);
+}
+
+/** A production-extractor run (no injected extractor): the gateway's fake transport answers or fails. */
+async function extractProductionRun(engine: BrainEngine, slug: string) {
+  const { runExtractConversationFactsCore } = await import('../../src/commands/extract-conversation-facts.ts');
+  return runExtractConversationFactsCore(engine, { sourceId: 'default', slugs: [slug], sleepMs: 0 });
 }

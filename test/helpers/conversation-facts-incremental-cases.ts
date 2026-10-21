@@ -105,7 +105,7 @@ export function paidTransport(o: ChatOpts): Promise<ChatResult> {
 /**
  * One extraction run with a fake extractor; `calls` lists every window text it was handed, in call order. `paid`: each
  * window also calls the gateway (install paidTransport), so the call is booked. `failAt`: the extractor throws on that
- * call (1-based) after the provider answered; `failOn`: it throws on every window text the predicate accepts;
+ * call (1-based) after the provider answered; `failOn`: it fails with the window's own malformed output on every window text the predicate accepts;
  * `abortAfter`: the run is aborted after that many calls; `segmentLimit`: at most that many windows per page.
  */
 export async function extract(engine: BrainEngine, slug: string, opts: { force?: boolean; paid?: boolean; failAt?: number; failOn?: (text: string) => boolean;
@@ -118,7 +118,7 @@ export async function extract(engine: BrainEngine, slug: string, opts: { force?:
       calls.push(input.turnText);
       if (opts.paid) await gatewayChat({ model: PAID_MODEL, messages: [{ role: 'user', content: input.turnText }], maxTokens: 64 });
       if (calls.length === opts.failAt) throw new Error('fake extractor failure after the provider answered');
-      if (opts.failOn?.(input.turnText)) throw new Error('fake extractor failure on this window');
+      if (opts.failOn?.(input.turnText)) throw Object.assign(new Error('fake extractor: malformed output on this window'), { extractionReason: 'malformed_output' });
       if (calls.length === opts.abortAfter) controller.abort();
       return [{ fact: `Alice Example noted window ${sha(input.turnText).slice(0, 12)}`, kind: 'fact', entity_slug: null, source: SOURCE }];
     } }, controller.signal);

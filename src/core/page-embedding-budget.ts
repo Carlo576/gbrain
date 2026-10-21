@@ -246,12 +246,13 @@ export function estimateFactsExtractionUsd(model: string, chars: number, maxOutp
 }
 
 /**
- * A metered step's tracker, which also sums what the provider may have billed: every attempt at its reported usage (a
- * success without reported usage at its estimate), and every failed attempt the provider may have billed at what the
- * gateway recorded for it, its reported usage topped up with the pessimistic fallback (the attempt's worst case): a
- * timeout, an abort, a reset connection, partial usage. Only an attempt the provider refused with an error status and
- * no usage (failedCallUsage's `rejected`: a rate limit, an auth or server error) and an embedding that failed
- * without reported usage are booked as nothing.
+ * A metered step's tracker, which also sums what the provider may have billed: every answered attempt at its reported
+ * usage (a success without reported usage at its estimate), and every failed call at what failedCallUsage says its
+ * attempts may have billed (`billed`): each attempt, a retry wrapper's every entry included, at its reported usage
+ * topped up with the attempt's worst case, unless the provider definitively refused it before generating (a 4xx other
+ * than 408 or 499, with no usage). A 5xx, a 529, a proxy's 499 or 504, a timeout, an abort or a reset connection is
+ * booked. An embedding that failed without reported usage is booked as nothing (the embedding ledger's own rule).
+ * The step runs with the SDK's hidden retries off (providerRetries 0), so each attempt is a call it reserved for.
  *
  * Each attempt is also reserved and recorded on the caller's tracker (`parent`) as it happens, so the caller's cap
  * (`--max-usd`) counts every in-flight attempt of every worker, its own outstanding reservations included.
@@ -273,9 +274,10 @@ class MeteredStepTracker extends BudgetTracker {
 
   override record(actual: Parameters<BudgetTracker['record']>[0]): void {
     const failed = actual.failed === true || (actual.label?.endsWith('.failed') ?? false);
-    const unbilled = failed && (actual.rejected === true || ((actual.kind ?? 'chat') === 'embed' && actual.estimated === true));
+    const tokens = failed && actual.billed ? actual.billed : { inputTokens: actual.inputTokens, outputTokens: actual.outputTokens ?? 0 };
+    const unbilled = failed && (((actual.kind ?? 'chat') === 'embed' && actual.estimated === true) || (tokens.inputTokens === 0 && tokens.outputTokens === 0));
     if (!unbilled) {
-      const cost = usageCostUsd(actual.modelId, actual.inputTokens, actual.outputTokens ?? 0, actual.kind ?? 'chat', this.pricing);
+      const cost = usageCostUsd(actual.modelId, tokens.inputTokens, tokens.outputTokens, actual.kind ?? 'chat', this.pricing);
       this.billedAttempts++;
       if (cost === null) this.unpricedAttempts++;
       else this.billedUsd += cost;
@@ -289,17 +291,17 @@ class MeteredStepTracker extends BudgetTracker {
  * Run one paid derivation step on `page` under its family's cap (wave-b spec 8.3): reserve `estimateUsd` (every attempt the
  * step may make), run `call`, and book what its provider calls actually cost, read from a budget tracker scoped to the call.
  * Every attempt the provider answered is booked whatever the step's outcome (a truncated, malformed or refused answer, a
- * throw after the provider answered); an attempt that failed with no provider-reported usage (a rate limit, an auth or
- * server error, an embedding that failed) is not; an unpriced model books the reservation; a step with no billed attempt
- * (the provider was never called or never answered) books nothing. The attempts are recorded on the caller's tracker too, and the caller's
- * remaining cap bounds them.
+ * throw after the provider answered), and so is every failed attempt it may have billed (MeteredStepTracker); one it
+ * definitively refused before generating (a rate limit, an auth error) and a failed embedding are not; an unpriced
+ * model books the reservation; a step with no billed attempt books nothing. The attempts are reserved and recorded on
+ * the caller's tracker too, so the caller's cap bounds them.
  */
 export async function meterPaidCall<T>(engine: BrainEngine, page: BudgetPage, signature: PageSpendSignature, estimateUsd: number,
   call: () => Promise<T>, opts: { pricingOverrides?: PricingOverrides } = {}): Promise<{ refused: Extract<PageSpendDecision, { kind: 'refused' }> } | { value: T }> {
   const decision = await reservePageSpend(engine, page, signature, estimateUsd);
   if (decision.kind === 'refused') return { refused: decision };
   if (decision.kind === 'unmetered') return { value: await call() };
-  const tracker = new MeteredStepTracker({ label: `page-spend:${signature}`, pricingOverrides: opts.pricingOverrides }, getCurrentBudgetTracker(), opts.pricingOverrides);
+  const tracker = new MeteredStepTracker({ label: `page-spend:${signature}`, pricingOverrides: opts.pricingOverrides, providerRetries: 0 }, getCurrentBudgetTracker(), opts.pricingOverrides);
   try {
     return { value: await withBudgetTracker(tracker, call) };
   } finally {
