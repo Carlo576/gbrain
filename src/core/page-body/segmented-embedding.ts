@@ -162,15 +162,15 @@ export interface SegmentedVectorUpdate { chunk_index: number; chunk_text: string
  * under the page lock, while the page's slug, title and contextual mode and the write target (column, provenance
  * model) are those the inputs were built under; 0 when any moved. A row whose recorded input is no longer `expected`
  * (another writer installed since the read) is left as it is: a stale install is a no-op. `beforeInstall` runs after
- * the lock; throwing installs nothing. Returns the rows that took a vector.
+ * the lock; throwing or returning false installs nothing. Returns the rows that took a vector.
  */
 export async function installSegmentedVectors(engine: BrainEngine, page: SegmentedEmbedPage, target: Awaited<ReturnType<typeof embeddingWriteTarget>>,
-  vectors: readonly SegmentedVectorUpdate[], beforeInstall?: (tx: BrainEngine) => Promise<void>): Promise<number> {
+  vectors: readonly SegmentedVectorUpdate[], beforeInstall?: (tx: BrainEngine) => Promise<void | boolean>): Promise<number> {
   const updates = vectors.map(v => ({ chunk_index: v.chunk_index, chunk_text: v.chunk_text, embedding: `[${Array.from(v.vector).join(',')}]`, hash: v.hash, expected: v.expected }));
   const col = quoteIdentifier(target.column.name);
   return engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId: page.source_id, slug: page.slug }]);
-    await beforeInstall?.(tx);
+    if (await beforeInstall?.(tx) === false) return 0;
     const current = await readSegmentedEmbedPage(tx, { id: page.id });
     const now = await embeddingWriteTarget(tx);
     if (!current || current.slug !== page.slug || current.title !== page.title

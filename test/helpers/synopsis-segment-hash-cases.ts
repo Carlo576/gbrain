@@ -31,7 +31,7 @@ import { reservationCostUsd } from '../../src/core/budget/reservation-cost.ts';
 import { chunkGenerationFilter } from '../../src/core/search/safe-chunks.ts';
 import { __setChatTransportForTests, __setEmbedTransportForTests, type ChatOpts, type ChatResult } from '../../src/core/ai/gateway.ts';
 import { embedStalePages } from '../../src/core/embed-stale.ts';
-import { pageEmbeddingLeaseProbe } from '../../src/core/page-embedding-lease.ts';
+import { acquirePageEmbeddingLease, pageEmbeddingLeaseId, pageEmbeddingLeaseProbe } from '../../src/core/page-embedding-lease.ts';
 import { installSegmentedVectors, readSegmentedEmbedPage } from '../../src/core/page-body/segmented-embedding.ts';
 import type { AppendBrain } from './append-brain.ts';
 import { needlePage, needlePageBody, sealAtOldChunker } from './rechunk-segmented-cases.ts';
@@ -272,6 +272,62 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     reset();
     expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: 0 });
     expect(calls.length).toBe(0);
+  }, 300_000);
+
+  test('lease busy: with the page lease held elsewhere through the wait, the pass makes no provider call and returns a retryable result; once released it runs', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-lease-busy';
+    await brain.seed(slug, page(days(1_300_000).body + '\nLease busy fixture.\n'));
+    const { id } = await pageRow(slug);
+    const all = await chunks(slug);
+    let contentions = 0;
+    pageEmbeddingLeaseProbe.contended = () => { contentions++; };
+    pageEmbeddingLeaseProbe.waitBoundMs = 300;
+    reset();
+    try {
+      await using held = await acquirePageEmbeddingLease(brain.engine, id);
+      expect(held.busy).toBe(false);
+      const result = await run(slug);
+      expect(result).toMatchObject({ kind: 'transient_error', cause: 'db' });
+      expect(result.kind === 'transient_error' ? result.detail : '').toContain('Another path is embedding this page');
+    } finally {
+      pageEmbeddingLeaseProbe.contended = undefined;
+      pageEmbeddingLeaseProbe.waitBoundMs = undefined;
+    }
+    expect(contentions).toBeGreaterThan(0);
+    expect({ calls: calls.length, embedded: brain.embedded.length }).toEqual({ calls: 0, embedded: 0 });
+    expect((await chunks(slug)).every(c => c.vector === null)).toBe(true);
+    expect(await synopsisRows(id)).toEqual([]);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: all.length });
+    expect(calls.length).toBe(nonCode(all).length);
+  }, 300_000);
+
+  test('lease lost: a pass whose lease another path took over before the install installs nothing and returns a retryable result', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-lease-lost';
+    await brain.seed(slug, page(days(1_300_000).body + '\nLease lost fixture.\n'));
+    const { id } = await pageRow(slug);
+    const all = await chunks(slug);
+    reset();
+    onSynopsis = async () => {
+      onSynopsis = null;
+      expect((await brain.engine.executeRaw('UPDATE gbrain_cycle_locks SET acquisition_token = $2::uuid WHERE id = $1 RETURNING id',
+        [pageEmbeddingLeaseId(id), randomUUID()])).length).toBe(1);
+    };
+    const result = await run(slug);
+    expect(result).toMatchObject({ kind: 'transient_error', cause: 'db' });
+    expect(result.kind === 'transient_error' ? result.detail : '').toContain('lease was lost');
+    expect(calls.length).toBeGreaterThan(0);
+    expect(brain.embedded.length).toBe(calls.length);
+    expect((await chunks(slug)).every(c => c.vector === null)).toBe(true);
+    expect(await synopsisRows(id)).toEqual([]);
+    await brain.engine.executeRaw('DELETE FROM gbrain_cycle_locks WHERE id = $1', [pageEmbeddingLeaseId(id)]);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: all.length });
+    expect(calls.length).toBe(nonCode(all).length);
   }, 300_000);
 
   test('race: a row another writer installed after the synopsis pass read it keeps that install; the stale synopsis install is a no-op and the retry pays for that row and the windows not reached', async () => {
