@@ -120,6 +120,7 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('page_projection_jobs', 'operational', 'Pending page projection work (derived side table, verified equal).'),
     carry('page_purges', 'user_data', 'Text-free page purge tombstones (#5575); dropping them would let purged pages re-import.'),
     carry('page_retrievals', 'operational', 'Retrieval telemetry: when a user-facing read last surfaced each page (stale-page bias, volunteer usage stats).'),
+    carry('page_segment_derivations', 'operational', 'Per-segment derivation watermarks (links, mentions, timeline, fences, conversation facts, atoms, backstop, synopsis) keyed by manifest occurrence; without them the next pass re-derives every segment, including paid conversation-facts windows.'),
     carry('page_segment_texts', 'user_data', 'Segment texts of segmented page bodies, stored once per source; without them a large page has no body.'),
     carry('page_versions', 'user_data', 'Page revision history with attribution.'),
     carry('page_write_guards', 'user_data', 'Page write guards per source incarnation and slug.'),

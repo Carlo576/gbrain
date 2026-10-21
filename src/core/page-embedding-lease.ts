@@ -36,8 +36,11 @@ const LEASE_WAIT_MAX_MS = 1_000;
  */
 export const pageEmbeddingLeaseProbe: { contended?: (pageId: number) => void; waitBoundMs?: number } = {};
 
+/** Every page embedding lease id starts with this; the writer admin fingerprint leaves these rows out (admin-intent.ts). */
+export const PAGE_EMBEDDING_LEASE_PREFIX = 'embed-page:';
+
 export function pageEmbeddingLeaseId(pageId: number): string {
-  return `embed-page:${pageId}`;
+  return `${PAGE_EMBEDDING_LEASE_PREFIX}${pageId}`;
 }
 
 /**

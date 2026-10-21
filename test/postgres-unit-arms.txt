@@ -445,9 +445,11 @@ test/trust-held-removals.test.ts
 test/trust-owner-actions.test.ts
 test/unbound-source-6536.test.ts
 test/unindexed-files.test.ts
+test/v265-validate-timeouts.test.ts
 test/vector-manifest-probe-bound.test.ts
 test/withdrawal-overlay-concurrency.test.ts
 test/withdrawal-publication-file.test.ts
 test/worktree-refresh-recovery-row-gbra130.test.ts
+test/writer-admin-state-embed-lease.test.ts
 test/writer-status-movement-not-read-gbra130.test.ts
 test/writer-status-owner-backends.test.ts
