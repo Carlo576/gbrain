@@ -11,7 +11,8 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { runExtractFacts } from '../../src/core/cycle/extract-facts.ts';
-import { __setBeforeDerivationWriteForTests, derivationSweepWork, segmentDeriveWork } from '../../src/core/page-body/segment-derive.ts';
+import { __setBeforeDerivationWriteForTests, __setDerivationSweepWorkForTests, derivationSweepWork, segmentDeriveWork } from '../../src/core/page-body/segment-derive.ts';
+import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { incrementalFactsFenceView, segmentedFactsFenceView } from '../../src/core/page-body/segment-facts.ts';
 import { forgetFactInFence } from '../../src/core/facts/forget.ts';
 import { deriveAll, KINDS, liveOccurrences, resetDeriveWork, storedPage } from './derivation-equivalence-cases.ts';
@@ -51,11 +52,16 @@ async function exactHolders(engine: BrainEngine, pageId: number, text: string): 
   [pageId, text])).map(row => ({ pipeline: row.pipeline, occurrence_id: Number(row.occurrence_id) }));
 }
 
-/** Per page of the source: derivation rows no live segment backs (occurrence retired, page inline or soft-deleted). */
-async function unbackedRows(engine: BrainEngine): Promise<Map<number, number>> {
+/**
+ * Per page of the source: derivation rows no live segment backs (occurrence retired, page inline or soft-deleted), and
+ * whose lowercased output and receipt text match the LIKE `pattern` (ASCII, so lowercasing is the same everywhere).
+ */
+async function unbackedRows(engine: BrainEngine, pattern = '%'): Promise<Map<number, number>> {
   const rows = await engine.executeRaw<{ page_id: number; n: number }>(`SELECT d.page_id, count(*)::int AS n FROM page_segment_derivations d
     JOIN pages p ON p.id=d.page_id WHERE p.source_id=$1 AND (p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.page_id=d.page_id
-      AND m.occurrence_id=d.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256=d.segment_sha256)) GROUP BY d.page_id`, [SOURCE]);
+      AND m.occurrence_id=d.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256=d.segment_sha256))
+      AND lower(COALESCE(d.output::text,'') || ' ' || COALESCE(d.receipt::text,'')) LIKE $2
+    GROUP BY d.page_id`, [SOURCE, pattern]);
   return new Map(rows.map(row => [Number(row.page_id), Number(row.n)]));
 }
 
@@ -197,6 +203,9 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
       { name: 'Greek capitals (final sigma)', claim: 'ΤΟ ΚΛΕΙΔΙ ΤΗΣ ΑΠΟΘΗΚΗΣ ΕΙΝΑΙ 2207', planted: 'ΤΟ ΚΛΕΙΔΙ ΤΗΣ ΑΠΟΘΗΚΗΣ ΕΙΝΑΙ 2207', n: 1 },
       { name: 'Turkish dotted capital I', claim: 'İSTANBUL DEPOSU KODU 6114', planted: 'İSTANBUL DEPOSU KODU 6114', n: 2 },
       { name: 'other case and spacing', claim: 'Purge Example  lift code is 6610', planted: 'purge example LIFT code is 6610', n: 3 },
+      { name: 'Greek capitals, stored in lowercase with final sigma', claim: 'Ο ΚΩΔΙΚΟΣ ΤΗΣ ΑΠΟΘΗΚΗΣ ΕΙΝΑΙ 3308', planted: 'ο κωδικος της αποθηκης ειναι 3308', n: 4 },
+      { name: 'Greek lowercase with final sigma, stored in capitals', claim: 'ο αριθμος της πορτας ειναι 7719', planted: 'Ο ΑΡΙΘΜΟΣ ΤΗΣ ΠΟΡΤΑΣ ΕΙΝΑΙ 7719', n: 5 },
+      { name: 'Turkish dotted capital I, stored as JavaScript lowercases it', claim: 'İZMİR DEPOSU KODU 5521', planted: 'İZMİR DEPOSU KODU 5521'.toLowerCase(), n: 6 },
     ]) {
       test(`a purge deletes a retired row stating the claim in its normalized form: ${variant.name}`, async () => {
         const holder = await retiredHolder(`notes/normalized-holder-${variant.n}`, variant.planted, 50 + variant.n);
@@ -224,20 +233,58 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
       const unrelatedRows = (await brain.engine.readSegmentDerivations(unrelated.id)).length;
       const retiredHeld = (await exactHolders(brain.engine, retired.id, 'Alice Example PLAYS OBOE')).length;
       expect(unbacked.has(live.id)).toBe(false);
-      derivationSweepWork.length = 0;
-      const receipt = await purge(id);
-      expect(derivationSweepWork.some(w => w.pageId === target.id && w.scanned > 0)).toBe(true);
+      const worded = await unbackedRows(brain.engine, '%plays%oboe%');
+      __setDerivationSweepWorkForTests(true);
+      let receipt: Record<string, any>;
+      let work: typeof derivationSweepWork;
+      try { receipt = await purge(id); work = [...derivationSweepWork]; } finally { __setDerivationSweepWorkForTests(false); }
+      expect(work.some(w => w.pageId === target.id && w.scanned > 0)).toBe(true);
       const expected = [...unbacked].filter(([pageId]) => pageId !== target.id).sort((a, b) => a[0] - b[0])
-        .map(([pageId, scanned]) => ({ pageId, scanned, deleted: pageId === retired.id ? retiredHeld : 0 }));
-      expect(derivationSweepWork.filter(w => w.pageId !== target.id)).toEqual(expected);
-      expect(derivationSweepWork.find(w => w.pageId === live.id)).toBeUndefined();
+        .map(([pageId, scanned]) => ({ pageId, scanned, normalized: worded.get(pageId) ?? 0, deleted: pageId === retired.id ? retiredHeld : 0 }));
+      expect(work.filter(w => w.pageId !== target.id)).toEqual(expected);
+      expect(work.find(w => w.pageId === live.id)).toBeUndefined();
+      const others = work.filter(w => w.pageId !== target.id);
+      expect(others.reduce((n, w) => n + w.normalized, 0)).toBe([...worded].filter(([pageId]) => pageId !== target.id).reduce((n, [, k]) => n + k, 0));
+      expect(others.reduce((n, w) => n + w.normalized, 0)).toBeLessThan(others.reduce((n, w) => n + w.scanned, 0));
       expect(expected.find(w => w.pageId === unrelated.id)?.deleted).toBe(0);
       expect(unbacked.get(unrelated.id)).toBeLessThan(unrelatedRows);
       expect((await brain.engine.readSegmentDerivations(unrelated.id)).length).toBe(unrelatedRows);
       expect(await exactHolders(brain.engine, retired.id, 'Alice Example PLAYS OBOE')).toEqual([]);
       expect(await exactHolders(brain.engine, live.id, claim)).toEqual(liveHeld);
-      expect(derivationStore(receipt)).toMatchObject({ status: 'out_of_scope', reason: 'source_prose', remaining: liveHeld.length });
-      expect((receipt.stores as Array<{ status: string }>).filter(s => s.status === 'incomplete')).toEqual([]);
+      expect(derivationStore(receipt!)).toMatchObject({ status: 'out_of_scope', reason: 'source_prose', remaining: liveHeld.length });
+      expect((receipt!.stores as Array<{ status: string }>).filter(s => s.status === 'incomplete')).toEqual([]);
+    }, 600_000);
+
+    test('a sweep records no work unless a test asks for it', async () => {
+      const id = await seed('notes/sweep-unrecorded', 'Purge Example shed code is 1186');
+      __setDerivationSweepWorkForTests(false);
+      await purge(id);
+      expect(derivationSweepWork).toEqual([]);
+    }, 600_000);
+
+    test('a statement timeout of the derivation sweep fails the purge with the typed code and purges nothing', async () => {
+      const claim = 'Purge Example safe code is 2093';
+      const holder = await retiredHolder('notes/sweep-timeout-holder', claim, 64);
+      const id = await seed('notes/sweep-timeout', claim);
+      const held = await exactHolders(brain.engine, holder.id, claim);
+      const dry = await brain.call('purge_fact', { id, dry_run: true });
+      let seen = 0;
+      installFaultHook(point => {
+        if (point !== 'purge:derivation_sweep') return;
+        seen++;
+        throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+      });
+      let failed: { isError: boolean; body: Record<string, any> };
+      try { failed = await brain.call('purge_fact', { id, confirm: dry.body.confirm_token, expected_revision: dry.body.expected_revision }); }
+      finally { installFaultHook(undefined); }
+      expect(seen).toBe(1);
+      expect({ isError: failed.isError, code: failed.body.error ?? failed.body.code }).toEqual({ isError: true, code: 'purge_lookup_timeout' });
+      expect(failed.body.state).not.toBe('committed');
+      const [fact] = await brain.engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM facts WHERE id=$1', [id]);
+      expect(Number(fact!.n)).toBe(1);
+      expect(await exactHolders(brain.engine, holder.id, claim)).toEqual(held);
+      const receipt = await purge(id);
+      expect({ rows: await exactHolders(brain.engine, holder.id, claim), receipt: derivationStore(receipt)?.status }).toEqual({ rows: [], receipt: 'deleted' });
     }, 600_000);
   });
 }

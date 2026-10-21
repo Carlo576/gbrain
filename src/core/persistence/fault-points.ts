@@ -45,6 +45,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'purge:sweep_chunk' | 'purge:carrying_lookup'
   // W1: before each keyset batch of the belief ledger's purge redaction (belief/purge.ts); a 57014 from the hook models its statement timeout.
   | 'purge:ledger_redaction'
+  // Before a fact purge's derivation sweep (segment-derive.ts sweepDerivationText); a 57014 from the hook models its statement timeout.
+  | 'purge:derivation_sweep'
   // #6712 PR 4b: after a page-row deletion of a managed Git source wrote its origin's deletion marker (sync-markers.ts), before the row goes.
   | 'purge:marker_written'
   // #6712 PR 4b: before each round of a pass reads its level (`round`), and after it read it (`level`: its statements and its
