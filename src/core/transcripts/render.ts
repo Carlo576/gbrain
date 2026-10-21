@@ -73,6 +73,13 @@ const DATE_HEADING_RE = /^#{1,6}\s*\d{4}-\d{2}-\d{2}\b/;
  * `part_bytes` keeps. New sessions no longer split at it.
  */
 export const PART_TARGET_BYTES = Math.floor(DEFAULT_BYTES_WARN * 0.9);
+/**
+ * Most part pages one session renders to. A session over it is refused before
+ * any write (the session is errored and the scan is not clean): 2,000 parts is
+ * 90 MB at the pre-Wave-B part size, and a new session splits only past the
+ * page ceiling.
+ */
+export const TRANSCRIPT_MAX_PARTS = 2_000;
 /** Share of the page ceiling a single-layout page's body may fill; the rest is frontmatter headroom. */
 export const PAGE_CEILING_FILL = 0.9;
 /** `single`: a new session, one page under the ceiling; `split`: a stored split session keeps its parts. */
@@ -431,6 +438,9 @@ export function renderSessionParts(
   }
   if (current.length) groups.push(current);
 
+  if (groups.length > TRANSCRIPT_MAX_PARTS) {
+    throw new Error(`session ${meta.sessionId} renders ${groups.length} parts at ${partTargetBytes} bytes per part, over the ${TRANSCRIPT_MAX_PARTS}-part cap; nothing was written for it`);
+  }
   const single = (opts.layout ?? 'single') === 'single' && groups.length === 1;
   const title = meta.title?.trim() || `${meta.harness} session ${meta.sessionId.slice(0, 12)}`;
 

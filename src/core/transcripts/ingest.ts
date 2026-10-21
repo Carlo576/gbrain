@@ -664,6 +664,9 @@ async function transcriptPageCeiling(engine: BrainEngine): Promise<number> {
   return Math.floor(Math.min(policy.maxBytes, block) * PAGE_CEILING_FILL);
 }
 
+/** The provenance the importer stamps on every part it writes (importFromContent and the coordinated put_page). */
+const IMPORTER_INGESTED_VIA = 'cli:transcripts-ingest';
+
 /**
  * How a session renders, from what is stored (one query by the part 1 and
  * part 2 identities, which also finds part 1's slug for adoption). The
@@ -672,17 +675,28 @@ async function transcriptPageCeiling(engine: BrainEngine): Promise<number> {
  * `of`); it then keeps the part size its parts carry (`part_bytes`, else
  * the pre-Wave-B PART_TARGET_BYTES). Otherwise it is one page under the page
  * ceiling. A split session is never re-rendered as one page.
+ *
+ * `transcript_import` is ordinary frontmatter that any writer can set, so its
+ * `of` and `part_bytes` are read only from a part whose last provenance-stamped
+ * write was the importer's (`ingested_via` is the importer's or, for a page
+ * no provenance-stamped write touched, NULL). Every remote write stamps
+ * `mcp:<operation>` and keeps it until the importer writes the page again,
+ * so a remote edit can't choose the layout or the part size. A live part 2
+ * counts whoever wrote it last: ignoring it would merge a split session and
+ * delete its parts. A `part_bytes` is accepted only between PART_TARGET_BYTES
+ * (or the ceiling, when that is lower) and the current ceiling.
  */
 async function storedTranscriptLayout(engine: BrainEngine, sourceId: string, meta: ParsedSession['meta'], pageCeiling: number):
   Promise<{ layout: TranscriptLayout; partTargetBytes: number; existingSlug: string | null }> {
   const [first, second] = [transcriptPartId(meta, 1), transcriptPartId(meta, 2)];
-  const rows = await engine.executeRaw<{ slug: string; fid: string; ti: unknown }>(
-    `SELECT slug, frontmatter->>'id' AS fid, frontmatter->'transcript_import' AS ti FROM pages
+  const rows = await engine.executeRaw<{ slug: string; fid: string; ti: unknown; via: string | null }>(
+    `SELECT slug, frontmatter->>'id' AS fid, frontmatter->'transcript_import' AS ti, ingested_via AS via FROM pages
      WHERE source_id = $1 AND deleted_at IS NULL AND frontmatter->>'id' IN ($2, $3) ORDER BY pages.id`,
     [sourceId, first, second],
   );
-  const importMeta = (row: { ti: unknown } | undefined) => {
-    const ti = typeof row?.ti === 'string' ? JSON.parse(row.ti) : row?.ti;
+  const importMeta = (row: { ti: unknown; via: string | null } | undefined) => {
+    if (!row || (row.via !== null && row.via !== IMPORTER_INGESTED_VIA)) return null;
+    const ti = typeof row.ti === 'string' ? JSON.parse(row.ti) : row.ti;
     return ti && typeof ti === 'object' ? ti as { of?: unknown; part_bytes?: unknown } : null;
   };
   const partOne = rows.find(row => row.fid === first);
@@ -690,8 +704,10 @@ async function storedTranscriptLayout(engine: BrainEngine, sourceId: string, met
   const one = importMeta(partOne);
   const split = partTwo !== undefined || (one !== null && !(Number(one.of) <= 1));
   if (!split) return { layout: 'single', partTargetBytes: pageCeiling, existingSlug: partOne?.slug ?? null };
-  const pinned = [one?.part_bytes, importMeta(partTwo)?.part_bytes].find(v => Number.isSafeInteger(v) && (v as number) > 0) as number | undefined;
-  return { layout: 'split', partTargetBytes: pinned ?? PART_TARGET_BYTES, existingSlug: partOne?.slug ?? null };
+  const floor = Math.min(PART_TARGET_BYTES, pageCeiling);
+  const pinned = [one?.part_bytes, importMeta(partTwo)?.part_bytes]
+    .find(v => Number.isSafeInteger(v) && (v as number) >= floor && (v as number) <= pageCeiling) as number | undefined;
+  return { layout: 'split', partTargetBytes: pinned ?? floor, existingSlug: partOne?.slug ?? null };
 }
 
 /** Fold one file's adapter diagnostics into its outcome and the run result (drift, skipped lines, truncation). */
