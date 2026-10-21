@@ -1022,6 +1022,10 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; 
   // #7125 and #7117 (GBRA-145). `since` is restamped at the merge slot.
   { since: '0.60.327.0', text: 'Fact extraction no longer rewrites the facts it stores: the prompt-injection filter used to delete words such as "System" before a parenthesis, so "Business System (ABS)" was saved as "Business [redacted](ABS)". Injection phrases are now neutralized only where stored facts are rendered into a model prompt (standing questions, turn context, proactive briefs). `gbrain doctor --only facts_redaction_marker` counts facts damaged earlier; `gbrain repair redacted-facts` previews what a source page can prove and changes nothing until you apply the printed `--apply --expect <hash>` command.' },
   { since: '0.60.327.0', text: 'The embed sweep that finds chunks whose text changed after they were embedded now runs in 5,000-chunk batches, keeps its place between runs (at most 60 seconds per run) and starts a new pass once a day (`embed.content_drift.pass_interval_hours`, default 24); before, one statement covered the whole brain and a large brain cancelled it on every run. `gbrain doctor --only content_drift_sweep` shows each pass and any error.' },
+  // PR 4 (Wave B incremental derivation, transcripts)
+  // PR 4 4a
+  { since: 'TBD', text: 'Links, mentions, timeline entries and facts/takes fences of a large (segmented) page are now kept per segment, so a write reads only the segments it changed, and an append reads its new tail instead of the whole page. A rewrite of the whole page does the same work as before. The results are unchanged.' },
+  { since: 'TBD', text: 'Forgetting, purging or withdrawing a fact on a large page now also deletes the stored link, mention, timeline and fence results of the segment that held it, in the same transaction. A purge counts them as `page_segment_derivations`.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */

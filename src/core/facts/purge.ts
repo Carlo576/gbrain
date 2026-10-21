@@ -245,7 +245,7 @@ const SEGMENTED_VERSION_CARRIES = `EXISTS (SELECT 1 FROM page_body_manifest m JO
     AND strpos(lower(convert_from(t.body,'UTF8')),$2)>0)`;
 
 /** What the body rewrites changed: slugs rewritten, segmented pages touched, and the segment texts they stopped referencing. */
-interface BodyRewrites { rewritten: string[]; segmented: number[]; unsealed: string[]; replaced: Uint8Array[] }
+interface BodyRewrites { rewritten: string[]; segmented: number[]; unsealed: string[]; replaced: Uint8Array[]; derivations: number }
 
 /**
  * Drop purged rows from each affected page's stored body. Each page is versioned first (the rewrite advances its
@@ -253,7 +253,7 @@ interface BodyRewrites { rewritten: string[]; segmented: number[]; unsealed: str
  * generation (spec 11), and its version of the old revision references that generation.
  */
 export async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages: PurgePlan['pages']): Promise<BodyRewrites> {
-  const out: BodyRewrites = { rewritten: [], segmented: [], unsealed: [], replaced: [] };
+  const out: BodyRewrites = { rewritten: [], segmented: [], unsealed: [], replaced: [], derivations: 0 };
   if (!pages.length) return out;
   const rows = await tx.executeRaw<Record<string, unknown>>(`SELECT p.*,COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id),'[]'::jsonb) AS purge_tags
     FROM pages p WHERE p.source_id=$1 AND p.id=ANY($2::int[]) ORDER BY p.slug`, [sourceId, pages.map(p => p.page_id)]);
@@ -269,6 +269,7 @@ export async function rewritePageBodies(tx: BrainEngine, sourceId: string, pages
       if (preimage) await createPageVersion(tx, slug, sourceId, preimage);
       out.rewritten.push(slug);
       out.replaced.push(...done.replaced);
+      out.derivations += done.derivations;
       if (!done.sealed) out.unsealed.push(slug);
       continue;
     }
@@ -541,7 +542,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
         targets: pages.map(page => ({ slug: page.slug, page_id: Number(page.id), revision: page.knowledge_revision })) })]);
       counts = { facts, takes, chunks, page_versions: versions.redacted, pages: rewritten.length, persistence_requests: intents,
         query_cache: cache, decide_review: review, open_loops: loops, take_proposals: proposals, core_edit_notices: notices,
-        write_gate_holds: holdIds.length, write_gate_receipts: gateReceipts, page_segment_texts: segments.texts,
+        write_gate_holds: holdIds.length, write_gate_receipts: gateReceipts, page_segment_texts: segments.texts, page_segment_derivations: bodies.derivations,
         page_body_stagings: segments.stagings, page_body_staging_parts: segments.parts, persistence_requests_cancelled: segments.cancelled,
         derived_hidden: Object.values(derived.hidden).reduce((a, b) => a + b, 0) };
       derivedHidden = derived;
