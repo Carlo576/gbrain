@@ -11,8 +11,14 @@
  *   (i)   a fact that disappeared had its exact window key extracted again (or a moved window's facts re-anchored onto
  *         it) in that step, or the step fully settled the page and its key is no current window's; a moved fact keeps
  *         its window text;
- *   (ii)  every window key holds exactly one batch: the fact count its text yields, no fact twice;
+ *   (ii)  every window key holds exactly one batch: the fact count its text yields, no fact twice; every window a live
+ *         row records holds exactly that count (a key holding no fact included), and a window marked failed holds either
+ *         that count (an earlier context's batch) or none;
  *   (iii) every window a row claims holds exactly the facts the row says, and a settled page holds only current windows.
+ * Each step records which paths it exercised (a moved window, a window-specific failure, a window marked failed, a
+ * settled collection, a --since run, a cap refusal); across the seeds every path must fire at least its floor. Each seed
+ * also dooms the windows whose text hash starts with one chosen digit for a span of steps, so windows reach the failure
+ * limit and block collection until the final --force run.
  * At the end a healthy unconstrained --force run leaves the same windows and facts as one extraction of the same page on
  * a fresh brain.
  *
@@ -56,7 +62,7 @@ async function factsOf(engine: BrainEngine, slug: string): Promise<Fact[]> {
 }
 const shaOf = (key: string) => key.split(':')[2] ?? key;
 
-interface RunOpts { force?: boolean; segmentLimit?: number; sinceIso?: string; abortAfter?: number; failAt?: number; doomed?: boolean; paid?: boolean }
+interface RunOpts { force?: boolean; segmentLimit?: number; sinceIso?: string; abortAfter?: number; failAt?: number; doomed?: string; paid?: boolean }
 
 /** One extraction run with the deterministic fake extractor; returns whether it threw and its counters. */
 async function run(engine: BrainEngine, slug: string, o: RunOpts) {
@@ -69,13 +75,13 @@ async function run(engine: BrainEngine, slug: string, o: RunOpts) {
         const windowSha = sha(input.turnText);
         if (o.paid) await gatewayChat({ model: PAID_MODEL, messages: [{ role: 'user', content: input.turnText }], maxTokens: 64 });
         if (calls === o.failAt) throw Object.assign(new Error('fake provider: upstream unavailable'), { status: 503 });
-        if (o.doomed && /^[01]/.test(windowSha)) throw Object.assign(new Error('fake extractor: malformed output on this window'), { extractionReason: 'malformed_output' });
+        if (o.doomed?.includes(windowSha[0]!)) throw Object.assign(new Error('fake extractor: malformed output on this window'), { extractionReason: 'malformed_output' });
         if (calls === o.abortAfter) controller.abort();
         return Array.from({ length: yieldOf(windowSha) }, (_, j) => ({ fact: `Alice Example noted window ${windowSha.slice(0, 16)} item ${j}`, kind: 'fact', entity_slug: null, source: SOURCE }));
       } }, controller.signal);
-    return { threw: false, failed: result.pages_failed };
+    return { threw: false, failed: result.pages_failed, calls };
   } catch {
-    return { threw: true, failed: 1 };
+    return { threw: true, failed: 1, calls };
   }
 }
 
@@ -84,14 +90,17 @@ async function pageState(engine: BrainEngine, slug: string) {
   const d = await derivations(engine, slug);
   const liveRows = d.rows.filter(row => d.live.includes(row.occurrenceId));
   const windowsOf = (row: (typeof d.rows)[number]) => ((row.output as { windows?: Array<{ ordinal: number; sha: string; failed?: unknown }> })?.windows ?? []);
-  const liveKeys = new Set(liveRows.flatMap(row => windowsOf(row).map(w => `${row.occurrenceId}:${w.ordinal}:${w.sha}`)));
+  const liveWindows = liveRows.flatMap(row => windowsOf(row).map(w => ({ key: `${row.occurrenceId}:${w.ordinal}:${w.sha}`, sha: w.sha, failed: !!w.failed })));
+  const liveKeys = new Set(liveWindows.map(w => w.key));
   const settled = liveRows.length === d.live.length && liveRows.every(row => row.state === 'done' && row.version === CONVERSATION_FACTS_DERIVATION_VERSION)
     && d.rows.every(row => windowsOf(row).every(w => !w.failed));
-  return { liveKeys, settled, windowShas: liveRows.flatMap(row => windowsOf(row).map(w => w.sha)).sort() };
+  const retrying = liveRows.some(row => ((row.output as { retries?: unknown[] })?.retries ?? []).length > 0);
+  const capped = d.receipts.some(r => (r as { reason?: string } | null)?.reason === 'cap_reached');
+  return { liveKeys, liveWindows, settled, retrying, capped, windowShas: liveRows.flatMap(row => windowsOf(row).map(w => w.sha)).sort() };
 }
 
 /** Problems with one page's facts after a step (the module doc's (i)–(iii)). */
-async function violations(engine: BrainEngine, slug: string, before: Fact[], o: RunOpts, outcome: { threw: boolean; failed: number }) {
+async function violations(engine: BrainEngine, slug: string, before: Fact[], o: RunOpts, outcome: { threw: boolean; failed: number; calls: number }) {
   const after = await factsOf(engine, slug);
   const state = await pageState(engine, slug);
   const fullySettled = !outcome.threw && outcome.failed === 0 && !o.sinceIso && state.settled;
@@ -100,13 +109,20 @@ async function violations(engine: BrainEngine, slug: string, before: Fact[], o: 
   const replaced = new Set([...after.filter(f => !beforeById.has(f.id)).map(f => f.key),
     ...after.filter(f => beforeById.has(f.id) && beforeById.get(f.id)!.key !== f.key).map(f => f.key)]);
   const problems: string[] = [];
+  const fired = new Set<PropertyPath>();
+  if (state.retrying) fired.add('failed_window');
+  if (state.liveWindows.some(w => w.failed)) fired.add('marked_failed');
+  if (o.sinceIso && outcome.calls > 0) fired.add('since');
+  if (o.paid && state.capped) fired.add('cap');
   for (const f of before) {
     if (afterById.has(f.id)) continue;
-    if (replaced.has(f.key) || (fullySettled && !state.liveKeys.has(f.key))) continue;
+    if (replaced.has(f.key)) continue;
+    if (fullySettled && !state.liveKeys.has(f.key)) { fired.add('collected'); continue; }
     problems.push(`(i) fact ${f.id} of window ${f.key} disappeared without its window being extracted again or a settled collection`);
   }
   for (const f of after) {
     const was = beforeById.get(f.id);
+    if (was && was.key !== f.key) fired.add('moved');
     if (was && shaOf(was.key) !== shaOf(f.key)) problems.push(`(i) fact ${f.id} moved from ${was.key} to a window of other text ${f.key}`);
   }
   const perKey = new Map<string, Fact[]>();
@@ -115,12 +131,22 @@ async function violations(engine: BrainEngine, slug: string, before: Fact[], o: 
     if (key === 'unanchored') continue;
     if (facts.length !== yieldOf(shaOf(key)) || new Set(facts.map(f => f.fact)).size !== facts.length) problems.push(`(ii) window ${key} holds ${facts.length} facts, ${new Set(facts.map(f => f.fact)).size} distinct; its text yields ${yieldOf(shaOf(key))}`);
   }
+  for (const w of state.liveWindows) {
+    const held = perKey.get(w.key)?.length ?? 0;
+    if (held !== yieldOf(w.sha) && !(w.failed && held === 0)) problems.push(`(ii) live window ${w.key}${w.failed ? ' (marked failed)' : ''} holds ${held} facts; its text yields ${yieldOf(w.sha)}`);
+  }
   for (const m of await claimMismatches(engine, slug)) problems.push(`(iii) a row claims ${m.claimed} facts of ${m.key}; it holds ${m.held}`);
   if (fullySettled) for (const key of perKey.keys()) if (!state.liveKeys.has(key)) problems.push(`(iii) the settled page still holds facts of ${key}, no current window`);
-  return { problems, after };
+  return { problems, after, fired };
 }
 
+type PropertyPath = 'moved' | 'failed_window' | 'marked_failed' | 'collected' | 'since' | 'cap';
+/** Steps, across every seed, that must exercise each path: about half of what the 30 seeds exercise on both engines (193, 165, 46, 133, 28, 21). */
+export const PROPERTY_PATH_FLOORS: Record<PropertyPath, number> = { moved: 96, failed_window: 82, marked_failed: 23, collected: 66, since: 14, cap: 10 };
+
 export function defineConversationFactsPropertyCases(opts: { getBrain: () => AppendBrain; getFresh: () => AppendBrain }): void {
+  const firedSteps: Record<PropertyPath, number> = { moved: 0, failed_window: 0, marked_failed: 0, collected: 0, since: 0, cap: 0 };
+  let seedsRun = 0;
   for (let seed = 1; seed <= PROPERTY_SEEDS; seed++) {
     test(`seed ${seed}: ${PROPERTY_STEPS} seeded changes and constrained runs keep the deletion invariant, and the page converges to a fresh extraction`, async () => {
       const brain = opts.getBrain();
@@ -138,6 +164,10 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
       await brain.seed(slug, chatPage(title, chatDays(FIRST_DAY, DAYS, seed)));
       const log: string[] = [];
       let facts = await factsOf(engine, slug);
+      // The windows whose text hash starts with this digit fail in every run of these steps.
+      const doomDigit = pick([...'0123456789abcdef']);
+      const doomFrom = 1 + Math.floor(next() * (PROPERTY_STEPS - 6));
+      const doomSteps = 4 + Math.floor(next() * 3);
       const reseed = async (edit: (lines: string[], turnsAt: number[]) => void) => {
         const lines = (await brain.body(slug)).truth.split('\n');
         const turnsAt = lines.flatMap((line, i) => (line.startsWith('**') ? [i] : []));
@@ -186,7 +216,8 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
           if (constraint === 'limit') o.segmentLimit = 1 + Math.floor(next() * 20);
           if (constraint === 'abort') o.abortAfter = 1 + Math.floor(next() * 30);
           if (constraint === 'provider') o.failAt = 1 + Math.floor(next() * 30);
-          if (constraint === 'doomed') o.doomed = true;
+          if (constraint === 'doomed') o.doomed = '01';
+          if (!final && step >= doomFrom && step < doomFrom + doomSteps) o.doomed = `${o.doomed ?? ''}${doomDigit}`;
           if (constraint === 'since') o.sinceIso = `${dateOf(FIRST_DAY + Math.floor(next() * (lastDay - FIRST_DAY)))}T12:00:00Z`;
           if (constraint === 'cap') {
             const { pageId } = await derivations(engine, slug);
@@ -200,7 +231,8 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
             await engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
           });
           const checked = await violations(engine, slug, facts, o, outcome);
-          log.push(`step ${step}: ${change} + ${constraint} ${JSON.stringify(o)} -> ${JSON.stringify(outcome)}, ${checked.after.length} facts`);
+          log.push(`step ${step}: ${change} + ${constraint} ${JSON.stringify(o)} -> ${JSON.stringify(outcome)}, ${checked.after.length} facts; ${[...checked.fired].join(' ') || 'no path'}`);
+          for (const path of checked.fired) firedSteps[path]++;
           expect({ step, log: log.at(-1), problems: checked.problems.slice(0, 5) }).toEqual({ step, log: log.at(-1), problems: [] });
           facts = checked.after;
         }
@@ -212,16 +244,23 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
         for (const key of ['facts.extraction_model', 'facts.default_visibility']) await fresh.engine.setConfig(key, (await engine.getConfig(key)) ?? '');
         for (const key of [PAGE_DERIVATION_CAP_KEY, PAGE_EMBED_CAP_KEY]) await fresh.engine.setConfig(key, 'off');
         await fresh.seed(freshSlug, chatPage(title, (await brain.body(slug)).truth));
-        expect(await run(fresh.engine, freshSlug, {})).toEqual({ threw: false, failed: 0 });
+        expect(await run(fresh.engine, freshSlug, {})).toMatchObject({ threw: false, failed: 0 });
         const freshState = await pageState(fresh.engine, freshSlug);
         const byWindow = (list: Fact[]) => list.map(f => `${shaOf(f.key)} ${f.fact}`).sort();
         expect({ windows: state.windowShas.length, sameWindows: state.windowShas.join() === freshState.windowShas.join(), facts: facts.length,
           sameFacts: byWindow(facts).join('\n') === byWindow(await factsOf(fresh.engine, freshSlug)).join('\n') })
           .toEqual({ windows: freshState.windowShas.length, sameWindows: true, facts: (await factsOf(fresh.engine, freshSlug)).length, sameFacts: true });
+        seedsRun++;
       } finally {
         await engine.setConfig('facts.extraction_model', '');
         await engine.setConfig('facts.default_visibility', 'private');
       }
     }, 900_000);
   }
+
+  test(`every path fires at least its floor across the ${PROPERTY_SEEDS} seeds`, () => {
+    process.stderr.write(`[property] steps per path across ${seedsRun} seeds: ${JSON.stringify(firedSteps)}\n`);
+    expect({ seedsRun, short: Object.entries(PROPERTY_PATH_FLOORS).filter(([path, floor]) => firedSteps[path as PropertyPath] < floor).map(([path]) => path) })
+      .toEqual({ seedsRun: PROPERTY_SEEDS, short: [] });
+  });
 }

@@ -54,11 +54,14 @@ function to24h(hour: number, ampm?: string): number {
 
 /**
  * normalizeBlockConversation one line at a time: `emit` gets each collapsed message line once the message ends (the next
- * header, or `end()`); `headers` counts the block headers seen. Lines before the first header are dropped.
+ * header, or `end()`); `headers` counts the block headers seen. Lines before the first header are dropped. With
+ * `maxBodyChars`, a message's body keeps only its first that many characters (pattern detection, which needs the
+ * collapsed line's shape, not all of its text), copied so a kept line never holds the text it was cut from alive.
  */
-export function blockNormalizer(emit: (line: string) => void): { line(line: string): void; end(): void; readonly headers: number } {
+export function blockNormalizer(emit: (line: string) => void, opts: { maxBodyChars?: number } = {}): { line(line: string): void; end(): void; readonly headers: number } {
   let current: { name: string; time: string } | null = null;
   let bodyParts: string[] = [];
+  let bodyChars = 0;
   let headers = 0;
 
   const flush = () => {
@@ -68,6 +71,7 @@ export function blockNormalizer(emit: (line: string) => void): { line(line: stri
     }
     current = null;
     bodyParts = [];
+    bodyChars = 0;
   };
 
   return {
@@ -82,8 +86,9 @@ export function blockNormalizer(emit: (line: string) => void): { line(line: stri
         current = { name: m[1].trim(), time };
       } else if (current) {
         // Body line of the current message. Drop blank lines; keep the rest.
-        const trimmed = line.trim();
-        if (trimmed) bodyParts.push(trimmed);
+        const room = (opts.maxBodyChars ?? Infinity) - bodyChars;
+        const trimmed = room > 0 ? line.trim().slice(0, room) : '';
+        if (trimmed) { bodyParts.push(opts.maxBodyChars === undefined ? trimmed : Buffer.from(trimmed).toString()); bodyChars += trimmed.length; }
       }
       // Lines before the first header (page title, leading blanks) are dropped —
       // they never matched a pattern anyway.

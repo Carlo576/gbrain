@@ -544,9 +544,9 @@ export const LABEL_RETIRED_MARKER = 'retired: conversation-labels';
  * page is deleted. Returns the rows removed from the active batch.
  */
 /** The page's conversation facts, audit rows aside: what a clear would lose that a window extraction may not see again. */
-export async function countConversationFacts(db: BrainEngine, sourceId: string, slug: string): Promise<number> {
+export async function countConversationFacts(db: BrainEngine, sourceId: string, slug: string, opts: { active?: boolean } = {}): Promise<number> {
   const [row] = await db.executeRaw<{ count: string }>(`SELECT count(*)::text AS count FROM facts f WHERE f.source_id=$1 AND f.source_markdown_slug=$2
-    AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%' AND NOT (f.source = ANY($3::text[]))`, [sourceId, slug, [...AUDIT_ROW_SOURCES]]);
+    AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%' AND NOT (f.source = ANY($3::text[]))${opts.active ? ' AND f.expired_at IS NULL' : ''}`, [sourceId, slug, [...AUDIT_ROW_SOURCES]]);
   return Number(row?.count ?? 0);
 }
 

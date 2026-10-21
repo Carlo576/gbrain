@@ -41,8 +41,10 @@ const FAILED_WINDOWS = 'failed_windows';
 const FAILED_REMEDY = 'a conversation window failed to extract in run after run and is skipped, so the older windows still get extracted (the sample names the window, its receipt the last error); fix the cause, then gbrain extract-conversation-facts --slug <slug> --force tries it again';
 const NO_MESSAGES = 'no_messages';
 const NO_MESSAGES_REMEDY = 'the page reads as a transcript format over its whole text, yet no message parsed under that format (a conversation parser fault), so the last run changed nothing and kept its facts; rerunning repeats this, so report it with gbrain doctor --json and the page\'s format (a page that is not a transcript settles as non-extractable instead)';
+const GRAMMAR_LOST = 'grammar_lost';
+const GRAMMAR_LOST_REMEDY = 'no chat format is detected over the whole page any more (text added around the transcript, such as reference paragraphs, can outweigh its message lines), yet its messages still parse in the format it was extracted in, so the run kept every conversation fact and settled nothing; move the added text to another page (or below a heading the transcript does not need) and rerun gbrain extract-conversation-facts --slug <slug>; if the page is no longer meant to be a transcript, remove its message lines and rerun, which marks it non-extractable and clears its conversation facts';
 const remedy = (g: ReceiptGroup): string | null => g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : g.kind === FAILED_WINDOWS ? FAILED_REMEDY
-  : g.kind === NO_MESSAGES ? NO_MESSAGES_REMEDY : REMEDY[g.pipeline] ?? null;
+  : g.kind === NO_MESSAGES ? NO_MESSAGES_REMEDY : g.kind === GRAMMAR_LOST ? GRAMMAR_LOST_REMEDY : REMEDY[g.pipeline] ?? null;
 
 const describe = (g: ReceiptGroup): string =>
   `${g.pipeline}/${g.kind}: ${g.pages} page(s) (e.g. ${g.samples.join(', ')}); ${remedy(g) ?? 'see the receipt in page_extraction_state'}`;
