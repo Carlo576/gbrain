@@ -11,5 +11,5 @@ import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
   let engine: PostgresEngine;
   beforeAll(async () => { engine = await setupDB(); }, 120_000);
   afterAll(async () => { await teardownDB(); });
-  defineTranscriptPartChurnCases({ getEngine: () => engine });
+  defineTranscriptPartChurnCases({ getEngine: () => engine, databaseUrl: process.env.DATABASE_URL });
 });

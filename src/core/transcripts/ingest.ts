@@ -677,11 +677,21 @@ const IMPORTER_INGESTED_VIA = 'cli:transcripts-ingest';
  * ceiling. A split session is never re-rendered as one page.
  *
  * `transcript_import` is ordinary frontmatter that any writer can set, so its
- * `of` and `part_bytes` are read only from a part whose last provenance-stamped
- * write was the importer's (`ingested_via` is the importer's or, for a page
- * no provenance-stamped write touched, NULL). Every remote write stamps
- * `mcp:<operation>` and keeps it until the importer writes the page again,
- * so a remote edit can't choose the layout or the part size. A live part 2
+ * `of` and `part_bytes` are read only from a part whose LIVE revision the
+ * importer wrote. `pages.ingested_via` can't say that: a managed write keeps
+ * the first write's stamp (persistence/page-prepare.ts), so a remote put_page
+ * over an imported page still reads `cli:transcripts-ingest`. The live
+ * revision's writer is the write attribution (`revision_write_request_id`):
+ *   - a journaled request wrote it: trusted when that request is the local
+ *     CLI's and its own intent carries the importer's provenance (a remote
+ *     request's intent is always server-stamped `mcp:<operation>`);
+ *   - its request has left the journal: trusted when the revision's principal
+ *     is the local CLI and the page carries the importer's stamp;
+ *   - no request wrote it (the direct importer on an unmanaged brain, a write
+ *     from before attribution): trusted when `ingested_via` is the importer's
+ *     or NULL; a remote write is always a journaled request, and on this path
+ *     it also replaces the stamp with `mcp:<operation>`.
+ * So a remote edit can't choose the layout or the part size. A live part 2
  * counts whoever wrote it last: ignoring it would merge a split session and
  * delete its parts. A `part_bytes` is accepted only between PART_TARGET_BYTES
  * (or the ceiling, when that is lower) and the current ceiling.
@@ -689,13 +699,17 @@ const IMPORTER_INGESTED_VIA = 'cli:transcripts-ingest';
 async function storedTranscriptLayout(engine: BrainEngine, sourceId: string, meta: ParsedSession['meta'], pageCeiling: number):
   Promise<{ layout: TranscriptLayout; partTargetBytes: number; existingSlug: string | null }> {
   const [first, second] = [transcriptPartId(meta, 1), transcriptPartId(meta, 2)];
-  const rows = await engine.executeRaw<{ slug: string; fid: string; ti: unknown; via: string | null }>(
-    `SELECT slug, frontmatter->>'id' AS fid, frontmatter->'transcript_import' AS ti, ingested_via AS via FROM pages
-     WHERE source_id = $1 AND deleted_at IS NULL AND frontmatter->>'id' IN ($2, $3) ORDER BY pages.id`,
-    [sourceId, first, second],
+  const rows = await engine.executeRaw<{ slug: string; fid: string; ti: unknown; trusted: boolean }>(
+    `SELECT p.slug, p.frontmatter->>'id' AS fid, p.frontmatter->'transcript_import' AS ti,
+            CASE WHEN p.revision_write_request_id IS NULL THEN p.ingested_via IS NULL OR p.ingested_via = $4
+                 WHEN r.id IS NOT NULL THEN r.principal_kind = 'local_cli' AND r.intent->>'ingested_via' IS NOT DISTINCT FROM $4
+                 ELSE p.revision_principal_kind IS NOT DISTINCT FROM 'local_cli' AND p.ingested_via IS NOT DISTINCT FROM $4 END AS trusted
+       FROM pages p LEFT JOIN persistence_requests r ON r.id = p.revision_write_request_id
+      WHERE p.source_id = $1 AND p.deleted_at IS NULL AND p.frontmatter->>'id' IN ($2, $3) ORDER BY p.id`,
+    [sourceId, first, second, IMPORTER_INGESTED_VIA],
   );
-  const importMeta = (row: { ti: unknown; via: string | null } | undefined) => {
-    if (!row || (row.via !== null && row.via !== IMPORTER_INGESTED_VIA)) return null;
+  const importMeta = (row: { ti: unknown; trusted: boolean } | undefined) => {
+    if (!row || row.trusted !== true) return null;
     const ti = typeof row.ti === 'string' ? JSON.parse(row.ti) : row.ti;
     return ti && typeof ti === 'object' ? ti as { of?: unknown; part_bytes?: unknown } : null;
   };

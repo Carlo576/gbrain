@@ -34,6 +34,7 @@ import { registerLocalWriter, withVerifiedLocalRegistration } from '../../src/co
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { TRANSCRIPT_MAX_PARTS } from '../../src/core/transcripts/render.ts';
 import { withEnv } from './with-env.ts';
+import { managedBrain } from './managed-brain.ts';
 
 const NO_PATTERNS = { userPatternsPath: '/nonexistent-patterns.txt' };
 const STARTED = '2026-08-10T08:00:00.000Z';
@@ -117,14 +118,15 @@ async function liveParts(engine: BrainEngine, base: string): Promise<LivePart[]>
 
 /**
  * A remote agent with read and write scope rewrites a page's `transcript_import` through MCP `put_page`
- * (`remote: true`, a registered writer, bound to the revision `get_page` returned).
+ * (`remote: true`, a registered writer, bound to the revision `get_page` returned). `dir` null: the current
+ * GBRAIN_HOME (a managed brain's, whose host owns the worktree), and its persistence consumer stays up.
  */
-async function remoteRewriteImportMeta(engine: BrainEngine, dir: string, slug: string, edit: (ti: Record<string, unknown>) => void): Promise<void> {
+async function remoteRewriteImportMeta(engine: BrainEngine, dir: string | null, slug: string, edit: (ti: Record<string, unknown>) => void): Promise<void> {
   const page = await engine.getPage(slug, { sourceId: 'default' });
   const fm = { ...(page!.frontmatter as Record<string, any>) };
   fm.transcript_import = { ...fm.transcript_import };
   edit(fm.transcript_import);
-  await withEnv({ GBRAIN_HOME: join(dir, 'home') }, async () => {
+  const write = async () => {
     const registration = await registerLocalWriter(engine, 'stdio', { sourceIds: ['*'], operations: null, scopes: ['read', 'write'], slugPrefixes: null } as never);
     const ctx = { remote: true, config: { engine: engine.kind }, sourceId: 'default', logger: { info() {}, warn() {}, error() {} },
       auth: { token: 'fixture', clientId: 'remote-agent-example', scopes: ['read', 'write'], sourceId: 'default' } } as never;
@@ -133,9 +135,13 @@ async function remoteRewriteImportMeta(engine: BrainEngine, dir: string, slug: s
     expect(typeof revision).toBe('string');
     const put = await withVerifiedLocalRegistration(engine, registration, () => dispatchToolCall(engine, 'put_page',
       { slug, expected_revision: revision, request_id: randomUUID(), content: `---\n${dumpFrontmatterYaml(fm)}---\n${page!.compiled_truth}\n` }, ctx));
-    expect((put as { isError?: boolean }).isError ?? false).toBe(false);
-  });
-  await disposePersistenceConsumer(engine);
+    expect((put as { isError?: boolean }).isError ? (put as { content: Array<{ text: string }> }).content[0]!.text : 'ok').toBe('ok');
+  };
+  if (dir === null) await write();
+  else {
+    await withEnv({ GBRAIN_HOME: join(dir, 'home') }, write);
+    await disposePersistenceConsumer(engine);
+  }
   const stored = await engine.getPage(slug, { sourceId: 'default' });
   expect((stored!.frontmatter as Record<string, any>).transcript_import).toEqual(fm.transcript_import);
 }
@@ -145,7 +151,7 @@ async function withDir(fn: (dir: string) => Promise<void>): Promise<void> {
   try { await fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
-export function defineTranscriptPartChurnCases(opts: { getEngine: () => BrainEngine }): void {
+export function defineTranscriptPartChurnCases(opts: { getEngine: () => BrainEngine; databaseUrl?: string }): void {
   test('a split session that grows rewrites every part once; after that parts 1..N-1 keep their content_hash', () => withDir(async (dir) => {
     const engine = opts.getEngine();
     const id = `churn-${randomUUID().slice(0, 8)}`;
@@ -372,4 +378,43 @@ export function defineTranscriptPartChurnCases(opts: { getEngine: () => BrainEng
     expect(await liveParts(engine, baseSlugOf(tiny))).toEqual([]);
     expect(await liveParts(engine, baseSlugOf(many))).toEqual([]);
   }), 180_000);
+
+  test('on a managed brain with a checkout, a remote put_page of transcript_import (first-write provenance kept) never steers the layout', () =>
+    managedBrain(async ({ engine, ctx }) => withDir(async (dir) => {
+      const managedIngest = (path: string) => runTranscriptsIngest(engine, { paths: [path], sourceId: 'default', context: ctx, ...NO_PATTERNS });
+      const one = `managed-one-${randomUUID().slice(0, 8)}`;
+      const split = `managed-split-${randomUUID().slice(0, 8)}`;
+      const oneMessages = regular(30);
+      const splitText = Array.from({ length: 20_000 }, (_, i) => `tok-${String(i).padStart(5, '0')}`).join(',');
+      expect((await managedIngest(writeSession(dir, one, oneMessages))).pages).toMatchObject({ imported: 1, errored: 0 });
+      await engine.setConfig('pages.max_bytes', '60000');
+      try {
+        expect((await managedIngest(writeSession(dir, split, [{ text: splitText }]))).pages).toMatchObject({ imported: 4, errored: 0 });
+      } finally {
+        await engine.unsetConfig('pages.max_bytes');
+      }
+      const splitBefore = await liveParts(engine, baseSlugOf(split));
+      expect(splitBefore.map(p => p.frontmatter.transcript_import.part_bytes)).toEqual([54_000, 54_000, 54_000, 54_000]);
+
+      await remoteRewriteImportMeta(engine, null, baseSlugOf(one), ti => { ti.part_bytes = 45_000; delete ti.of; });
+      await remoteRewriteImportMeta(engine, null, baseSlugOf(split), ti => { ti.part_bytes = 240_000; });
+      const stamps = await engine.executeRaw<{ via: string }>(
+        'SELECT ingested_via AS via FROM pages WHERE slug = ANY($1::text[]) ORDER BY slug', [[baseSlugOf(one), baseSlugOf(split)]]);
+      expect(stamps).toEqual([{ via: 'cli:transcripts-ingest' }, { via: 'cli:transcripts-ingest' }]);
+
+      const grownOne = await managedIngest(writeSession(dir, one, [...oneMessages, { text: 'small follow-up' }]));
+      expect({ pages: grownOne.pages, partsDeleted: grownOne.partsDeleted, sessionsErrored: grownOne.sessionsErrored })
+        .toEqual({ pages: { imported: 1, skipped: 0, errored: 0, planned: 0, pending: 0 }, partsDeleted: 0, sessionsErrored: 0 });
+      const onePages = await liveParts(engine, baseSlugOf(one));
+      expect(onePages.map(p => p.slug)).toEqual([baseSlugOf(one)]);
+      expect(onePages[0]!.frontmatter.transcript_import).toEqual({ harness: 'openclaw', session_id: one, version: 1, part: 1, of: 1 });
+
+      const grownSplit = await managedIngest(writeSession(dir, split, [{ text: splitText }, { text: 'small follow-up' }]));
+      expect({ pages: grownSplit.pages, partsDeleted: grownSplit.partsDeleted, sessionsErrored: grownSplit.sessionsErrored })
+        .toEqual({ pages: { imported: 2, skipped: 2, errored: 0, planned: 0, pending: 0 }, partsDeleted: 0, sessionsErrored: 0 });
+      const splitAfter = await liveParts(engine, baseSlugOf(split));
+      expect(splitAfter.map(p => p.slug)).toEqual(splitBefore.map(p => p.slug));
+      expect(splitAfter.map(p => p.frontmatter.transcript_import.part_bytes)).toEqual([54_000, 54_000, 54_000, 54_000]);
+      expect(splitAfter.slice(1, 3).map(p => p.hash)).toEqual(splitBefore.slice(1, 3).map(p => p.hash));
+    }), { databaseUrl: opts.databaseUrl }), 300_000);
 }
