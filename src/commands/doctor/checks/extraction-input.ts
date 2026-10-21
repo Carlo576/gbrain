@@ -13,7 +13,9 @@
  * PR 4 (Wave B incremental derivation, transcripts): a segmented page's paid
  * derivations keep their receipt per occurrence on page_segment_derivations
  * (`unread_windows`: the run stopped before every window was read, at the
- * per-page spend cap or a window limit; the next run resumes there). Both tables
+ * per-page spend cap or a window limit; the next run resumes there; `failed_windows`:
+ * a conversation window whose extraction failed run after run was skipped, and its
+ * sample names the window). Both tables
  * are read; a page counts once per pipeline and receipt kind. A derivation receipt
  * without a `kind` (the synopsis pass's tier fallback or refused reservation) is
  * not an input-truncation receipt and is not counted.
@@ -34,7 +36,9 @@ const REMEDY: Record<string, string> = {
 
 const UNREAD_WINDOWS = 'unread_windows';
 const UNREAD_REMEDY = `the run stopped before every window of the page was read (the receipt's reason: the per-page spend cap, a window limit or a skipped window); the next run resumes where it stopped, and when the cap stopped it: gbrain config set ${PAGE_DERIVATION_CAP_KEY} <usd>`;
-const remedy = (g: ReceiptGroup): string | null => g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : REMEDY[g.pipeline] ?? null;
+const FAILED_WINDOWS = 'failed_windows';
+const FAILED_REMEDY = 'a conversation window failed to extract in run after run and is skipped, so the older windows still get extracted (the sample names the window, its receipt the last error); fix the cause, then gbrain extract-conversation-facts --slug <slug> --force tries it again';
+const remedy = (g: ReceiptGroup): string | null => g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : g.kind === FAILED_WINDOWS ? FAILED_REMEDY : REMEDY[g.pipeline] ?? null;
 
 const describe = (g: ReceiptGroup): string =>
   `${g.pipeline}/${g.kind}: ${g.pages} page(s) (e.g. ${g.samples.join(', ')}); ${remedy(g) ?? 'see the receipt in page_extraction_state'}`;
@@ -44,13 +48,14 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
   try {
     const rows = await connectedEngine(ctx).executeRaw<{ pipeline: string; kind: string; pages: number; samples: string[] }>(
       `WITH receipts AS (
-         SELECT s.page_id, s.pipeline, COALESCE(s.input_truncated->>'kind', 'unknown') AS kind, s.updated_at
+         SELECT s.page_id, s.pipeline, COALESCE(s.input_truncated->>'kind', 'unknown') AS kind, s.updated_at, NULL::text AS detail
            FROM page_extraction_state s WHERE s.input_truncated IS NOT NULL
          UNION ALL
-         SELECT d.page_id, d.pipeline, COALESCE(d.receipt->>'kind', 'unknown') AS kind, max(d.updated_at) AS updated_at
+         SELECT d.page_id, d.pipeline, COALESCE(d.receipt->>'kind', 'unknown') AS kind, max(d.updated_at) AS updated_at,
+                min(CASE WHEN d.receipt->>'kind' = '${FAILED_WINDOWS}' THEN ' window ' || (d.receipt->'windows'->0->>'ordinal') || ' of occurrence ' || d.occurrence_id END) AS detail
            FROM page_segment_derivations d WHERE d.receipt->>'kind' IS NOT NULL GROUP BY 1, 2, 3)
        SELECT r.pipeline, r.kind, count(DISTINCT r.page_id)::int AS pages,
-              (array_agg(p.source_id || ':' || p.slug ORDER BY r.updated_at DESC))[1:3] AS samples
+              (array_agg(p.source_id || ':' || p.slug || COALESCE(r.detail, '') ORDER BY r.updated_at DESC))[1:3] AS samples
          FROM receipts r JOIN pages p ON p.id = r.page_id AND p.deleted_at IS NULL
         GROUP BY 1, 2 ORDER BY 1, 2`);
     const groups: ReceiptGroup[] = rows.map(r => ({ pipeline: r.pipeline, kind: r.kind, pages: Number(r.pages), samples: r.samples ?? [] }));

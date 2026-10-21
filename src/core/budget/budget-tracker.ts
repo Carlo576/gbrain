@@ -95,6 +95,12 @@ export interface BudgetActualUsage {
   countsAsCall?: boolean;
   /** Token counts are a heuristic (char estimate or pessimistic failure fallback), not provider-reported. */
   estimated?: boolean;
+  /**
+   * PR 4 (Wave B incremental derivation, transcripts): a failed call the provider refused with an HTTP error status
+   * and reported no usage for (failedCallUsage): it billed nothing. A failure without a status (a timeout, an abort,
+   * a reset connection) or with partial usage may have been billed and is not marked.
+   */
+  rejected?: boolean;
 }
 
 export interface BudgetSnapshot {
