@@ -24,7 +24,7 @@ import { reembedPageWithContextualRetrieval } from '../../src/core/contextual-re
 import { SYNOPSIS_DOC_MAX_CHARS, segmentSynopsisWindows, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
 import { embeddingInputHash } from '../../src/core/embedding-input-hash.ts';
 import { embeddingInputContext, embeddingWriteTarget } from '../../src/core/page-state/projections.ts';
-import { segmentSynopsisLead } from '../../src/core/page-body/segment-synopsis.ts';
+import { segmentSynopsisInputHashes, segmentSynopsisLead } from '../../src/core/page-body/segment-synopsis.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import { chunkGenerationFilter } from '../../src/core/search/safe-chunks.ts';
 import { embedStalePages } from '../../src/core/embed-stale.ts';
@@ -288,6 +288,38 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     const after = await chunks(slug);
     for (const c of after) expect(c.embedding_input_hash).not.toBe(await titleHash(c));
     expect(after.every(c => c.vector !== null)).toBe(true);
+  }, 300_000);
+
+  test('lead edit: a write that changes the page lead carries no synopsis vector onto its new rows (every window opens with the new lead)', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-lead-edit';
+    const { body } = days(1_300_000);
+    await brain.seed(slug, page(body));
+    const { id } = await pageRow(slug);
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis' });
+    const before = await chunks(slug);
+    const stampedGeneration = (await pageRow(slug)).generation;
+    const oldLead = await segmentSynopsisLead(brain.engine, { id, slug, source_id: 'default' });
+    const editedLead = LEAD.replace('launch.', 'pilots.');
+    expect(Buffer.byteLength(editedLead)).toBe(Buffer.byteLength(LEAD));
+    await brain.seed(slug, page(body).replace(LEAD, editedLead));
+    const after = await chunks(slug);
+    const occurrences = new Set(before.map(c => c.occurrence_id));
+    const fresh = after.filter(c => !occurrences.has(c.occurrence_id));
+    expect(fresh.length).toBeGreaterThan(1);
+    const newLead = await segmentSynopsisLead(brain.engine, { id, slug, source_id: 'default' });
+    expect(newLead).not.toBe(oldLead);
+    // Under the stored (old) lead, every fresh chunk but the edited one's window would match a retired row's input.
+    const retiredHashes = new Set(before.filter(c => !after.some(a => a.occurrence_id === c.occurrence_id)).map(c => c.embedding_input_hash));
+    const base = embeddingInputContext(await embeddingWriteTarget(brain.engine), TITLE, stampedGeneration, []);
+    const underOld = segmentSynopsisInputHashes(base, oldLead, fresh);
+    expect(fresh.filter(c => retiredHashes.has(underOld.get(c) ?? null)).length).toBeGreaterThan(0);
+    expect(fresh.filter(c => c.vector !== null)).toEqual([]);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: after.length });
+    expect(calls.length).toBe(nonCode(after).length);
+    expect(calls.every(call => call.documentText.startsWith(editedLead))).toBe(true);
   }, 300_000);
 
   test('an inline page keeps the synopsisBodyHash input', async () => {

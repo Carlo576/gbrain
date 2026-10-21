@@ -10,10 +10,13 @@ import { SEGMENT_SYNOPSIS_LEAD_BYTES, segmentSynopsisWindows } from '../page-sum
 import { overlaidBoundedPrefix, pageLeadSource } from '../page-window/bounded-lead.ts';
 import { boundedProjectedPrefix } from '../page-window/document.ts';
 
-/** The lead a segmented page's synopsis documents open with: its stored truth_lead after the withdrawal overlay, sanitized and cut. */
-export async function segmentSynopsisLead(engine: BrainEngine, page: { id: number; slug: string; source_id: string }): Promise<string> {
-  const truthLead = await pageLeadSource(engine, { id: page.id, body_storage: 'segmented', compiled_truth: '' });
-  return boundedProjectedPrefix(await overlaidBoundedPrefix(engine, { slug: page.slug, source_id: page.source_id, compiled_truth: truthLead }), SEGMENT_SYNOPSIS_LEAD_BYTES);
+/**
+ * The lead a segmented page's synopsis documents open with: its truth_lead after the withdrawal overlay, sanitized and
+ * cut. `truthLead` is the lead a write is about to store; omitted, the stored one.
+ */
+export async function segmentSynopsisLead(engine: BrainEngine, page: { id: number; slug: string; source_id: string }, truthLead?: string): Promise<string> {
+  const lead = truthLead ?? await pageLeadSource(engine, { id: page.id, body_storage: 'segmented', compiled_truth: '' });
+  return boundedProjectedPrefix(await overlaidBoundedPrefix(engine, { slug: page.slug, source_id: page.source_id, compiled_truth: lead }), SEGMENT_SYNOPSIS_LEAD_BYTES);
 }
 
 type SegmentChunk = { chunk_text: string; chunk_source?: string | null; occurrence_id?: number | null };
