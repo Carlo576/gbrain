@@ -70,6 +70,7 @@ import { digest, sha256 } from './persistence/digest.ts';
 import { isLargePageBytes } from './page-size-policy.ts';
 import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { installSegmentedVectors, listLiveEmbedSegments, listSegmentChunkRows, readSegmentedEmbedPage } from './page-body/segmented-embedding.ts';
+import { acquirePageEmbeddingLease } from './page-embedding-lease.ts';
 import { planSegmentDerivations, segmentDerivationContextHash } from './page-body/derivations.ts';
 import { SEGMENTED_CHUNKER_VERSION } from './page-body/segment-chunks.ts';
 import { embeddingInputHash, synopsisDocumentHash, type EmbeddingTier } from './embedding-input-hash.ts';
@@ -550,6 +551,7 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
   let embedded = 0;
   let fallbackKind: SynopsisFailureKind | null = null;
   for (const segment of plan.todo) {
+    await using _lease = await acquirePageEmbeddingLease(engine, page.id, { signal: args.abortSignal });
     const anchors: Array<{ first_chunk: number; last_chunk: number; chunks: number; document_sha256: string; tier: EmbeddingTier }> = [];
     let segmentFallback: SynopsisFailureKind | null = null;
     for (const window of segmentSynopsisWindows(await listSegmentChunkRows(engine, page.id, segment.occurrenceId), lead)) {
@@ -584,7 +586,7 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
         return { kind: 'transient_error', cause: 'embed', detail: 'Embedding provider returned an incomplete or invalid batch' };
       }
       const installed = await installSegmentedVectors(engine, page, target, todo.map((c, i) => ({ chunk_index: c.chunk_index, chunk_text: c.chunk_text,
-        vector: built.vectors[i]!, hash: embeddingInputHash(built.tier === 'title' ? base : provenance, built.tier, c) })));
+        vector: built.vectors[i]!, hash: embeddingInputHash(built.tier === 'title' ? base : provenance, built.tier, c), expected: c.embedding_input_hash ?? null })));
       if (installed < todo.length) return superseded;
       embedded += installed;
       if (built.fallback) segmentFallback ??= built.fallback;

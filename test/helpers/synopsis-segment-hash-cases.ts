@@ -27,6 +27,9 @@ import { embeddingInputContext, embeddingWriteTarget } from '../../src/core/page
 import { segmentSynopsisLead } from '../../src/core/page-body/segment-synopsis.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import { chunkGenerationFilter } from '../../src/core/search/safe-chunks.ts';
+import { embedStalePages } from '../../src/core/embed-stale.ts';
+import { pageEmbeddingLeaseProbe } from '../../src/core/page-embedding-lease.ts';
+import { installSegmentedVectors, readSegmentedEmbedPage } from '../../src/core/page-body/segmented-embedding.ts';
 import type { AppendBrain } from './append-brain.ts';
 
 const WORDS = ['launch', 'pricing', 'roadmap', 'hiring', 'metrics', 'retention', 'design', 'latency', 'budget', 'customer'];
@@ -52,8 +55,10 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
   const calls: GeneratePerChunkSynopsisArgs[] = [];
   let segmentReads = 0;
   let refuse: ((args: GeneratePerChunkSynopsisArgs) => boolean) | null = null;
+  let onSynopsis: ((args: GeneratePerChunkSynopsisArgs) => Promise<void>) | null = null;
   const generateSynopsis = async (args: GeneratePerChunkSynopsisArgs): Promise<GeneratePerChunkSynopsisResult> => {
     calls.push(args);
+    await onSynopsis?.(args);
     if (refuse?.(args)) return { kind: 'refusal', detail: 'fixture refusal' };
     return { kind: 'success', synopsis: `Synopsis of chunk ${args.chunkIndex}.` };
   };
@@ -209,6 +214,80 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     reset();
     expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: 0 });
     expect(calls.length).toBe(0);
+  }, 300_000);
+
+  const unitVectors = async (n: number) => {
+    const dims = (await embeddingWriteTarget(opts.getBrain().engine)).column.dimensions;
+    return Array.from({ length: n }, () => Float32Array.from({ length: dims }, (_, j) => (j === 1 ? 1 : 0)));
+  };
+
+  test('race: a title-tier embed in flight on a stamped page with new rows when the synopsis pass starts installs first; the pass waits for the page lease and its install wins', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-race-lease';
+    const { body, count } = days(1_300_000);
+    await brain.seed(slug, page(body));
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis' });
+    const stamped = await pageRow(slug);
+    // The state an append leaves (the page stays stamped per_chunk_synopsis, the new rows have no vector), written
+    // locally so no post-write embedding effect races the fixture.
+    await brain.seed(slug, page(body + day(count + 1)));
+    await brain.engine.executeRaw('UPDATE pages SET contextual_retrieval_mode = $2, corpus_generation = $3 WHERE id = $1', [stamped.id, stamped.mode, stamped.generation]);
+    const pending = (await chunks(slug)).filter(c => c.vector === null);
+    expect(pending.length).toBeGreaterThan(0);
+    reset();
+    let pass: Promise<unknown> | null = null;
+    let contended!: () => void;
+    const waited = new Promise<void>(resolve => { contended = resolve; });
+    pageEmbeddingLeaseProbe.contended = () => contended();
+    let titleTexts = 0;
+    try {
+      const titled = await embedStalePages(brain.engine, [slug], 'default', { embedFn: async texts => {
+        titleTexts += texts.length;
+        if (!pass) { pass = run(slug); await Promise.race([pass, waited]); }
+        return unitVectors(texts.length);
+      } });
+      expect(titled.embedded).toBe(pending.length);
+      expect(await pass).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: pending.length });
+    } finally {
+      pageEmbeddingLeaseProbe.contended = undefined;
+    }
+    expect({ titleTexts, calls: calls.length, synopsisEmbeds: brain.embedded.length })
+      .toEqual({ titleTexts: pending.length, calls: nonCode(pending).length, synopsisEmbeds: pending.length });
+    const after = await chunks(slug);
+    for (const c of after) expect(c.embedding_input_hash).not.toBe(await titleHash(c));
+    expect(after.every(c => c.vector !== null)).toBe(true);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: 0 });
+    expect(calls.length).toBe(0);
+  }, 300_000);
+
+  test('race: a row another writer installed after the synopsis pass read it keeps that install; the stale synopsis install is a no-op and the retry pays for that row and the windows not reached', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-race-cas';
+    await brain.seed(slug, page(days(1_300_000).body));
+    const all = await chunks(slug);
+    const target = all.filter(c => c.chunk_source !== 'fenced_code')[Math.floor(all.length / 2)]!;
+    const engine = brain.engine;
+    reset();
+    onSynopsis = async args => {
+      if (args.chunkIndex !== target.chunk_index) return;
+      onSynopsis = null;
+      const seg = (await readSegmentedEmbedPage(engine, { sourceId: 'default', slug }))!;
+      expect(await installSegmentedVectors(engine, seg, await embeddingWriteTarget(engine), [{ chunk_index: target.chunk_index, chunk_text: target.chunk_text,
+        vector: (await unitVectors(1))[0]!, hash: await titleHash(target), expected: null }])).toBe(1);
+    };
+    expect(await run(slug)).toMatchObject({ kind: 'transient_error', cause: 'db' });
+    const halted = await chunks(slug);
+    expect(halted.find(c => c.chunk_index === target.chunk_index)!.embedding_input_hash).toBe(await titleHash(target));
+    const unreached = halted.filter(c => c.vector === null);
+    reset();
+    expect(await run(slug)).toMatchObject({ kind: 'success', mode_applied: 'per_chunk_synopsis', chunks_embedded: unreached.length + 1 });
+    expect(calls.map(call => call.chunkIndex).sort((a, b) => a - b)).toEqual([target, ...nonCode(unreached)].map(c => c.chunk_index).sort((a, b) => a - b));
+    const after = await chunks(slug);
+    for (const c of after) expect(c.embedding_input_hash).not.toBe(await titleHash(c));
+    expect(after.every(c => c.vector !== null)).toBe(true);
   }, 300_000);
 
   test('an inline page keeps the synopsisBodyHash input', async () => {

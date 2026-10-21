@@ -127,6 +127,7 @@ export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmb
   const missing = opts.includeEmbedded ? null : await vectorlessChunkIndexes(engine, page.id, target.column.name);
   const rows = missing ? listed.filter(row => missing.has(row.chunk_index)) : listed;
   if (rows.length === 0) return { pending: 0, installed: 0 };
+  const asRead = await readChunkInputHashes(engine, page.id, rows.map(row => row.chunk_index));
   const metered = await meterPageBatch(engine, page, rows, { signature: opts.signature ?? null, approvedCapUsd: opts.approvedCapUsd });
   if (!metered) return null;
   const chunks = metered.chunks;
@@ -137,21 +138,33 @@ export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmb
   const tier = plainEmbeddingTier(page.contextual_retrieval_mode);
   const provenance = embeddingInputContext(target, page.title, null, []);
   return { pending: rows.length, installed: await installSegmentedVectors(engine, page, target, chunks.map((chunk, i) => ({ chunk_index: chunk.chunk_index,
-    chunk_text: chunk.chunk_text, vector: vectors[i]!, hash: embeddingInputHash(provenance, tier, chunk) })), opts.beforeInstall) };
+    chunk_text: chunk.chunk_text, vector: vectors[i]!, hash: embeddingInputHash(provenance, tier, chunk), expected: asRead.get(chunk.chunk_index) ?? null })), opts.beforeInstall) };
 }
 
-/** One vector to install on a segmented page: the row's chunk_index and exact text, and the recorded embedding input. */
-export interface SegmentedVectorUpdate { chunk_index: number; chunk_text: string; vector: Float32Array; hash: string }
+/** The recorded embedding input of a segmented page's live rows at `chunkIndexes`, as read now (null: none recorded). */
+async function readChunkInputHashes(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, chunkIndexes: readonly number[]): Promise<Map<number, string | null>> {
+  const rows = await engine.executeRaw<{ chunk_index: number; embedding_input_hash: string | null }>(
+    `SELECT cc.chunk_index, cc.embedding_input_hash FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+      WHERE cc.page_id = $1 AND cc.chunk_index = ANY($2::int[]) AND ${chunkGenerationFilter('p', 'cc')}`, [pageId, [...chunkIndexes]]);
+  return new Map(rows.map(row => [Number(row.chunk_index), row.embedding_input_hash]));
+}
+
+/**
+ * One vector to install on a segmented page: the row's chunk_index and exact text, the recorded embedding input, and
+ * `expected`, the row's recorded input as the writer read it before building the vector (null: none).
+ */
+export interface SegmentedVectorUpdate { chunk_index: number; chunk_text: string; vector: Float32Array; hash: string; expected: string | null }
 
 /**
  * Install vectors with their recorded inputs on the live rows of a segmented page with the same chunk_index and text,
  * under the page lock, while the page's slug, title and contextual mode and the write target (column, provenance
- * model) are those the inputs were built under; 0 when any moved. `beforeInstall` runs after the lock; throwing
- * installs nothing. Returns the rows that took a vector.
+ * model) are those the inputs were built under; 0 when any moved. A row whose recorded input is no longer `expected`
+ * (another writer installed since the read) is left as it is: a stale install is a no-op. `beforeInstall` runs after
+ * the lock; throwing installs nothing. Returns the rows that took a vector.
  */
 export async function installSegmentedVectors(engine: BrainEngine, page: SegmentedEmbedPage, target: Awaited<ReturnType<typeof embeddingWriteTarget>>,
   vectors: readonly SegmentedVectorUpdate[], beforeInstall?: (tx: BrainEngine) => Promise<void>): Promise<number> {
-  const updates = vectors.map(v => ({ chunk_index: v.chunk_index, chunk_text: v.chunk_text, embedding: `[${Array.from(v.vector).join(',')}]`, hash: v.hash }));
+  const updates = vectors.map(v => ({ chunk_index: v.chunk_index, chunk_text: v.chunk_text, embedding: `[${Array.from(v.vector).join(',')}]`, hash: v.hash, expected: v.expected }));
   const col = quoteIdentifier(target.column.name);
   return engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId: page.source_id, slug: page.slug }]);
@@ -166,9 +179,9 @@ export async function installSegmentedVectors(engine: BrainEngine, page: Segment
       installed += (await tx.executeRaw(`UPDATE content_chunks cc SET ${col} = v.embedding${vectorCastSuffix(target.column)},
           embedding_input_hash = v.hash, embedded_at = now(), embedded_text_hash = md5(cc.chunk_text), model = COALESCE($3, cc.model),
           embedding_pending_since = NULL
-        FROM jsonb_to_recordset($2::text::jsonb) AS v(chunk_index int, chunk_text text, embedding text, hash text), pages p
+        FROM jsonb_to_recordset($2::text::jsonb) AS v(chunk_index int, chunk_text text, embedding text, hash text, expected text), pages p
         WHERE cc.page_id = $1 AND p.id = cc.page_id AND cc.chunk_index = v.chunk_index AND cc.chunk_text = v.chunk_text
-          AND ${chunkGenerationFilter('p', 'cc')}
+          AND cc.embedding_input_hash IS NOT DISTINCT FROM v.expected AND ${chunkGenerationFilter('p', 'cc')}
         RETURNING cc.id`, [page.id, batch, target.model])).length;
     }
     return installed;
