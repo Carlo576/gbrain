@@ -70,7 +70,7 @@ import { digest, sha256 } from './persistence/digest.ts';
 import { isLargePageBytes } from './page-size-policy.ts';
 import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { installSegmentedVectors, listLiveEmbedSegments, listSegmentChunkRows, readSegmentedEmbedPage } from './page-body/segmented-embedding.ts';
-import { acquirePageEmbeddingLease } from './page-embedding-lease.ts';
+import { acquirePageEmbeddingLease, pageEmbeddingLeaseUnavailable } from './page-embedding-lease.ts';
 import { planSegmentDerivations, segmentDerivationContextHash } from './page-body/derivations.ts';
 import { embeddingInputHash, synopsisDocumentHash, type EmbeddingTier } from './embedding-input-hash.ts';
 import { currentEmbeddingSignature } from './embedding.ts';
@@ -504,7 +504,9 @@ export const SYNOPSIS_DERIVATION_VERSION = 1;
  * (`synopsis:<model>`) first: a held page or a refused reservation leaves the title tier in place (`budget_limited`), the
  * segment `partial` and the windows already installed kept. A window whose synopsis is refused, empty or malformed
  * embeds at the title tier, which a synopsis page accepts (page_fallback; the segment is settled with the fallback in
- * its receipt, so it is not paid for again until its inputs change). Vectors install through installSegmentedVectors;
+ * its receipt, so it is not paid for again until its inputs change). Each segment runs under the page's embedding lease:
+ * a lease another path holds through the wait returns a retryable result before any provider call, and a lease lost
+ * before an install (assertHeld) installs nothing and returns one too. Vectors install through installSegmentedVectors;
  * the page is stamped `per_chunk_synopsis` once every segment is settled.
  */
 async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promise<ReembedPageResult> {
@@ -551,7 +553,8 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
   let embedded = 0;
   let fallbackKind: SynopsisFailureKind | null = null;
   for (const segment of plan.todo) {
-    await using _lease = await acquirePageEmbeddingLease(engine, page.id, { signal: args.abortSignal });
+    await using lease = await acquirePageEmbeddingLease(engine, page.id, { signal: args.abortSignal });
+    if (lease.busy) return { kind: 'transient_error', cause: 'db', detail: pageEmbeddingLeaseUnavailable(page.id, false).message };
     const anchors: Array<{ first_chunk: number; last_chunk: number; chunks: number; document_sha256: string; tier: EmbeddingTier }> = [];
     let segmentFallback: SynopsisFailureKind | null = null;
     for (const window of segmentSynopsisWindows(await listSegmentChunkRows(engine, page.id, segment.occurrenceId), lead)) {
@@ -585,8 +588,11 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
       if (built.vectors.length !== todo.length || built.vectors.some(v => !v?.length || !v.every(Number.isFinite))) {
         return { kind: 'transient_error', cause: 'embed', detail: 'Embedding provider returned an incomplete or invalid batch' };
       }
+      let held = true;
       const installed = await installSegmentedVectors(engine, page, target, todo.map((c, i) => ({ chunk_index: c.chunk_index, chunk_text: c.chunk_text,
-        vector: built.vectors[i]!, hash: embeddingInputHash(built.tier === 'title' ? base : provenance, built.tier, c), expected: c.embedding_input_hash ?? null })));
+        vector: built.vectors[i]!, hash: embeddingInputHash(built.tier === 'title' ? base : provenance, built.tier, c), expected: c.embedding_input_hash ?? null })),
+      async tx => (held = await lease.assertHeld(tx).then(() => true, () => false)));
+      if (!held) return { kind: 'transient_error', cause: 'db', detail: pageEmbeddingLeaseUnavailable(page.id, true).message };
       if (installed < todo.length) return superseded;
       embedded += installed;
       if (built.fallback) segmentFallback ??= built.fallback;
