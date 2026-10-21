@@ -27,7 +27,7 @@ import { readFix } from '../ops/op-fix.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { contentHash, rowToPage } from '../utils.ts';
 import { rewriteLiveSegmentedFences, rewriteSegmentedGeneration, segmentedBodyContains } from '../page-body/segment-rewrite.ts';
-import { sweepDerivationText } from '../page-body/segment-derive.ts';
+import { DerivationSweepBudgetExceeded, sweepDerivationText } from '../page-body/segment-derive.ts';
 import { discoverWithdrawalTargets, withdrawalDiscoveryFailure } from './withdrawal-discovery.ts';
 import { dropPurgedFenceRows } from './purge-overlay.ts';
 import { derivedRowsFrom, hideDerivedRows, type DerivationRef } from './derivation-inputs.ts';
@@ -225,12 +225,16 @@ async function ledgerLookup<T>(fn: () => Promise<T>, factId: number, sourceId: s
   }
 }
 
-/** The derivation sweep's statement timeout refuses the whole purge with the typed code, as the ledger redaction does. */
+/**
+ * A statement timeout of the derivation sweep, or the sweep passing its overall budget (DerivationSweepBudgetExceeded),
+ * refuses the whole purge with the typed code, as the ledger redaction does.
+ */
 async function derivationSweep(fn: () => Promise<number>, factId: number, sourceId: string): Promise<number> {
   try { return await fn(); } catch (error) {
-    if ((error as { code?: unknown } | null)?.code !== '57014') throw error;
+    const budget = error instanceof DerivationSweepBudgetExceeded;
+    if (!budget && (error as { code?: unknown } | null)?.code !== '57014') throw error;
     throw opError('purge_lookup_timeout', 'This purge could not finish; nothing was purged. Do not assume the requested content was erased.',
-      `The sweep of stored derivation results holding fact ${factId} in source ${sourceId} exceeded the purge transaction's statement budget, so the transaction rolled back and nothing was removed, tombstoned or redacted. `
+      `The sweep of stored derivation results holding fact ${factId} in source ${sourceId} exceeded ${budget ? `its overall budget (${(error as Error).message})` : "the purge transaction's statement budget"}, so the transaction rolled back and nothing was removed, tombstoned or redacted. `
       + 'Run the purge again with a new request id; if it times out again, report it with the output of gbrain doctor --json.',
     { fix: readFix('Reports the brain\'s health, read-only.', { argv: ['gbrain', 'doctor', '--json'] }) });
   }

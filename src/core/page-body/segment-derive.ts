@@ -413,38 +413,107 @@ export function derivationSweepScopeSql(d: string, p: string, pageIds: string): 
 }
 
 /**
- * @internal Per page, for the work-volume tests (counts, not time): derivation rows each sweep read, normalized and
- * deleted. Recorded only while __setDerivationSweepWorkForTests(true) is in effect.
+ * Rows of one derivation statement: a fact purge's sweep and its receipt probe each read at most `batchRows` rows per
+ * statement (so the rows they normalize per statement are bounded too, well inside a statement budget), walking the
+ * source's rows in primary-key order; the sweep gives up, failing the purge, past `totalMs`.
+ */
+export const DERIVATION_SWEEP_LIMITS = { batchRows: 500, totalMs: 120_000 } as const;
+let sweepLimits: { batchRows: number; totalMs: number } = { ...DERIVATION_SWEEP_LIMITS };
+/** @internal Test seam: shrink the sweep's bounds (null restores them). */
+export function __setDerivationSweepLimitsForTests(limits: Partial<typeof sweepLimits> | null): void {
+  sweepLimits = { ...DERIVATION_SWEEP_LIMITS, ...(limits ?? {}) };
+}
+/** The rows one sweep or probe statement reads. */
+export function derivationBatchRows(): number { return sweepLimits.batchRows; }
+
+/** A purge's derivation sweep passed DERIVATION_SWEEP_LIMITS.totalMs; the purge fails as on a statement timeout. */
+export class DerivationSweepBudgetExceeded extends Error {
+  readonly code = 'derivation_sweep_budget';
+  constructor(readonly rows: number, readonly statements: number) {
+    super(`The derivation sweep read ${rows} rows in ${statements} statements and passed its ${sweepLimits.totalMs} ms budget.`);
+  }
+}
+
+/** A derivation row's primary key, the cursor a batched walk resumes after. */
+export type DerivationKey = [pageId: number, pipeline: string, occurrenceId: string];
+
+/** SQL predicate: row `d` comes after the cursor in the int, text and bigint parameters `at` (all null: the first batch). */
+export function derivationAfterSql(d: string, at: [string, string, string]): string {
+  return `(${at[0]}::int IS NULL OR (${d}.page_id, ${d}.pipeline, ${d}.occurrence_id) > (${at[0]}::int, ${at[1]}::text, ${at[2]}::bigint))`;
+}
+
+/**
+ * @internal For the work-volume tests (counts, not time): per page, the derivation rows each sweep read, normalized and
+ * deleted; per statement of a sweep or a receipt probe, the rows it read and normalized. Recorded only while
+ * __setDerivationSweepWorkForTests(true) is in effect.
  */
 export const derivationSweepWork: Array<{ pageId: number; scanned: number; normalized: number; deleted: number }> = [];
+export const derivationSweepStatements: Array<{ phase: 'sweep' | 'probe'; scanned: number; normalized: number }> = [];
 let recordSweepWork = false;
-/** @internal Test seam: start (clearing what is there) or stop recording derivationSweepWork. */
-export function __setDerivationSweepWorkForTests(on: boolean): void { recordSweepWork = on; derivationSweepWork.length = 0; }
+/** @internal Test seam: start (clearing what is there) or stop recording derivationSweepWork and derivationSweepStatements. */
+export function __setDerivationSweepWorkForTests(on: boolean): void {
+  recordSweepWork = on;
+  derivationSweepWork.length = 0;
+  derivationSweepStatements.length = 0;
+}
+/** @internal Records one statement's rows while a test records sweep work. */
+export function recordDerivationStatement(entry: { phase: 'sweep' | 'probe'; scanned: number; normalized: number }): void {
+  if (recordSweepWork) derivationSweepStatements.push(entry);
+}
 
 /**
  * Delete the derivation rows of a source that hold one of `claims` (derivationHoldsClaimSql) among the rows a fact purge
  * sweeps (derivationSweepScopeSql over `pageIds`, the pages it rewrote), in the purge's transaction after the body
- * rewrites and under its statement budget, so a row a rewrite could not place goes too. Only rows in scope that pass the
- * prefilter (derivationClaimCandidateSql) are normalized; the purge receipt probes the store with the same predicates.
- * Returns the rows deleted.
+ * rewrites, so a row a rewrite could not place goes too. The rows in scope are walked in primary-key order, at most
+ * DERIVATION_SWEEP_LIMITS.batchRows per statement, each statement under the purge's statement budget; only the rows
+ * that pass the prefilter (derivationClaimCandidateSql) are normalized. Past DERIVATION_SWEEP_LIMITS.totalMs it throws
+ * DerivationSweepBudgetExceeded, and the caller's transaction rolls back. The purge receipt probes the store with the same
+ * predicates. Returns the rows deleted.
  */
 export async function sweepDerivationText(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, pageIds: readonly number[],
   claims: readonly string[]): Promise<number> {
   const { needles, patterns } = await derivationNeedles(engine, claims);
   if (!needles.length) return 0;
-  const rows = await engine.executeRaw<{ page_id: number; scanned: number; normalized: number; deleted: number }>(`WITH scope AS MATERIALIZED (
-      SELECT d.page_id, d.pipeline, d.occurrence_id, d.output, d.receipt, ${derivationClaimCandidateSql('d', '$4')} AS candidate
-      FROM page_segment_derivations d JOIN pages p ON p.id = d.page_id WHERE p.source_id = $1 AND ${derivationSweepScopeSql('d', 'p', '$2')}
-    ), hits AS MATERIALIZED (
-      SELECT s.page_id, s.pipeline, s.occurrence_id FROM scope s WHERE s.candidate AND ${derivationHoldsClaimSql('s', '$3', '$4')}
-    ), gone AS (
-      DELETE FROM page_segment_derivations x USING hits h WHERE x.page_id = h.page_id AND x.pipeline = h.pipeline
-        AND x.occurrence_id = h.occurrence_id RETURNING x.page_id
-    ) SELECT s.page_id, count(*)::int AS scanned, count(*) FILTER (WHERE s.candidate)::int AS normalized,
-      (SELECT count(*)::int FROM gone g WHERE g.page_id = s.page_id) AS deleted
-    FROM scope s GROUP BY s.page_id ORDER BY s.page_id`, [sourceId, [...pageIds], needles, patterns]);
-  if (recordSweepWork) for (const row of rows) derivationSweepWork.push({ pageId: Number(row.page_id), scanned: Number(row.scanned), normalized: Number(row.normalized), deleted: Number(row.deleted) });
-  return rows.reduce((n, row) => n + Number(row.deleted), 0);
+  const { batchRows, totalMs } = sweepLimits;
+  const deadline = performance.now() + totalMs;
+  const pages = new Map<number, { scanned: number; normalized: number; deleted: number }>();
+  let cursor: DerivationKey | null = null, read = 0, statements = 0;
+  for (;;) {
+    const rows: Array<{ page_id: number; scanned: number; normalized: number; deleted: number; last_page: number; last_pipeline: string; last_occurrence: string }> =
+      await engine.executeRaw(`WITH batch AS MATERIALIZED (
+        SELECT d.page_id, d.pipeline, d.occurrence_id FROM page_segment_derivations d JOIN pages p ON p.id = d.page_id
+        WHERE p.source_id = $1 AND ${derivationSweepScopeSql('d', 'p', '$2')} AND ${derivationAfterSql('d', ['$5', '$6', '$7'])}
+        ORDER BY d.page_id, d.pipeline, d.occurrence_id LIMIT $8
+      ), scope AS MATERIALIZED (
+        SELECT d.page_id, d.pipeline, d.occurrence_id, d.output, d.receipt, ${derivationClaimCandidateSql('d', '$4')} AS candidate
+        FROM batch b JOIN page_segment_derivations d ON d.page_id = b.page_id AND d.pipeline = b.pipeline AND d.occurrence_id = b.occurrence_id
+      ), hits AS MATERIALIZED (
+        SELECT s.page_id, s.pipeline, s.occurrence_id FROM scope s WHERE s.candidate AND ${derivationHoldsClaimSql('s', '$3', '$4')}
+      ), gone AS (
+        DELETE FROM page_segment_derivations x USING hits h WHERE x.page_id = h.page_id AND x.pipeline = h.pipeline
+          AND x.occurrence_id = h.occurrence_id RETURNING x.page_id
+      ), last AS (
+        SELECT page_id, pipeline, occurrence_id::text AS occurrence_id FROM batch ORDER BY page_id DESC, pipeline DESC, occurrence_id DESC LIMIT 1
+      ) SELECT s.page_id, count(*)::int AS scanned, count(*) FILTER (WHERE s.candidate)::int AS normalized,
+        (SELECT count(*)::int FROM gone g WHERE g.page_id = s.page_id) AS deleted,
+        (SELECT page_id FROM last) AS last_page, (SELECT pipeline FROM last) AS last_pipeline, (SELECT occurrence_id FROM last) AS last_occurrence
+      FROM scope s GROUP BY s.page_id ORDER BY s.page_id`,
+      [sourceId, [...pageIds], needles, patterns, cursor?.[0] ?? null, cursor?.[1] ?? null, cursor?.[2] ?? null, batchRows]);
+    statements++;
+    const scanned = rows.reduce((n, row) => n + Number(row.scanned), 0);
+    read += scanned;
+    recordDerivationStatement({ phase: 'sweep', scanned, normalized: rows.reduce((n, row) => n + Number(row.normalized), 0) });
+    for (const row of rows) {
+      const page = pages.get(Number(row.page_id)) ?? { scanned: 0, normalized: 0, deleted: 0 };
+      pages.set(Number(row.page_id), { scanned: page.scanned + Number(row.scanned), normalized: page.normalized + Number(row.normalized), deleted: page.deleted + Number(row.deleted) });
+    }
+    if (scanned < batchRows) break;
+    cursor = [Number(rows[0]!.last_page), rows[0]!.last_pipeline, String(rows[0]!.last_occurrence)];
+    if (performance.now() > deadline) throw new DerivationSweepBudgetExceeded(read, statements);
+  }
+  const sorted = [...pages].sort((a, b) => a[0] - b[0]);
+  if (recordSweepWork) for (const [pageId, work] of sorted) derivationSweepWork.push({ pageId, ...work });
+  return sorted.reduce((n, [, work]) => n + work.deleted, 0);
 }
 
 /** SHA-256 hex (its first 32 digits) of a key, recorded in an output instead of the key's text. */

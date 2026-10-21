@@ -27,7 +27,8 @@ import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from 
 import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
-import { derivationHoldsClaimSql, derivationNeedles, derivationSweepScopeSql } from '../page-body/segment-derive.ts';
+import { derivationAfterSql, derivationBatchRows, derivationClaimCandidateSql, derivationHoldsClaimSql, derivationNeedles, derivationSweepScopeSql,
+  recordDerivationStatement, type DerivationKey } from '../page-body/segment-derive.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
 import { CARRYING_FIELDS } from '../belief/keys.ts';
@@ -125,21 +126,52 @@ async function segmentTextReport(engine: BrainEngine, sourceId: string, needles:
 /**
  * Derivation rows holding the claim, matched and scoped as the purge sweeps them (segment-derive.ts
  * derivationHoldsClaimSql, derivationSweepScopeSql): a row the sweep covers is a residual (`incomplete`); a row of a
- * live segment of a page the purge did not rewrite is that page's prose, reported with it.
+ * live segment of a page the purge did not rewrite is that page's prose, reported with it. The source's rows are walked
+ * in primary-key order, segment-derive.ts derivationBatchRows() per statement, each under the probe's statement bound.
  */
 async function derivationTextReport(engine: BrainEngine, sourceId: string, pageIds: readonly number[], claims: readonly string[], removed: number,
   deadline: number): Promise<StoreReport> {
   const { needles, patterns } = await derivationNeedles(engine, claims);
   if (!needles.length) return { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed };
-  const carrying = `SELECT 1 FROM page_segment_derivations d JOIN pages p ON p.id=d.page_id WHERE p.source_id=$1 AND ${derivationHoldsClaimSql('d', '$2', '$4')}`;
-  const params = [sourceId, needles, [...pageIds], patterns];
-  const swept = await boundedCount(engine, `${carrying} AND ${derivationSweepScopeSql('d', 'p', '$3')}`, params, deadline);
-  if ('unverified' in swept) return { store: 'page_segment_derivations', status: 'unverified', reason: swept.unverified, removed };
-  if (swept.count) return { store: 'page_segment_derivations', status: 'incomplete', remaining: swept.count, removed };
-  const kept = await boundedCount(engine, `${carrying} AND NOT ${derivationSweepScopeSql('d', 'p', '$3')}`, params, deadline);
-  if ('unverified' in kept) return { store: 'page_segment_derivations', status: 'unverified', reason: kept.unverified, removed };
-  return kept.count
-    ? { store: 'page_segment_derivations', status: 'out_of_scope', reason: 'source_prose', remaining: kept.count, removed,
+  const unverified = (reason: string): StoreReport => ({ store: 'page_segment_derivations', status: 'unverified', reason, removed });
+  let swept = 0, kept = 0;
+  let cursor: DerivationKey | null = null;
+  for (;;) {
+    if (performance.now() > deadline) return unverified('verification_deadline');
+    let row: { scanned: number; normalized: number; swept: number; kept: number; last_page: number | null; last_pipeline: string | null; last_occurrence: string | null };
+    try {
+      row = await engine.transaction(async tx => {
+        await tx.executeRaw("SELECT set_config('statement_timeout',$1,true)", [`${probeLimits.statementMs}ms`]);
+        const [counted] = await tx.executeRaw<typeof row>(`WITH batch AS MATERIALIZED (
+            SELECT d.page_id, d.pipeline, d.occurrence_id, ${derivationSweepScopeSql('d', 'p', '$3')} AS swept FROM page_segment_derivations d
+            JOIN pages p ON p.id=d.page_id WHERE p.source_id=$1 AND ${derivationAfterSql('d', ['$5', '$6', '$7'])}
+            ORDER BY d.page_id, d.pipeline, d.occurrence_id LIMIT $8
+          ), checked AS MATERIALIZED (
+            SELECT b.swept, c.candidate, CASE WHEN c.candidate THEN ${derivationHoldsClaimSql('d', '$2', '$4')} ELSE false END AS hit
+            FROM batch b JOIN page_segment_derivations d ON d.page_id=b.page_id AND d.pipeline=b.pipeline AND d.occurrence_id=b.occurrence_id
+            CROSS JOIN LATERAL (SELECT ${derivationClaimCandidateSql('d', '$4')} AS candidate) c
+          ), last AS (
+            SELECT page_id, pipeline, occurrence_id::text AS occurrence_id FROM batch ORDER BY page_id DESC, pipeline DESC, occurrence_id DESC LIMIT 1
+          ) SELECT (SELECT count(*)::int FROM batch) AS scanned, count(*) FILTER (WHERE candidate)::int AS normalized,
+            count(*) FILTER (WHERE hit AND swept)::int AS swept, count(*) FILTER (WHERE hit AND NOT swept)::int AS kept,
+            (SELECT page_id FROM last) AS last_page, (SELECT pipeline FROM last) AS last_pipeline, (SELECT occurrence_id FROM last) AS last_occurrence
+          FROM checked`, [sourceId, needles, [...pageIds], patterns, cursor?.[0] ?? null, cursor?.[1] ?? null, cursor?.[2] ?? null, derivationBatchRows()]);
+        return counted!;
+      });
+    } catch (error) {
+      if (getCode(error) === '57014') return unverified('statement_deadline');
+      throw error;
+    }
+    recordDerivationStatement({ phase: 'probe', scanned: Number(row.scanned), normalized: Number(row.normalized) });
+    swept += Number(row.swept);
+    kept += Number(row.kept);
+    if (swept > probeLimits.rows || kept > probeLimits.rows) return unverified('row_bound');
+    if (Number(row.scanned) < derivationBatchRows()) break;
+    cursor = [Number(row.last_page), row.last_pipeline!, String(row.last_occurrence)];
+  }
+  if (swept) return { store: 'page_segment_derivations', status: 'incomplete', remaining: swept, removed };
+  return kept
+    ? { store: 'page_segment_derivations', status: 'out_of_scope', reason: 'source_prose', remaining: kept, removed,
       detail: 'Derivations of live segments of pages the purge did not rewrite hold the text their prose still states; they are listed under pages.' }
     : { store: 'page_segment_derivations', status: removed ? 'deleted' : 'not_present', removed };
 }
