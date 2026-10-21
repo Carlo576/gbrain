@@ -130,6 +130,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'extract_health',
   // Large pages A7: page extractions that read only part of their input.
   'extraction_input_truncated',
+  // PR 4 (Wave B incremental derivation, transcripts): conversation pages held because no format is detected over them.
+  'conversation_detection_ambiguous',
   // PR 4 (Wave B incremental derivation, transcripts): segmented derivations held back by a model without a price.
   'derivation_unpriced_model',
   'facts_embedding_width_consistency',

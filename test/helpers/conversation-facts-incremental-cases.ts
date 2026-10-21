@@ -109,11 +109,11 @@ export function paidTransport(o: ChatOpts): Promise<ChatResult> {
  * `abortAfter`: the run is aborted after that many calls; `segmentLimit`: at most that many windows per page.
  */
 export async function extract(engine: BrainEngine, slug: string, opts: { force?: boolean; paid?: boolean; failAt?: number; failOn?: (text: string) => boolean;
-  abortAfter?: number; sinceIso?: string; segmentLimit?: number } = {}) {
+  abortAfter?: number; sinceIso?: string; segmentLimit?: number; grammar?: string | null; dryRun?: boolean } = {}) {
   const calls: string[] = [];
   const controller = new AbortController();
   const result = await runExtractConversationFactsCore(engine, { sourceId: 'default', slugs: [slug], sleepMs: 0, force: opts.force,
-    sinceIso: opts.sinceIso, segmentLimit: opts.segmentLimit,
+    sinceIso: opts.sinceIso, segmentLimit: opts.segmentLimit, grammar: opts.grammar, dryRun: opts.dryRun,
     extractor: async input => {
       calls.push(input.turnText);
       if (opts.paid) await gatewayChat({ model: PAID_MODEL, messages: [{ role: 'user', content: input.turnText }], maxTokens: 64 });

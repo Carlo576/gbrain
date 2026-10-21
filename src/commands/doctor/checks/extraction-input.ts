@@ -23,6 +23,13 @@
  * synopsis or fact extraction made no paid call because a fact purge's sweep covers the
  * page) counts under that kind, whatever its own: its remedy is finishing the sweep
  * (doctor derivation_purge_sweeps), not a higher spend cap.
+ *
+ * conversation_detection_ambiguous (PR 4, Wave B incremental derivation, transcripts): segmented conversation pages
+ * held because no format is detected over them yet some format parses messages (a `detection_ambiguous` receipt
+ * with each format's count): nothing was extracted or collected there until the operator chooses the format with
+ * gbrain extract-conversation-facts --slug <slug> --grammar <format|none> (preview with --dry-run). Such a page's
+ * receipts are listed there, not here, so a stale window receipt never offers a spend cap for it; an operator choice
+ * (`grammar_chosen`) is not a truncation and is not listed.
  */
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
@@ -46,6 +53,8 @@ const PURGE_SWEEP = 'purge_sweep_pending';
 const PURGE_SWEEP_REMEDY = 'a fact purge\'s sweep of stored derivation results covers the page, so the run made no paid call there; gbrain doctor --only derivation_purge_sweeps names the purge, gbrain forget --purge --status --request-id <request_id> --continue finishes its sweep, and the next run resumes where it stopped';
 const NO_MESSAGES = 'no_messages';
 const NO_MESSAGES_REMEDY = 'the page reads as a transcript format over its whole text, yet no message parsed under that format (a conversation parser fault), so the last run changed nothing and kept its facts; rerunning repeats this, so report it with gbrain doctor --json and the page\'s format (a page that is not a transcript settles as non-extractable instead)';
+const AMBIGUOUS = 'detection_ambiguous';
+const CHOSEN = 'grammar_chosen';
 const remedy = (g: ReceiptGroup): string | null => g.kind === PURGE_SWEEP ? PURGE_SWEEP_REMEDY : g.kind === UNREAD_WINDOWS ? UNREAD_REMEDY : g.kind === FAILED_WINDOWS ? FAILED_REMEDY
   : g.kind === NO_MESSAGES ? NO_MESSAGES_REMEDY : REMEDY[g.pipeline] ?? null;
 
@@ -55,16 +64,44 @@ const describe = (g: ReceiptGroup): string =>
 async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Check[]> {
   const checks: Check[] = [];
   try {
+    const held = await connectedEngine(ctx).executeRaw<{ page: string; grammars: Record<string, number> | string | null; total: number }>(
+      `SELECT p.source_id || ':' || p.slug AS page, s.input_truncated->'grammars' AS grammars, count(*) OVER ()::int AS total
+         FROM page_extraction_state s JOIN pages p ON p.id = s.page_id AND p.deleted_at IS NULL
+        WHERE s.pipeline = 'conversation_facts' AND s.input_truncated->>'kind' = '${AMBIGUOUS}'
+        ORDER BY s.updated_at DESC LIMIT 20`);
+    const pages = held.map(r => ({ page: r.page, grammars: (typeof r.grammars === 'string' ? JSON.parse(r.grammars) : r.grammars ?? {}) as Record<string, number> }));
+    if (!pages.length) {
+      checks.push({ name: 'conversation_detection_ambiguous', status: 'ok', message: 'No conversation page is held for an undetected format.', details: { pages: 0, samples: [] } });
+    } else {
+      const total = Number(held[0]!.total);
+      const sample = pages.slice(0, 3).map(p => `${p.page} (${Object.entries(p.grammars).map(([id, n]) => `${id}: ${n}`).join(', ')})`).join('; ');
+      checks.push({ name: 'conversation_detection_ambiguous', status: 'warn',
+        message: `${total} conversation page(s) are held: no format is detected over the whole page, yet these formats parse messages in it, so nothing was extracted or removed there (messages per format: ${sample}). `
+          + 'Preview the format the page holds with gbrain extract-conversation-facts --source-id <source> --slug <slug> --grammar <format> --dry-run (--grammar none for a page that is not a transcript: its conversation facts are removed), then run it without --dry-run.',
+        details: { pages: total, samples: pages },
+        fix: agentFix(['gbrain', 'extract-conversation-facts', '--source-id', '<SOURCE>', '--slug', '<SLUG>', '--grammar', '<FORMAT>', '--dry-run'],
+          "Shows what a run under the chosen format would extract and which conversation facts its settled run would remove; it changes nothing. Running it without --dry-run applies the choice, which is the user's call.",
+          'conversation_detection_ambiguous', { ask_user: true, inputs: [
+            { name: 'SOURCE', how: 'the source id before the colon of a page in details.samples' },
+            { name: 'SLUG', how: 'the slug after the colon of that page' },
+            { name: 'FORMAT', how: "one of that page's formats in details.samples, or none when the page is not a transcript, chosen with the user" }] }) });
+    }
+  } catch (error) {
+    checks.push(checkError('conversation_detection_ambiguous', 'read the held conversation pages', error, { details: { health: 'unknown' } }));
+  }
+  try {
     const rows = await connectedEngine(ctx).executeRaw<{ pipeline: string; kind: string; pages: number; samples: string[] }>(
       `WITH receipts AS (
          SELECT s.page_id, s.pipeline, COALESCE(s.input_truncated->>'kind', 'unknown') AS kind, s.updated_at, NULL::text AS detail
-           FROM page_extraction_state s WHERE s.input_truncated IS NOT NULL
+           FROM page_extraction_state s WHERE s.input_truncated IS NOT NULL AND COALESCE(s.input_truncated->>'kind', '') NOT IN ('${AMBIGUOUS}', '${CHOSEN}')
          UNION ALL
          SELECT d.page_id, d.pipeline, CASE WHEN d.receipt->>'reason' = '${PURGE_SWEEP}' THEN '${PURGE_SWEEP}' ELSE COALESCE(d.receipt->>'kind', 'unknown') END AS kind,
                 max(d.updated_at) AS updated_at,
                 min(CASE WHEN d.receipt->>'kind' = '${FAILED_WINDOWS}' THEN ' window ' || (d.receipt->'windows'->0->>'ordinal') || ' of occurrence ' || d.occurrence_id END) AS detail
            FROM page_segment_derivations d
-          WHERE (d.receipt->>'kind' IS NOT NULL AND d.receipt->>'kind' <> 'unpriced_model') OR d.receipt->>'reason' = '${PURGE_SWEEP}' GROUP BY 1, 2, 3)
+          WHERE ((d.receipt->>'kind' IS NOT NULL AND d.receipt->>'kind' <> 'unpriced_model') OR d.receipt->>'reason' = '${PURGE_SWEEP}')
+            AND NOT EXISTS (SELECT 1 FROM page_extraction_state h WHERE h.page_id = d.page_id AND h.pipeline = d.pipeline AND h.input_truncated->>'kind' = '${AMBIGUOUS}')
+          GROUP BY 1, 2, 3)
        SELECT r.pipeline, r.kind, count(DISTINCT r.page_id)::int AS pages,
               (array_agg(p.source_id || ':' || p.slug || COALESCE(r.detail, '') ORDER BY r.updated_at DESC))[1:3] AS samples
          FROM receipts r JOIN pages p ON p.id = r.page_id AND p.deleted_at IS NULL
@@ -103,4 +140,4 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
   return checks;
 }
 
-export const extractionInputTruncatedEntry: DoctorEntry = { name: 'extraction_input_truncated', emits: ['extraction_input_truncated'], run: runExtractionInputTruncatedCheck };
+export const extractionInputTruncatedEntry: DoctorEntry = { name: 'extraction_input_truncated', emits: ['conversation_detection_ambiguous', 'extraction_input_truncated'], run: runExtractionInputTruncatedCheck };

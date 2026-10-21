@@ -18,11 +18,11 @@
  * Before a step, the page may also be rewritten to prose that keeps zero to three of its message lines, so no grammar
  * is detected while it still holds facts, then restored; each of the two runs is checked like a step. Or it may be
  * rewritten to another transcript format and run one window, so its rows record two grammars, then lose detection with
- * a few or about as many of its own message lines kept, then be restored: each run is checked like a step, and the lost
- * run also holds that competing grammars publish nothing and a settled page records the grammar parsing the most messages.
+ * a few or about as many of its own message lines kept, then be restored: each run is checked like a step. A lost run on
+ * a page some built-in format still parses a message in must be held: no call, no fact lost.
  * Each step records which paths it exercised (a moved window, a window-specific failure, a window marked failed, a
- * settled collection, a --since run, a cap refusal, a lost grammar on a page holding facts, a lost grammar on a page
- * recording two grammars that one dominates or that compete); across the seeds every path must fire at least its floor. Each seed
+ * settled collection, a --since run, a cap refusal, a lost grammar on a page holding facts, a held page keeping quoted
+ * lines, a held page recording two grammars); across the seeds every path must fire at least its floor. Each seed
  * also dooms the windows whose text hash starts with one chosen digit for a span of steps, so windows reach the failure
  * limit and block collection until the final --force run.
  * At the end a healthy unconstrained --force run leaves the same windows and facts as one extraction of the same page on
@@ -148,17 +148,31 @@ async function violations(engine: BrainEngine, slug: string, before: Fact[], o: 
   return { problems, after, fired };
 }
 
-type PropertyPath = 'moved' | 'failed_window' | 'marked_failed' | 'collected' | 'since' | 'cap' | 'grammar_lost' | 'grammar_adopted' | 'grammar_refused';
+type PropertyPath = 'moved' | 'failed_window' | 'marked_failed' | 'collected' | 'since' | 'cap' | 'grammar_lost' | 'held_quoted' | 'held_two_grammars';
+
+/** Whether some built-in conversation format parses a message in the page's text `body`. */
+async function anyFormatParses(engine: BrainEngine, slug: string, body: string): Promise<boolean> {
+  const page = (await engine.getPage(slug, { sourceId: 'default' }))!;
+  return BUILTIN_PATTERNS.some(entry => applyPattern(body, entry, deriveDateContext({ page })).length > 0);
+}
+
+/** A run on a page with no detected format but a parseable message is held: it never calls and never loses a fact. */
+function heldOracle(checked: { problems: string[]; after: Fact[]; fired: Set<PropertyPath> }, before: Fact[], outcome: { calls: number; failed: number }, path: PropertyPath): void {
+  checked.fired.add(path);
+  if (outcome.calls !== 0 || outcome.failed !== 0 || checked.after.map(f => f.id).join() !== before.map(f => f.id).join()) {
+    checked.problems.push(`(held) a page with no detected format and a parseable message made ${outcome.calls} call(s), failed ${outcome.failed} or changed its facts (${before.length} -> ${checked.after.length})`);
+  }
+}
 /**
  * Steps, across every seed, that must exercise each path: the round-5 floors (about half of 193, 165, 46, 133, 28, 21),
- * half of the 24 steps that lose the grammar on a page holding facts, and half of the 12 lost runs on a page recording two
- * grammars where one dominates and of the 12 where they compete (the 30 seeds now exercise 201, 153, 37, 184, 30, 22,
- * 24, 12, 12).
+ * half of the 24 steps that lose the grammar on a page holding facts, and half of the 18 held runs on a page keeping
+ * quoted lines and of the 24 on a page recording two grammars (the 30 seeds now exercise 206, 153, 47, 153, 27, 23, 24,
+ * 18, 24).
  */
-export const PROPERTY_PATH_FLOORS: Record<PropertyPath, number> = { moved: 96, failed_window: 82, marked_failed: 23, collected: 66, since: 14, cap: 10, grammar_lost: 12, grammar_adopted: 6, grammar_refused: 6 };
+export const PROPERTY_PATH_FLOORS: Record<PropertyPath, number> = { moved: 96, failed_window: 82, marked_failed: 23, collected: 66, since: 14, cap: 10, grammar_lost: 12, held_quoted: 9, held_two_grammars: 12 };
 
 export function defineConversationFactsPropertyCases(opts: { getBrain: () => AppendBrain; getFresh: () => AppendBrain }): void {
-  const firedSteps: Record<PropertyPath, number> = { moved: 0, failed_window: 0, marked_failed: 0, collected: 0, since: 0, cap: 0, grammar_lost: 0, grammar_adopted: 0, grammar_refused: 0 };
+  const firedSteps: Record<PropertyPath, number> = { moved: 0, failed_window: 0, marked_failed: 0, collected: 0, since: 0, cap: 0, grammar_lost: 0, held_quoted: 0, held_two_grammars: 0 };
   let seedsRun = 0;
   for (let seed = 1; seed <= PROPERTY_SEEDS; seed++) {
     test(`seed ${seed}: ${PROPERTY_STEPS} seeded changes and constrained runs keep the deletion invariant, and the page converges to a fresh extraction`, async () => {
@@ -189,11 +203,13 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
           const detector = createPatternDetector();
           detector.push((await brain.body(slug)).truth);
           const lostGrammar = phase === 'lost' && detector.finish() === null && facts.length > 0;
+          const parseable = lostGrammar && await anyFormatParses(engine, slug, (await brain.body(slug)).truth);
           const constraint = (['none', 'none', 'abort', 'limit'] as const)[Math.floor(lost() * 4)]!;
           const o: RunOpts = constraint === 'abort' ? { abortAfter: 1 + Math.floor(lost() * 30) } : constraint === 'limit' ? { segmentLimit: 1 + Math.floor(lost() * 20) } : {};
           const outcome = await run(engine, slug, o);
           const checked = await violations(engine, slug, facts, o, outcome);
           if (lostGrammar) checked.fired.add('grammar_lost');
+          if (parseable) heldOracle(checked, facts, outcome, 'held_quoted');
           log.push(`step ${step} (grammar ${phase}, ${quoted.length} message line(s) kept): ${constraint} ${JSON.stringify(o)} -> ${JSON.stringify(outcome)}, ${checked.after.length} facts; ${[...checked.fired].join(' ') || 'no path'}`);
           for (const path of checked.fired) firedSteps[path]++;
           expect({ step, log: log.at(-1), problems: checked.problems.slice(0, 5) }).toEqual({ step, log: log.at(-1), problems: [] });
@@ -204,10 +220,9 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
       const rival = rng(seed + 104_729);
       /**
        * Rewrite the page to a plain-role transcript and run one window of it, so the rows record two grammars; then put
-       * prose before it and keep a few of the page's own message lines (the plain-role grammar dominates) or about as many
-       * as it has turns (the two compete), so no grammar is detected, and run; then restore the page and run. Each run is
-       * checked like a step, and the lost run also against G1: competing grammars publish nothing, a dominant one is the
-       * grammar every row of a settled page records.
+       * prose before it and keep a few of the page's own message lines or about as many as it has turns, so no grammar is
+       * detected, and run; then restore the page and run. Each run is checked like a step, and the lost run also holds
+       * that a page with a parseable message and no detected format is held: no call, no fact lost.
        */
       const rivalGrammar = async (step: number) => {
         const truth = (await brain.body(slug)).truth;
@@ -226,27 +241,14 @@ export function defineConversationFactsPropertyCases(opts: { getBrain: () => App
           detector.push(body);
           const grammars = [...new Set((await derivations(engine, slug)).rows.map(row => (row.output as { pattern?: string | null }).pattern).filter((p): p is string => !!p))];
           const lostTwo = phase === 'lost' && detector.finish() === null && facts.length > 0 && grammars.length > 1;
-          const page = (await engine.getPage(slug, { sourceId: 'default' }))!;
-          const parsed = grammars.map(id => ({ id, messages: applyPattern(body, BUILTIN_PATTERNS.find(p => p.id === id)!, deriveDateContext({ page })).length })).sort((a, b) => b.messages - a.messages);
-          const counts = parsed.map(p => p.messages).join(' vs ');
-          const refused = lostTwo && parsed[0]!.messages > 0 && parsed[0]!.messages <= 2 * parsed[1]!.messages;
+          const parseable = lostTwo && await anyFormatParses(engine, slug, body);
           const constraint = phase === 'recorded' ? 'limit' : (['none', 'none', 'abort', 'limit'] as const)[Math.floor(rival() * 4)]!;
           const o: RunOpts = phase === 'recorded' ? { segmentLimit: 1 } : constraint === 'abort' ? { abortAfter: 1 + Math.floor(rival() * 30) }
             : constraint === 'limit' ? { segmentLimit: 1 + Math.floor(rival() * 20) } : {};
           const outcome = await run(engine, slug, o);
           const checked = await violations(engine, slug, facts, o, outcome);
-          if (refused) {
-            checked.fired.add('grammar_refused');
-            if (outcome.calls !== 0 || outcome.failed !== 1 || checked.after.map(f => f.id).join() !== facts.map(f => f.id).join()) checked.problems.push(`(G1) competing recorded grammars (${counts} messages) published or extracted`);
-          } else if (lostTwo && parsed[0]!.messages > 0) {
-            checked.fired.add('grammar_adopted');
-            const best = parsed[0]!.id;
-            const state = await pageState(engine, slug);
-            const d = await derivations(engine, slug);
-            const live = d.rows.filter(row => d.live.includes(row.occurrenceId)).map(row => (row.output as { pattern?: string | null }).pattern);
-            if (state.settled && live.some(p => p !== best)) checked.problems.push(`(G1) the page settled under ${[...new Set(live)].join()} although ${best} parses the most messages (${counts})`);
-          }
-          log.push(`step ${step} (rival grammar ${phase}, ${count} plain-role turns, ${keep} own line(s) kept, recorded ${grammars.join('+') || 'none'} parsing ${counts || 'nothing'}): ${constraint} ${JSON.stringify(o)} -> ${JSON.stringify(outcome)}, ${checked.after.length} facts; ${[...checked.fired].join(' ') || 'no path'}`);
+          if (parseable) heldOracle(checked, facts, outcome, 'held_two_grammars');
+          log.push(`step ${step} (rival grammar ${phase}, ${count} plain-role turns, ${keep} own line(s) kept, recorded ${grammars.join('+') || 'none'}): ${constraint} ${JSON.stringify(o)} -> ${JSON.stringify(outcome)}, ${checked.after.length} facts; ${[...checked.fired].join(' ') || 'no path'}`);
           for (const path of checked.fired) firedSteps[path]++;
           expect({ step, log: log.at(-1), problems: checked.problems.slice(0, 5) }).toEqual({ step, log: log.at(-1), problems: [] });
           facts = checked.after;

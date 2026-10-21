@@ -3134,6 +3134,17 @@
         {
           "category": "brain",
           "details": {
+            "pages": 0,
+            "samples": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No conversation page is held for an undetected format.",
+          "name": "conversation_detection_ambiguous",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "groups": []
           },
           "elapsed_ms": "<volatile>",

@@ -887,6 +887,10 @@
       },
       {
         "category": "brain",
+        "name": "conversation_detection_ambiguous"
+      },
+      {
+        "category": "brain",
         "name": "extraction_input_truncated"
       },
       {
