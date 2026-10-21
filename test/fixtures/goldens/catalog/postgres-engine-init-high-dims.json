@@ -268,6 +268,8 @@
       "page_purges.page_purges_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "page_purges.trust_generation_insert": "t TRIGGER DEFERRABLE INITIALLY DEFERRED",
       "page_retrievals.page_retrievals_pkey": "p PRIMARY KEY (page_id)",
+      "page_segment_derivation_purges.page_segment_derivation_purges_pkey": "p PRIMARY KEY (request_id)",
+      "page_segment_derivation_purges.page_segment_derivation_purges_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "page_segment_derivations.page_segment_derivations_context_hash_check": "c CHECK ((octet_length(context_hash) = 32))",
       "page_segment_derivations.page_segment_derivations_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "page_segment_derivations.page_segment_derivations_pipeline_check": "c CHECK ((pipeline = ANY (ARRAY['links'::text, 'mentions'::text, 'timeline'::text, 'fences'::text, 'conversation_facts'::text, 'extract_atoms'::text, 'facts_backstop'::text, 'synopsis'::text])))",
@@ -538,6 +540,7 @@
       "gbrain_refuse_purged_fact()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=d1d584b91ceea7f4e63c235b790ef89c958c578e635f77ddd644918bc36d33f1",
       "gbrain_refuse_purged_page()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=8aaaf7c22fc9acb4b1e84fe75f11ae6c889949b78de1ef6bdba1db54ef43844e",
       "gbrain_refuse_purged_take()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=4a291b0448ab7a31926aa482b5222e0595d31a6bfad81b851b13e4bf581a0d83",
+      "gbrain_refuse_purging_derivation()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=0d0afb3e61857f1668f2e7996da1c6aaf269aecaa1bf3763ce90df90e2d66fd3",
       "gbrain_require_managed_writer()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=f29ded3a50b998bbe342052444996675f57ddf2de3fd786b2373015d35e6d859",
       "gbrain_require_persistence_protocol(required integer)": "RETURNS void kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=af07b7fac60dec0a4fe568217931ac449d32f73b3a53a047b3b02a5f59cb5058",
       "gbrain_snapshot_version_trust()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=7452350236ed4c68a6cd1f4d78a1381a4ef44cc70e8a032141f01bba4a704702",
@@ -816,6 +819,9 @@
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "page_retrievals": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "page_segment_derivation_purges": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "page_segment_derivations": [
@@ -1316,6 +1322,8 @@
       "page_projection_jobs_pkey": "CREATE UNIQUE INDEX page_projection_jobs_pkey ON public.page_projection_jobs USING btree (source_incarnation, slug)",
       "page_purges_pkey": "CREATE UNIQUE INDEX page_purges_pkey ON public.page_purges USING btree (source_id, content_hash)",
       "page_retrievals_pkey": "CREATE UNIQUE INDEX page_retrievals_pkey ON public.page_retrievals USING btree (page_id)",
+      "page_segment_derivation_purges_pkey": "CREATE UNIQUE INDEX page_segment_derivation_purges_pkey ON public.page_segment_derivation_purges USING btree (request_id)",
+      "page_segment_derivation_purges_source": "CREATE INDEX page_segment_derivation_purges_source ON public.page_segment_derivation_purges USING btree (source_id, created_at)",
       "page_segment_derivations_pkey": "CREATE UNIQUE INDEX page_segment_derivations_pkey ON public.page_segment_derivations USING btree (page_id, pipeline, occurrence_id)",
       "page_segment_derivations_unsettled": "CREATE INDEX page_segment_derivations_unsettled ON public.page_segment_derivations USING btree (pipeline, page_id) WHERE (state = ANY (ARRAY['partial'::text, 'failed'::text]))",
       "page_segment_texts_pkey": "CREATE UNIQUE INDEX page_segment_texts_pkey ON public.page_segment_texts USING btree (source_id, sha256)",
@@ -2980,6 +2988,20 @@
         ],
         "flags": "relkind=r rls=true force_rls=false"
       },
+      "page_segment_derivation_purges": {
+        "columns": [
+          "1 request_id uuid/uuid NOT NULL",
+          "2 source_id text/text NOT NULL",
+          "3 needles ARRAY/_text NOT NULL",
+          "4 patterns ARRAY/_text NOT NULL",
+          "5 page_ids ARRAY/_int4 NOT NULL DEFAULT '{}'::integer[]",
+          "6 cursor_page integer/int4 NULL",
+          "7 cursor_pipeline text/text NULL",
+          "8 cursor_occurrence bigint/int8 NULL",
+          "9 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=true force_rls=false"
+      },
       "page_segment_derivations": {
         "columns": [
           "1 page_id integer/int4 NOT NULL",
@@ -4119,6 +4141,7 @@
       "page_aliases.managed_writer_guard": "CREATE TRIGGER managed_writer_guard BEFORE INSERT OR DELETE OR UPDATE ON public.page_aliases FOR EACH ROW EXECUTE FUNCTION gbrain_require_managed_writer()",
       "page_body_manifest.managed_writer_guard": "CREATE TRIGGER managed_writer_guard BEFORE INSERT OR DELETE OR UPDATE ON public.page_body_manifest FOR EACH ROW EXECUTE FUNCTION gbrain_require_managed_writer()",
       "page_purges.trust_generation_insert": "CREATE CONSTRAINT TRIGGER trust_generation_insert AFTER INSERT ON public.page_purges DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (true) EXECUTE FUNCTION gbrain_bump_trust_generation()",
+      "page_segment_derivations.page_segment_derivations_refuse_purging": "CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON public.page_segment_derivations FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation()",
       "page_segment_texts.managed_writer_guard": "CREATE TRIGGER managed_writer_guard BEFORE INSERT OR DELETE OR UPDATE ON public.page_segment_texts FOR EACH ROW EXECUTE FUNCTION gbrain_require_managed_writer()",
       "page_versions.page_versions_trust_snapshot": "CREATE TRIGGER page_versions_trust_snapshot BEFORE INSERT ON public.page_versions FOR EACH ROW EXECUTE FUNCTION gbrain_snapshot_version_trust()",
       "page_versions.page_versions_write_attribution": "CREATE TRIGGER page_versions_write_attribution BEFORE INSERT ON public.page_versions FOR EACH ROW EXECUTE FUNCTION gbrain_stamp_version_attribution()",
