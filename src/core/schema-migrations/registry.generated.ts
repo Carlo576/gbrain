@@ -264,6 +264,7 @@ import { v260 } from './v260-segmented-page-size-index.ts';
 import { v261 } from './v261-persistence-request-transient-retries.ts';
 import { v262 } from './v262-commit-notifier.ts';
 import { v263 } from './v263-try-jsonb-function.ts';
+import { v264 } from './v264-set-based-fact-insert-guards.ts';
 import { v265 } from './v265-segment-derivations.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
@@ -527,5 +528,6 @@ export const MIGRATIONS: Migration[] = [
   v261,
   v262,
   v263,
+  v264,
   v265,
 ];

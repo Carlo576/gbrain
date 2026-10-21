@@ -33,7 +33,7 @@
 import { VERSION } from '../../version.ts';
 import type { BrainEngine } from '../engine.ts';
 import { resolveSlugForPath } from '../sync.ts';
-import { massReconcileAllowed, planReconcileDeletes } from '../sync-reconcile.ts';
+import { massReconcileAllowed, planReconcileDeletes, readSyncDeleteCaps, syncDeleteTrip } from '../sync-reconcile.ts';
 import { filterYielding, loopYield } from './sync-yield.ts';
 import { admitKeepDbReconcile, driftSkippedSlugs, freezeKeepDbReconcile, releaseMatchedDriftSkips } from '../repair/keep-db-policy.ts';
 
@@ -75,7 +75,7 @@ const LEVEL_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 /** What a pass applied across its rounds (kept in memory; its counts go into the pass row's telemetry). */
 export interface PassApplyState {
   markersRetired: number;
-  holds: { file_gone: number; tombstone_edited: number; purged_differs: number; settle_mismatch: number; origin_conflict: number; page_identity_changed: number };
+  holds: { file_gone: number; tombstone_edited: number; purged_differs: number; settle_mismatch: number; origin_conflict: number; page_identity_changed: number; uncommitted: number };
   settleMismatch: string[];
   adopted: number;
   swept: { screened: number; recorded: number };
@@ -101,7 +101,7 @@ export interface PassApplyState {
 }
 
 export function newPassApplyState(): PassApplyState {
-  return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0, origin_conflict: 0, page_identity_changed: 0 }, settleMismatch: [], adopted: 0,
+  return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0, origin_conflict: 0, page_identity_changed: 0, uncommitted: 0 }, settleMismatch: [], adopted: 0,
     swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], originHeld: new Set(), matchedSlugs: new Set(), classes: {}, summary: null, recorded: new Set() };
 }
 
@@ -242,7 +242,10 @@ async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: 
     const live = await filterYielding(level.paths, entry => (isCompactMatched(entry) || entry.state.page?.live === true) && !!entry.slug);
     return planReconcileDeletes(live.map(entry => ({ slug: entry.slug!, source_path: entry.path })), live.filter(entry => !deleting.has(entry.path)).map(entry => entry.path), () => true);
   })() : null;
-  const tripped = !!plan?.massDelete && (input.remote || !massReconcileAllowed());
+  // #7130: the absolute caps (sync.max_deletes, sync.max_delete_ratio) withhold too, below the 50% valve.
+  const caps = plan ? await readSyncDeleteCaps(engine, level.sourceId) : null;
+  const trip = plan && caps ? (plan.massDelete ? 'mass_ratio' as const : syncDeleteTrip(deletes.length, plan.reconcilableCount, caps)) : null;
+  const tripped = trip !== null && (input.remote || !massReconcileAllowed());
   state.withheldCount = tripped ? deletes.length : 0;
   if (tripped) {
     for (const entry of deletes) settleAs(entry, { settled: true, action: 'none', withheld: true });
@@ -251,7 +254,7 @@ async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: 
     await engine.transaction(async tx => {
       await assertDrainLease(tx, level.sourceId);
       state.withheld = await writeDeletesWithheld(tx, { sourceId: level.sourceId, incarnation: level.incarnation, target: level.head, count: deletes.length,
-        reconcilable: plan!.reconcilableCount, ratio: plan!.reconcilableCount ? deletes.length / plan!.reconcilableCount : 1, set_hash: deleteSetHash(paths), samples: paths });
+        reconcilable: plan!.reconcilableCount, ratio: plan!.reconcilableCount ? deletes.length / plan!.reconcilableCount : 1, set_hash: deleteSetHash(paths), samples: paths, trip: trip!, caps: caps! });
     });
     return;
   }
@@ -301,7 +304,11 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
       continue;
     }
     if (r.cls === 'delete_drift' && heldRenameOrigins.has(syncOriginPath(passEntryPaths(level, entry.path).sourcePath))) continue;
-    if (r.cls === 'delete_drift') {
+    if (r.cls === 'delete_drift' && r.uncommitted) {
+      const why = r.uncommitted === 'ignored' ? '.gitignore excludes it, so Git never kept it' : 'no commit in its history holds it (or Git could not show one)';
+      pending.push({ entry, code: 'file_drift', slug: entry.slug, kind: 'uncommitted', meta: { side: 'deleted', state: 'file_gone', reason: r.uncommitted, ...(entry.revision ? { page_revision: entry.revision } : {}) },
+        message: `${path}: the file is gone, but ${why}, so its absence is no evidence that page ${entry.slug} was deleted; sync held it and kept the page instead of deleting it (#7130); the rest of the source synced.` });
+    } else if (r.cls === 'delete_drift') {
       pending.push({ entry, code: 'file_drift', slug: entry.slug, kind: 'file_gone', meta: { side: 'deleted', state: 'file_gone', ...(entry.revision ? { page_revision: entry.revision } : {}) },
         message: `${path}: the file is gone, but page ${entry.slug} changed in the database since the file was last imported, so sync held the deletion instead of deleting the page; the rest of the source synced.` });
     } else if (r.cls === 'deleted_edited') {
@@ -532,7 +539,7 @@ export async function finishPassApply(engine: BrainEngine, sourceId: string, sta
 export function passApplyCounts(state: PassApplyState): Record<string, number> {
   const refused = Object.values(state.keepDb.refused).reduce((a, b) => a + b, 0);
   return { markers_retired: state.markersRetired, holds_file_gone: state.holds.file_gone, holds_tombstone_edited: state.holds.tombstone_edited,
-    holds_purged_differs: state.holds.purged_differs, holds_settle_mismatch: state.holds.settle_mismatch, holds_origin_conflict: state.holds.origin_conflict, holds_page_identity_changed: state.holds.page_identity_changed, adopted: state.adopted, legacy_swept: state.swept.screened,
+    holds_purged_differs: state.holds.purged_differs, holds_settle_mismatch: state.holds.settle_mismatch, holds_origin_conflict: state.holds.origin_conflict, holds_page_identity_changed: state.holds.page_identity_changed, holds_uncommitted: state.holds.uncommitted, adopted: state.adopted, legacy_swept: state.swept.screened,
     legacy_recorded: state.swept.recorded, deletes_withheld: state.withheldCount, keep_db_admitted: state.keepDb.admitted, keep_db_pending: state.keepDb.pending,
     paused_keep_db: state.keepDb.paused, keep_db_refused: refused };
 }

@@ -907,6 +907,10 @@
       },
       {
         "category": "brain",
+        "name": "uncommitted_sync_deletions"
+      },
+      {
+        "category": "brain",
         "name": "unindexed_files"
       },
       {

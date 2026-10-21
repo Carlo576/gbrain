@@ -1,12 +1,11 @@
 {
   "golden": {
-    "count": 259,
+    "count": 260,
     "gaps": [
       17,
       18,
       19,
-      100,
-      264
+      100
     ],
     "helpers": {
       "ALIAS_TABLES": "cddd37c636af42d862c08ca7754a57dfe9d12576b769fa8f74a5f02c803f67a0",
@@ -2909,8 +2908,8 @@
         "idempotent": true,
         "name": "f1_write_attribution",
         "sql": {
-          "length": 15269,
-          "sha256": "6ed235b09ce8b18a25cf065fa32321472485ad16b2af17f90e292d01881b3ead"
+          "length": 16337,
+          "sha256": "a39e3a157993c7308a6ff5ba71da3a29f723d9ff69a9c2029e9541ba9678f8ac"
         },
         "sqlFor": "absent",
         "transaction": "absent",
@@ -3228,8 +3227,8 @@
         "idempotent": true,
         "name": "facts_attributed_to",
         "sql": {
-          "length": 9118,
-          "sha256": "2e772deed199aba5dc05c6b9f88b70c57a6b50dc724d60b0e9eca684c66f63ba"
+          "length": 10186,
+          "sha256": "87e2f77b99e6081776216ea01fa59602f5253f257600935e150f7f8c4123d2c4"
         },
         "sqlFor": "absent",
         "transaction": "absent",
@@ -4191,6 +4190,19 @@
         "version": 263
       },
       {
+        "handler": "absent",
+        "idempotent": true,
+        "name": "set_based_fact_insert_guards",
+        "sql": {
+          "length": 8343,
+          "sha256": "d01ea4d8a212485932351ad8473d54ef7d0b65f4d5b59b1ba34e4b63bf20b4bb"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 264
+      },
+      {
         "handler": {
           "form": "arrow",
           "helpers": [],
@@ -4467,6 +4479,7 @@
       261,
       262,
       263,
+      264,
       265
     ]
   },

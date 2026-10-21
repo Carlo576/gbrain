@@ -2939,6 +2939,34 @@
         {
           "category": "brain",
           "details": {
+            "by_source": [
+              {
+                "checked": 0,
+                "other_writer": 0,
+                "source_id": "default",
+                "status": "known",
+                "sync_deleted": 0,
+                "tombstones": 0,
+                "truncated": false,
+                "unknown": 0
+              }
+            ],
+            "count": 0,
+            "docs": "docs/guides/repair.md#uncommitted-deletions",
+            "exact": true,
+            "other_writer_count": 0,
+            "purged": "Pages already purged cannot be restored by this command; only a backup (pg_dump, or gbrain backup create taken before the purge) can bring them back.",
+            "samples": [],
+            "truncated": false
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No soft-deleted page was removed by a sync while Git never held its file (0 tombstone(s) checked).",
+          "name": "uncommitted_sync_deletions",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "docs": "docs/guides/repair.md#unindexed-files",
             "sources": [
               {
@@ -3144,7 +3172,7 @@
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
-          "message": "No retrieval-affecting files changed in working tree.",
+          "message": "11 retrieval-affecting file(s) changed since HEAD: src/core/search/collapse.ts, src/core/search/hybrid.ts, src/core/search/hybrid/keyword-only.ts, …. Re-run `gbrain eval run-all` after committing these changes.",
           "name": "eval_drift",
           "status": "ok"
         },

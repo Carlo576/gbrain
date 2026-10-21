@@ -124,6 +124,7 @@ import { renameIdentityDowngradesEntry } from './checks/rename-identity-downgrad
 import { unindexedFilesEntry } from './checks/unindexed-files.ts';
 import { purgeParkedPagesEntry } from './checks/purge-parks.ts';
 import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
+import { uncommittedSyncDeletionsEntry } from './checks/uncommitted-sync-deletions.ts';
 import { overwrittenEditsEntry } from './checks/overwritten-edits.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
 import { managedSyncLatencyEntry } from './checks/managed-sync-latency.ts';
@@ -260,6 +261,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   renameIdentityDowngradesEntry,
   purgeParkedPagesEntry,
   missingRecordedFilesEntry,
+  uncommittedSyncDeletionsEntry,
   unindexedFilesEntry,
   overwrittenEditsEntry,
   syncConfigKeysEntry,

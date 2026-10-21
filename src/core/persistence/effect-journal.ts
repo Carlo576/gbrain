@@ -20,8 +20,8 @@ import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
 
 /**
  * `snapshot` is the publication's final read of the page, including deleted rows, in this transaction.
- * A remote put_page/capture/edit_page also queues a `links` effect, in one statement that inserts
- * nothing while `auto_link` or `mcp.remote_auto_links` is off (unset is on).
+ * A remote put_page/capture/edit_page also queues a `links` effect (an append_page to the compiled truth, one scoped
+ * to its appended bytes), in one statement that inserts nothing while `auto_link` or `mcp.remote_auto_links` is off (unset is on).
  */
 export async function queuePublicationEffects(tx: BrainEngine, row: EffectRequest & Partial<Pick<WriteRequest, 'operation' | 'intent' | 'authority' | 'principal_kind' | 'principal_id'>>, snapshot: PageSnapshot | null,
   outcome: Record<string, unknown>, prepared?: PreparedMutation,
@@ -55,11 +55,11 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
     }
     // The links effect is inserted with the others, gated in SQL on auto_link and mcp.remote_auto_links.
     // Wave B (spec 8.5): on a segmented page it carries the occurrences this write added (live rows with no older row).
-    if (queuesMentionLinks(row)) {
+    if (queuesMentionLinks(row, prepared)) {
       const added = await tx.executeRaw<{ id: string }>(`SELECT m.occurrence_id::text AS id FROM page_body_manifest m JOIN pages p ON p.id=m.page_id
         WHERE m.page_id=$1 AND p.body_storage='segmented' AND m.gen_from=p.body_generation AND m.gen_to IS NULL AND m.staging_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM page_body_manifest o WHERE o.page_id=m.page_id AND o.occurrence_id=m.occurrence_id AND o.gen_from<m.gen_from) ORDER BY m.seq`, [snapshot.page.id]);
-      queued.push({ kind: 'links', data: { ...data, ...(added.length ? { occurrence_ids: added.map(r => Number(r.id)) } : {}) }, gated: true });
+      queued.push({ kind: 'links', data: { ...data, ...(prepared?.mentionRange ? { range: prepared.mentionRange } : {}), ...(added.length ? { occurrence_ids: added.map(r => Number(r.id)) } : {}) }, gated: true });
     }
     // #5876: the Life Chronicle decision is a ledger row, not an effect; the `chronicle` cycle phase executes it.
     await recordChronicleDecision(tx, row, snapshot, outcome);
@@ -76,10 +76,13 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
   }
 }
 
-/** Whether a publication of this request queues a mention `links` effect: a remote page write without trusted auto-linking. */
-export function queuesMentionLinks(row: Partial<Pick<WriteRequest, 'operation' | 'authority'>>): boolean {
-  return !!row.authority && !!row.operation && REMOTE_MENTION_OPERATIONS.includes(row.operation)
-    && !(row.authority.autoLinkTrusted ?? !row.authority.remote);
+/**
+ * Whether a publication of this request queues a mention `links` effect: a remote page write without trusted
+ * auto-linking. #7122: an append_page queues one only when it appended to the compiled truth (`mentionRange`).
+ */
+export function queuesMentionLinks(row: Partial<Pick<WriteRequest, 'operation' | 'authority'>>, prepared?: Pick<PreparedMutation, 'mentionRange'>): boolean {
+  if (!row.authority || !row.operation || (row.authority.autoLinkTrusted ?? !row.authority.remote)) return false;
+  return REMOTE_MENTION_OPERATIONS.includes(row.operation) || (row.operation === 'append_page' && !!prepared?.mentionRange);
 }
 
 /**

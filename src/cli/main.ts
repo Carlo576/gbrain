@@ -76,7 +76,7 @@ import {
   type CliDispatchContext,
 } from './command-table.ts';
 import { formatRememberResult } from './remember-format.ts';
-import { applyCliOpNotices, captureCapacityNotices, captureOpNotice } from './op-notices.ts';
+import { applyCliOpNotices, captureCapacityNotices, captureOpNotice, captureRetrievalNotices } from './op-notices.ts';
 
 // db-availability loop: best-effort brain-id for the GBRAIN_DB_ACCESS marker,
 // so a MOUNT's DB failure reads as `brain=<id>` instead of masquerading as a
@@ -696,6 +696,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
       if (op.mutating) await captureCapacityNotices(engine); // #6696 (A4)
     }
     if (rawResult === SEGMENTED_STREAMED) return;
+    captureRetrievalNotices(op.name, rawResult, lastRetrievalMeta, params, ctx.config);
     // ENG-2 (renderer parity by data shape): JSON-round-trip the local-engine
     // path's return value so renderers see the same shape they'd see on the
     // routed path. Date → ISO string; bigint → string (postgres.js shape);
@@ -1037,7 +1038,7 @@ export function resolveQueryImage(
 
 export function parseOpArgs(op: Operation, args: string[]): Record<string, unknown> {
   // `gbrain search --explain`: the CLI-local formatter flag also asks the op for score attribution.
-  const params: Record<string, unknown> = op.name === 'search' && args.includes('--explain') ? { explain: true } : {};
+  const params: Record<string, unknown> = (op.name === 'search' || op.name === 'query') && (getCliOptions().explain || args.includes('--explain')) ? { explain: true } : {};
   const positional = op.cliHints?.positional || [];
   let posIdx = 0;
 

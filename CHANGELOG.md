@@ -10,6 +10,67 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.332.0] - 2026-10-21
+
+**`search` and `query` stop spending result slots on copies of one page, and `--explain` shows both retrieval arms again.** The same page in two sources, a merge stub beside its target, and the summary and transcript of one document each used to take their own slot in the top 10. They now fold into the best-ranked row, which lists what it absorbed in `collapsed`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The same slug in two sources with copied bodies | two rows | one row; the other copy is listed in `collapsed` (reason `twin`) |
+| A merge or redirect stub and its target | the stub could rank above the target | the target takes the slot; a stub whose target can't be returned stays, stamped `redirect_to` and ranked ×0.5 |
+| Summary, transcript and diarized copies of one document in one directory | one slot each | one row (reason `family`) |
+| An organization question that names no person | the founder's page could outrank the company | person pages ×0.85 |
+| An image page whose text covers half the query or less | ranked like a text page | ×0.6, stamped `image_page` |
+| An undated page on a "when" question | no penalty | ×0.85 |
+| `score` down the result list | could go up | follows rank; the previous value is `fused_score` |
+| A chunk row longer than 8,000 characters | returned whole | cut at 8,000 with a marker naming the read for the rest; `snippet_chars: 0` returns it whole |
+| `gbrain search/query --explain` on a hybrid brain | printed `arms: []` and `rrf: not_run` | shows both arms, with fusion and blend applied |
+| A keyword or vector arm that timed out, on the CLI | nothing said so | a `degraded_recall` notice on stderr, `--json` included |
+| The `query` tool description | implied expansion helps | says `expand` is one LLM call and rarely helps |
+
+Opt-outs: `search.collapse false` and `search.rank_priors false`. Nothing is rewritten on upgrade.
+
+## [0.60.331.0] - 2026-10-20
+
+**Writing many facts at once no longer costs one guard call per row, new pages over 4 MiB reply as soon as they commit, and a remote `append_page` links what it mentions.** The facts purge refusal and withdrawal stamp ran once per row, so a 6,000-row publish spent most of its publication deadline in triggers (#7105). A managed import of a large new page waited for its whole search index to build before replying, which on a loaded host outlasted the deadline (#7106). A remote append added text with links that never became graph edges (#7122).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A publish inserts thousands of facts | the purge refusal and the withdrawal stamp ran once per row | they run once per statement over the inserted rows; `INSERT … RETURNING` still sees the stamp (migration v264) |
+| A managed `gbrain import` or `gbrain sync`, or a `put_page`, of a new page over 4 MiB stored in segments | replied after its search index was built | replies at commit with `searchable: 'pending'`; the index builds in the background, one at a time. Edits still reply when sealed |
+| A remote `append_page` to a page body with `[[wikilinks]]`, markdown links or page paths | no links were added | plain `mentions` links (`mcp-remote-mention`) to existing pages the writer can see |
+| An owner `append_page` to a page with a purged claim | (undocumented) | still not an owner edit, so it doesn't release the claim's redaction (#7123) |
+| A lane sync reaches a page whose preparation ran past its budget | another lane could claim and prepare it again, overwriting its deadline | the worktree waits for the abandoned preparation to end, and so does a foreground write to it |
+
+Nothing changes on upgrade beyond migration v264, which replaces the per-row facts triggers with statement-level ones.
+
+### For contributors
+
+- `test/sync-pass-xid-arms-gbra108.test.ts` drew snapshot xmax values PostgreSQL never reports (`TransactionIdAdvance` skips low words 0–2), so it failed whenever a new migration moved `txid_current()` onto them. It now draws only reportable values.
+
+## [0.60.330.0] - 2026-10-20
+
+**Sync no longer deletes a page just because its file is missing when Git never had that file, and the autopilot purge no longer hard-deletes what a sync deleted without review.** A large managed source lost thousands of agent-written pages: their write-through files sat in a `.gitignore`d directory, so they were never committed; when they left the disk, sync read their absence as deletions (4% of the source, under the 50% valve), and the purge phase hard-deleted them 72 hours later (#7130, reported by @liuwenyong1985).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A live page's file is missing and Git never committed it (ignored, or never added) | managed sync soft-deleted the page | the page is held `file_drift` (side `deleted`, reason `never_committed` or `ignored`); a person decides with `gbrain repair file-drift --prefer file` |
+| A committed file is removed in a commit | the page is deleted | unchanged |
+| One sync run deletes many pages below the 50% valve | nothing stopped it | `sync.max_deletes` (500) and `sync.max_delete_ratio` (1%, above 50 deletes), per source too, withhold the deletes and ask the user; managed passes, classic `sync --full` and working-tree syncs |
+| Classic `sync --full` when `git log --all` fails (a dangling ref) | every stale page was deleted | every stale page is kept, with a warning |
+| The autopilot purge reaches a sync tombstone no live page duplicates | hard-deleted after 72 h | held (`sync_delete_unreviewed`); `gbrain pages purge-deleted` purges it after consent |
+| The purge window | fixed 72 h | `purge.retention_hours`, which can only lengthen it (default and minimum 72) |
+| A managed put_page or capture of a new page into an ignored directory, on a source without Git durability | wrote a file Git would never commit | the page is database-only |
+| Pages a sync already deleted this way | no way to find them | doctor `uncommitted_sync_deletions` and the preview-first `gbrain repair uncommitted-deletions --source <id>` restore them database-only |
+
+Pages the purge already hard-deleted come back only from a backup (`pg_dump`, or a `gbrain backup create` taken before the purge). Nothing changes on upgrade; the repair runs only when named.
+
 ## [0.60.329.0] - 2026-10-20
 
 **Five tests that failed once each on CI are fixed at their causes, and two of the causes were real bugs.** An unchanged transcript re-ingest on Postgres could admit a no-op page write (and spend a request id), and a sync that held its lock while a write admission rebuilt the database pool threw at the very end and left its lock row behind.

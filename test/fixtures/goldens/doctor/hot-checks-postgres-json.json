@@ -3355,6 +3355,54 @@
           {
             "category": "brain",
             "details": {
+              "by_source": [
+                {
+                  "checked": 0,
+                  "other_writer": 0,
+                  "source_id": "default",
+                  "status": "known",
+                  "sync_deleted": 0,
+                  "tombstones": 0,
+                  "truncated": false,
+                  "unknown": 0
+                },
+                {
+                  "checked": 0,
+                  "other_writer": 0,
+                  "source_id": "notes",
+                  "status": "known",
+                  "sync_deleted": 0,
+                  "tombstones": 0,
+                  "truncated": false,
+                  "unknown": 0
+                },
+                {
+                  "checked": 0,
+                  "other_writer": 0,
+                  "source_id": "plain",
+                  "status": "known",
+                  "sync_deleted": 0,
+                  "tombstones": 0,
+                  "truncated": false,
+                  "unknown": 0
+                }
+              ],
+              "count": 0,
+              "docs": "docs/guides/repair.md#uncommitted-deletions",
+              "exact": true,
+              "other_writer_count": 0,
+              "purged": "Pages already purged cannot be restored by this command; only a backup (pg_dump, or gbrain backup create taken before the purge) can bring them back.",
+              "samples": [],
+              "truncated": false
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No soft-deleted page was removed by a sync while Git never held its file (0 tombstone(s) checked).",
+            "name": "uncommitted_sync_deletions",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
               "docs": "docs/guides/repair.md#unindexed-files",
               "sources": [
                 {
@@ -7738,6 +7786,54 @@
             "name": "missing_recorded_files",
             "readiness_state": "not_applicable",
             "severity": "info",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "by_source": [
+                {
+                  "checked": 0,
+                  "other_writer": 0,
+                  "source_id": "default",
+                  "status": "known",
+                  "sync_deleted": 0,
+                  "tombstones": 0,
+                  "truncated": false,
+                  "unknown": 0
+                },
+                {
+                  "checked": 0,
+                  "other_writer": 0,
+                  "source_id": "notes",
+                  "status": "known",
+                  "sync_deleted": 0,
+                  "tombstones": 0,
+                  "truncated": false,
+                  "unknown": 0
+                },
+                {
+                  "checked": 0,
+                  "other_writer": 0,
+                  "source_id": "plain",
+                  "status": "known",
+                  "sync_deleted": 0,
+                  "tombstones": 0,
+                  "truncated": false,
+                  "unknown": 0
+                }
+              ],
+              "count": 0,
+              "docs": "docs/guides/repair.md#uncommitted-deletions",
+              "exact": true,
+              "other_writer_count": 0,
+              "purged": "Pages already purged cannot be restored by this command; only a backup (pg_dump, or gbrain backup create taken before the purge) can bring them back.",
+              "samples": [],
+              "truncated": false
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No soft-deleted page was removed by a sync while Git never held its file (0 tombstone(s) checked).",
+            "name": "uncommitted_sync_deletions",
             "status": "ok"
           },
           {

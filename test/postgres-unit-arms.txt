@@ -16,6 +16,7 @@ test/alias-source-cascade-5094.test.ts
 test/attribution-backfill-history.test.ts
 test/backstop-same-page-shadow-managed-6333.test.ts
 test/behavior-change-notice.test.ts
+test/belief-ledger-append-owner.test.ts
 test/belief-ledger-coverage.test.ts
 test/belief-ledger-group.test.ts
 test/belief-ledger-identity.test.ts
@@ -65,6 +66,7 @@ test/extract-timeline-from-meetings-managed.test.ts
 test/extraction-watermark-atoms.test.ts
 test/fact-fence-adoption-exits.test.ts
 test/fact-purge-lookup-timeout-6511.test.ts
+test/facts-insert-guards-7105.test.ts
 test/facts-publication-large-fence-6898.test.ts
 test/fence-repair-receipts.test.ts
 test/forecast-journal.test.ts
@@ -92,6 +94,7 @@ test/keyword-timeout-negative-cache-6495.test.ts
 test/lane-apply-pipelining.test.ts
 test/large-pages/append-concurrency.test.ts
 test/large-pages/append-cost.test.ts
+test/large-pages/append-mention-links.test.ts
 test/large-pages/chunk-retirement-plan.test.ts
 test/large-pages/chunk-visibility.test.ts
 test/large-pages/contextual-reembed-segmented.test.ts
@@ -104,6 +107,7 @@ test/large-pages/gbra117-segmented-classes-window.test.ts
 test/large-pages/held-budget-count-list.test.ts
 test/large-pages/held-budget-shrink.test.ts
 test/large-pages/managed-import-outside-root.test.ts
+test/large-pages/managed-import-projection-pending.test.ts
 test/large-pages/managed-links-timeline-heap.test.ts
 test/large-pages/managed-streamed-import.test.ts
 test/large-pages/managed-sync-segmented-rename.test.ts
@@ -362,6 +366,7 @@ test/purge-fact.test.ts
 test/purge-global-marker.test.ts
 test/purge-missing-cache-6911.test.ts
 test/purge-read-surfaces.test.ts
+test/purge-sync-tombstone-hold-7130.test.ts
 test/recall-page-fill.test.ts
 test/receipt-compaction-newest-sync-gbra130.test.ts
 test/remediation-manual-only.test.ts
@@ -396,6 +401,7 @@ test/sync-absent-from-worktree-s27.test.ts
 test/sync-admission-6712.test.ts
 test/sync-capacity-preflight.test.ts
 test/sync-checkpoint-moved-6834.test.ts
+test/sync-discovery-legacy-origin-7130.test.ts
 test/sync-drain-claims.test.ts
 test/sync-drain-effect-recovery-blocked.test.ts
 test/sync-drain-head-blocked-6543.test.ts
@@ -425,6 +431,7 @@ test/sync-slug-root-mode-6694.test.ts
 test/sync-staged-catchup.test.ts
 test/sync-status-failure-detail-6513.test.ts
 test/sync-unblock-repair-error-gbra130.test.ts
+test/sync-uncommitted-origin-7130.test.ts
 test/sync-unreadable-file-gbra130.test.ts
 test/sync-waiver-budget.test.ts
 test/sync-waiver-run-imports.test.ts
