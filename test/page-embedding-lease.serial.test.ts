@@ -4,7 +4,8 @@
  * 1. Protects: a path that finds a page's lease held gives up at its deadline (or after one TTL) with a busy lease
  *    instead of waiting forever; a holder whose lease was taken over during its provider call installs nothing;
  *    `embedStalePages` reads the page under the lease; a release deletes the expired `embed-page:` rows a dead
- *    holder left (doctor `stale_locks` clears); and a holder that throws releases its lease.
+ *    holder left (doctor `stale_locks` clears); a holder that throws releases its lease; and activation's legacy-lock
+ *    inspection and deactivation's lease blockers leave page embedding leases out, live or expired.
  * 2. Fails when: the wait loop has no bound, the install skips the lease renewal, the drain reads its snapshot before
  *    the lease, expired lease rows stay, or an error path skips the release. Each test holds the lease itself or
  *    steals it inside the provider call, so every contention is forced, never timed.
@@ -29,7 +30,9 @@ import { embedStaleForSource, embedStalePages } from '../src/core/embed-stale.ts
 import { runPersistenceEffects } from '../src/core/persistence/effects.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
 import { installPageProjection, readProjectionSnapshot } from '../src/core/page-state/projections.ts';
-import { listStaleLocks } from '../src/core/db-lock.ts';
+import { listStaleLocks, tryAcquireDbLock } from '../src/core/db-lock.ts';
+import { inspectLegacyWriterLocks } from '../src/core/persistence/legacy-locks.ts';
+import { deactivationBlockers } from '../src/core/persistence/deactivation.ts';
 import { checkStaleLocks } from '../src/commands/doctor/checks/routing-federation.ts';
 
 const CHUNKS = ['Alpha example chunk about the acme-example ledger.', 'Beta example chunk about the quarterly report.', 'Gamma example chunk about the roadmap.'];
@@ -67,7 +70,9 @@ for (const kind of testBackends()) {
       dims = (await resolveActiveEmbeddingColumnFromEngine(brain.engine)).dimensions;
       home = mkdtempSync(join(tmpdir(), 'gbrain-embed-lease-'));
     }, 600_000);
-    afterEach(() => {
+    afterEach(async () => {
+      // A stolen lease row carries a token no holder releases; it would outlive its test until the TTL.
+      await brain.engine.executeRaw("DELETE FROM gbrain_cycle_locks WHERE id LIKE 'embed-page:%'");
       sent.length = 0;
       pageEmbeddingLeaseProbe.contended = undefined;
       pageEmbeddingLeaseProbe.waitBoundMs = undefined;
@@ -166,6 +171,24 @@ for (const kind of testBackends()) {
       expect(stale).toContain(sync);
       await brain.engine.executeRaw('DELETE FROM gbrain_cycle_locks WHERE id=$1', [sync]);
       expect((await checkStaleLocks(brain.engine)).status).toBe('ok');
+    }, 30_000);
+
+    test('activation legacy locks and deactivation lease blockers leave page embedding leases out, live or expired; a writer lock still shows', async () => {
+      const { pageId } = await pending();
+      const expired = 'embed-page:987654322';
+      await brain.engine.executeRaw(`INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at, last_refreshed_at, acquisition_token)
+        VALUES ($1, 999999, 'host-a', now() - interval '2 hours', now() - interval '1 hour', now() - interval '1 hour', $2::uuid)`, [expired, randomUUID()]);
+      const writer = (await tryAcquireDbLock(brain.engine, `gbrain-sync:lease-test-${randomUUID()}`))!;
+      try {
+        await using _live = await acquirePageEmbeddingLease(brain.engine, pageId);
+        expect((await brain.engine.executeRaw<{ id: string }>("SELECT id FROM gbrain_cycle_locks WHERE id LIKE 'embed-page:%' ORDER BY id")).map(r => r.id))
+          .toEqual([pageEmbeddingLeaseId(pageId), expired].sort());
+        expect((await inspectLegacyWriterLocks(brain.engine)).map(l => l.id)).toEqual([writer.id]);
+        expect((await deactivationBlockers(brain.engine)).filter(b => b.kind === 'lease').map(b => b.id)).toEqual([writer.id]);
+      } finally {
+        await writer.release();
+        await brain.engine.executeRaw('DELETE FROM gbrain_cycle_locks WHERE id=$1', [expired]);
+      }
     }, 30_000);
 
     test('a holder that throws releases its lease: the drain, the effect and a bare holder', async () => {

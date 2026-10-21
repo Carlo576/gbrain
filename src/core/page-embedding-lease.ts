@@ -39,6 +39,14 @@ export const pageEmbeddingLeaseProbe: { contended?: (pageId: number) => void; wa
 /** Every page embedding lease id starts with this; the writer admin fingerprint leaves these rows out (admin-intent.ts). */
 export const PAGE_EMBEDDING_LEASE_PREFIX = 'embed-page:';
 
+/**
+ * SQL predicate on `gbrain_cycle_locks.id` that leaves page embedding leases out. Activation's legacy-lock inspection,
+ * deactivation's lease blockers and shared-skill activation's quiescence check use it: a lease only dedupes provider
+ * calls and guards vector installs, which ran unleased before it existed; its holders run inside a lock, job lease or
+ * effect claim those checks already see, and an expired row (a crashed holder's) must not block them.
+ */
+export const NOT_PAGE_EMBEDDING_LEASE = `id NOT LIKE '${PAGE_EMBEDDING_LEASE_PREFIX}%'`;
+
 export function pageEmbeddingLeaseId(pageId: number): string {
   return `${PAGE_EMBEDDING_LEASE_PREFIX}${pageId}`;
 }
@@ -107,7 +115,7 @@ export async function acquirePageEmbeddingLease(engine: BrainEngine, pageId: num
     [Symbol.asyncDispose]: async () => {
       clearInterval(refresh);
       await engine.executeRaw(`DELETE FROM gbrain_cycle_locks
-        WHERE (id = $1 AND acquisition_token = $2::uuid) OR (id LIKE 'embed-page:%' AND ttl_expires_at < now())`, [id, token])
+        WHERE (id = $1 AND acquisition_token = $2::uuid) OR (id LIKE '${PAGE_EMBEDDING_LEASE_PREFIX}%' AND ttl_expires_at < now())`, [id, token])
         .catch(() => { /* the TTL is the backstop */ });
     },
   };
