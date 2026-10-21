@@ -21,12 +21,13 @@ import { expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { reembedPageWithContextualRetrieval } from '../../src/core/contextual-retrieval-service.ts';
-import { SYNOPSIS_DOC_MAX_CHARS, segmentSynopsisWindows, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
+import { SYNOPSIS_DOC_MAX_CHARS, estimateSynopsisCallUsd, segmentSynopsisWindows, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
 import { embeddingInputHash } from '../../src/core/embedding-input-hash.ts';
 import { embeddingInputContext, embeddingWriteTarget } from '../../src/core/page-state/projections.ts';
 import { segmentSynopsisInputHashes, segmentSynopsisLead } from '../../src/core/page-body/segment-synopsis.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import { chunkGenerationFilter } from '../../src/core/search/safe-chunks.ts';
+import { __setEmbedTransportForTests } from '../../src/core/ai/gateway.ts';
 import { embedStalePages } from '../../src/core/embed-stale.ts';
 import { pageEmbeddingLeaseProbe } from '../../src/core/page-embedding-lease.ts';
 import { installSegmentedVectors, readSegmentedEmbedPage } from '../../src/core/page-body/segmented-embedding.ts';
@@ -60,11 +61,14 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
   const calls: GeneratePerChunkSynopsisArgs[] = [];
   let segmentReads = 0;
   let refuse: ((args: GeneratePerChunkSynopsisArgs) => boolean) | null = null;
+  let fail: ((args: GeneratePerChunkSynopsisArgs) => GeneratePerChunkSynopsisResult | null) | null = null;
   let onSynopsis: ((args: GeneratePerChunkSynopsisArgs) => Promise<void>) | null = null;
   const generateSynopsis = async (args: GeneratePerChunkSynopsisArgs): Promise<GeneratePerChunkSynopsisResult> => {
     calls.push(args);
     await onSynopsis?.(args);
     if (refuse?.(args)) return { kind: 'refusal', detail: 'fixture refusal' };
+    const failed = fail?.(args);
+    if (failed) return failed;
     return { kind: 'success', synopsis: `Synopsis of chunk ${args.chunkIndex}.` };
   };
   const counting = (engine: BrainEngine): BrainEngine => new Proxy(engine, {
@@ -382,6 +386,55 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     const groups = (check.details as { groups: Array<{ pipeline: string; kind: string }> }).groups;
     expect(groups.filter(g => g.pipeline === 'synopsis')).toEqual([]);
     expect(check.status).not.toBe('warn');
+  }, 300_000);
+
+  const ledger = async (pageId: number) => (await opts.getBrain().engine.executeRaw<{ spent: number | string; reserved: number | string }>(
+    'SELECT spent_usd AS spent, reserved_usd AS reserved FROM page_embedding_budget WHERE page_id = $1', [pageId])).map(r => ({ spent: Number(r.spent), reserved: Number(r.reserved) }))[0]!;
+  const callUsd = (calls: readonly GeneratePerChunkSynopsisArgs[]) => calls.reduce((n, c) => n + estimateSynopsisCallUsd(c.model!, c.documentText, c.chunkText, c.maxTokens), 0);
+
+  test('spend: a window whose synopsis fails books only the calls the provider may have billed (a rate-limited call is not), never its embedding', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-spend-synopsis-failure';
+    await brain.seed(slug, page(days(1_300_000).body + '\nSpend fixture one.\n'));
+    const { id } = await pageRow(slug);
+    let limited: GeneratePerChunkSynopsisArgs | null = null;
+    fail = args => { if (limited) return null; limited = args; return { kind: 'rate_limit', detail: 'fixture rate limit' }; };
+    reset();
+    try {
+      expect(await run(slug)).toMatchObject({ kind: 'transient_error', cause: 'rate_limit' });
+    } finally {
+      fail = null;
+    }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(brain.embedded.length).toBe(0);
+    const billed = calls.filter(c => c !== limited);
+    const { spent, reserved } = await ledger(id);
+    expect(reserved).toBeCloseTo(0, 12);
+    expect(spent).toBeCloseTo(callUsd(billed), 12);
+  }, 300_000);
+
+  test('spend: a window whose embedding fails books its synopsis calls and not the embedding', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const slug = 'notes/synopsis-spend-embed-failure';
+    await brain.seed(slug, page(days(1_300_000).body + '\nSpend fixture two.\n'));
+    const { id } = await pageRow(slug);
+    const dims = (await embeddingWriteTarget(brain.engine)).column.dimensions;
+    __setEmbedTransportForTests((async () => { throw new Error('fixture embedding outage'); }) as never);
+    reset();
+    try {
+      expect(await run(slug)).toMatchObject({ kind: 'transient_error' });
+    } finally {
+      __setEmbedTransportForTests((async ({ values }: { values: string[] }) => {
+        brain.embedded.push(...values);
+        return { embeddings: values.map(() => Array.from({ length: dims }, (_, j) => (j === 0 ? 1 : 0))), usage: { tokens: values.length } };
+      }) as never);
+    }
+    expect(calls.length).toBeGreaterThan(0);
+    const { spent, reserved } = await ledger(id);
+    expect(reserved).toBeCloseTo(0, 12);
+    expect(spent).toBeCloseTo(callUsd(calls), 12);
   }, 300_000);
 
   test('an inline page keeps the synopsisBodyHash input', async () => {
