@@ -16,6 +16,7 @@ import { carryChunkMetadata, probeEmbedder, resolveProvenanceStamp, stampIfPageP
 import type { StaleImageSweepResult } from '../core/embed-stale-images.ts';
 import { resolveMaxChunkTokens } from '../core/embedding-input-limit.ts';
 import { healOversizedPageChunks, healedChunksToStaleRows } from '../core/embed-oversize-heal.ts';
+import { acquirePageEmbeddingLease, stillPendingChunks } from '../core/page-embedding-lease.ts';
 import { healAndReportOverLength, isSingleInputOverLengthError, statusFromCause } from '../core/embed-overlength-heal.ts';
 import {
   createEmbedStallWatchdog,
@@ -2079,6 +2080,7 @@ async function embedAllStale(
         try {
           const segmented = await observed(pacer, () => readSegmentedEmbedPage(engine, { sourceId: keySourceId, slug }));
           if (segmented) { await embedSegmented(engine, segmented, result, { dryRun: false, signal: effectiveSignal, signature }); processedPageKeys.add(key); return; }
+          await using _lease = await acquirePageEmbeddingLease(engine, stale[0].page_id, { signal: effectiveSignal });
           // SUP-3874: split legacy oversized chunk_text BEFORE the embed call.
           // `--stale` reuses stored rows; without this, one pre-cap chunk
           // (e.g. a long pre-cap notes page on a 512-token model) fails
@@ -2117,8 +2119,7 @@ async function embedAllStale(
           }
           const selected = new Map(stale.map(c => [c.chunk_index, c]));
           const existing = prepared.chunks;
-          stale = existing.filter(c => selected.get(c.chunk_index)?.chunk_text === c.chunk_text)
-            .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
+          stale = stillPendingChunks(existing, selected);
           if (!stale.length) return;
           const pageRow = prepared.snapshot.page;
           const metered = await meterPageBatch(engine, pageRow, existing.filter(c => !c.embedded_at), { signature, announceHeld: true });

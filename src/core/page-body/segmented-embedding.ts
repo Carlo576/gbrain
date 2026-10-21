@@ -16,6 +16,7 @@ import { jsonRowBatches } from '../batch-rows.ts';
 import { wrapChunkTextsForStoredMode } from '../embedding-context.ts';
 import { embeddingInputHash, plainEmbeddingTier } from '../embedding-input-hash.ts';
 import { meterPageBatch, spendGrant } from '../page-embedding-budget.ts';
+import { acquirePageEmbeddingLease, vectorlessChunkIndexes } from '../page-embedding-lease.ts';
 import { embeddingInputContext, embeddingWriteTarget } from '../page-state/projections.ts';
 import { quoteIdentifier, vectorCastSuffix } from '../search/embedding-column.ts';
 import { chunkGenerationFilter, currentTextProjectionFilter } from '../search/safe-chunks.ts';
@@ -48,6 +49,8 @@ export interface SegmentedEmbedOpts {
   approvedCapUsd?: number;
   /** Runs inside the install transaction after the page guard (ownership, effect claim); throwing installs nothing. */
   beforeInstall?: (tx: BrainEngine) => Promise<void>;
+  /** Runs before each wait for the page's embedding lease (page-embedding-lease.ts); an effect renews its claim there. */
+  whileWaiting?: () => Promise<void>;
 }
 
 /** A segmented page that is live, sealed and in a live source, by id or by source and slug; null otherwise (inline pages included). */
@@ -106,20 +109,27 @@ export async function listSegmentedStaleRows(engine: Pick<BrainEngine, 'executeR
 }
 
 /**
- * Embed `rows` of one segmented page: meter them under the per-page budget,
- * call the provider once for the granted rows, and install each vector with
- * its recorded input on the row with the same chunk_index and text while that
- * row is in the live generation and the page's title, mode and write target
- * are unchanged. Returns the rows that took a vector; null when the budget
- * holds the page or the cap left nothing to embed.
+ * Embed `listed` rows of one segmented page under the page's embedding lease
+ * (page-embedding-lease.ts): keep the rows still without a vector once the
+ * lease is held (every row with `includeEmbedded`), meter them under the
+ * per-page budget, call the provider once for the granted rows, and install
+ * each vector with its recorded input on the row with the same chunk_index and
+ * text while that row is in the live generation and the page's title, mode and
+ * write target are unchanged. Returns how many rows were still pending and how
+ * many took a vector; null when the budget holds the page or the cap left
+ * nothing to embed.
  */
-export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmbedPage, rows: readonly SegmentedStaleRow[],
-  opts: SegmentedEmbedOpts): Promise<number | null> {
-  if (rows.length === 0) return 0;
+export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmbedPage, listed: readonly SegmentedStaleRow[],
+  opts: SegmentedEmbedOpts & { includeEmbedded?: boolean }): Promise<{ pending: number; installed: number } | null> {
+  if (listed.length === 0) return { pending: 0, installed: 0 };
+  await using _lease = await acquirePageEmbeddingLease(engine, page.id, { signal: opts.signal, whileWaiting: opts.whileWaiting });
+  const target = await embeddingWriteTarget(engine);
+  const missing = opts.includeEmbedded ? null : await vectorlessChunkIndexes(engine, page.id, target.column.name);
+  const rows = missing ? listed.filter(row => missing.has(row.chunk_index)) : listed;
+  if (rows.length === 0) return { pending: 0, installed: 0 };
   const metered = await meterPageBatch(engine, page, rows, { signature: opts.signature ?? null, approvedCapUsd: opts.approvedCapUsd });
   if (!metered) return null;
   const chunks = metered.chunks;
-  const target = await embeddingWriteTarget(engine);
   const vectors = await spendGrant(metered.grant, () => opts.embedFn(wrapChunkTextsForStoredMode(page, chunks), { abortSignal: opts.signal }));
   if (vectors.length !== chunks.length || vectors.some(v => !v?.length || !v.every(Number.isFinite))) {
     throw new Error('Embedding provider returned an incomplete or invalid batch');
@@ -150,7 +160,7 @@ export async function installSegmentedVectors(engine: BrainEngine, page: Segment
     const now = await embeddingWriteTarget(tx);
     if (!current || current.slug !== page.slug || current.title !== page.title
       || current.contextual_retrieval_mode !== page.contextual_retrieval_mode
-      || now.column.name !== target.column.name || now.provenanceModel !== target.provenanceModel) return 0;
+      || now.column.name !== target.column.name || now.provenanceModel !== target.provenanceModel) return { pending: rows.length, installed: 0 };
     let installed = 0;
     for (const batch of jsonRowBatches(updates, update => update)) {
       installed += (await tx.executeRaw(`UPDATE content_chunks cc SET ${col} = v.embedding${vectorCastSuffix(target.column)},
@@ -161,7 +171,7 @@ export async function installSegmentedVectors(engine: BrainEngine, page: Segment
           AND ${chunkGenerationFilter('p', 'cc')}
         RETURNING cc.id`, [page.id, batch, target.model])).length;
     }
-    return installed;
+    return { pending: rows.length, installed };
   });
 }
 
@@ -207,11 +217,11 @@ export async function embedSegmentedPage(engine: BrainEngine, page: SegmentedEmb
     const rows = await listSegmentedStaleRows(engine, page.id, column, { beforeChunkIndex: before, limit, occurrenceIds: opts.occurrenceIds, includeEmbedded: opts.all });
     if (rows.length === 0) return { embedded, complete: true };
     const approvedCapUsd = opts.approvedCapUsd === undefined || before === null ? opts.approvedCapUsd : 0;
-    const installed = await embedSegmentedRows(engine, page, rows, { ...opts, approvedCapUsd });
-    if (installed === null) return { embedded, complete: false, stopped: 'budget' };
-    embedded += installed;
-    if (installed === 0) return { embedded, complete: false, stopped: 'page_moved' };
-    if (installed < rows.length) return { embedded, complete: false, stopped: 'budget' };
+    const done = await embedSegmentedRows(engine, page, rows, { ...opts, approvedCapUsd, includeEmbedded: opts.all });
+    if (done === null) return { embedded, complete: false, stopped: 'budget' };
+    embedded += done.installed;
+    if (done.pending > 0 && done.installed === 0) return { embedded, complete: false, stopped: 'page_moved' };
+    if (done.installed < done.pending) return { embedded, complete: false, stopped: 'budget' };
     before = rows[rows.length - 1]!.chunk_index;
   }
 }

@@ -301,6 +301,14 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/google-calendar.ts')).googleCalendarReadableCheck(engine, scope.sourceIds),
   },
   {
+    id: 'google_api_access', resolution: 'operator', registration: 'wave',
+    hostOnly: 'Connector state, the account address and the Google Cloud project live on the brain host.',
+    count: d => Number(d.count ?? 0),
+    impact: 'A Google source could not reach a service because its API is disabled for the OAuth project or its scope was not granted, so that service imports nothing',
+    instruction: 'Enable each named API at the console link in the finding (or run `gbrain google connect --reauth <email>` for a missing scope), then confirm with `gbrain google status --json` and run `gbrain sync --source <source>` (docs/guides/google-connect.md#api-access).',
+    run: async (engine, scope) => (await import('./checks/google-api-access.ts')).googleApiAccessCheck(engine, scope.sourceIds),
+  },
+  {
     id: 'atom_provenance_drift', resolution: 'repair', registration: 'doctor.ts',
     hostOnly: 'Retiring stale atoms is a host-side, explicit-only repair.',
     count: d => Number(d.drifted ?? 0),

@@ -37,6 +37,7 @@ import { JUNK_SAMPLE_CHARS, assessJunkWindows, assessSampledJunk } from './conte
 import type { BodyStorage, ManifestRow } from './page-body/types.ts';
 import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { estimateCostFromChars } from './embedding-pricing.ts';
+import { reservationCostUsd } from './budget/reservation-cost.ts';
 import { PAGE_INLINE_MAX_BYTES, budgetRowAppliesFilter, isLargePageBytes } from './page-size-policy.ts';
 import { isEmbedSkipped } from './embed-skip.ts';
 import { parseUsdLimit, resolveSpendPosture } from './spend-posture.ts';
@@ -235,6 +236,18 @@ export async function reservePageSpend(engine: BrainEngine, page: BudgetPage, si
     };
     return { kind: 'grant', grant } as const;
   });
+}
+
+/** Rough characters per token and the system prompt overhead of one chat call, for a reservation estimate. */
+const CHARS_PER_TOKEN = 4;
+const PROMPT_OVERHEAD_TOKENS = 1500;
+/** Per-1M-token rates for a chat model without a price: the reservation still bounds the spend. */
+const UNPRICED_CHAT_RATE = { input: 15, output: 75 };
+
+/** What one chat call over `chars` of input may cost at most (the prompt estimate plus the full output ceiling): the estimate a paid derivation reserves. */
+export function estimateChatCallUsd(model: string, chars: number, maxOutputTokens: number): number {
+  const input = Math.ceil(chars / CHARS_PER_TOKEN) + PROMPT_OVERHEAD_TOKENS;
+  return reservationCostUsd(model, 'chat', input, maxOutputTokens) ?? (input * UNPRICED_CHAT_RATE.input + maxOutputTokens * UNPRICED_CHAT_RATE.output) / 1_000_000;
 }
 
 export interface PageBudgetReport { slug: string; source_id: string; state: Exclude<PageBudgetState, 'open'>; reason: string | null;

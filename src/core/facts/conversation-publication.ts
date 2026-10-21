@@ -80,6 +80,7 @@ import { recordReextractMemo } from './conversation-memo.ts';
 import { recordTaintEdges } from '../trust/taint.ts';
 import { applyGateDecision, derivedGateConfig, derivedGateInput } from '../trust/derived-gate.ts';
 import { decideFactWrite, recordFlaggedRow } from '../write-gate-store.ts';
+import type { SourceWindow } from '../page-body/derivations.ts';
 
 export const CONVERSATION_FACTS_INTENT = 'managed_maintenance_conversation_facts';
 export const CONVERSATION_FACTS_PROTOCOL = 1;
@@ -414,6 +415,41 @@ async function mergedEntities(tx: BrainEngine, sourceId: string, slugs: string[]
 type UnnumberedFact = Omit<ConversationFactRow, 'row_num' | 'source_markdown_slug'>;
 
 /**
+ * A segmented page's incremental publication (wave-b spec 8.2, PR 4): `windows[i]` anchors `rows[i]` (facts.source_window;
+ * null for an outcome row). Nothing is replaced wholesale: the page's extractor facts whose window key is not in `keep`
+ * (windows of retired or rewritten occurrences) are cleared, and so are its unanchored facts (older full-pass runs)
+ * when `retireUnanchored` (every live occurrence is settled); every other fact keeps its row and id.
+ */
+export interface ConversationSegmentsPublication {
+  windows: ReadonlyArray<SourceWindow | null>;
+  /** Facts re-anchored, not re-extracted: the same rendered window under the same context now lives in another occurrence. */
+  moves: ReadonlyArray<{ from: string; to: SourceWindow }>;
+  keep: readonly string[];
+  retireUnanchored: boolean;
+}
+
+const STAMP_BATCH_ROWS = 1000;
+const WINDOW_KEY_SQL = `(f.source_window->>'occurrence_id') || ':' || (f.source_window->>'window_ordinal') || ':' || (f.source_window->>'window_text_sha')`;
+
+/** Re-anchors the page's extractor facts of each `from` window key to its `to` window (ids unchanged), in bounded batches. */
+async function moveSourceWindows(tx: BrainEngine, sourceId: string, slug: string, moves: ConversationSegmentsPublication['moves']): Promise<void> {
+  for (let i = 0; i < moves.length; i += STAMP_BATCH_ROWS) {
+    await tx.executeRaw(`UPDATE facts f SET source_window = r.w FROM jsonb_to_recordset($3::text::jsonb) AS r(k text, w jsonb)
+      WHERE f.source_id = $1 AND f.source_markdown_slug = $2 AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%' AND ${WINDOW_KEY_SQL} = r.k`,
+    [sourceId, slug, JSON.stringify(moves.slice(i, i + STAMP_BATCH_ROWS).map(m => ({ k: m.from, w: m.to })))]);
+  }
+}
+
+/** Anchors freshly inserted facts to their windows, in bounded batches; one JSON bind per batch, so JSONB stays an object. */
+async function stampSourceWindows(tx: BrainEngine, ids: readonly number[], windows: ReadonlyArray<SourceWindow | null>): Promise<void> {
+  const pairs = ids.flatMap((id, i) => windows[i] ? [{ id, w: windows[i] }] : []);
+  for (let i = 0; i < pairs.length; i += STAMP_BATCH_ROWS) {
+    await tx.executeRaw(`UPDATE facts f SET source_window = r.w FROM jsonb_to_recordset($1::text::jsonb) AS r(id bigint, w jsonb) WHERE f.id = r.id`,
+      [JSON.stringify(pairs.slice(i, i + STAMP_BATCH_ROWS))]);
+  }
+}
+
+/**
  * One page's extractor rows published under its lock, shared by the managed
  * apply and the unmanaged writer. Fact rows pass the write gate at the page's
  * derived tier (#5575 I2/B3); outcome rows are not gated. #7013: only a
@@ -425,23 +461,27 @@ type UnnumberedFact = Omit<ConversationFactRow, 'row_num' | 'source_markdown_slu
  * the prior ones, and a partial run's facts are not published over them.
  */
 export async function publishConversationFacts(tx: BrainEngine, sourceId: string, slug: string, rows: UnnumberedFact[],
-  opts: { scope: ConversationScope; requestId?: string }): Promise<{ deleted: number; facts_inserted: number }> {
+  opts: { scope: ConversationScope; requestId?: string; segments?: ConversationSegmentsPublication }): Promise<{ deleted: number; facts_inserted: number }> {
   const derivation = await conversationDerivation(tx, sourceId, slug);
   const cfg = await derivedGateConfig(tx);
-  const gated = rows.map(row => ({ row, decision: OUTCOME_SOURCES.has(row.source) ? null : decideFactWrite(row,
+  const gated = rows.map((row, index) => ({ row, index, decision: OUTCOME_SOURCES.has(row.source) ? null : decideFactWrite(row,
     { sourceId, slug, payload: { ...row, embedding: null }, input: derivedGateInput(derivation.trust, opts.requestId), cfg }) }));
   for (const { decision } of gated) if (decision && decision.action !== 'insert') await applyGateDecision(tx, decision, { table: 'facts', sourceId }, async () => null);
   const kept = gated.filter(({ decision }) => decision?.action !== 'hold' && decision?.action !== 'reject');
   const [active] = await tx.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM facts f WHERE f.source_id=$1 AND f.source_markdown_slug=$2
     AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%' AND f.expired_at IS NULL AND NOT (f.source = ANY($3::text[]))`, [sourceId, slug, [...AUDIT_ROW_SOURCES]]);
-  const retire = !Number(active?.n ?? 0) || (opts.scope === 'full' && kept.length === rows.length && kept.some(({ row }) => !OUTCOME_SOURCES.has(row.source)));
-  const published = retire || opts.scope === 'window' ? kept : kept.filter(({ row }) => OUTCOME_SOURCES.has(row.source));
+  const segments = opts.segments;
+  const retire = !segments && (!Number(active?.n ?? 0) || (opts.scope === 'full' && kept.length === rows.length && kept.some(({ row }) => !OUTCOME_SOURCES.has(row.source))));
+  const published = retire || opts.scope === 'window' || segments ? kept : kept.filter(({ row }) => OUTCOME_SOURCES.has(row.source));
   const { deleted, ids } = await withWriteTrust(tx, derivation.trust, async () => {
     if (retire) return replaceConversationFacts(tx, sourceId, slug, published.map(({ row }) => row));
+    if (segments) await moveSourceWindows(tx, sourceId, slug, segments.moves);
+    const retiredWindows = segments ? await clearConversationFacts(tx, sourceId, slug, segments) : 0;
     const outcomes = published.some(({ row }) => OUTCOME_SOURCES.has(row.source)) ? await tx.executeRaw<{ id: number }>(`DELETE FROM facts
       WHERE source_id=$1 AND source_markdown_slug=$2 AND source = ANY($3::text[]) RETURNING id`, [sourceId, slug, [...AUDIT_ROW_SOURCES]]) : [];
-    return { deleted: outcomes.length, ...await insertConversationFacts(tx, sourceId, slug, published.map(({ row }) => row)) };
+    return { deleted: retiredWindows + outcomes.length, ...await insertConversationFacts(tx, sourceId, slug, published.map(({ row }) => row)) };
   });
+  if (segments) await stampSourceWindows(tx, ids, published.map(({ index }) => segments.windows[index] ?? null));
   for (const [i, id] of ids.entries()) {
     await recordTaintEdges(tx, { table: 'facts', id, sourceId }, derivation.inputs);
     const decision = published[i]?.decision;
@@ -498,17 +538,20 @@ export async function countConversationFacts(db: BrainEngine, sourceId: string, 
   return Number(row?.count ?? 0);
 }
 
-export async function clearConversationFacts(db: BrainEngine, sourceId: string, slug: string): Promise<number> {
-  const page = `f.source_id=$1 AND f.source_markdown_slug=$2 AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%'`;
+export async function clearConversationFacts(db: BrainEngine, sourceId: string, slug: string,
+  windows?: Pick<ConversationSegmentsPublication, 'keep' | 'retireUnanchored'>): Promise<number> {
+  const page = `f.source_id=$1 AND f.source_markdown_slug=$2 AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%'` + (windows
+    ? ` AND NOT (f.source = ANY($3::text[])) AND (CASE WHEN f.source_window IS NULL THEN $4::boolean ELSE NOT (${WINDOW_KEY_SQL} = ANY($5::text[])) END)` : '');
+  const params = windows ? [sourceId, slug, [...AUDIT_ROW_SOURCES], windows.retireUnanchored, [...windows.keep]] : [sourceId, slug];
   const referenced = 'EXISTS (SELECT 1 FROM open_loops o WHERE o.fact_id=f.id) OR EXISTS (SELECT 1 FROM facts g WHERE g.superseded_by=f.id)';
-  await db.executeRaw(`DELETE FROM facts f WHERE ${page} AND f.expired_at IS NOT NULL AND ${RELINKED_DERIVED_ROW} AND NOT (${referenced})`, [sourceId, slug]);
+  await db.executeRaw(`DELETE FROM facts f WHERE ${page} AND f.expired_at IS NOT NULL AND ${RELINKED_DERIVED_ROW} AND NOT (${referenced})`, params);
   const [relinked] = await db.executeRaw<{ count: string }>(`WITH up AS (UPDATE facts f SET expired_at=now()
-    WHERE ${page} AND f.expired_at IS NULL AND ${RELINKED_DERIVED_ROW} RETURNING 1) SELECT COUNT(*)::text AS count FROM up`, [sourceId, slug]);
+    WHERE ${page} AND f.expired_at IS NULL AND ${RELINKED_DERIVED_ROW} RETURNING 1) SELECT COUNT(*)::text AS count FROM up`, params);
   const [expired] = await db.executeRaw<{ count: string }>(`WITH up AS (UPDATE facts f SET expired_at=now()
-    WHERE ${page} AND f.expired_at IS NULL AND (${referenced}) RETURNING 1) SELECT COUNT(*)::text AS count FROM up`, [sourceId, slug]);
+    WHERE ${page} AND f.expired_at IS NULL AND (${referenced}) RETURNING 1) SELECT COUNT(*)::text AS count FROM up`, params);
   const [deleted] = await db.executeRaw<{ count: string }>(`WITH del AS (DELETE FROM facts f
     WHERE ${page} AND NOT (${referenced}) AND COALESCE(f.context,'') NOT LIKE '%${LABEL_RETIRED_MARKER}%' AND NOT (${RELINKED_DERIVED_ROW}) RETURNING 1)
-    SELECT COUNT(*)::text AS count FROM del`, [sourceId, slug]);
+    SELECT COUNT(*)::text AS count FROM del`, params);
   return Number(relinked?.count ?? 0) + Number(expired?.count ?? 0) + Number(deleted?.count ?? 0);
 }
 
