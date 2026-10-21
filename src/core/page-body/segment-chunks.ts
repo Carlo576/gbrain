@@ -21,6 +21,7 @@
  * Inline pages keep prepareMarkdownChunks; this is a separate chunker identity.
  */
 import { chunkProjectedText, chunkText } from '../chunkers/recursive.ts';
+import { chunkTimelineBullets } from '../chunkers/bullet-chunks.ts';
 import { estimateEmbedTokens } from '../chunkers/token-estimate.ts';
 import { resolveMaxChunkTokens } from '../embedding-input-limit.ts';
 import { fencedCodeChunks, newFenceChunkBudget, type FenceChunkBudget } from '../markdown-chunks.ts';
@@ -37,7 +38,9 @@ import { projectSegment } from './segment-projection.ts';
  * stays at or above SAFE_FENCE_CHUNKER_VERSION, but it is its own identity: inline pages keep MARKDOWN_CHUNKER_VERSION.
  *
  * 5: the hard cap's forced cuts land on a sentence or line end (chunkProjectedText `boundaryCuts`), so a sentence the
- * cap used to split now sits whole in one chunk. Pages sealed at 4 keep serving their chunks until
+ * cap used to split now sits whole in one chunk; and a timeline segment with bullet lines breaks only at bullet starts
+ * chosen by the bullet itself (chunkers/bullet-chunks.ts), so an entry added at the top changes only the passage it joins.
+ * Pages sealed at 4 keep serving their chunks until
  * `gbrain reindex --segmented --apply` re-chunks them (page-body/rechunk.ts). A change to the cuts or the stored
  * per-segment metadata bumps SEGMENTER_VERSION instead.
  */
@@ -90,7 +93,9 @@ export async function prepareSegmentChunks(segment: ChunkableSegment, opts: Segm
   const wholeSegment = { raw_byte_start: 0, raw_byte_end: segment.bytes.length };
 
   if (projection.trim()) {
-    for (const c of chunkProjectedText(projection, { maxTokens, spans: true, headingsLead: true, boundaryCuts: true })) {
+    const prose = (segment.region === 'timeline' ? chunkTimelineBullets(projection, { maxTokens }) : null)
+      ?? chunkProjectedText(projection, { maxTokens, spans: true, headingsLead: true, boundaryCuts: true });
+    for (const c of prose) {
       if (c.byte_start === undefined || c.byte_end === undefined) {
         push({ chunk_text: c.text, chunk_source: source, ...wholeSegment });
         continue;
