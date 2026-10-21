@@ -345,17 +345,54 @@ export async function deleteRewrittenDerivations(engine: BrainEngine, pageId: nu
 }
 
 /**
- * Delete every derivation row of a source's pages (live, soft-deleted or demoted; any occurrence, any kind) whose
- * output or receipt holds one of `needles`, matched as the purge receipt probes the store: case-insensitive, raw and
- * JSON-escaped. A fact purge runs it in its transaction after the body rewrites, so a row a rewrite could not place
- * (an occurrence retired before it, a page demoted to inline) goes too. Returns the rows deleted.
+ * SQL predicate: derivation row `d` holds one of the claims in the text[] parameter `needles`. Both sides go through
+ * gbrain_fact_normalize, the fact fingerprint's normalization (lowercase, punctuation folded, whitespace collapsed), in
+ * the database, so a row matches whatever case, spacing or locale lowercasing the claim was written in. The claim must
+ * fill whole words of one string value or object key of the row's output or receipt (link excerpts carry it inside a
+ * longer window, so equality would miss them): "plays oboe" never matches "plays oboes", nor a claim straddling two fields.
  */
-export async function sweepDerivationText(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, needles: readonly string[]): Promise<number> {
-  const list = [...new Set(needles.filter(Boolean).flatMap(n => [n.toLowerCase(), JSON.stringify(n).slice(1, -1).toLowerCase()]))];
+export function derivationHoldsClaimSql(d: string, needles: string): string {
+  return `EXISTS (SELECT 1 FROM (VALUES (${d}.output), (${d}.receipt)) doc(j),
+    LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
+      UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s,
+    (SELECT DISTINCT ' ' || gbrain_fact_normalize(n) || ' ' AS n FROM unnest(${needles}::text[]) n) k
+    WHERE k.n <> '  ' AND strpos(' ' || gbrain_fact_normalize(s.t) || ' ', k.n) > 0)`;
+}
+
+/**
+ * SQL predicate: derivation row `d` of page `p` is one a fact purge sweeps: a row of a page the purge rewrote (the
+ * int[] parameter `pageIds`), or a row no live segment backs (its occurrence retired, its page demoted to inline or
+ * soft-deleted). Any other row was derived from a live segment of a page the purge left alone, so it holds only what
+ * that page's prose still says, and the next derivation would write it back.
+ */
+export function derivationSweepScopeSql(d: string, p: string, pageIds: string): string {
+  return `(${d}.page_id = ANY(${pageIds}::int[]) OR ${p}.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
+    WHERE m.page_id = ${d}.page_id AND m.occurrence_id = ${d}.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = ${d}.segment_sha256))`;
+}
+
+/** @internal Per page, for the work-volume tests (counts, not time): derivation rows each sweep read and deleted. */
+export const derivationSweepWork: Array<{ pageId: number; scanned: number; deleted: number }> = [];
+
+/**
+ * Delete the derivation rows of a source that hold one of `claims` (derivationHoldsClaimSql) among the rows a fact purge
+ * sweeps (derivationSweepScopeSql over `pageIds`, the pages it rewrote), in the purge's transaction after the body
+ * rewrites, so a row a rewrite could not place goes too. Only rows in scope are normalized and matched; the purge
+ * receipt probes the store with the same two predicates. Returns the rows deleted.
+ */
+export async function sweepDerivationText(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, pageIds: readonly number[],
+  claims: readonly string[]): Promise<number> {
+  const list = [...new Set(claims.filter(Boolean))];
   if (!list.length) return 0;
-  return (await engine.executeRaw(`DELETE FROM page_segment_derivations d USING pages p WHERE p.id=d.page_id AND p.source_id=$1
-    AND EXISTS (SELECT 1 FROM unnest($2::text[]) n WHERE strpos(lower(COALESCE(d.output::text,'')),n)>0 OR strpos(lower(COALESCE(d.receipt::text,'')),n)>0)
-    RETURNING 1`, [sourceId, list])).length;
+  const rows = await engine.executeRaw<{ page_id: number; scanned: number; deleted: number }>(`WITH scope AS MATERIALIZED (
+      SELECT d.page_id, d.pipeline, d.occurrence_id, ${derivationHoldsClaimSql('d', '$3')} AS hit
+      FROM page_segment_derivations d JOIN pages p ON p.id = d.page_id WHERE p.source_id = $1 AND ${derivationSweepScopeSql('d', 'p', '$2')}
+    ), gone AS (
+      DELETE FROM page_segment_derivations x USING scope s WHERE s.hit AND x.page_id = s.page_id AND x.pipeline = s.pipeline
+        AND x.occurrence_id = s.occurrence_id RETURNING x.page_id
+    ) SELECT s.page_id, count(*)::int AS scanned, (SELECT count(*)::int FROM gone g WHERE g.page_id = s.page_id) AS deleted
+    FROM scope s GROUP BY s.page_id ORDER BY s.page_id`, [sourceId, [...pageIds], list]);
+  for (const row of rows) derivationSweepWork.push({ pageId: Number(row.page_id), scanned: Number(row.scanned), deleted: Number(row.deleted) });
+  return rows.reduce((n, row) => n + Number(row.deleted), 0);
 }
 
 /** SHA-256 hex (its first 32 digits) of a key, recorded in an output instead of the key's text. */

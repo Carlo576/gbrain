@@ -523,8 +523,8 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
       const facts = (await tx.executeRaw('DELETE FROM facts WHERE id=ANY($1::bigint[]) AND source_id=$2 RETURNING id', [ids, p.sourceId])).length;
       const bodies = await rewritePageBodies(tx, p.sourceId, plan.pages);
       ({ rewritten, unsealed } = bodies);
-      const derivationRows = bodies.derivations + await sweepDerivationText(tx, p.sourceId, [current.fact, escapeFenceCell(current.fact)]);
       const pageIds = plan.pages.map(page => page.page_id);
+      const derivationRows = bodies.derivations + await sweepDerivationText(tx, p.sourceId, pageIds, [current.fact, escapeFenceCell(current.fact)]);
       // A segmented page's flip already retired only the chunks of the occurrences it rewrote.
       const inline = pageIds.filter(id => !bodies.segmented.includes(id));
       const chunks = inline.length ? (await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=ANY($1::integer[]) RETURNING 1', [inline])).length : 0;
