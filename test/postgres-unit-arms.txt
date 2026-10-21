@@ -456,7 +456,7 @@ test/vector-manifest-probe-bound.test.ts
 test/withdrawal-overlay-concurrency.test.ts
 test/withdrawal-publication-file.test.ts
 test/worktree-refresh-recovery-row-gbra130.test.ts
-test/writer-admin-state-embed-lease.test.ts
 test/write-through-leak-guard-alias-7203.test.ts
+test/writer-admin-state-embed-lease.test.ts
 test/writer-status-movement-not-read-gbra130.test.ts
 test/writer-status-owner-backends.test.ts
