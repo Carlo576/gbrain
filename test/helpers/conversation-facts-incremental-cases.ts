@@ -432,6 +432,6 @@ export function defineSegmentReceiptDoctorCases(opts: { getBrain: () => AppendBr
     const groups = (check.details as { groups: Array<{ pipeline: string; kind: string; samples: string[] }> }).groups;
     expect({ status: check.status, argv: (check as { fix?: { argv: string[] } }).fix?.argv,
       listed: groups.some(g => g.pipeline === 'extract_atoms' && g.kind === 'unread_windows' && g.samples.includes(`default:${s}`)) })
-      .toEqual({ status: 'warn', argv: ['gbrain', 'config', 'set', PAGE_DERIVATION_CAP_KEY, '<usd>'], listed: true });
+      .toEqual({ status: 'warn', argv: ['gbrain', 'config', 'set', PAGE_DERIVATION_CAP_KEY, '<USD>'], listed: true });
   }, 600_000);
 }

@@ -1036,14 +1036,14 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1296 column(s) verified against live schema",
+          "message": "1329 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "All 152 table(s) the applied migrations create exist.",
+          "message": "All 156 table(s) the applied migrations create exist.",
           "name": "schema_missing_tables",
           "status": "ok"
         },
@@ -3139,6 +3139,16 @@
           "elapsed_ms": "<volatile>",
           "message": "Every page extraction read all of its input (no head-only, tail-window or size-skip receipts).",
           "name": "extraction_input_truncated",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "models": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No segmented page derivation is held back by a model without a price.",
+          "name": "derivation_unpriced_model",
           "status": "ok"
         },
         {

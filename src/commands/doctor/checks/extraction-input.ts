@@ -82,9 +82,9 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
           'A higher cap lets the next extract_atoms cycle read more of each cut page; it raises model spend, so the value is the user\'s call.', 'extraction_input_truncated',
           { ask_user: true, consent: ['paid'], inputs: [{ name: 'n', how: 'a character count above the cut pages\' sizes, chosen with the user' }] }) }
         : capped
-          ? { fix: agentFix(['gbrain', 'config', 'set', PAGE_DERIVATION_CAP_KEY, '<usd>'],
+          ? { fix: agentFix(['gbrain', 'config', 'set', PAGE_DERIVATION_CAP_KEY, '<USD>'],
             'A higher per-page cap lets the next run read the windows the cap stopped; it raises model spend, so the value is the user\'s call.', 'extraction_input_truncated',
-            { ask_user: true, consent: ['paid'], inputs: [{ name: 'usd', how: 'a per-page dollar cap chosen with the user' }] }) }
+            { ask_user: true, consent: ['paid'], inputs: [{ name: 'USD', how: 'a per-page dollar cap chosen with the user' }] }) }
           : { fix_unavailable_reason: 'operator_judgement' as const }) });
   } catch (error) {
     checks.push(checkError('extraction_input_truncated', 'read the extraction receipts', error, { details: { health: 'unknown' } }));
