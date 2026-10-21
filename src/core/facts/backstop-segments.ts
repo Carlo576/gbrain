@@ -67,7 +67,7 @@ export interface SegmentedBackstopRun<R extends { inserted: number; skipped_reas
  * or a window is skipped. Returns each window's pipeline result, in call order, and why the run stopped (null: done).
  */
 export async function runSegmentedBackstop<R extends { inserted: number; skipped_reason?: unknown }>(run: SegmentedBackstopRun<R>):
-  Promise<{ results: R[]; stop: 'cap_reached' | 'skipped' | null }> {
+  Promise<{ results: R[]; stop: 'cap_reached' | 'purge_sweep_pending' | 'skipped' | null }> {
   // PR 4 (Wave B incremental derivation, transcripts)
   const { engine, page } = run;
   const { body, occurrences } = await readConversationOccurrences(engine, page.id);
@@ -85,7 +85,7 @@ export async function runSegmentedBackstop<R extends { inserted: number; skipped
   const pricingOverrides = plan.todo.length ? await loadPricingOverrides(engine) : undefined;
   const results: R[] = [];
   const touched: Array<{ segment: (typeof plan.todo)[number]; windows: string[]; done: Map<number, WindowRecord> }> = [];
-  let stop: 'cap_reached' | 'skipped' | 'interrupted' | null = null;
+  let stop: 'cap_reached' | 'purge_sweep_pending' | 'skipped' | 'interrupted' | null = null;
   let unpricedModel: string | null = null;
   const rowsOf = (): SegmentDerivationInput[] => touched.map(({ segment, windows, done }) => {
     const kept = windows.flatMap((text, ordinal) => done.get(ordinal)?.sha === sha(text) ? [done.get(ordinal)!] : []);
@@ -113,7 +113,7 @@ export async function runSegmentedBackstop<R extends { inserted: number; skipped
         const metered = await meterPaidCall(engine, page, `facts:${run.model}`, estimateFactsExtractionUsd(run.model, text.length, maxTokens, pricingOverrides),
           () => run.extract(text), { pricingOverrides });
         unpricedModel = metered.unpricedModel ?? unpricedModel;
-        if ('refused' in metered) { stop = 'cap_reached'; break; }
+        if ('refused' in metered) { stop = metered.refused.reason === 'purge_sweep_pending' ? 'purge_sweep_pending' : 'cap_reached'; break; }
         const result = metered.value;
         results.push(result);
         if (result.skipped_reason) { stop = 'skipped'; break; }

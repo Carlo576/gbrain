@@ -36,6 +36,7 @@ import type { BrainEngine } from './engine.ts';
 import { JUNK_SAMPLE_CHARS, assessJunkWindows, assessSampledJunk } from './content-sanity.ts';
 import type { BodyStorage, ManifestRow } from './page-body/types.ts';
 import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
+import { derivationSweepCoversPage } from './page-body/segment-derive.ts';
 import { estimateCostFromChars } from './embedding-pricing.ts';
 import { reservationCostUsd, usageCostUsd } from './budget/reservation-cost.ts';
 import { BudgetTracker, type PricingOverrides } from './budget/budget-tracker.ts';
@@ -296,10 +297,14 @@ class MeteredStepTracker extends BudgetTracker {
  * model books the reservation; a step with no billed attempt books nothing. The attempts are reserved and recorded on
  * the caller's tracker too, so the caller's cap bounds them. `unpricedModel` names the model when the step was refused
  * under an unpriced model's ceiling estimate or booked its reservation because the model has no price: the caller's
- * receipt then says `unpriced_model` (unpricedModelReceipt) and doctor derivation_unpriced_model names the fix.
+ * receipt then says `unpriced_model` (unpricedModelReceipt) and doctor derivation_unpriced_model names the fix. While a fact
+ * purge's derivation sweep covers the page (segment-derive.ts derivationSweepCoversPage) the step is refused with
+ * `purge_sweep_pending` before anything is reserved or called.
  */
 export async function meterPaidCall<T>(engine: BrainEngine, page: BudgetPage, signature: PageSpendSignature, estimateUsd: number,
   call: () => Promise<T>, opts: { pricingOverrides?: PricingOverrides } = {}): Promise<({ refused: Extract<PageSpendDecision, { kind: 'refused' }> } | { value: T }) & { unpricedModel?: string }> {
+  // A purge sweep covering the page would drop the step's checkpoint, so the step is not paid for until the sweep ends.
+  if (await derivationSweepCoversPage(engine, page.id)) return { refused: { kind: 'refused', reason: 'purge_sweep_pending', capUsd: 0, spentUsd: 0, reservedUsd: 0, estimateUsd } };
   const decision = await reservePageSpend(engine, page, signature, estimateUsd);
   // PR 4 (Wave B incremental derivation, transcripts): an unpriced model reserves the ceiling estimate, so a refusal under it is the missing price's.
   const model = signature.slice(signature.indexOf(':') + 1);

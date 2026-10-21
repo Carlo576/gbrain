@@ -580,7 +580,7 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
       });
       unpricedModel = metered.unpricedModel ?? unpricedModel;
       if ('refused' in metered) {
-        await derivation(segment, 'partial', anchors, { reason: unpricedModel ? 'unpriced_model' : 'budget_limited', ...(unpricedModel ? { model: unpricedModel } : {}),
+        await derivation(segment, 'partial', anchors, { reason: unpricedModel ? 'unpriced_model' : metered.refused.reason === 'purge_sweep_pending' ? 'purge_sweep_pending' : 'budget_limited', ...(unpricedModel ? { model: unpricedModel } : {}),
           cap_usd: metered.refused.capUsd, estimate_usd: metered.refused.estimateUsd });
         return { kind: 'skipped', reason: 'budget_limited' };
       }

@@ -100,7 +100,7 @@ interface RowOutput { windows: WindowRecord[]; starts_group?: boolean; prev?: nu
 /** One window of the stream: `reused` (an earlier run's facts stand), `todo`, `extracted` by this run, or `failed` past the limit. */
 interface StreamWindow { owner: number; seg: ConversationSegment; text: string | null; window: SourceWindow;
   state: 'reused' | 'todo' | 'extracted' | 'failed'; facts: number; failed?: WindowFailure }
-type Stop = 'segment_limit' | 'cap_reached' | 'interrupted' | null;
+type Stop = 'segment_limit' | 'cap_reached' | 'purge_sweep_pending' | 'interrupted' | null;
 
 /** The bounded output a conversation_facts row stores (window anchors and counts; never text). */
 function rowOutput(row: SegmentDerivationInput | undefined): RowOutput {
@@ -370,7 +370,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
           continue;
         }
         unpricedModel = metered.unpricedModel ?? unpricedModel;
-        if ('refused' in metered) { stop = 'cap_reached'; break; }
+        if ('refused' in metered) { stop = metered.refused.reason === 'purge_sweep_pending' ? 'purge_sweep_pending' : 'cap_reached'; break; }
         const out = metered.value;
         w.state = 'extracted';
         w.facts = out.extracted;

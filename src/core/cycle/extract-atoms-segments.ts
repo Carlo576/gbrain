@@ -71,7 +71,7 @@ async function planPage(engine: BrainEngine, sourceId: string, page: AtomPageInp
   const states = new Map<number, OccurrenceState>();
   const items: AtomPageInput[] = [];
   let unread = false;
-  let stop: 'cap_reached' | null = null;
+  let stop: 'cap_reached' | 'purge_sweep_pending' | null = null;
   let unpricedModel: string | null = null;
   let open = 0;
   const todo = new Map(plan.todo.map(segment => [segment.occurrenceId, segment]));
@@ -119,7 +119,7 @@ async function planPage(engine: BrainEngine, sourceId: string, page: AtomPageInp
             estimateChatCallUsd(model, text.length, maxOutputTokens, pricingOverrides), call, { pricingOverrides });
           unpricedModel = metered.unpricedModel ?? unpricedModel;
           if (!('refused' in metered)) return metered;
-          stop = 'cap_reached';
+          stop = metered.refused.reason === 'purge_sweep_pending' ? 'purge_sweep_pending' : 'cap_reached';
           const unfinished = [...states.values()].filter(s => s.done.size < s.total);
           if (unfinished.length) await engine.upsertSegmentDerivations(unfinished.map(row));
           return null;

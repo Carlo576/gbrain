@@ -406,12 +406,16 @@ async function matchCandidates(engine: BrainEngine, sourceId: string, text: stri
     next: rows.length ? 'Pick one id and run gbrain forget <id> --purge; --match never purges.' : 'No fact in this source contains that text.' };
 }
 
-/** `--status`: the stored receipt and the current completion of an earlier purge request. Never re-reads claim text. */
-async function purgeStatus(ctx: OperationContext, requestId: string): Promise<Record<string, unknown>> {
+/**
+ * `--status`: the stored receipt and the current completion of an earlier purge request. Never re-reads claim text. With
+ * `--continue` it first continues the request's derivation sweep (a stalled one is tried again), then the source's others.
+ */
+async function purgeStatus(ctx: OperationContext, requestId: string, resume: boolean): Promise<Record<string, unknown>> {
   const principal = await requestPrincipalForContext(ctx);
   const row = await getWriteRequest(ctx.engine, principal, requestId);
   if (!row || row.operation !== PURGE_OPERATION) throw opError('not_found', `No purge request ${requestId} for this caller.`,
     'Pass the --request-id a purge printed. Status reads only purges this CLI submitted.');
+  if (resume && row.state === 'committed') await continueDerivationPurges(ctx.engine, row.source_id, { first: row.id, retry: row.id });
   return { ...(row.outcome ?? {}), request_id: row.request_id, state: row.state, ...await purgeCompletion(ctx.engine, row) };
 }
 
@@ -430,7 +434,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
   if (params.status === true) {
     const requestId = parseWriteRequestId(params.request_id);
     if (!requestId) throw opError('invalid_params', '--status needs --request-id.', 'Pass the request id the purge printed with --request-id, together with --status.');
-    return purgeStatus(ctx, requestId);
+    return purgeStatus(ctx, requestId, params.continue === true);
   }
   const sourceIdForMatch = typeof params.source_id === 'string' ? params.source_id : ctx.sourceId ?? 'default';
   if (typeof params.match === 'string') return matchCandidates(ctx.engine, sourceIdForMatch, params.match);
@@ -443,7 +447,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
     const prior = await getWriteRequest(ctx.engine, principal, p.requestId);
     if (prior) {
       assertReplayIntent(prior, intentDigest({ operation: PURGE_OPERATION, sourceId: p.sourceId, slug: prior.slug, callerIntent }));
-      if (prior.state === 'committed') await continueDerivationPurges(ctx.engine, prior.source_id);
+      if (prior.state === 'committed') await continueDerivationPurges(ctx.engine, prior.source_id, { first: prior.id });
       return { ...(prior.outcome ?? {}), request_id: prior.request_id, state: prior.state, replayed: true, ...await purgeCompletion(ctx.engine, prior) };
     }
   }
@@ -588,7 +592,7 @@ export async function submitPurgeFactMutation(ctx: OperationContext, params: Rec
   for (const slug of unsealed) await buildSegmentedProjection(ctx.engine, { sourceId: p.sourceId, slug }).catch(() => undefined);
   if (row.state !== 'committed') return { ...(row.outcome ?? {}), request_id: row.request_id, state: row.state, error: row.error_code };
   appendPurgeCommitted(row.id);
-  counts.page_segment_derivations = (counts.page_segment_derivations ?? 0) + await continueDerivationPurges(ctx.engine, p.sourceId);
+  counts.page_segment_derivations = (counts.page_segment_derivations ?? 0) + await continueDerivationPurges(ctx.engine, p.sourceId, { first: row.id });
   if (beliefReport.appended || ledger?.derived_hidden) await markBeliefCommits(ctx.engine, [row.id]).catch(() => undefined);
   const receipt: PurgeReceipt = await verifyFactPurge(ctx.engine, { target, plan: committedPlan, dryRun: false, removed: counts, prose,
     vacuum: params.vacuum === true, ledger });

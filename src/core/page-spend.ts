@@ -36,7 +36,7 @@ export interface PageSpendGrant {
 /** `refused`: the estimate does not fit what the cap leaves (`cap_reached`), or an embedding waits for approval (`held`); nothing was reserved. */
 export type PageSpendDecision =
   | { kind: 'unmetered' }
-  | { kind: 'refused'; reason: 'cap_reached' | 'held'; capUsd: number; spentUsd: number; reservedUsd: number; estimateUsd: number }
+  | { kind: 'refused'; reason: 'cap_reached' | 'held' | 'purge_sweep_pending'; capUsd: number; spentUsd: number; reservedUsd: number; estimateUsd: number }
   | { kind: 'grant'; grant: PageSpendGrant };
 
 const RESERVED_EPSILON_USD = 1e-9;

@@ -124,3 +124,11 @@ export function parseSourceWindow(value: unknown): SourceWindow | null {
   }
   return { occurrence_id: w.occurrence_id as number, window_ordinal: w.window_ordinal as number, window_text_sha: w.window_text_sha };
 }
+
+/** Derivation rows a fact purge's recorded sweep refused (they hold its claim); the caller's step did not settle. */
+export class DerivationWriteRefused extends Error {
+  readonly code = 'derivation_purge_pending';
+  constructor(readonly refused: number) {
+    super(`${refused} derivation row(s) were not stored: a fact purge's sweep of stored derivation results is still running and they hold its claim.`);
+  }
+}

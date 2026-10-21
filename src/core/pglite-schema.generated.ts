@@ -1419,12 +1419,43 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
   needles           TEXT[]    NOT NULL,
   patterns          TEXT[]    NOT NULL,
   page_ids          INTEGER[] NOT NULL DEFAULT '{}',
+  phase             TEXT      NOT NULL DEFAULT 'sweep' CHECK (phase IN ('sweep','verify','recheck')),
+  recheck           INTEGER[],
+  found             INTEGER   NOT NULL DEFAULT 0 CHECK (found >= 0),
   cursor_page       INTEGER,
   cursor_pipeline   TEXT,
   cursor_occurrence BIGINT,
+  batch_rows        INTEGER   CHECK (batch_rows >= 1),
+  stalled_at        TIMESTAMPTZ,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);
+CREATE TABLE IF NOT EXISTS page_segment_derivation_purge_pages (
+  request_id UUID    NOT NULL,
+  page_id    INTEGER NOT NULL,
+  PRIMARY KEY (request_id, page_id)
+);
+CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SET search_path = pg_catalog, public AS \$func\$
+BEGIN
+  IF TG_TABLE_NAME = 'pages' THEN
+    INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
+      SELECT x.request_id, NEW.id FROM page_segment_derivation_purges x WHERE x.source_id = NEW.source_id ON CONFLICT DO NOTHING;
+  ELSE
+    INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
+      SELECT x.request_id, OLD.page_id FROM page_segment_derivation_purges x WHERE x.source_id = OLD.source_id ON CONFLICT DO NOTHING;
+  END IF;
+  RETURN NULL;
+END
+\$func\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS page_body_manifest_derivation_scope_retire ON page_body_manifest;
+CREATE TRIGGER page_body_manifest_derivation_scope_retire AFTER UPDATE OF gen_to ON page_body_manifest
+  FOR EACH ROW WHEN (OLD.gen_to IS NULL AND NEW.gen_to IS NOT NULL AND OLD.staging_id IS NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
+DROP TRIGGER IF EXISTS page_body_manifest_derivation_scope_delete ON page_body_manifest;
+CREATE TRIGGER page_body_manifest_derivation_scope_delete AFTER DELETE ON page_body_manifest
+  FOR EACH ROW WHEN (OLD.gen_to IS NULL AND OLD.staging_id IS NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
+DROP TRIGGER IF EXISTS pages_derivation_scope_delete ON pages;
+CREATE TRIGGER pages_derivation_scope_delete AFTER UPDATE OF deleted_at ON pages
+  FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
 CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS \$func\$
 BEGIN
   IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id

@@ -978,7 +978,7 @@
         {
           "category": "ops",
           "elapsed_ms": "<volatile>",
-          "message": "RLS enabled on 154/154 public tables",
+          "message": "RLS enabled on 155/155 public tables",
           "name": "rls",
           "status": "ok"
         },
@@ -992,14 +992,14 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1328 column(s) verified against live schema",
+          "message": "1335 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "All 153 table(s) the applied migrations create exist.",
+          "message": "All 155 table(s) the applied migrations create exist.",
           "name": "schema_missing_tables",
           "status": "ok"
         },

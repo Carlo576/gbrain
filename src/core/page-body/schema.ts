@@ -234,13 +234,17 @@ export function derivationSweepScopeSql(d: string, p: string, pageIds: string): 
  * fence rewrite; demotion to inline deletes the page's rows, a fact purge the rows holding the claim, and a page
  * delete cascades. The output holds link context and window anchors, so the table gets the segment tables' RLS posture.
  *
- * page_segment_derivation_purges holds a fact purge's derivation sweep from the purge's commit until a walk of the
- * source's rows has deleted every row in its scope holding the claim (segment-derive.ts continueDerivationPurges): the
- * claim's normalized forms, the pages the purge rewrote and the walk's cursor. While it is there, the trigger on
- * page_segment_derivations drops a write of a row of the source that the sweep would delete (in its scope,
- * derivationSweepScopeSql, and holding the claim; returns NULL: the row is not stored and the pipeline derives it again
- * after the sweep), so a row the walk has passed cannot come back behind it. A derivation write that read a purged
- * page before the purge committed is refused by its own generation guard instead.
+ * page_segment_derivation_purges holds a fact purge's derivation sweep from the purge's commit until it is verified
+ * (segment-derive.ts continueDerivationPurges): the claim's normalized forms, the pages the purge rewrote, the walk's
+ * phase and cursor, its adaptive batch size and, once a row alone outran the statement budget, when it stalled. While it
+ * is there, the trigger on page_segment_derivations drops a write of a row of the source that the sweep would delete (in
+ * its scope, derivationSweepScopeSql, and holding the claim; returns NULL: the row is not stored and the pipeline derives
+ * it again after the sweep; a paid pipeline makes no call on such a page meanwhile, page-embedding-budget.ts
+ * meterPaidCall), so a row the walk has passed cannot come back behind it. A derivation write that read a purged page
+ * before the purge committed is refused by its own generation guard instead. A row can also enter the scope without a
+ * write, when its occurrence is retired or its page soft-deleted: the triggers on page_body_manifest and pages note the
+ * page in page_segment_derivation_purge_pages for every sweep of the source, and the sweep checks those pages again
+ * before it ends.
  *
  * PR 4 (Wave B incremental derivation, transcripts): page_derivation_spend is the per-page lifetime spend ledger of each
  * paid derivation family (`facts`, `atoms`, `synopsis`; page-spend.ts), each capped by `derive.max_usd_per_page` on its own,
@@ -276,12 +280,43 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
   needles           TEXT[]    NOT NULL,
   patterns          TEXT[]    NOT NULL,
   page_ids          INTEGER[] NOT NULL DEFAULT '{}',
+  phase             TEXT      NOT NULL DEFAULT 'sweep' CHECK (phase IN ('sweep','verify','recheck')),
+  recheck           INTEGER[],
+  found             INTEGER   NOT NULL DEFAULT 0 CHECK (found >= 0),
   cursor_page       INTEGER,
   cursor_pipeline   TEXT,
   cursor_occurrence BIGINT,
+  batch_rows        INTEGER   CHECK (batch_rows >= 1),
+  stalled_at        TIMESTAMPTZ,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);
+CREATE TABLE IF NOT EXISTS page_segment_derivation_purge_pages (
+  request_id UUID    NOT NULL,
+  page_id    INTEGER NOT NULL,
+  PRIMARY KEY (request_id, page_id)
+);
+CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SET search_path = pg_catalog, public AS $func$
+BEGIN
+  IF TG_TABLE_NAME = 'pages' THEN
+    INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
+      SELECT x.request_id, NEW.id FROM page_segment_derivation_purges x WHERE x.source_id = NEW.source_id ON CONFLICT DO NOTHING;
+  ELSE
+    INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
+      SELECT x.request_id, OLD.page_id FROM page_segment_derivation_purges x WHERE x.source_id = OLD.source_id ON CONFLICT DO NOTHING;
+  END IF;
+  RETURN NULL;
+END
+$func$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS page_body_manifest_derivation_scope_retire ON page_body_manifest;
+CREATE TRIGGER page_body_manifest_derivation_scope_retire AFTER UPDATE OF gen_to ON page_body_manifest
+  FOR EACH ROW WHEN (OLD.gen_to IS NULL AND NEW.gen_to IS NOT NULL AND OLD.staging_id IS NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
+DROP TRIGGER IF EXISTS page_body_manifest_derivation_scope_delete ON page_body_manifest;
+CREATE TRIGGER page_body_manifest_derivation_scope_delete AFTER DELETE ON page_body_manifest
+  FOR EACH ROW WHEN (OLD.gen_to IS NULL AND OLD.staging_id IS NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
+DROP TRIGGER IF EXISTS pages_derivation_scope_delete ON pages;
+CREATE TRIGGER pages_derivation_scope_delete AFTER UPDATE OF deleted_at ON pages
+  FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
 CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
@@ -308,7 +343,7 @@ CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE O
  * bootstrap enables RLS on no core table either. Source-scoped policies are operator SQL (docs/ENGINES.md).
  */
 export const PAGE_BODY_RLS_TABLES = ['page_segment_texts', 'page_body_manifest', 'page_body_stagings', 'page_body_staging_parts', 'page_view_digests', 'page_body_staging_texts', 'page_segment_derivations',
-  'page_segment_derivation_purges'] as const;
+  'page_segment_derivation_purges', 'page_segment_derivation_purge_pages'] as const;
 export const PAGE_BODY_RLS_SQL = `DO $rls$
 DECLARE target TEXT;
 BEGIN

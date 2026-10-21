@@ -18,6 +18,7 @@ import type { BrainEngine } from '../engine.ts';
 import { canonicalJson } from '../belief/keys.ts';
 import { planSegmentDerivations, segmentDerivationContextHash, type LiveSegment, type SegmentDerivationKind,
   type SegmentDerivationRow } from './derivations.ts';
+import { faultPoint } from '../persistence/fault-points.ts';
 import { derivationClaimCandidateSql, derivationHoldsClaimSql, derivationSweepScopeSql, foldSql } from './schema.ts';
 import { bodyBlocks, type BodyBlock } from './segment-blocks.ts';
 import { ledgerApplies, readBodyLedger } from './segment-ledger.ts';
@@ -366,9 +367,10 @@ export async function derivationNeedles(engine: Pick<BrainEngine, 'executeRaw'>,
 
 /**
  * Bounds of a fact purge's derivation sweep and of its receipt probe: each statement reads at most `batchRows` rows of
- * the source, walking them in primary-key order (so the rows it normalizes are bounded too); a sweep statement runs in a
- * transaction of its own under `statementMs`; one continueDerivationPurges call starts no new batch past `totalMs`
- * (it runs at least one), and the next call resumes from the stored cursor.
+ * the source, walking them in primary-key order (so the rows it normalizes are bounded too), fewer after a statement
+ * outran `statementMs` (the batch halves, down to one row); a sweep statement runs in a transaction of its own under
+ * `statementMs`; one continueDerivationPurges call starts no new batch past `totalMs` (it runs at least one), and the
+ * next call resumes from the stored cursor.
  */
 export const DERIVATION_SWEEP_LIMITS = { batchRows: 500, totalMs: 120_000, statementMs: 5_000 } as const;
 let sweepLimits: { batchRows: number; totalMs: number; statementMs: number } = { ...DERIVATION_SWEEP_LIMITS };
@@ -391,12 +393,13 @@ export function derivationAfterSql(d: string, at: [string, string, string]): str
 }
 
 /**
- * @internal For the work-volume tests (counts, not time): per page, the derivation rows each sweep read, normalized and
- * deleted; per statement of a sweep or a receipt probe, the rows it read and normalized. Recorded only while
+ * @internal For the work-volume tests (counts, not time): per page, the derivation rows each sweep's first walk read,
+ * normalized and deleted; per statement of a sweep's first walk, of its verify and recheck walks (`verify`) or of a
+ * receipt probe, the rows it read and normalized. Recorded only while
  * __setDerivationSweepWorkForTests(true) is in effect.
  */
 export const derivationSweepWork: Array<{ pageId: number; scanned: number; normalized: number; deleted: number }> = [];
-export const derivationSweepStatements: Array<{ phase: 'sweep' | 'probe'; scanned: number; normalized: number }> = [];
+export const derivationSweepStatements: Array<{ phase: 'sweep' | 'verify' | 'probe'; scanned: number; normalized: number }> = [];
 let recordSweepWork = false;
 /** @internal Test seam: start (clearing what is there) or stop recording derivationSweepWork and derivationSweepStatements. */
 export function __setDerivationSweepWorkForTests(on: boolean): void {
@@ -405,7 +408,7 @@ export function __setDerivationSweepWorkForTests(on: boolean): void {
   derivationSweepStatements.length = 0;
 }
 /** @internal Records one statement's rows while a test records sweep work. */
-export function recordDerivationStatement(entry: { phase: 'sweep' | 'probe'; scanned: number; normalized: number }): void {
+export function recordDerivationStatement(entry: { phase: 'sweep' | 'verify' | 'probe'; scanned: number; normalized: number }): void {
   if (recordSweepWork) derivationSweepStatements.push(entry);
 }
 
@@ -423,38 +426,90 @@ export async function recordDerivationPurge(engine: Pick<BrainEngine, 'executeRa
     VALUES ($1::uuid, $2, $3::text[], $4::text[], $5::int[]) ON CONFLICT (request_id) DO NOTHING`, [requestId, sourceId, needles, patterns, [...pageIds]]);
 }
 
-/** Whether a purge request's derivation sweep is still recorded, so its rows are not all deleted yet. */
-export async function derivationPurgePending(engine: Pick<BrainEngine, 'executeRaw'>, requestId: string): Promise<boolean> {
-  return (await engine.executeRaw('SELECT 1 FROM page_segment_derivation_purges WHERE request_id=$1::uuid', [requestId])).length > 0;
+/** A recorded derivation sweep of a purge request: still walking (`pending`) or stopped on a row that alone outran its statement budget (`stalled`). */
+export type DerivationSweepState = 'pending' | 'stalled';
+
+/** The state of a purge request's derivation sweep, or null once it is verified and its record is gone. */
+export async function derivationPurgeState(engine: Pick<BrainEngine, 'executeRaw'>, requestId: string): Promise<DerivationSweepState | null> {
+  const [row] = await engine.executeRaw<{ stalled: boolean }>('SELECT stalled_at IS NOT NULL AS stalled FROM page_segment_derivation_purges WHERE request_id=$1::uuid', [requestId]);
+  return row ? (row.stalled ? 'stalled' : 'pending') : null;
 }
 
 /**
- * Continue the recorded derivation sweeps of a source, oldest first: each batch is a transaction of its own that locks
- * the sweep's record (a sweep another caller is walking is left to it), reads the next DERIVATION_SWEEP_LIMITS.batchRows
- * rows of the source after the stored cursor, deletes those in the sweep's scope (derivationSweepScopeSql over its
- * pages) that hold the claim (derivationHoldsClaimSql; only rows passing the prefilter, derivationClaimCandidateSql, are
- * normalized) and stores the cursor, or deletes the record after the source's last row. No batch locks the source or a
- * page, so writes go on during a sweep. A batch is not started past DERIVATION_SWEEP_LIMITS.totalMs, and a statement
- * timeout ends the call with its batch rolled back; either way the next call (a later purge of the source, a replay of the
- * purge request) resumes from the cursor. Returns the rows deleted.
+ * Whether a recorded sweep covers page `pageId` (a page its purge rewrote, or a soft-deleted page of its source): the
+ * trigger drops a derivation write there that holds the claim, so a paid pipeline makes no call for it until the sweep ends.
  */
-export async function continueDerivationPurges(engine: BrainEngine, sourceId: string): Promise<number> {
-  const { batchRows, totalMs, statementMs } = sweepLimits;
+export async function derivationSweepCoversPage(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number): Promise<boolean> {
+  return (await engine.executeRaw(`SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
+    WHERE p.id = $1 AND (p.id = ANY(x.page_ids) OR p.deleted_at IS NOT NULL) LIMIT 1`, [pageId])).length > 0;
+}
+
+type SweepRecord = { request_id: string; needles: string[]; patterns: string[]; page_ids: number[]; phase: 'sweep' | 'verify' | 'recheck'; recheck: number[] | null;
+  found: number; cursor_page: number | null; cursor_pipeline: string | null; cursor_occurrence: string | null; batch_rows: number };
+
+/**
+ * Continue the recorded derivation sweeps of a source: the sweep of request `opts.first` first, then the others oldest
+ * first, skipping a stalled one (`opts.retry` names one to try again). Each batch is a transaction of its own that locks
+ * the sweep's record (one another caller is walking is left to it), reads the next rows of the source after its cursor,
+ * the record's batch size of them (DERIVATION_SWEEP_LIMITS.batchRows at first), deletes those in the sweep's scope
+ * (derivationSweepScopeSql over its pages) that hold the claim (derivationHoldsClaimSql; only rows passing the
+ * prefilter, derivationClaimCandidateSql, are normalized) and stores the cursor. No batch locks the source or a page, so
+ * writes go on during a sweep.
+ *
+ * A batch that outruns DERIVATION_SWEEP_LIMITS.statementMs rolls back and halves the record's batch size, down to one
+ * row. A single row that still outruns it is deleted unread when it is in scope: derivation rows are rederived from the
+ * segments, and a row no live segment backs serves nothing. When even that statement outruns its budget, the record is
+ * marked stalled: it is skipped from then on, so it blocks no other sweep, until `opts.retry` names it.
+ *
+ * At the end of the source the first walk (`sweep`) is followed by a `verify` walk, repeated until one deletes nothing;
+ * then the pages that entered the scope meanwhile (page_segment_derivation_purge_pages) are walked again (`recheck`)
+ * until none are noted, and only then is the record deleted. No batch starts past DERIVATION_SWEEP_LIMITS.totalMs; the
+ * next call resumes from the cursor. Returns the rows deleted.
+ */
+export async function continueDerivationPurges(engine: BrainEngine, sourceId: string, opts: { first?: string; retry?: string } = {}): Promise<number> {
+  const { batchRows: maxRows, totalMs, statementMs } = sweepLimits;
   const deadline = performance.now() + totalMs;
   const pages = new Map<number, { scanned: number; normalized: number; deleted: number }>();
-  try {
-    for (let batches = 0; batches === 0 || performance.now() <= deadline; batches++) {
-      type Row = { page_id: number | null; swept: number; normalized: number; deleted: number; scanned: number; last_page: number; last_pipeline: string; last_occurrence: string };
-      const rows = await engine.transaction(async tx => {
+  if (opts.retry) await engine.executeRaw('UPDATE page_segment_derivation_purges SET stalled_at = NULL WHERE request_id=$1::uuid', [opts.retry]);
+  const endWalk = async (tx: BrainEngine, purge: SweepRecord, found: number) => {
+    const restart = 'cursor_page = NULL, cursor_pipeline = NULL, cursor_occurrence = NULL, found = 0';
+    if (purge.phase === 'sweep' || (purge.phase === 'verify' && found > 0)) {
+      await tx.executeRaw('DELETE FROM page_segment_derivation_purge_pages WHERE request_id=$1::uuid', [purge.request_id]);
+      await tx.executeRaw(`UPDATE page_segment_derivation_purges SET phase = 'verify', recheck = NULL, ${restart} WHERE request_id=$1::uuid`, [purge.request_id]);
+      return;
+    }
+    const noted = (await tx.executeRaw<{ page_id: number }>('DELETE FROM page_segment_derivation_purge_pages WHERE request_id=$1::uuid RETURNING page_id',
+      [purge.request_id])).map(row => Number(row.page_id));
+    if (noted.length) await tx.executeRaw(`UPDATE page_segment_derivation_purges SET phase = 'recheck', recheck = $2::int[], ${restart} WHERE request_id=$1::uuid`,
+      [purge.request_id, noted]);
+    else {
+      await tx.executeRaw('DELETE FROM page_segment_derivation_purges WHERE request_id=$1::uuid', [purge.request_id]);
+      await tx.executeRaw(`DELETE FROM page_segment_derivation_purge_pages n WHERE NOT EXISTS (SELECT 1 FROM page_segment_derivation_purges x
+        WHERE x.request_id = n.request_id)`);
+    }
+  };
+  const timedOut = (error: unknown) => (error as { code?: unknown } | null)?.code === '57014';
+  const stalled: string[] = [];
+  for (let batches = 0; batches === 0 || performance.now() <= deadline; batches++) {
+    let picked: SweepRecord | null = null;
+    type Row = { page_id: number | null; swept: number; normalized: number; deleted: number; scanned: number; last_page: number; last_pipeline: string; last_occurrence: string };
+    let rows: Row[] | null;
+    try {
+      rows = await engine.transaction(async tx => {
         await tx.executeRaw("SELECT set_config('statement_timeout',$1,true)", [`${statementMs}ms`]);
-        const [purge] = await tx.executeRaw<{ request_id: string; needles: string[]; patterns: string[]; page_ids: number[]; cursor_page: number | null;
-          cursor_pipeline: string | null; cursor_occurrence: string | null }>(`SELECT request_id::text AS request_id, needles, patterns, page_ids, cursor_page,
-            cursor_pipeline, cursor_occurrence::text AS cursor_occurrence FROM page_segment_derivation_purges WHERE source_id=$1
-          ORDER BY created_at, request_id LIMIT 1 FOR UPDATE SKIP LOCKED`, [sourceId]);
+        const [purge] = await tx.executeRaw<SweepRecord>(`SELECT request_id::text AS request_id, needles, patterns, page_ids, phase, recheck, found, cursor_page,
+            cursor_pipeline, cursor_occurrence::text AS cursor_occurrence, LEAST(COALESCE(batch_rows, $4), $4) AS batch_rows
+          FROM page_segment_derivation_purges WHERE source_id=$1 AND stalled_at IS NULL AND NOT (request_id = ANY($3::uuid[]))
+          ORDER BY COALESCE(request_id = $2::uuid, false) DESC, created_at, request_id LIMIT 1 FOR UPDATE SKIP LOCKED`,
+        [sourceId, opts.first ?? null, stalled, maxRows]);
         if (!purge) return null;
+        picked = purge;
+        await faultPoint('purge:derivation_batch', { sourceId, requestId: purge.request_id, round: Number(purge.batch_rows),
+          read: purge.cursor_page === null ? '' : `${purge.cursor_page}/${purge.cursor_pipeline}/${purge.cursor_occurrence}` });
         const batch = await tx.executeRaw<Row>(`WITH batch AS MATERIALIZED (
             SELECT d.page_id, d.pipeline, d.occurrence_id, ${derivationSweepScopeSql('d', 'p', '$2')} AS swept FROM page_segment_derivations d
             JOIN pages p ON p.id = d.page_id WHERE p.source_id = $1 AND ${derivationAfterSql('d', ['$5', '$6', '$7'])}
+              AND ($9::int[] IS NULL OR d.page_id = ANY($9::int[]))
             ORDER BY d.page_id, d.pipeline, d.occurrence_id LIMIT $8
           ), scope AS MATERIALIZED (
             SELECT d.page_id, d.pipeline, d.occurrence_id, d.output, d.receipt, ${derivationClaimCandidateSql('d', '$4')} AS candidate
@@ -473,24 +528,56 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
           ) SELECT pp.page_id, COALESCE(pp.swept, 0) AS swept, COALESCE(pp.normalized, 0) AS normalized, COALESCE(pp.deleted, 0) AS deleted,
             (SELECT count(*)::int FROM batch) AS scanned, l.page_id AS last_page, l.pipeline AS last_pipeline, l.occurrence_id AS last_occurrence
           FROM (SELECT 1) one LEFT JOIN last l ON true LEFT JOIN per_page pp ON true ORDER BY pp.page_id`,
-        [sourceId, purge.page_ids, purge.needles, purge.patterns, purge.cursor_page, purge.cursor_pipeline, purge.cursor_occurrence, batchRows]);
-        const scanned = Number(batch[0]?.scanned ?? 0);
-        if (scanned < batchRows) await tx.executeRaw('DELETE FROM page_segment_derivation_purges WHERE request_id=$1::uuid', [purge.request_id]);
-        else await tx.executeRaw(`UPDATE page_segment_derivation_purges SET cursor_page=$2, cursor_pipeline=$3, cursor_occurrence=$4::bigint
-          WHERE request_id=$1::uuid`, [purge.request_id, Number(batch[0]!.last_page), batch[0]!.last_pipeline, String(batch[0]!.last_occurrence)]);
+        [sourceId, purge.page_ids, purge.needles, purge.patterns, purge.cursor_page, purge.cursor_pipeline, purge.cursor_occurrence, purge.batch_rows, purge.recheck]);
+        const found = Number(purge.found) + batch.reduce((n, row) => n + Number(row.deleted), 0);
+        if (Number(batch[0]?.scanned ?? 0) < Number(purge.batch_rows)) await endWalk(tx, purge, found);
+        else await tx.executeRaw(`UPDATE page_segment_derivation_purges SET cursor_page=$2, cursor_pipeline=$3, cursor_occurrence=$4::bigint, found=$5
+          WHERE request_id=$1::uuid`, [purge.request_id, Number(batch[0]!.last_page), batch[0]!.last_pipeline, String(batch[0]!.last_occurrence), found]);
         return batch;
       });
-      if (!rows) break;
-      recordDerivationStatement({ phase: 'sweep', scanned: Number(rows[0]?.scanned ?? 0), normalized: rows.reduce((n, row) => n + Number(row.normalized), 0) });
-      for (const row of rows) {
-        if (row.page_id === null) continue;
-        const page = pages.get(Number(row.page_id)) ?? { scanned: 0, normalized: 0, deleted: 0 };
-        pages.set(Number(row.page_id), { scanned: page.scanned + Number(row.swept), normalized: page.normalized + Number(row.normalized), deleted: page.deleted + Number(row.deleted) });
+    } catch (error) {
+      const purge = picked as SweepRecord | null;
+      if (!timedOut(error) || !purge) throw error;
+      if (Number(purge.batch_rows) > 1) {
+        await engine.executeRaw('UPDATE page_segment_derivation_purges SET batch_rows=$2 WHERE request_id=$1::uuid', [purge.request_id, Math.floor(Number(purge.batch_rows) / 2)]);
+        continue;
       }
-      await afterSweepBatch?.();
+      try {
+        rows = await engine.transaction(async tx => {
+          await tx.executeRaw("SELECT set_config('statement_timeout',$1,true)", [`${statementMs}ms`]);
+          await faultPoint('purge:derivation_unread', { sourceId, requestId: purge.request_id });
+          const [next] = await tx.executeRaw<{ page_id: number; pipeline: string; occurrence_id: string; swept: boolean }>(`SELECT d.page_id, d.pipeline,
+              d.occurrence_id::text AS occurrence_id, ${derivationSweepScopeSql('d', 'p', '$2')} AS swept FROM page_segment_derivations d
+            JOIN pages p ON p.id = d.page_id WHERE p.source_id = $1 AND ${derivationAfterSql('d', ['$3', '$4', '$5'])} AND ($6::int[] IS NULL OR d.page_id = ANY($6::int[]))
+            ORDER BY d.page_id, d.pipeline, d.occurrence_id LIMIT 1`,
+          [sourceId, purge.page_ids, purge.cursor_page, purge.cursor_pipeline, purge.cursor_occurrence, purge.recheck]);
+          if (!next) {
+            await endWalk(tx, purge, Number(purge.found));
+            return [];
+          }
+          const deleted = next.swept ? (await tx.executeRaw('DELETE FROM page_segment_derivations WHERE page_id=$1 AND pipeline=$2 AND occurrence_id=$3::bigint RETURNING 1',
+            [Number(next.page_id), next.pipeline, next.occurrence_id])).length : 0;
+          await tx.executeRaw(`UPDATE page_segment_derivation_purges SET cursor_page=$2, cursor_pipeline=$3, cursor_occurrence=$4::bigint, found=found + $5
+            WHERE request_id=$1::uuid`, [purge.request_id, Number(next.page_id), next.pipeline, next.occurrence_id, deleted]);
+          return [{ page_id: Number(next.page_id), swept: next.swept ? 1 : 0, normalized: 0, deleted, scanned: 1, last_page: Number(next.page_id), last_pipeline: next.pipeline,
+            last_occurrence: next.occurrence_id }];
+        });
+      } catch (unread) {
+        if (!timedOut(unread)) throw unread;
+        await engine.executeRaw('UPDATE page_segment_derivation_purges SET stalled_at = now() WHERE request_id=$1::uuid', [purge.request_id]);
+        stalled.push(purge.request_id);
+        continue;
+      }
     }
-  } catch (error) {
-    if ((error as { code?: unknown } | null)?.code !== '57014') throw error;
+    if (!rows) break;
+    const walk = (picked as SweepRecord | null)?.phase === 'sweep' ? 'sweep' : 'verify';
+    recordDerivationStatement({ phase: walk, scanned: Number(rows[0]?.scanned ?? 0), normalized: rows.reduce((n, row) => n + Number(row.normalized), 0) });
+    if (walk === 'sweep') for (const row of rows) {
+      if (row.page_id === null) continue;
+      const page = pages.get(Number(row.page_id)) ?? { scanned: 0, normalized: 0, deleted: 0 };
+      pages.set(Number(row.page_id), { scanned: page.scanned + Number(row.swept), normalized: page.normalized + Number(row.normalized), deleted: page.deleted + Number(row.deleted) });
+    }
+    await afterSweepBatch?.();
   }
   const sorted = [...pages].sort((a, b) => a[0] - b[0]);
   if (recordSweepWork) for (const [pageId, work] of sorted) derivationSweepWork.push({ pageId, ...work });

@@ -35,7 +35,7 @@ import type { LegacyUnscopedRead } from './brands.ts';
 import { joinFragments, sqlFragment, trustedSql, type SqlFragment } from './fragment.ts';
 import { compileRowNormalizer } from './normalize.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
-import type { SegmentDerivationInput, SegmentDerivationKind, SegmentDerivationRow, SegmentDerivationState } from '../page-body/derivations.ts';
+import { DerivationWriteRefused, type SegmentDerivationInput, type SegmentDerivationKind, type SegmentDerivationRow, type SegmentDerivationState } from '../page-body/derivations.ts';
 import { RELEASE_STAGED_CTE } from '../persistence/limits.ts';
 
 export const LIVE_STAGING_STATES = ['open', 'sealed', 'prepared'];
@@ -489,7 +489,8 @@ export async function readSegmentDerivations(exec: LegacyUnscopedRead, pageId: n
 /**
  * Insert or replace rows keyed (page, kind, occurrence), in statements bounded like manifest rows. A replaced row
  * keeps its created_at and moves updated_at. Outputs and receipts travel inside the batch's JSON text, never as a
- * `::jsonb` bind of a stringified value.
+ * `::jsonb` bind of a stringified value. A row a fact purge's sweep refuses (it holds the purged claim; page-body/schema.ts)
+ * is not stored, and the call throws DerivationWriteRefused after storing the others.
  */
 export async function upsertSegmentDerivations(exec: SqlExecutor, rows: readonly SegmentDerivationInput[]): Promise<void> {
   const batches = jsonRowBatches(rows, row => ({
@@ -497,8 +498,9 @@ export async function upsertSegmentDerivations(exec: SqlExecutor, rows: readonly
     segment_sha256: hex(row.segmentSha256), context_hash: hex(row.contextHash), state: row.state,
     output: row.output ?? null, receipt: row.receipt ?? null,
   }), stageBatchBytes(exec));
+  let stored = 0;
   for (const json of batches) {
-    await exec.run(sqlFragment`INSERT INTO page_segment_derivations (page_id, pipeline, occurrence_id, pipeline_version, segment_sha256,
+    const { affectedRows } = await exec.run(sqlFragment`INSERT INTO page_segment_derivations (page_id, pipeline, occurrence_id, pipeline_version, segment_sha256,
         context_hash, state, output, receipt)
       SELECT d.page_id, d.pipeline, d.occurrence_id, d.pipeline_version, decode(d.segment_sha256, 'hex'), decode(d.context_hash, 'hex'),
         d.state, d.output, d.receipt
@@ -507,8 +509,10 @@ export async function upsertSegmentDerivations(exec: SqlExecutor, rows: readonly
       ON CONFLICT (page_id, pipeline, occurrence_id) DO UPDATE SET pipeline_version = EXCLUDED.pipeline_version,
         segment_sha256 = EXCLUDED.segment_sha256, context_hash = EXCLUDED.context_hash, state = EXCLUDED.state,
         output = EXCLUDED.output, receipt = EXCLUDED.receipt, updated_at = now()`);
+    stored += affectedRows;
     await yieldTurn();
   }
+  if (stored < rows.length) throw new DerivationWriteRefused(rows.length - stored);
 }
 
 /** Delete a page's rows (every kind, or `kind`) whose occurrence is not in `liveOccurrenceIds`; returns the count. */
