@@ -78,6 +78,36 @@ export type PageEmbedDecision =
 
 interface BudgetRow { state: PageBudgetState; reason: string | null; embedding_signature: string | null; spent_usd: number; reserved_usd: number; stale_reservation: boolean; cap_usd: number | null }
 
+// PR 4 (Wave B incremental derivation, transcripts)
+/**
+ * The ledger's open reservations form one window: `reserved_at` is the time the window opened (the first reservation
+ * after the ledger had none), and it identifies the window. Reservations nobody settled for an hour (no reservation or
+ * settle on the ledger since: `updated_at`) are folded into spent by the next reservation, and so are the reservations
+ * of a ledger a new embedding model replaced; either way the next reservation opens a new window. A grant settles only
+ * inside the window it reserved in, so a reservation that was already folded is never booked twice and never releases
+ * a newer one. The window closes (reserved_at NULL) when its last reservation settles.
+ */
+const RESERVED_EPSILON_USD = 1e-9;
+/** A window's id: reserved_at in whole microseconds, as text (a bound timestamp parameter would lose the microseconds). */
+const RESERVATION_WINDOW_SQL = '(extract(epoch FROM reserved_at) * 1000000)::bigint::text';
+
+/**
+ * The reserved_at a reservation leaves: the open window's (`keep`), a new window's, or NULL when nothing is reserved. A new
+ * window's id is later than the one it replaces even on a millisecond clock (PGLite), so the two never compare equal.
+ */
+const RESERVED_AT_SQL = (total: string, keep: string) =>
+  `reserved_at = CASE WHEN ${total} <= 0 THEN NULL WHEN ${keep} THEN reserved_at ELSE GREATEST(now(), reserved_at + interval '1 millisecond') END`;
+
+/** Book (`ok`) or release one grant's reservation, only while the window it reserved in is still open. */
+async function settleReservation(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, window: string | null, usd: number, ok: boolean, unpriced = 0): Promise<void> {
+  if (usd === 0 || window === null) return;
+  await engine.executeRaw(`UPDATE page_embedding_budget SET
+      reserved_usd = CASE WHEN reserved_usd - $2::float8 <= $5::float8 THEN 0 ELSE reserved_usd - $2::float8 END,
+      reserved_at = CASE WHEN reserved_usd - $2::float8 <= $5::float8 THEN NULL ELSE reserved_at END,
+      spent_usd = spent_usd + $3::float8, unpriced_calls = unpriced_calls + $4::int, updated_at = now()
+    WHERE page_id = $1 AND ${RESERVATION_WINDOW_SQL} = $6::text`, [pageId, usd, ok ? usd : 0, ok ? unpriced : 0, RESERVED_EPSILON_USD, window]);
+}
+
 /** A segmented page (Wave B) carries `body_bytes` and no body strings; an inline page carries its body. */
 type BudgetPage = { id: number; body_storage?: BodyStorage | null; body_bytes?: number | null; compiled_truth?: string; timeline?: string | null };
 
@@ -129,7 +159,7 @@ export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
   return engine.transaction(async tx => {
     await tx.executeRaw('INSERT INTO page_embedding_budget (page_id) VALUES ($1) ON CONFLICT (page_id) DO NOTHING', [page.id]);
     const [row] = await tx.executeRaw<BudgetRow>(`SELECT state, reason, embedding_signature, spent_usd, reserved_usd, cap_usd,
-        (reserved_usd > 0 AND reserved_at < now() - interval '1 hour') AS stale_reservation
+        (reserved_usd > 0 AND updated_at < now() - interval '1 hour') AS stale_reservation
       FROM page_embedding_budget WHERE page_id = $1 FOR UPDATE`, [page.id]);
     if (!row) return { kind: 'unmetered' } as const;
     if (row.state === 'held' && !approved) return { kind: 'held', reason: row.reason ?? 'awaiting_approval' } as const;
@@ -158,21 +188,17 @@ export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
       chunkIndexes.add(chunk.chunk_index);
     }
     const deferred = stale.length - chunkIndexes.size;
+    const openWindow = reserved > 0;
     reserved += reservedUsd;
     const state: PageBudgetState = deferred > 0 ? 'capped' : 'open';
-    await tx.executeRaw(`UPDATE page_embedding_budget SET state = $2, reason = $3, embedding_signature = COALESCE($4, embedding_signature),
-        spent_usd = $5::float8, reserved_usd = $6::float8, reserved_at = CASE WHEN $6::float8 > 0 THEN now() ELSE NULL END,
-        cap_usd = $7::float8, updated_at = now() WHERE page_id = $1`,
+    const [written] = await tx.executeRaw<{ reservation_window: string | null }>(`UPDATE page_embedding_budget SET state = $2, reason = $3, embedding_signature = COALESCE($4, embedding_signature),
+        spent_usd = $5::float8, reserved_usd = $6::float8, ${RESERVED_AT_SQL('$6::float8', '$8::boolean')},
+        cap_usd = $7::float8, updated_at = now() WHERE page_id = $1 RETURNING ${RESERVATION_WINDOW_SQL} AS reservation_window`,
     [page.id, state, deferred > 0 ? 'cap_reached' : null, opts.signature ?? null, spent, reserved,
-      approved && Number.isFinite(capUsd) ? capUsd : row.cap_usd]);
+      approved && Number.isFinite(capUsd) ? capUsd : row.cap_usd, openWindow]);
     const grant: PageEmbedGrant = {
       chunkIndexes, reservedUsd, deferred, capUsd,
-      settle: async ({ ok }) => {
-        if (reservedUsd === 0) return;
-        await engine.executeRaw(`UPDATE page_embedding_budget SET reserved_usd = GREATEST(0, reserved_usd - $2::float8),
-            spent_usd = spent_usd + $3::float8, unpriced_calls = unpriced_calls + $4::int, updated_at = now() WHERE page_id = $1`,
-        [page.id, reservedUsd, ok ? reservedUsd : 0, ok && !priced ? 1 : 0]);
-      },
+      settle: ({ ok }) => settleReservation(engine, page.id, written?.reservation_window ?? null, reservedUsd, ok, priced ? 0 : 1),
     };
     return { kind: 'grant', grant } as const;
   });
@@ -213,7 +239,7 @@ export async function reservePageSpend(engine: BrainEngine, page: BudgetPage, si
   return engine.transaction(async tx => {
     await tx.executeRaw('INSERT INTO page_embedding_budget (page_id) VALUES ($1) ON CONFLICT (page_id) DO NOTHING', [page.id]);
     const [row] = await tx.executeRaw<BudgetRow>(`SELECT state, reason, embedding_signature, spent_usd, reserved_usd, cap_usd,
-        (reserved_usd > 0 AND reserved_at < now() - interval '1 hour') AS stale_reservation
+        (reserved_usd > 0 AND updated_at < now() - interval '1 hour') AS stale_reservation
       FROM page_embedding_budget WHERE page_id = $1 FOR UPDATE`, [page.id]);
     if (!row) return { kind: 'unmetered' } as const;
     const sameLedger = !embeddingSignature || !row.embedding_signature || row.embedding_signature === embeddingSignature;
@@ -223,16 +249,13 @@ export async function reservePageSpend(engine: BrainEngine, page: BudgetPage, si
     const refused = (reason: 'cap_reached' | 'held') => ({ kind: 'refused', reason, capUsd, spentUsd: spent, reservedUsd: reserved, estimateUsd: estimate } as const);
     if (kind === 'embedding' && row.state === 'held') return refused('held');
     if (spent + reserved + estimate > capUsd) return refused('cap_reached');
-    await tx.executeRaw(`UPDATE page_embedding_budget SET embedding_signature = COALESCE($2, embedding_signature), spent_usd = $3::float8,
-        reserved_usd = $4::float8, reserved_at = CASE WHEN $4::float8 > 0 THEN now() ELSE NULL END, updated_at = now() WHERE page_id = $1`,
-    [page.id, embeddingSignature, spent, reserved + estimate]);
+    const [written] = await tx.executeRaw<{ reservation_window: string | null }>(`UPDATE page_embedding_budget SET embedding_signature = COALESCE($2, embedding_signature),
+        spent_usd = $3::float8, reserved_usd = $4::float8, ${RESERVED_AT_SQL('$4::float8', '$5::boolean')}, updated_at = now()
+      WHERE page_id = $1 RETURNING ${RESERVATION_WINDOW_SQL} AS reservation_window`,
+    [page.id, embeddingSignature, spent, reserved + estimate, reserved > 0]);
     const grant: PageSpendGrant = {
       reservedUsd: estimate, capUsd,
-      settle: async ({ ok }) => {
-        if (estimate === 0) return;
-        await engine.executeRaw(`UPDATE page_embedding_budget SET reserved_usd = GREATEST(0, reserved_usd - $2::float8),
-            spent_usd = spent_usd + $3::float8, updated_at = now() WHERE page_id = $1`, [page.id, estimate, ok ? estimate : 0]);
-      },
+      settle: ({ ok }) => settleReservation(engine, page.id, written?.reservation_window ?? null, estimate, ok),
     };
     return { kind: 'grant', grant } as const;
   });

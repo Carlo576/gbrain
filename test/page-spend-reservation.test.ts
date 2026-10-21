@@ -134,4 +134,51 @@ describe('reservePageSpend', () => {
       await decision.grant.settle({ ok: true });
     }
   });
+  test('a settle after its reservation was folded into spent as stale changes nothing; the newer reservation is untouched', async () => {
+    for (const { name, engine } of engines) {
+      const page = await segmentedPage(engine);
+      // The ledger is aged by rewriting its times; the 2 ms let the clock (1 ms resolution on PGLite) pass A's reservation time as an hour would.
+      const age = async () => { await new Promise(resolve => setTimeout(resolve, 2)); await engine.executeRaw("UPDATE page_embedding_budget SET reserved_at = now() - interval '2 hours', updated_at = now() - interval '2 hours' WHERE page_id = $1", [page.id]); };
+      const a = await reservePageSpend(engine, page, 'facts:anthropic:claude-haiku-5-5', 0.25);
+      await age();
+      const b = await reservePageSpend(engine, page, 'atoms:anthropic:claude-haiku-5-5', 0.125);
+      expect(await ledger(engine, page.id), name).toEqual({ spent: 0.25, reserved: 0.125, signature: null });
+      if (a.kind !== 'grant' || b.kind !== 'grant') throw new Error(name + ': expected two grants');
+      await a.grant.settle({ ok: true });
+      expect(await ledger(engine, page.id), name).toEqual({ spent: 0.25, reserved: 0.125, signature: null });
+      await a.grant.settle({ ok: false });
+      expect(await ledger(engine, page.id), name).toEqual({ spent: 0.25, reserved: 0.125, signature: null });
+      await b.grant.settle({ ok: true });
+      expect(await ledger(engine, page.id), name).toEqual({ spent: 0.375, reserved: 0, signature: null });
+    }
+  });
+
+  test('an embedding grant folded by a later derivation reservation is not booked twice', async () => {
+    for (const { name, engine } of engines) {
+      const page = await segmentedPage(engine);
+      const stale = [{ chunk_index: 0, chunk_text: 'alpha '.repeat(2000) }];
+      const a = await planPageEmbedding(engine, page, stale, { signature: 'openai:text-embedding-3-large:1536', approvedCapUsd: 1 });
+      if (a.kind !== 'grant' || a.grant.reservedUsd <= 0) throw new Error(name + ': expected an embedding grant with a reservation');
+      await new Promise(resolve => setTimeout(resolve, 2));
+      await engine.executeRaw("UPDATE page_embedding_budget SET reserved_at = now() - interval '2 hours', updated_at = now() - interval '2 hours' WHERE page_id = $1", [page.id]);
+      const b = await reservePageSpend(engine, page, 'facts:anthropic:claude-haiku-5-5', 0.125);
+      if (b.kind !== 'grant') throw new Error(name + ': expected a facts grant');
+      const folded = await ledger(engine, page.id);
+      await a.grant.settle({ ok: true });
+      expect(await ledger(engine, page.id), name).toEqual(folded);
+      expect(folded, name).toEqual({ spent: a.grant.reservedUsd, reserved: 0.125, signature: 'openai:text-embedding-3-large:1536' });
+    }
+  });
+  test('a new embedding model replaces the ledger: the old model\'s open grant settles into nothing', async () => {
+    for (const { name, engine } of engines) {
+      const page = await segmentedPage(engine);
+      const a = await reservePageSpend(engine, page, 'embedding:openai:text-embedding-3-large:1536', 0.25);
+      const b = await reservePageSpend(engine, page, 'embedding:voyage:voyage-4:1024', 0.125);
+      if (a.kind !== 'grant' || b.kind !== 'grant') throw new Error(name + ': expected two grants');
+      await a.grant.settle({ ok: true });
+      expect(await ledger(engine, page.id), name).toEqual({ spent: 0, reserved: 0.125, signature: 'voyage:voyage-4:1024' });
+      await b.grant.settle({ ok: true });
+      expect(await ledger(engine, page.id), name).toEqual({ spent: 0.125, reserved: 0, signature: 'voyage:voyage-4:1024' });
+    }
+  });
 });
