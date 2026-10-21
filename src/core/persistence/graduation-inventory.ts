@@ -122,6 +122,7 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('page_purges', 'user_data', 'Text-free page purge tombstones (#5575); dropping them would let purged pages re-import.'),
     carry('page_retrievals', 'operational', 'Retrieval telemetry: when a user-facing read last surfaced each page (stale-page bias, volunteer usage stats).'),
     carry('page_segment_derivations', 'operational', 'Per-segment derivation watermarks (links, mentions, timeline, fences, conversation facts, atoms, backstop, synopsis) keyed by manifest occurrence; without them the next pass re-derives every segment, including paid conversation-facts windows.'),
+    carry('page_segment_derivation_purges', 'operational', 'Recorded purge sweeps of segment derivation rows still in progress, with their cursor and claim; without them a graduated brain stops refusing claimed text and never finishes sweeping it out of copied derivation rows.'),
     carry('page_segment_texts', 'user_data', 'Segment texts of segmented page bodies, stored once per source; without them a large page has no body.'),
     carry('page_versions', 'user_data', 'Page revision history with attribution.'),
     carry('page_write_guards', 'user_data', 'Page write guards per source incarnation and slug.'),
