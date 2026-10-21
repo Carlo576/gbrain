@@ -1201,7 +1201,7 @@ export async function runExtractConversationFactsCore(
             // delete-orphans-first makes that replay deterministic.
             state.cpMap.delete(cpMapKey(sourceId, currentPage.slug));
             if (isSegmentedPage(currentPage) && !state.managed && !hasRawTranscriptSidecar(currentPage)) {
-              const { newestEnd } = await processSegmentedConversationPage(state, currentPage, { gapMinutes: pageSegmentGapMinutes(currentPage) ?? null, sinceIso: opts.sinceIso });
+              const { newestEnd } = await processSegmentedConversationPage(state, currentPage, { gapMinutes: pageSegmentGapMinutes(currentPage) ?? null, sinceIso: opts.sinceIso, retryFailed: opts.force });
               if (newestEnd) state.cpMap.set(cpMapKey(sourceId, currentPage.slug), newestEnd);
               return { newEndIso: newestEnd };
             }

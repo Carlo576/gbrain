@@ -41,7 +41,7 @@ const clock = (minutes: number) => { const h = 9 + Math.floor(minutes / 60); ret
 const dateOf = (day: number) => new Date(Date.UTC(2025, 0, 1) + day * 86_400_000).toISOString().slice(0, 10);
 
 /** Timed turns two minutes apart: one gap group per day. Deterministic per seed. */
-function turns(day: number, from: number, count: number, seed: number): string {
+export function turns(day: number, from: number, count: number, seed: number): string {
   let s = seed * 7919 + day * 104_729 + from;
   const next = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
   const out: string[] = [];
@@ -105,17 +105,20 @@ export function paidTransport(o: ChatOpts): Promise<ChatResult> {
 /**
  * One extraction run with a fake extractor; `calls` lists every window text it was handed, in call order. `paid`: each
  * window also calls the gateway (install paidTransport), so the call is booked. `failAt`: the extractor throws on that
- * call (1-based) after the provider answered; `abortAfter`: the run is aborted after that many calls.
+ * call (1-based) after the provider answered; `failOn`: it throws on every window text the predicate accepts;
+ * `abortAfter`: the run is aborted after that many calls; `segmentLimit`: at most that many windows per page.
  */
-export async function extract(engine: BrainEngine, slug: string, opts: { force?: boolean; paid?: boolean; failAt?: number; abortAfter?: number; sinceIso?: string } = {}) {
+export async function extract(engine: BrainEngine, slug: string, opts: { force?: boolean; paid?: boolean; failAt?: number; failOn?: (text: string) => boolean;
+  abortAfter?: number; sinceIso?: string; segmentLimit?: number } = {}) {
   const calls: string[] = [];
   const controller = new AbortController();
   const result = await runExtractConversationFactsCore(engine, { sourceId: 'default', slugs: [slug], sleepMs: 0, force: opts.force,
-    sinceIso: opts.sinceIso,
+    sinceIso: opts.sinceIso, segmentLimit: opts.segmentLimit,
     extractor: async input => {
       calls.push(input.turnText);
       if (opts.paid) await gatewayChat({ model: PAID_MODEL, messages: [{ role: 'user', content: input.turnText }], maxTokens: 64 });
       if (calls.length === opts.failAt) throw new Error('fake extractor failure after the provider answered');
+      if (opts.failOn?.(input.turnText)) throw new Error('fake extractor failure on this window');
       if (calls.length === opts.abortAfter) controller.abort();
       return [{ fact: `Alice Example noted window ${sha(input.turnText).slice(0, 12)}`, kind: 'fact', entity_slug: null, source: SOURCE }];
     } }, controller.signal);

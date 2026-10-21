@@ -134,8 +134,8 @@ function splitOversizedTurn(m: ConversationMessage, pageTitle: string, maxChars:
   return splitTurnText(m.text, budget).map((text) => ({ ...m, text }));
 }
 
-/** A closed window and the tag of the message it starts with (the caller's owner of that message). */
-export interface TaggedWindow<Tag> { seg: ConversationSegment; tag: Tag }
+/** A closed window, the tag of the message it starts with and the tag of the message it ends with. */
+export interface TaggedWindow<Tag> { seg: ConversationSegment; tag: Tag; last: Tag }
 
 /** What one pushed message did: dropped (filtered out), or accepted, opening a new gap group or not. */
 export type WindowPush<Tag> = { accepted: false; windows: [] } | { accepted: true; startsGroup: boolean; windows: TaggedWindow<Tag>[] };
@@ -156,9 +156,10 @@ export function createWindowStream<Tag>(opts: SplitSegmentsOpts = {}) {
   let groupMessages = 0;
   let cur: ConversationMessage[] = [];
   let curTag: Tag | undefined;
+  let lastTag: Tag | undefined;
   let held: TaggedWindow<Tag>[] = [];
   const close = (out: TaggedWindow<Tag>[]) => {
-    if (cur.length > 0) held.push({ seg: segmentOf(cur), tag: curTag as Tag });
+    if (cur.length > 0) held.push({ seg: segmentOf(cur), tag: curTag as Tag, last: lastTag as Tag });
     cur = [];
     if (groupMessages >= MIN_SEGMENT_MESSAGES) { out.push(...held); held = []; }
   };
@@ -180,6 +181,7 @@ export function createWindowStream<Tag>(opts: SplitSegmentsOpts = {}) {
       for (const part of parts) {
         if (cur.length >= maxMessages || (cur.length > 0 && renderedLength(pageTitle, [...cur, part]) > maxChars)) close(windows);
         if (cur.length === 0) curTag = tag;
+        lastTag = tag;
         cur.push(part);
       }
       if (groupMessages >= MIN_SEGMENT_MESSAGES && held.length) { windows.push(...held); held = []; }
