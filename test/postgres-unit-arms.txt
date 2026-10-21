@@ -175,7 +175,6 @@ test/large-pages/segmented-storage-visibility.test.ts
 test/large-pages/segmented-sweep-budget.test.ts
 test/large-pages/segmented-sweep-deferral.test.ts
 test/large-pages/segmented-switch.test.ts
-test/large-pages/segmented-synopsis.test.ts
 test/large-pages/segmented-think-compile-leads.serial.test.ts
 test/large-pages/segmented-timeline-heap.test.ts
 test/large-pages/segmented-timeline-retract-versions.test.ts

@@ -3,13 +3,15 @@
  * (`readProjectionSnapshot` / `installPageEmbeddings`) reads the page body, its
  * fence overlay and every chunk of the page; a segmented page is embedded from
  * its stale chunk rows alone: keyset pages of live, vector-less rows with their
- * text, the page title and the plain tier (the synopsis tier stays off for
- * segmented pages, so no input depends on the rest of the body), metered by the
+ * text, the page title and the plain tier (no input depends on the rest of the
+ * body; per-chunk synopsis on a segmented page, whose input is the lead and one
+ * window of the chunk's segment, is the contextual retrieval service's, spec
+ * 8.6, and installs through installSegmentedVectors), metered by the
  * per-page budget and installed by chunk_index and exact text onto rows still
  * in the page's live body generation. It never reads a segment.
  */
 import type { BrainEngine } from '../engine.ts';
-import type { CRMode } from '../types.ts';
+import type { ChunkInput, CRMode } from '../types.ts';
 import { jsonRowBatches } from '../batch-rows.ts';
 import { wrapChunkTextsForStoredMode } from '../embedding-context.ts';
 import { embeddingInputHash, plainEmbeddingTier } from '../embedding-input-hash.ts';
@@ -124,12 +126,26 @@ export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmb
   }
   const tier = plainEmbeddingTier(page.contextual_retrieval_mode);
   const provenance = embeddingInputContext(target, page.title, null, []);
-  const updates = chunks.map((chunk, i) => ({ chunk_index: chunk.chunk_index, chunk_text: chunk.chunk_text,
-    embedding: `[${Array.from(vectors[i]!).join(',')}]`, hash: embeddingInputHash(provenance, tier, chunk) }));
+  return installSegmentedVectors(engine, page, target, chunks.map((chunk, i) => ({ chunk_index: chunk.chunk_index, chunk_text: chunk.chunk_text,
+    vector: vectors[i]!, hash: embeddingInputHash(provenance, tier, chunk) })), opts.beforeInstall);
+}
+
+/** One vector to install on a segmented page: the row's chunk_index and exact text, and the recorded embedding input. */
+export interface SegmentedVectorUpdate { chunk_index: number; chunk_text: string; vector: Float32Array; hash: string }
+
+/**
+ * Install vectors with their recorded inputs on the live rows of a segmented page with the same chunk_index and text,
+ * under the page lock, while the page's slug, title and contextual mode and the write target (column, provenance
+ * model) are those the inputs were built under; 0 when any moved. `beforeInstall` runs after the lock; throwing
+ * installs nothing. Returns the rows that took a vector.
+ */
+export async function installSegmentedVectors(engine: BrainEngine, page: SegmentedEmbedPage, target: Awaited<ReturnType<typeof embeddingWriteTarget>>,
+  vectors: readonly SegmentedVectorUpdate[], beforeInstall?: (tx: BrainEngine) => Promise<void>): Promise<number> {
+  const updates = vectors.map(v => ({ chunk_index: v.chunk_index, chunk_text: v.chunk_text, embedding: `[${Array.from(v.vector).join(',')}]`, hash: v.hash }));
   const col = quoteIdentifier(target.column.name);
   return engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId: page.source_id, slug: page.slug }]);
-    await opts.beforeInstall?.(tx);
+    await beforeInstall?.(tx);
     const current = await readSegmentedEmbedPage(tx, { id: page.id });
     const now = await embeddingWriteTarget(tx);
     if (!current || current.slug !== page.slug || current.title !== page.title
@@ -147,6 +163,29 @@ export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmb
     }
     return installed;
   });
+}
+
+/** A live segment of a segmented page, newest first: its occurrence, text hash and entry state (manifest metadata only). */
+export interface LiveEmbedSegment { occurrenceId: number; sha256: Uint8Array; entryState: unknown }
+
+export async function listLiveEmbedSegments(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number): Promise<LiveEmbedSegment[]> {
+  const rows = await engine.executeRaw<{ occurrence_id: number | string; sha256: Uint8Array; entry_state: unknown }>(
+    `SELECT m.occurrence_id, m.sha256, m.entry_state FROM page_body_manifest m JOIN pages p ON p.id = m.page_id
+      WHERE m.page_id = $1 AND m.staging_id IS NULL AND m.gen_from <= p.body_generation AND (m.gen_to IS NULL OR m.gen_to > p.body_generation)
+      ORDER BY m.seq DESC`, [pageId]);
+  return rows.map(row => ({ occurrenceId: Number(row.occurrence_id), sha256: new Uint8Array(row.sha256), entryState: row.entry_state }));
+}
+
+export interface SegmentChunkRow { chunk_index: number; chunk_text: string; chunk_source: NonNullable<ChunkInput['chunk_source']>; embedding_input_hash: string | null }
+
+/** The live chunk rows of one segment of a segmented page in text order, with their recorded embedding inputs. */
+export async function listSegmentChunkRows(engine: Pick<BrainEngine, 'executeRaw'>, pageId: number, occurrenceId: number): Promise<SegmentChunkRow[]> {
+  const rows = await engine.executeRaw<SegmentChunkRow>(
+    `SELECT cc.chunk_index, cc.chunk_text, cc.chunk_source, cc.embedding_input_hash
+       FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+      WHERE cc.page_id = $1 AND cc.occurrence_id = $2 AND ${currentTextProjectionFilter('p')} AND ${chunkGenerationFilter('p', 'cc')}
+      ORDER BY cc.chunk_index`, [pageId, occurrenceId]);
+  return rows.map(row => ({ ...row, chunk_index: Number(row.chunk_index) }));
 }
 
 /**
