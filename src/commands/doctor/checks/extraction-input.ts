@@ -14,7 +14,9 @@
  * derivations keep their receipt per occurrence on page_segment_derivations
  * (`unread_windows`: the run stopped before every window was read, at the
  * per-page spend cap or a window limit; the next run resumes there). Both tables
- * are read; a page counts once per pipeline and receipt kind.
+ * are read; a page counts once per pipeline and receipt kind. A derivation receipt
+ * without a `kind` (the synopsis pass's tier fallback or refused reservation) is
+ * not an input-truncation receipt and is not counted.
  */
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
@@ -46,7 +48,7 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
            FROM page_extraction_state s WHERE s.input_truncated IS NOT NULL
          UNION ALL
          SELECT d.page_id, d.pipeline, COALESCE(d.receipt->>'kind', 'unknown') AS kind, max(d.updated_at) AS updated_at
-           FROM page_segment_derivations d WHERE d.receipt IS NOT NULL GROUP BY 1, 2, 3)
+           FROM page_segment_derivations d WHERE d.receipt->>'kind' IS NOT NULL GROUP BY 1, 2, 3)
        SELECT r.pipeline, r.kind, count(DISTINCT r.page_id)::int AS pages,
               (array_agg(p.source_id || ':' || p.slug ORDER BY r.updated_at DESC))[1:3] AS samples
          FROM receipts r JOIN pages p ON p.id = r.page_id AND p.deleted_at IS NULL

@@ -33,6 +33,9 @@ import { installSegmentedVectors, readSegmentedEmbedPage } from '../../src/core/
 import type { AppendBrain } from './append-brain.ts';
 import { needlePage, needlePageBody, sealAtOldChunker } from './rechunk-segmented-cases.ts';
 import { runSegmentedRechunk } from '../../src/core/page-body/rechunk.ts';
+import { extractionInputTruncatedEntry } from '../../src/commands/doctor/checks/extraction-input.ts';
+import type { DoctorContext } from '../../src/commands/doctor/context.ts';
+import type { Check } from '../../src/commands/doctor.ts';
 
 const WORDS = ['launch', 'pricing', 'roadmap', 'hiring', 'metrics', 'retention', 'design', 'latency', 'budget', 'customer'];
 const paragraph = (d: number, k: number) =>
@@ -349,6 +352,36 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
     expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: 0 });
     expect({ calls: calls.length, segmentReads }).toEqual({ calls: 0, segmentReads: 0 });
     expect((await synopsisRows(id)).every(r => r.state === 'done')).toBe(true);
+  }, 300_000);
+
+  test('doctor: synopsis receipts (a title-tier fallback, a refused reservation) are not extraction truncation and raise no extraction_input_truncated warning', async () => {
+    const brain = opts.getBrain();
+    await roomyCap();
+    const fallbackSlug = 'notes/synopsis-doctor-fallback';
+    await brain.seed(fallbackSlug, page(days(1_300_000).body + '\nDoctor fallback fixture.\n'));
+    refuse = args => args.chunkIndex === 0;
+    try {
+      expect(await run(fallbackSlug)).toMatchObject({ kind: 'page_fallback', fallback_kind: 'refusal' });
+    } finally {
+      refuse = null;
+    }
+    const cappedSlug = 'notes/synopsis-doctor-capped';
+    await brain.seed(cappedSlug, page(days(1_300_000).body + '\nDoctor cap fixture.\n'));
+    await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, '0.000001');
+    try {
+      reset();
+      expect(await run(cappedSlug)).toEqual({ kind: 'skipped', reason: 'budget_limited' });
+      expect(calls.length).toBe(0);
+    } finally {
+      await roomyCap();
+    }
+    const receipts = [...await synopsisRows((await pageRow(fallbackSlug)).id), ...await synopsisRows((await pageRow(cappedSlug)).id)].map(r => r.receipt);
+    expect(receipts).toContainEqual({ fallback_kind: 'refusal' });
+    expect(receipts.some(r => (r as { reason?: string } | null)?.reason === 'budget_limited')).toBe(true);
+    const check = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
+    const groups = (check.details as { groups: Array<{ pipeline: string; kind: string }> }).groups;
+    expect(groups.filter(g => g.pipeline === 'synopsis')).toEqual([]);
+    expect(check.status).not.toBe('warn');
   }, 300_000);
 
   test('an inline page keeps the synopsisBodyHash input', async () => {
