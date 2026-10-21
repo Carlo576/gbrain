@@ -136,8 +136,8 @@ export async function embedSegmentedRows(engine: BrainEngine, page: SegmentedEmb
   }
   const tier = plainEmbeddingTier(page.contextual_retrieval_mode);
   const provenance = embeddingInputContext(target, page.title, null, []);
-  return installSegmentedVectors(engine, page, target, chunks.map((chunk, i) => ({ chunk_index: chunk.chunk_index, chunk_text: chunk.chunk_text,
-    vector: vectors[i]!, hash: embeddingInputHash(provenance, tier, chunk) })), opts.beforeInstall);
+  return { pending: rows.length, installed: await installSegmentedVectors(engine, page, target, chunks.map((chunk, i) => ({ chunk_index: chunk.chunk_index,
+    chunk_text: chunk.chunk_text, vector: vectors[i]!, hash: embeddingInputHash(provenance, tier, chunk) })), opts.beforeInstall) };
 }
 
 /** One vector to install on a segmented page: the row's chunk_index and exact text, and the recorded embedding input. */
@@ -160,7 +160,7 @@ export async function installSegmentedVectors(engine: BrainEngine, page: Segment
     const now = await embeddingWriteTarget(tx);
     if (!current || current.slug !== page.slug || current.title !== page.title
       || current.contextual_retrieval_mode !== page.contextual_retrieval_mode
-      || now.column.name !== target.column.name || now.provenanceModel !== target.provenanceModel) return { pending: rows.length, installed: 0 };
+      || now.column.name !== target.column.name || now.provenanceModel !== target.provenanceModel) return 0;
     let installed = 0;
     for (const batch of jsonRowBatches(updates, update => update)) {
       installed += (await tx.executeRaw(`UPDATE content_chunks cc SET ${col} = v.embedding${vectorCastSuffix(target.column)},
@@ -171,7 +171,7 @@ export async function installSegmentedVectors(engine: BrainEngine, page: Segment
           AND ${chunkGenerationFilter('p', 'cc')}
         RETURNING cc.id`, [page.id, batch, target.model])).length;
     }
-    return { pending: rows.length, installed };
+    return installed;
   });
 }
 

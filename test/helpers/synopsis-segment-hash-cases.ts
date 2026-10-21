@@ -7,21 +7,24 @@
  * 1. Protects: under per_chunk_synopsis a segmented page leaves the title tier: every live chunk gets a synopsis vector
  *    whose document is the title, the projected lead and one window of its own segment (within SYNOPSIS_DOC_MAX_CHARS),
  *    one synopsis derivation row per live occurrence. A rerun calls nothing and reads no chunk row. An append (by a
- *    remote writer) re-synopsizes only the chunks of its new segments: calls and segment reads equal those, and every
- *    other chunk keeps its embedding_input_hash and vector. An exhausted per-page cap leaves the page on the title tier
+ *    remote writer) re-synopsizes only the chunks of the windows it changed: the rewritten tail segment's unchanged
+ *    windows carry their synopsis vectors onto the new rows at staging, so calls equal the changed windows' chunks, one
+ *    segment is read, and every other chunk keeps its embedding_input_hash and vector. An exhausted per-page cap leaves the page on the title tier
  *    with no synopsis call; with room, the same page takes the synopsis tier. A refused synopsis embeds its window at
  *    the title tier and settles. An inline page keeps the synopsisBodyHash input.
  * 2. Fails when: a segmented page never leaves the title tier (the pre-lane skip), the synopsis input is hashed over every
- *    chunk of the page (an append changes every chunk's input), a settled segment is read or paid for again, or a refused
+ *    chunk of the page (an append changes every chunk's input), the rewritten tail is re-synopsized whole (staging drops
+ *    the synopsis vectors of its unchanged windows), a settled segment is read or paid for again, or a refused
  *    reservation still calls the model.
  */
 import { expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { reembedPageWithContextualRetrieval } from '../../src/core/contextual-retrieval-service.ts';
-import { SYNOPSIS_DOC_MAX_CHARS, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
+import { SYNOPSIS_DOC_MAX_CHARS, segmentSynopsisWindows, type GeneratePerChunkSynopsisArgs, type GeneratePerChunkSynopsisResult } from '../../src/core/page-summary.ts';
 import { embeddingInputHash } from '../../src/core/embedding-input-hash.ts';
 import { embeddingInputContext, embeddingWriteTarget } from '../../src/core/page-state/projections.ts';
+import { segmentSynopsisLead } from '../../src/core/page-body/segment-synopsis.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import { chunkGenerationFilter } from '../../src/core/search/safe-chunks.ts';
 import type { AppendBrain } from './append-brain.ts';
@@ -78,7 +81,7 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
   /** The cap is set high enough for a whole 2.3 MB page at the upper-bound estimate (uncached prompts at list price). */
   const roomyCap = () => opts.getBrain().engine.setConfig(PAGE_EMBED_CAP_KEY, '1000');
 
-  test('append invalidation: a segmented page leaves the title tier, a rerun does no work, an append pays only for its new segments', async () => {
+  test('append invalidation: a segmented page leaves the title tier, a rerun does no work, an append pays only for the windows it changed', async () => {
     const brain = opts.getBrain();
     await roomyCap();
     const slug = 'notes/synopsis-log';
@@ -126,11 +129,32 @@ export function defineSynopsisSegmentHashCases(opts: { getBrain: () => AppendBra
       expect(c.embedding_input_hash).toBe(kept.get(c.chunk_index)!.embedding_input_hash);
       expect(c.vector).toBe(kept.get(c.chunk_index)!.vector);
     }
+    // The changed windows, from the window documents alone: a fresh chunk whose (document, text) no retired window had.
+    const lead = await segmentSynopsisLead(brain.engine, { id: seeded.id, slug, source_id: 'default' });
+    const retired = done.filter(c => !after.some(a => a.occurrence_id === c.occurrence_id));
+    const oldInputs = new Map<string, ChunkRow>();
+    for (const w of segmentSynopsisWindows(retired, lead)) for (const c of w.chunks) oldInputs.set(`${w.document}\0${c.chunk_text}`, c);
+    const changed: number[] = [];
+    const carried: Array<[ChunkRow, ChunkRow]> = [];
+    for (const w of segmentSynopsisWindows(fresh, lead)) {
+      for (const c of w.chunks) {
+        const old = oldInputs.get(`${w.document}\0${c.chunk_text}`);
+        if (old) carried.push([c, old]); else if (c.chunk_source !== 'fenced_code') changed.push(c.chunk_index);
+      }
+    }
+    expect(changed.length).toBeGreaterThan(0);
+    expect(changed.length).toBeLessThan(fresh.length / 2);
+    expect(carried.length).toBe(fresh.length - changed.length);
+    for (const [c, old] of carried) {
+      expect(c.embedding_input_hash).toBe(old.embedding_input_hash);
+      expect(c.vector).toBe(old.vector);
+    }
 
     reset();
-    expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: fresh.length });
-    expect(calls.map(call => call.chunkIndex).sort((a, b) => a - b)).toEqual(nonCode(fresh).map(c => c.chunk_index));
+    expect(await run(slug)).toMatchObject({ kind: 'success', chunks_embedded: changed.length });
+    expect(calls.map(call => call.chunkIndex).sort((a, b) => a - b)).toEqual(changed);
     expect(segmentReads).toBe(freshOccurrences.size);
+    for (const [c] of carried) expect((await chunks(slug)).find(row => row.chunk_index === c.chunk_index)!.embedding_input_hash).toBe(c.embedding_input_hash);
     expect(calls.some(call => call.documentText.includes(`## Day ${count + 1}`))).toBe(true);
     const settled = await synopsisRows(seeded.id);
     expect(new Set(settled.map(r => r.occurrenceId))).toEqual(new Set(after.map(c => c.occurrence_id!)));

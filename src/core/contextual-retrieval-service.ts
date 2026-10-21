@@ -53,7 +53,6 @@ import {
   DEFAULT_SYNOPSIS_MODEL,
   estimateSynopsisCallUsd,
   generatePerChunkSynopsis,
-  SEGMENT_SYNOPSIS_LEAD_BYTES,
   segmentSynopsisWindows,
   SYNOPSIS_MAX_TOKENS,
   SYNOPSIS_PROMPT_VERSION,
@@ -76,8 +75,7 @@ import { SEGMENTED_CHUNKER_VERSION } from './page-body/segment-chunks.ts';
 import { embeddingInputHash, synopsisDocumentHash, type EmbeddingTier } from './embedding-input-hash.ts';
 import { currentEmbeddingSignature } from './embedding.ts';
 import { estimatePageEmbedUsd, reservePageSpend, spendGrant } from './page-embedding-budget.ts';
-import { overlaidBoundedPrefix, pageLeadSource } from './page-window/bounded-lead.ts';
-import { boundedProjectedPrefix } from './page-window/document.ts';
+import { segmentSynopsisLead } from './page-body/segment-synopsis.ts';
 
 /**
  * v3 = chunks embed with optional contextual retrieval wrapper. The
@@ -537,8 +535,7 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
   const base = embeddingInputContext(target, page.title, corpusGeneration, []);
   const titlePrefix = buildContextualPrefix(page.title, null);
   const embedSignature = currentEmbeddingSignature();
-  const lead = boundedProjectedPrefix(await overlaidBoundedPrefix(engine,
-    { slug: page.slug, source_id: page.source_id, compiled_truth: await pageLeadSource(engine, initial) }), SEGMENT_SYNOPSIS_LEAD_BYTES);
+  const lead = await segmentSynopsisLead(engine, page);
   const inputs = { title: page.title, lead_sha256: sha256(lead), synopsis_model: synopsisModel, synopsis_max_tokens: synopsisMaxTokens ?? SYNOPSIS_MAX_TOKENS,
     chunker_version: SEGMENTED_CHUNKER_VERSION, corpus_generation: corpusGeneration,
     embedding: { column: target.column.name, model: target.provenanceModel, dimensions: target.column.dimensions } };
