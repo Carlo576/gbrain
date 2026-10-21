@@ -558,6 +558,14 @@ export async function countWindowFacts(db: BrainEngine, sourceId: string, slug: 
   return Number(row?.count ?? 0);
 }
 
+/** The page's active conversation facts a settled collection keeping window `keys` removes: anchored to another window, or unanchored. */
+export async function countConversationFactsOutside(db: BrainEngine, sourceId: string, slug: string, keys: readonly string[]): Promise<number> {
+  const [row] = await db.executeRaw<{ count: string }>(`SELECT count(*)::text AS count FROM facts f WHERE f.source_id=$1 AND f.source_markdown_slug=$2
+    AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%' AND NOT (f.source = ANY($3::text[])) AND f.expired_at IS NULL
+    AND (f.source_window IS NULL OR NOT (${WINDOW_KEY_SQL} = ANY($4::text[])))`, [sourceId, slug, [...AUDIT_ROW_SOURCES], [...keys]]);
+  return Number(row?.count ?? 0);
+}
+
 /**
  * With `windows`, only the page's anchored facts whose window key is in `keys` (`keep` false) or not in it (`keep` true),
  * and its unanchored facts when `unanchored`.

@@ -209,6 +209,7 @@
       "  [OK] consumers_without_heartbeat: PGLite admits one process; no consumer heartbeat rows are kept.",
       "  [OK] host_identity_mismatch: This process's host identity (<home>/.gbrain/persistence/host.json) owns every binding this filesystem holds.",
       "  [OK] extract_atoms_held_failed: No managed atom page or transcript is held after repeated extraction failures.",
+      "  [OK] conversation_detection_ambiguous: No conversation page is held for an undetected format.",
       "  [OK] extraction_input_truncated: Every page extraction read all of its input (no head-only, tail-window or size-skip receipts).",
       "  [OK] derivation_unpriced_model: No segmented page derivation is held back by a model without a price.",
       "  [OK] ghost_pages: No live page is missing its canonical file (5 page(s) inspected).",

@@ -27,10 +27,11 @@
  *     and in runs, newest run first, so a stop reads only the runs it reached; a page nothing changed on reads nothing;
  *   - parses under the page's grammar: the one detectPagePattern picks over the whole page (the whole-page pass's
  *     choice; one unpaid read, counted in conversationDetectionWork), pinned on the rows while the occurrences that
- *     recorded it under the same context are mostly unchanged by bytes; with none detected, the recorded grammar that
- *     parses the most messages, while it parses more than twice any other recorded grammar (else the page fails and
- *     nothing is published); a page with no grammar is not a conversation: it settles as
- *     non-extractable and its conversation facts are collected; a pinned grammar under which nothing parses is detected
+ *     recorded it under the same context are mostly unchanged by bytes, or the one the operator chose for this page
+ *     version (--grammar; none settles the page as non-extractable); with none detected while some built-in format still
+ *     parses a message, the page is held (a detection_ambiguous receipt with each format's count; no call, nothing
+ *     published or collected) until it changes or the operator chooses; a page no format parses a message in is not a
+ *     conversation: it settles as non-extractable and its conversation facts are collected; a pinned grammar under which nothing parses is detected
  *     again; a detected grammar under which nothing parses leaves a no_messages receipt and changes nothing;
  *   - reuses every window an earlier run extracted with the same rendered text under the same context (re-anchored
  *     when it moved), so an append extracts only its new windows and the one it grew;
@@ -51,13 +52,14 @@ import { loadPricingOverrides, type PricingOverrides } from '../budget/budget-tr
 import { providerItemRefusal } from '../ai/errors.ts';
 import { writeDerivedFacts } from '../persistence/derived-facts.ts';
 import { estimateFactsExtractionUsd, meterPaidCall, unpricedModelReceipt } from '../page-embedding-budget.ts';
-import { setExtractionReceipt } from '../extraction-watermark.ts';
+import { readExtractionReceipt, setExtractionReceipt, type InputTruncated } from '../extraction-watermark.ts';
 import { planSegmentDerivations, segmentDerivationContextHash, sourceWindowFor, sourceWindowKey, type SegmentDerivationInput,
   type SegmentDerivationRow, type SourceWindow } from '../page-body/derivations.ts';
 import { conversationDetectionWork, readConversationOccurrences, readOccurrenceText } from '../page-body/segment-conversation.ts';
 import { emptySaveTimeResolutionCounts, mergeSaveTimeResolutionCounts } from '../entities/resolve-on-save.ts';
 import { conversationEntityHints } from './conversation-entity-hints.ts';
-import { countWindowFacts, publishConversationFacts, type ConversationFactRow } from './conversation-publication.ts';
+import { countConversationFactsOutside, countWindowFacts, publishConversationFacts, type ConversationFactRow } from './conversation-publication.ts';
+import { BUILTIN_PATTERNS } from '../conversation-parser/builtins.ts';
 import { recordFailedPage } from './conversation-run-status.ts';
 import { detectPagePattern, startsConversationRun, streamConversationWindows } from './conversation-stream.ts';
 import type { ConversationSegment } from './conversation-types.ts';
@@ -84,7 +86,14 @@ export interface SegmentedConversationCounters {
   pages_marked_non_extractable: number; pages_failed: number; segments_processed: number; facts_extracted: number;
   facts_inserted: number; orphan_facts_cleaned: number; fallback_slugify_count: number; resolution_errors: number;
   failed_pages: Array<{ slug: string; error: string }>;
+  /** Pages held because no format is detected over them yet some format parses a message (a detection_ambiguous receipt). */
+  pages_detection_ambiguous?: number;
+  /** --grammar --dry-run: what a run under the chosen format would extract and collect, per page. */
+  grammar_previews?: GrammarPreview[];
 }
+
+/** What a run under the operator's format (null: none) would do on one page: its messages and windows, the windows it would extract, and the facts its settled collection would remove. */
+export interface GrammarPreview { slug: string; grammar: string | null; messages: number; windows: number; windows_to_extract: number; facts_to_collect: number }
 
 export interface SegmentedConversationRun extends ConversationWindowRun {
   result: SegmentedConversationCounters;
@@ -137,12 +146,23 @@ function windowFailure(error: unknown, signal: AbortSignal | undefined): boolean
   return reason === 'provider_error' && providerItemRefusal((error as { cause?: unknown }).cause) !== null;
 }
 
+/** The messages each built-in format parses over the whole page, for the formats that parse any (unpaid reads). */
+async function messagesByGrammar(occurrences: Parameters<typeof streamConversationWindows>[0], opts: { page: Page; gapMinutes: number | null },
+  readText: (index: number) => Promise<string>): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const { id } of BUILTIN_PATTERNS) {
+    const parsed = await streamConversationWindows(occurrences, 0, occurrences.length, { ...opts, pattern: id }, readText, { window() {}, occurrence() {} });
+    if (parsed.messages > 0) counts[id] = parsed.messages;
+  }
+  return counts;
+}
+
 /**
  * One segmented page's conversation facts, incrementally (module doc). `gapMinutes` is the page's own
  * conversation_segment_gap_minutes (null: the default). Returns the end of the newest window it extracted.
  */
 export async function processSegmentedConversationPage(run: SegmentedConversationRun, page: Page,
-  opts: { gapMinutes: number | null; sinceIso?: string; retryFailed?: boolean; redetect?: boolean }): Promise<{ newestEnd: string | null }> {
+  opts: { gapMinutes: number | null; sinceIso?: string; retryFailed?: boolean; redetect?: boolean; grammar?: string | null }): Promise<{ newestEnd: string | null }> {
   const { engine, sourceId, result } = run;
   if (!opts.redetect) result.pages_considered++;
   const versionToken = regularPageVersionToken(page);
@@ -177,42 +197,35 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   const recorded = prior.filter(row => sameContext(row) && liveOccurrence.has(row.occurrenceId) && rowOutput(row).pattern);
   const kept = recorded.filter(row => hex(liveOccurrence.get(row.occurrenceId)!.sha256) === hex(row.segmentSha256));
   const bytesOf = (rows: SegmentDerivationRow[]) => rows.reduce((n, row) => n + liveOccurrence.get(row.occurrenceId)!.byteLen, 0);
-  let pattern = !opts.redetect && kept.length && 2 * bytesOf(kept) > bytesOf(recorded) ? rowOutput(kept[0]).pattern ?? null : null;
-  const pinned = pattern !== null;
-  let recovered = false;
+  // The operator's format for the page (gbrain extract-conversation-facts --grammar): this run's, else the one chosen for
+  // this page version. It covers the whole page, so the stream starts at its head; none (null) settles it as non-extractable.
+  const stored = opts.grammar === undefined ? await readExtractionReceipt(engine, page.id, KIND) : null;
+  const choice = opts.grammar !== undefined ? opts.grammar
+    : stored?.kind === 'grammar_chosen' && stored.version_token === versionToken ? stored.grammar ?? null : undefined;
+  const choiceReceipt: InputTruncated | null = choice === undefined ? null : { kind: 'grammar_chosen', pipeline: KIND, processed_chars: 0, grammar: choice, version_token: versionToken };
+  if (opts.grammar !== undefined && !run.dryRun) await setExtractionReceipt(engine, page.id, KIND, choiceReceipt);
+  if (choice !== undefined) from = 0;
+  let pattern = choice !== undefined ? choice
+    : !opts.redetect && kept.length && 2 * bytesOf(kept) > bytesOf(recorded) ? rowOutput(kept[0]).pattern ?? null : null;
+  const pinned = choice === undefined && pattern !== null;
   const detectedBytes = conversationDetectionWork.bytes;
-  if (!pattern && from < liveIds.length) pattern = await detectPagePattern(occurrences, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
-  if (!pattern && from < liveIds.length) {
+  if (choice === undefined && !pattern && from < liveIds.length) pattern = await detectPagePattern(occurrences, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
+  if (choice === undefined && !pattern && from < liveIds.length) {
     if (opts.sinceIso) { result.pages_skipped++; return { newestEnd: null }; }
-    // No grammar over the whole page (text around a transcript can tip the density test). Of the grammars earlier runs
-    // recorded, the one that parses the most messages here (on a tie, the one recorded last) is the page's grammar: the
-    // run goes on under it, so its windows replace their exact keys and a settled run collects the rest. It must parse
-    // more than twice the messages of any other recorded grammar, else the other may be the real one and collecting
-    // would delete its facts: the page fails with nothing published until an edit settles which format it is. When no
-    // recorded grammar parses a message, the page stopped being a transcript: it settles as non-extractable below and
-    // its conversation facts are collected.
-    const lastRecorded = new Map<string, string>();
-    for (const row of prior) {
-      const recordedGrammar = rowOutput(row).pattern;
-      if (recordedGrammar && row.updatedAt > (lastRecorded.get(recordedGrammar) ?? '')) lastRecorded.set(recordedGrammar, row.updatedAt);
-    }
-    const candidates: Array<{ grammar: string; messages: number; at: string }> = [];
-    for (const [grammar, at] of lastRecorded) {
-      const parsed = await streamConversationWindows(occurrences, 0, liveIds.length, { page, gapMinutes: opts.gapMinutes, pattern: grammar },
-        i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }), { window() {}, occurrence() {} });
-      candidates.push({ grammar, messages: parsed.messages, at });
-    }
-    candidates.sort((a, b) => b.messages - a.messages || (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
-    const [best, rival] = candidates;
-    if (best && rival && best.messages > 0 && best.messages <= 2 * rival.messages) {
-      const why = `no format is detected and its recorded formats compete (${best.grammar}: ${best.messages} messages, ${rival.grammar}: ${rival.messages}); facts kept, nothing settled`;
-      process.stderr.write(`[extract-conversation-facts] ${page.slug}: ${why}\n`);
-      result.pages_failed++;
-      recordFailedPage(result, page.slug, why);
+    // No format is detected over the whole page. One that still parses a message here may be the page's (text around a
+    // transcript can tip the density test) or a quoted part of it, and guessing has deleted current facts: the page is
+    // held, with no call, nothing published or collected and a detection_ambiguous receipt naming each format's count,
+    // until it changes or the operator chooses its format. A page no format parses a message in is not a transcript: it
+    // settles as non-extractable below and its conversation facts are collected.
+    const grammars = await messagesByGrammar(occurrences, { page, gapMinutes: opts.gapMinutes }, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
+    if (Object.keys(grammars).length) {
+      if (!run.dryRun) await setExtractionReceipt(engine, page.id, KIND, { kind: 'detection_ambiguous', pipeline: KIND, processed_chars: 0, grammars });
+      result.pages_detection_ambiguous = (result.pages_detection_ambiguous ?? 0) + 1;
+      process.stderr.write(`[extract-conversation-facts] ${page.slug}: held: no format is detected over the page, yet ${Object.entries(grammars).map(([id, n]) => `${id} parses ${n}`).join(', ')} message(s);`
+        + ` its facts were kept and nothing was extracted; gbrain extract-conversation-facts --slug ${page.slug} --grammar <format|none> --dry-run previews a choice\n`);
       return { newestEnd: null };
     }
-    if (best && best.messages > 0) { pattern = best.grammar; recovered = true; }
-    if (!pattern) from = 0;
+    from = 0;
   }
   // Earlier windows of the occurrences the stream covers (and of retired ones), reusable by rendered text under the same context.
   const reusable = new Map<string, Array<{ occurrenceId: number; record: WindowRecord }>>();
@@ -279,6 +292,12 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     for (let end = liveIds.length; pattern && end > from;) { const next = await streamRun(end); todo += next.windows.filter(w => w.state === 'todo').length; end = next.start; }
     result.segments_processed += run.segmentLimit > 0 ? Math.min(todo, run.segmentLimit) : todo;
     result.pages_processed++;
+    if (opts.grammar !== undefined) {
+      // The operator's preview: what a run under the chosen format extracts and what its settled collection removes.
+      const keys = windows.map(w => sourceWindowKey(w.window));
+      (result.grammar_previews ??= []).push({ slug: page.slug, grammar: opts.grammar, messages: parsedMessages, windows: windows.length, windows_to_extract: todo,
+        facts_to_collect: await countConversationFactsOutside(engine, sourceId, page.slug, keys) });
+    }
     return { newestEnd: null };
   }
 
@@ -407,9 +426,16 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     result.resolution_errors += resolution.resolution_errors;
   }
 
-  if (pattern && !recovered && from < liveIds.length && parsedMessages === 0) {
+  if (pattern && from < liveIds.length && parsedMessages === 0) {
     // A pinned grammar reads nothing here: detect the page's grammar again and start over under it.
     if (pinned) return processSegmentedConversationPage(run, page, { ...opts, redetect: true });
+    if (choice !== undefined) {
+      // The chosen format reads nothing here: the choice is dropped, nothing is published, and the page is held again.
+      await setExtractionReceipt(engine, page.id, KIND, null);
+      result.pages_failed++;
+      recordFailedPage(result, page.slug, `the chosen format ${pattern} parses no message on the page; facts kept, choose another or none`);
+      return { newestEnd: null };
+    }
     // The grammar detected over the whole page reads no message from the page: a parser fault. Nothing is published.
     await setExtractionReceipt(engine, page.id, KIND, { kind: 'no_messages', pipeline: KIND, processed_chars: 0 });
     process.stderr.write(`[extract-conversation-facts] ${page.slug}: the page reads as ${pattern} but no message parsed under it; its facts were kept, nothing settled\n`);
@@ -418,7 +444,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     return { newestEnd: null };
   }
   const { unchanged, settled, liveKeys, outcome } = await publish(true);
-  await setExtractionReceipt(engine, page.id, KIND, null);
+  await setExtractionReceipt(engine, page.id, KIND, choiceReceipt);
   if (!unchanged) {
     process.stderr.write(`[extract-conversation-facts] ${page.slug} changed during extraction; its finished windows were kept, the rest wait for the next run\n`);
     result.pages_failed++;
