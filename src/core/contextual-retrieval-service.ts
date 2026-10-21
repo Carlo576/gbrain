@@ -74,7 +74,7 @@ import { planSegmentDerivations, segmentDerivationContextHash } from './page-bod
 import { SEGMENTED_CHUNKER_VERSION } from './page-body/segment-chunks.ts';
 import { embeddingInputHash, synopsisDocumentHash, type EmbeddingTier } from './embedding-input-hash.ts';
 import { currentEmbeddingSignature } from './embedding.ts';
-import { estimatePageEmbedUsd, reservePageSpend, spendGrant } from './page-embedding-budget.ts';
+import { estimatePageEmbedUsd, meterPaidCall } from './page-embedding-budget.ts';
 import { segmentSynopsisLead } from './page-body/segment-synopsis.ts';
 
 /**
@@ -561,12 +561,7 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
       const estimateUsd = todo.reduce((usd, c) => usd
         + (c.chunk_source === 'fenced_code' ? 0 : estimateSynopsisCallUsd(synopsisModel, window.document, c.chunk_text, synopsisMaxTokens)), 0)
         + estimatePageEmbedUsd(todo.reduce((n, c) => n + wrapChunkForEmbedding(c.chunk_text, titlePrefix, c.chunk_source).length + SYNOPSIS_WRAPPER_CHARS, 0), embedSignature);
-      const decision = await reservePageSpend(engine, page, `synopsis:${synopsisModel}`, estimateUsd);
-      if (decision.kind === 'refused') {
-        await derivation(segment, 'partial', anchors, { reason: 'budget_limited', cap_usd: decision.capUsd, estimate_usd: decision.estimateUsd });
-        return { kind: 'skipped', reason: 'budget_limited' };
-      }
-      const built = await spendGrant(decision.kind === 'grant' ? decision.grant : undefined, async () => {
+      const metered = await meterPaidCall(engine, page, `synopsis:${synopsisModel}`, estimateUsd, async () => {
         const synopsized = await synopsisWrappedTexts({ chunks: todo, sourceText: window.document, title: page.title, args, synopsisModel, synopsisMaxTokens });
         if (!Array.isArray(synopsized) && synopsized.kind !== 'page_level_fallback_requested') return synopsized;
         const tier: EmbeddingTier = Array.isArray(synopsized) ? 'per_chunk_synopsis' : 'title';
@@ -577,6 +572,11 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
           return classifyEmbedError(err, err instanceof Error ? err.message : String(err));
         }
       });
+      if ('refused' in metered) {
+        await derivation(segment, 'partial', anchors, { reason: 'budget_limited', cap_usd: metered.refused.capUsd, estimate_usd: metered.refused.estimateUsd });
+        return { kind: 'skipped', reason: 'budget_limited' };
+      }
+      const built = metered.value;
       if (built.kind !== 'built') {
         return { kind: built.kind === 'permanent' ? 'permanent_error' : 'transient_error', cause: built.cause, detail: built.detail };
       }

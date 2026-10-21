@@ -3,7 +3,6 @@ import type { PageSnapshot } from '../page-state/types.ts';
 import { stableJson } from '../persistence/digest.ts';
 import type { BrainEngine } from '../engine.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
-import type { PageEmbedGrant } from '../page-embedding-budget.ts';
 
 /**
  * gbrain#4148: consecutive same-content failures of a content-deterministic
@@ -33,8 +32,8 @@ export interface AtomPageInput {
 // PR 4 (Wave B incremental derivation, transcripts)
 /** One window of a segmented page (extract-atoms-segments.ts); its methods are bound to the page's derivation plan. */
 export interface AtomPageWindow {
-  /** Reserve this window's model call against the page's spend cap. Null: refused, the page's remaining windows are skipped and the receipt recorded. */
-  reserve(model: string, maxOutputTokens: number): Promise<{ grant?: Pick<PageEmbedGrant, 'settle'> } | null>;
+  /** Run this window's model call metered against the page's atoms cap. Null: refused, the page's remaining windows are skipped and the receipt recorded. */
+  run<T>(model: string, maxOutputTokens: number, call: () => Promise<T>): Promise<{ value: T } | null>;
   /** Record the window extracted with these atoms. Returns the atom slugs retired when this settles the page. */
   settle(atomSlugs: string[]): Promise<string[]>;
 }
@@ -158,6 +157,38 @@ export async function transferLegacyAtomPageState(engine: SqlEngine, before: Pag
 }
 
 /**
+ * Soft-delete an origin's atoms that are not current, inside the caller's transaction (errors propagate, so the caller's
+ * transaction rolls back). PR 4 (Wave B incremental derivation, transcripts): a segmented page settles with its scan
+ * state's revision check first, then this, in one transaction.
+ */
+export async function retireStaleAtomsIn(
+  tx: BrainEngine,
+  sourceId: string,
+  origin: { key: 'source_slug' | 'source_path'; value: string },
+  hash16: string,
+  currentSlugs: string[],
+): Promise<string[]> {
+  const stale = await staleAtomSlugs(tx, sourceId, origin, hash16, currentSlugs);
+  for (let i = 0; i < stale.length; i += 500) await tx.softDeletePages(stale.slice(i, i + 500), { sourceId });
+  return stale;
+}
+
+async function staleAtomSlugs(engine: BrainEngine, sourceId: string, origin: { key: 'source_slug' | 'source_path'; value: string },
+  hash16: string, currentSlugs: string[]): Promise<string[]> {
+  const rows = await engine.executeRaw<{ slug: string }>(
+    `SELECT slug FROM pages
+      WHERE source_id = $1 AND type = 'atom' AND deleted_at IS NULL
+        AND frontmatter->>'${origin.key}' = $2
+        AND COALESCE(frontmatter->>'source_hash', '') <> $3
+        AND (frontmatter->>'imported_from') IS NULL
+        AND COALESCE(frontmatter->>'managed_extraction', '') <> 'true'
+        AND NOT (slug = ANY($4::text[]))`,
+    [sourceId, origin.value, hash16, currentSlugs],
+  );
+  return rows.map(r => r.slug);
+}
+
+/**
  * Soft-delete a source's atoms from earlier extractions (a different or
  * provisional source_hash) that the current, completed extraction did not
  * re-produce. Imported atoms (`imported_from`) and managed atoms are left
@@ -171,17 +202,7 @@ export async function retireStaleAtoms(
   currentSlugs: string[],
 ): Promise<string[]> {
   try {
-    const rows = await engine.executeRaw<{ slug: string }>(
-      `SELECT slug FROM pages
-        WHERE source_id = $1 AND type = 'atom' AND deleted_at IS NULL
-          AND frontmatter->>'${origin.key}' = $2
-          AND COALESCE(frontmatter->>'source_hash', '') <> $3
-          AND (frontmatter->>'imported_from') IS NULL
-          AND COALESCE(frontmatter->>'managed_extraction', '') <> 'true'
-          AND NOT (slug = ANY($4::text[]))`,
-      [sourceId, origin.value, hash16, currentSlugs],
-    );
-    const stale = rows.map(r => r.slug);
+    const stale = await staleAtomSlugs(engine, sourceId, origin, hash16, currentSlugs);
     for (let i = 0; i < stale.length; i += 500) await maintenanceTransaction(engine, tx => tx.softDeletePages(stale.slice(i, i + 500), { sourceId }));
     return stale;
   } catch (err) {

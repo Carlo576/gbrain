@@ -7,20 +7,23 @@
  * the atom slugs it produced). An append offers only the new text's windows; a window whose text an earlier run
  * extracted under the same context is never offered again, so a rewritten tail keeps its earlier windows' atoms.
  *
- * Each window's call reserves against the page's spend cap (reservePageSpend, atoms:<model>) first; a refusal skips the
- * page's remaining windows and records an unread_windows receipt on each unfinished occurrence's row. When every live
- * occurrence is settled, atoms of windows that left the page (and atoms of an earlier whole-page extraction) are
- * retired and the page's scan state is stamped complete for its content hash, so discovery skips it until it changes.
+ * Each window's call is metered against the page's atoms cap (meterPaidCall, atoms:<model>: reserved first, the
+ * provider-reported cost booked); a refusal skips the page's remaining windows and records an unread_windows receipt on
+ * each unfinished occurrence's row. When every live occurrence is settled, the page's scan state is stamped complete
+ * for its content hash (the revision check) and then, in the same transaction, atoms of windows that left the page (and
+ * atoms of an earlier whole-page extraction) are retired, so a page that changed meanwhile retires nothing.
  * The completion CAS stays on content_hash + knowledge_revision (completeAtomReceipts). Managed brains do not extract
  * segmented pages (their publication path is whole-page).
  */
 import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
-import { estimateChatCallUsd, reservePageSpend } from '../page-embedding-budget.ts';
+import { loadPricingOverrides } from '../budget/budget-tracker.ts';
+import { maintenanceTransaction } from '../persistence/attribution.ts';
+import { estimateChatCallUsd, meterPaidCall } from '../page-embedding-budget.ts';
 import { planSegmentDerivations, segmentDerivationContextHash, type SegmentDerivationInput, type SegmentDerivationRow } from '../page-body/derivations.ts';
 import { readConversationOccurrences, readOccurrenceText } from '../page-body/segment-conversation.ts';
 import { lineWindows } from '../facts/backstop-segments.ts';
-import { retireStaleAtoms, writeAtomPageState, type AtomPageInput, type AtomPageWindow } from './extract-atoms-page-state.ts';
+import { retireStaleAtomsIn, writeAtomPageState, type AtomPageInput, type AtomPageWindow } from './extract-atoms-page-state.ts';
 
 const KIND = 'extract_atoms';
 /** Bump when the windowing or the row output changes shape: every occurrence is extracted again once. */
@@ -81,9 +84,11 @@ async function planPage(engine: BrainEngine, sourceId: string, page: AtomPageInp
     const keep = new Set<string>();
     for (const current of plan.current) for (const w of records(current)) for (const slug of w.atoms ?? []) keep.add(slug);
     for (const state of states.values()) for (const w of state.done.values()) for (const slug of w.atoms) keep.add(slug);
-    const gone = await retireStaleAtoms(engine, sourceId, { key: 'source_slug', value: page.slug }, '', [...keep]);
-    await writeAtomPageState(engine, sourceId, page, 'complete');
-    return gone;
+    // PR 4 (Wave B incremental derivation, transcripts): the revision check, then the retire, in one transaction.
+    return maintenanceTransaction(engine, async tx => {
+      await writeAtomPageState(tx, sourceId, page, 'complete');
+      return retireStaleAtomsIn(tx, sourceId, { key: 'source_slug', value: page.slug }, '', [...keep]);
+    });
   };
   for (const occurrence of [...occurrences].reverse()) {
     const segment = todo.get(occurrence.row.occurrenceId);
@@ -105,13 +110,13 @@ async function planPage(engine: BrainEngine, sourceId: string, page: AtomPageInp
       if (items.length >= MAX_ATOM_WINDOWS_PER_PAGE_RUN) { unread = true; continue; }
       open++;
       const window: AtomPageWindow = {
-        async reserve(model, maxOutputTokens) {
-          if (opts.dryRun) return {};
+        async run(model, maxOutputTokens, call) {
+          if (opts.dryRun) return { value: await call() };
           if (stop) return null;
-          const decision = await reservePageSpend(engine, { id: pageId, body_storage: 'segmented' }, `atoms:${model}`,
-            estimateChatCallUsd(model, text.length, maxOutputTokens));
-          if (decision.kind === 'grant') return { grant: decision.grant };
-          if (decision.kind !== 'refused') return {};
+          const pricingOverrides = await loadPricingOverrides(engine);
+          const metered = await meterPaidCall(engine, { id: pageId, body_storage: 'segmented' }, `atoms:${model}`,
+            estimateChatCallUsd(model, text.length, maxOutputTokens, pricingOverrides), call, { pricingOverrides });
+          if (!('refused' in metered)) return metered;
           stop = 'cap_reached';
           const unfinished = [...states.values()].filter(s => s.done.size < s.total);
           if (unfinished.length) await engine.upsertSegmentDerivations(unfinished.map(row));

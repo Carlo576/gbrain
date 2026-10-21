@@ -72,7 +72,6 @@ import { serializeMarkdown } from '../markdown.ts';
 import { DEFAULT_EXTRACT_MAX_INPUT_CHARS, extractAtomsInput, inputTruncatedLine, recordPartialDisposition, releasePartialDispositions, resolveExtractAtomsInputCap, stampTranscriptTombstone, type ExtractAtomsInput, type ExtractAtomsItem } from './extract-atoms-input.ts';
 import { commitExtractionPlan, readPageWatermark } from '../extraction-watermark.ts';
 import { expandSegmentedAtomPages } from './extract-atoms-segments.ts';
-import { spendGrant } from '../page-embedding-budget.ts';
 import { claudeCliSelfSessionIds } from '../ai/providers/claude-cli-scratch.ts';
 import { BudgetExhausted, BudgetTracker, loadPricingOverrides } from '../budget/budget-tracker.ts';
 import type { MaintenanceWriteWait } from '../persistence/maintenance-wait.ts';
@@ -1006,9 +1005,9 @@ export async function runPhaseExtractAtoms(
   }
   /** PR 4 4b: a segmented page's window reserves its call against the page's spend cap first; null: refused, the item is skipped. */
   async function chatWithinPageCap<T>(item: WorkItem, call: () => Promise<T>): Promise<T | null> {
-    const reserved = item.kind === 'page' && item.window ? await item.window.reserve(extractModel, maxOutputTokens) : {};
-    if (!reserved) pagesSkipped++;
-    return reserved ? spendGrant(reserved.grant, call) : null;
+    const metered = item.kind === 'page' && item.window ? await item.window.run(extractModel, maxOutputTokens, call) : { value: await call() };
+    if (!metered) pagesSkipped++;
+    return metered ? metered.value : null;
   }
   /** Large pages A7: a page's watermark moves past the text this item read once its writes committed (a pending batch keeps the old one). */
   async function commitAtomsWatermark(item: ExtractAtomsItem, input: ExtractAtomsInput, published: readonly { state: string }[]): Promise<void> {
