@@ -62,7 +62,7 @@ import type { ConversationSegment } from './conversation-types.ts';
 import { renderSegmentForExtraction } from './conversation-windows.ts';
 import { extractConversationWindow, nonExtractableAuditFact, regularPageVersionToken, terminalAuditFact, type ConversationWindowRun } from './conversation-window-extract.ts';
 import { getFactsExtractionMaxTokens, resolveFactsExtractionModel, type ExtractInput } from './extract.ts';
-import type { FactVisibility } from './visibility.ts';
+import { tightenToPage, type FactVisibility } from './visibility.ts';
 
 const KIND = 'conversation_facts';
 /** Bump when the windowing or the row output changes shape: every occurrence is extracted again once. */
@@ -144,7 +144,8 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   const { engine, sourceId, result } = run;
   if (!opts.redetect) result.pages_considered++;
   const versionToken = regularPageVersionToken(page);
-  const { model, inputs } = await conversationContext(engine, page, opts.gapMinutes, run.factVisibility);
+  const factVisibility = tightenToPage(run.factVisibility, page);
+  const { model, inputs } = await conversationContext(engine, page, opts.gapMinutes, factVisibility);
   const contextHash = segmentDerivationContextHash(KIND, { entryState: null, page: inputs });
   const { body, occurrences } = await readConversationOccurrences(engine, page.id);
   const live = occurrences.map(o => ({ occurrenceId: o.row.occurrenceId, sha256: o.row.sha256, contextHash }));
@@ -349,7 +350,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
       for (const w of next.windows.filter(x => x.state === 'todo').reverse()) {
         if (run.segmentLimit > 0 && extracted >= run.segmentLimit) { stop = 'segment_limit'; break; }
         if (run.signal?.aborted) throw new Error('aborted');
-        paid ??= { pricingOverrides: await loadPricingOverrides(engine), entityHints: await conversationEntityHints(engine, sourceId, page.slug, run.factVisibility) };
+        paid ??= { pricingOverrides: await loadPricingOverrides(engine), entityHints: await conversationEntityHints(engine, sourceId, page.slug, factVisibility) };
         const { pricingOverrides, entityHints } = paid;
         const text = w.text!;
         const sha = w.window.window_text_sha;

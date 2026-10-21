@@ -77,6 +77,7 @@ import { withWriteTrust } from '../persistence/context.ts';
 import { conversationDerivation } from '../persistence/derived-facts.ts';
 import { RELINKED_DERIVED_ROW, inheritRelinkedEntities } from './conversation-relink-carry.ts';
 import { recordReextractMemo } from './conversation-memo.ts';
+import { tightenToPage } from './visibility.ts';
 import { recordTaintEdges } from '../trust/taint.ts';
 import { applyGateDecision, derivedGateConfig, derivedGateInput } from '../trust/derived-gate.ts';
 import { decideFactWrite, recordFlaggedRow } from '../write-gate-store.ts';
@@ -806,7 +807,7 @@ export async function enqueueManagedPage(state: ManagedRunState, snapshot: PageS
   rows: ConversationFactRow[], newestEnd: string | null, scope: ConversationScope): Promise<void> {
   const m = state.managed!;
   await enqueueEntry(state, await buildConversationPage(m.engine, m.config, { slug: snapshot.page.slug, generation: start.generation, attempt: start.attempt,
-    versionToken: snapshot.versionToken, since: start.since, segmentLimit: state.segmentLimit, scope }, rows, { newestEnd, visibility: state.factVisibility }));
+    versionToken: snapshot.versionToken, since: start.since, segmentLimit: state.segmentLimit, scope }, rows, { newestEnd, visibility: tightenToPage(state.factVisibility, snapshot.page) }));
 }
 
 async function enqueueEntry(state: ManagedRunState, entry: ConversationPageEntry): Promise<void> {

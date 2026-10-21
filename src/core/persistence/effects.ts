@@ -439,6 +439,7 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
   if (isEmbedSkipped(snapshot.page.frontmatter)) { await completeEffect(engine, effect, { embedding: 'skipped', reason: 'embed_skip' }); return; }
   const segmented = await readSegmentedEmbedPage(engine, { id: snapshot.page.id });
   if (segmented) { await embedSegmentedEffect(engine, config, effect, snapshot, segmented, signature, opts); return; }
+  await faultPoint('effect:embedding:page_read', { effectId: effect.id, requestId: effect.request_id, sourceId: effect.source_id });
   // A stale drain or another worker embedding this page finishes first; the projection read below then finds its chunks complete.
   await using pageLease = await acquirePageEmbeddingLease(engine, snapshot.page.id, { signal: opts.signal, whileWaiting: async () => {
     if (!await renewPersistenceEffectClaim({ executeRaw: engine.executeRawDirect.bind(engine) }, effect)) throw opError('write_claim_lost', 'The embedding claim changed.',
@@ -446,7 +447,15 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
       { fix: effectStatusFix(effect) });
   } });
   if (pageLease.busy) throw pageEmbeddingLeaseUnavailable(snapshot.page.id, false);
-  const projection = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, signature, opts.embedding?.model);
+  // A write that committed after the page read above leaves no projection at this revision to wait for: the effect is
+  // superseded, as when the page read already saw the newer revision; only the effect's own revision still unsealed retries.
+  const projection = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, signature, opts.embedding?.model).catch(async error => {
+    if ((error as { code?: string }).code !== 'projection_pending' || targetedWithdrawalEffect(effect) || effect.data.source_scan) throw error;
+    const current = await selectedEffectPage(engine, effect);
+    if (!current || current.page.deleted_at || (current.revision === effect.revision && current.page.id === effect.data.page_id)) throw error;
+    return null;
+  });
+  if (!projection) { await completeEffect(engine, effect, { embedding: 'superseded', reason: 'revision_changed' }); return; }
   const { prepared } = projection;
   let pending = projection.pending;
   // A large page is metered as a whole under embed.max_usd_per_page (page-embedding-budget.ts).

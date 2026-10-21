@@ -293,6 +293,28 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
     expect({ calls: forced.calls, facts: after.length, survivors: survivors(after), anchored: after.every(f => rows.keys.includes(f.key)) })
       .toEqual({ calls: [stuck[1]!], facts: rows.keys.length, survivors: 0, anchored: true });
   }, 600_000);
+
+  test('facts from a private segmented transcript stay private on a world-default brain, on the import run and on the incremental run after an append', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/private-chat-${randomUUID().slice(0, 8)}`;
+    const privatePage = (body: string) => chatPage('Private chat', body).replace('date: 2025-01-01', 'date: 2025-01-01\nvisibility: private');
+    const visibilities = async () => {
+      const ids = (await factsOf(brain.engine, slug)).map(f => f.id);
+      const rows = await brain.engine.executeRaw<{ visibility: string }>('SELECT DISTINCT visibility FROM facts WHERE id = ANY($1::bigint[])', [ids]);
+      return { facts: ids.length, visibility: rows.map(r => r.visibility) };
+    };
+    await caps(brain.engine, 'off');
+    await brain.engine.setConfig('facts.default_visibility', 'world');
+    await brain.seed(slug, privatePage(chatDays(0, 100, 7)));
+    const first = await extract(brain.engine, slug);
+    expect((await derivations(brain.engine, slug)).live.length).toBeGreaterThan(2);
+    expect(await visibilities()).toEqual({ facts: first.calls.length, visibility: ['private'] });
+    await brain.seed(slug, privatePage(chatDays(0, 101, 7)));
+    const second = await extract(brain.engine, slug);
+    expect(second.calls.length).toBeGreaterThan(0);
+    expect(second.calls.length).toBeLessThan(first.calls.length);
+    expect((await visibilities()).visibility).toEqual(['private']);
+  }, 600_000);
 }
 
 /** A production-extractor run (no injected extractor): the gateway's fake transport answers or fails. */
