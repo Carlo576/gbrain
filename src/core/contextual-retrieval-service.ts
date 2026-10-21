@@ -552,6 +552,7 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
 
   let embedded = 0;
   let fallbackKind: SynopsisFailureKind | null = null;
+  let unpricedModel: string | null = null;
   for (const segment of plan.todo) {
     await using lease = await acquirePageEmbeddingLease(engine, page.id, { signal: args.abortSignal });
     if (lease.busy) return { kind: 'transient_error', cause: 'db', detail: pageEmbeddingLeaseUnavailable(page.id, false).message };
@@ -577,8 +578,10 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
           return classifyEmbedError(err, err instanceof Error ? err.message : String(err));
         }
       });
+      unpricedModel = metered.unpricedModel ?? unpricedModel;
       if ('refused' in metered) {
-        await derivation(segment, 'partial', anchors, { reason: 'budget_limited', cap_usd: metered.refused.capUsd, estimate_usd: metered.refused.estimateUsd });
+        await derivation(segment, 'partial', anchors, { reason: unpricedModel ? 'unpriced_model' : 'budget_limited', ...(unpricedModel ? { model: unpricedModel } : {}),
+          cap_usd: metered.refused.capUsd, estimate_usd: metered.refused.estimateUsd });
         return { kind: 'skipped', reason: 'budget_limited' };
       }
       const built = metered.value;
@@ -598,7 +601,8 @@ async function reembedSegmentedPage(args: ReembedPageArgs, initial: Page): Promi
       if (built.fallback) segmentFallback ??= built.fallback;
       anchors.push({ ...anchor, tier: built.tier });
     }
-    await derivation(segment, 'done', anchors, segmentFallback ? { fallback_kind: segmentFallback } : null);
+    await derivation(segment, 'done', anchors, segmentFallback || unpricedModel
+      ? { ...(unpricedModel ? { kind: 'unpriced_model', pipeline: 'synopsis', model: unpricedModel } : {}), ...(segmentFallback ? { fallback_kind: segmentFallback } : {}) } : null);
     fallbackKind ??= segmentFallback;
   }
   await engine.retireSegmentDerivations(page.id, live.map(s => s.occurrenceId), { kind: 'synopsis' });

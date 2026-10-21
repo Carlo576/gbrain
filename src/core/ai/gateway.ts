@@ -1766,6 +1766,7 @@ async function embedSubBatch(
   opts?: EmbedOpts,
 ): Promise<{ embeddings: Float32Array[]; reportedTokens: number | null }> {
   try {
+    const maxRetries = hasAIInvocationGuard() ? 0 : opts?.maxRetries ?? __budgetStore.getStore()?.providerRetries; // PR 4 (Wave B incremental derivation, transcripts): an embed in a metered page step makes only the attempts it reserved for
     const callTransport = () => invokeAI({ operation: 'gateway.embed', kind: 'embedding', model: `${recipe.id}:${modelId}`,
       maxInputTokens: embedRequestMaxInputTokens(texts, recipe, modelId), maxOutputTokens: 0, estimatedInputTokens: Math.ceil(texts.reduce((n, text) => n + text.length, 0) / (recipe.touchpoints.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN)) }, () => _embedTransport({
       model,
@@ -1776,7 +1777,7 @@ async function embedSubBatch(
       // per-SDK-call scope). Composes with a caller signal (Fix 3's 6s query
       // deadline) — shorter wins.
       abortSignal: withDefaultTimeout(opts?.abortSignal, AI_EMBED_TIMEOUT_MS),
-      ...(hasAIInvocationGuard() ? { maxRetries: 0 } : opts?.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
+      ...(maxRetries !== undefined ? { maxRetries } : {}),
     }), sdkInvocationUsage, err => isTokenLimitError(err) || isUnbilledEmbeddingRejection(recipe.id, err) ? { inputTokens: 0, outputTokens: 0 } : null);
     // Carry the threaded input_type across the SDK boundary via
     // __embedInputTypeStore (the adapter strips it from providerOptions —

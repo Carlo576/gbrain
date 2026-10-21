@@ -15,9 +15,13 @@
  *      it carries the day-header date in force there, and its parse is the
  *      suffix of the whole body's parse (the same speakers, texts and times);
  *    - a page over the single-string ceiling is extracted per occurrence,
- *      newest windows first, reading only the segment it extracts (at most
- *      SEGMENT_MAX_BYTES under --segment-limit 2), its partial-input receipt
- *      on the occurrence's derivation row instead of page_extraction_state;
+ *      newest windows first; a run with no current grammar first detects it
+ *      over the whole page once (conversationDetectionWork counts exactly the
+ *      body's bytes), and every run, that one included, reads only the segment
+ *      it extracts (at most SEGMENT_MAX_BYTES under --segment-limit 2); a run on
+ *      the grammar the first one pinned reads nothing to detect it; its
+ *      partial-input receipt is on the occurrence's derivation row instead of
+ *      page_extraction_state;
  *    - such a run keeps the page's unanchored conversation facts (from
  *      earlier full-pass runs) untouched: a partial run never clears them.
  * 2. Fails when: a segmented page reads its throwing body getters, the window
@@ -25,7 +29,7 @@
  *    is lost, a window spans a segment cut, a read exceeds the segment, or a
  *    partial run clears facts it cannot see.
  * 3. Why existing coverage misses it: conversation-facts tests use inline pages.
- * Seams: `segmentedPassWork.bytes` counts bytes read.
+ * Seams: `segmentedPassWork.bytes` counts bytes read; `conversationDetectionWork.bytes` the grammar detection's.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -38,7 +42,7 @@ import { readPageBodyPolicy } from '../../src/core/page-body/limits.ts';
 import { runExtractConversationFactsCore } from '../../src/commands/extract-conversation-facts.ts';
 import { readConversationInput, readSummaryBody } from '../../src/core/conversation-parser/body.ts';
 import { parseConversation } from '../../src/core/conversation-parser/parse.ts';
-import { CONVERSATION_WINDOW_BYTES, readSegmentedConversationInput } from '../../src/core/page-body/segment-conversation.ts';
+import { CONVERSATION_WINDOW_BYTES, conversationDetectionWork, readSegmentedConversationInput } from '../../src/core/page-body/segment-conversation.ts';
 import { segmentedPassWork } from '../../src/core/page-body/segment-blocks.ts';
 import { materializedPage } from '../../src/core/persistence/segmented-apply.ts';
 import { PAGE_MAX_BYTES } from '../../src/core/page-size-policy.ts';
@@ -200,7 +204,7 @@ describe('conversation facts over a segmented page (full-pass mode)', () => {
     }
   }, 300_000);
 
-  test('a page over the single-string ceiling is extracted per occurrence, newest windows first, reading only the occurrence it extracts', async () => {
+  test('a page over the single-string ceiling is extracted per occurrence, newest windows first: the grammar is detected over the whole page once, apart, and each run reads only the occurrence it extracts', async () => {
     for (const engine of engines) {
       await engine.setConfig('pages.segmented_storage', 'on');
       const file = join(dir, 'huge.md');
@@ -211,11 +215,14 @@ describe('conversation facts over a segmented page (full-pass mode)', () => {
       const huge = await stored(engine, 'conversations/huge');
       expect(Number(huge.body_bytes)).toBeGreaterThan(PAGE_MAX_BYTES);
       const before = segmentedPassWork.bytes;
+      const detectedBefore = conversationDetectionWork.bytes;
       const texts: string[] = [];
       const result = await runExtractConversationFactsCore(engine, { sourceId: 'default', slugs: ['conversations/huge'], sleepMs: 0, segmentLimit: 2,
         extractor: async input => { texts.push(input.turnText); return []; } });
       expect({ tooLarge: result.pages_skipped_too_large, calls: texts.length }).toEqual({ tooLarge: 0, calls: 2 });
-      // One segment read (the newest occurrence's), never the 24 MiB window.
+      // The first run has no current grammar: it detects it over the whole page once, counted apart from the extraction's reads.
+      expect(conversationDetectionWork.bytes - detectedBefore).toBe(Number(huge.body_bytes));
+      // The extraction reads one segment (the newest occurrence's), never the 24 MiB window.
       expect(segmentedPassWork.bytes - before).toBeLessThanOrEqual(SEGMENT_MAX_BYTES);
       expect(texts[0]).toContain([...body.matchAll(/^## (\d{4}-\d{2}-\d{2})$/gm)].at(-1)![1]);
       // The partial-input receipt moved to the occurrence's derivation row.
@@ -223,6 +230,14 @@ describe('conversation facts over a segmented page (full-pass mode)', () => {
       const rows = await engine.readSegmentDerivations(huge.id, { kind: 'conversation_facts' });
       expect(rows.map(row => ({ state: row.state, receipt: row.receipt }))).toEqual([{ state: 'partial',
         receipt: expect.objectContaining({ kind: 'unread_windows', pipeline: 'conversation_facts', reason: 'segment_limit', windows_read: 2 }) }]);
+      // A run on the grammar the first run pinned detects nothing and again reads only the segment it extracts.
+      const pinnedBefore = segmentedPassWork.bytes;
+      const detectedAgain = conversationDetectionWork.bytes;
+      const next = await runExtractConversationFactsCore(engine, { sourceId: 'default', slugs: ['conversations/huge'], sleepMs: 0, segmentLimit: 2,
+        extractor: async input => { texts.push(input.turnText); return []; } });
+      expect({ tooLarge: next.pages_skipped_too_large, calls: texts.length, detected: conversationDetectionWork.bytes - detectedAgain })
+        .toEqual({ tooLarge: 0, calls: 4, detected: 0 });
+      expect(segmentedPassWork.bytes - pinnedBefore).toBeLessThanOrEqual(SEGMENT_MAX_BYTES);
     }
   }, 1_800_000);
 

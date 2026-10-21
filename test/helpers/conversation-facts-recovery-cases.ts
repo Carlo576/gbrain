@@ -60,7 +60,7 @@ const terminalStamps = async (engine: BrainEngine, slug: string) => {
 };
 
 export function defineConversationFactsRecoveryCases(opts: { getBrain: () => AppendBrain }): void {
-  test('a partial run on a transcript without message times clears only the window it extracted again', async () => {
+  test('a partial run on a transcript without message times deletes nothing: the window it extracted is added beside the old facts', async () => {
     const brain = opts.getBrain();
     const slug = `notes/timeless-partial-${randomUUID().slice(0, 8)}`;
     await caps(brain.engine, 'off');
@@ -75,7 +75,7 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
     const after = await factsOf(brain.engine, slug);
     expect({ calls: limited.calls.length, before: before.length, after: after.length, cleaned: limited.result.orphan_facts_cleaned,
       kept: before.filter(f => after.some(a => a.id === f.id)).length })
-      .toEqual({ calls: 1, before: before.length, after: before.length, cleaned: 1, kept: before.length - 1 });
+      .toEqual({ calls: 1, before: before.length, after: before.length + 1, cleaned: 0, kept: before.length });
   }, 600_000);
 
   test('a time-less transcript whose turns cross segment cuts streams exactly the whole-page windows before it settles', async () => {
@@ -179,7 +179,7 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
     expect({ calls: forced.calls, receipts: (await derivations(brain.engine, slug)).receipts.filter(Boolean) }).toEqual({ calls: [stuck!], receipts: [] });
   }, 600_000);
 
-  test('a one-window run on a page of oversized turns clears only the pieces that window holds', async () => {
+  test('a one-window run on a page of oversized turns after a title of another length deletes nothing (piece numbers move with the title)', async () => {
     const brain = opts.getBrain();
     const slug = `notes/oversized-turns-${randomUUID().slice(0, 8)}`;
     await caps(brain.engine, 'off');
@@ -191,11 +191,11 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
     const before = await factsOf(brain.engine, slug);
     expect(before.length).toBe(all.calls.length);
     expect(before.length).toBeGreaterThan(60);
-    await brain.seed(slug, chatPage('Oversized T2', (await brain.body(slug)).truth));
+    await brain.seed(slug, chatPage('Oversized turns, retitled with a much longer page title', (await brain.body(slug)).truth));
     const limited = await extract(brain.engine, slug, { segmentLimit: 1 });
     const after = await factsOf(brain.engine, slug);
     expect({ calls: limited.calls.length, after: after.length, cleaned: limited.result.orphan_facts_cleaned, kept: before.filter(f => after.some(a => a.id === f.id)).length })
-      .toEqual({ calls: 1, after: before.length, cleaned: 1, kept: before.length - 1 });
+      .toEqual({ calls: 1, after: before.length + 1, cleaned: 0, kept: before.length });
   }, 600_000);
 
   test('a page re-imported in another chat format is parsed in its new format, not the grammar its old rows recorded', async () => {
@@ -218,22 +218,26 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
       .toEqual({ calls: expected.length, same: true, nonExtractable: 0, facts: expected.length, states: ['done'] });
   }, 600_000);
 
-  test('a run that parses no message from occurrences that had windows keeps their facts, settles nothing and leaves a receipt doctor lists', async () => {
+  test('a page that stops being a transcript settles as non-extractable and its conversation facts are collected, under --force too', async () => {
     const brain = opts.getBrain();
     const slug = `notes/unparsed-${randomUUID().slice(0, 8)}`;
     await caps(brain.engine, 'off');
     await brain.seed(slug, chatPage('Unparsed', chatDays(3500, 100, 24)));
     await extract(brain.engine, slug);
-    const before = (await factsOf(brain.engine, slug)).map(f => f.id);
+    const before = (await factsOf(brain.engine, slug)).length;
+    expect(before).toBeGreaterThan(100);
     const prose = Array.from({ length: 6000 }, (_, i) => `Paragraph ${i} of the notes: the roadmap review moved to next quarter and the budget stays flat.`).join('\n\n');
     await brain.seed(slug, chatPage('Unparsed', prose));
     const { calls, result } = await extract(brain.engine, slug);
+    const rows = await derivations(brain.engine, slug);
     expect({ calls: calls.length, failed: result.pages_failed, nonExtractable: result.pages_marked_non_extractable, cleaned: result.orphan_facts_cleaned,
-      facts: (await factsOf(brain.engine, slug)).map(f => f.id), stamped: await terminalStamps(brain.engine, slug) })
-      .toEqual({ calls: 0, failed: 1, nonExtractable: 0, cleaned: 0, facts: before, stamped: 0 });
+      facts: (await factsOf(brain.engine, slug)).length, states: [...new Set(rows.states)], receipts: rows.receipts.filter(Boolean) })
+      .toEqual({ calls: 0, failed: 0, nonExtractable: 1, cleaned: before + 1, facts: 0, states: ['done'], receipts: [] });
+    const forced = await extract(brain.engine, slug, { force: true });
+    expect({ calls: forced.calls.length, failed: forced.result.pages_failed, facts: (await factsOf(brain.engine, slug)).length }).toEqual({ calls: 0, failed: 0, facts: 0 });
     const check = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
-    const groups = (check.details as { groups: Array<{ pipeline: string; kind: string; samples: string[] }> }).groups;
-    expect(groups.some(g => g.pipeline === 'conversation_facts' && g.kind === 'no_messages' && g.samples.includes(`default:${slug}`))).toBe(true);
+    const groups = ((check.details as { groups?: Array<{ pipeline: string; kind: string; samples: string[] }> } | undefined)?.groups ?? []);
+    expect(groups.some(g => g.kind === 'no_messages' && g.samples.includes(`default:${slug}`))).toBe(false);
   }, 600_000);
 
   test('provider-wide failures (an auth error, a 503) never count against a window: it is never marked failed and extracts once the provider recovers', async () => {
@@ -265,23 +269,29 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
     }
   }, 600_000);
 
-  test('a window marked failed keeps the facts of the earlier window it replaced until it is extracted', async () => {
+  test('a window marked failed blocks collection across two context changes: every earlier fact stands until a --force run extracts it', async () => {
     const brain = opts.getBrain();
     const slug = `notes/failed-keeps-${randomUUID().slice(0, 8)}`;
     await caps(brain.engine, 'off');
     await brain.seed(slug, chatPage('Keeps T1', chatDays(3700, 100, 26)));
     await extract(brain.engine, slug);
     const before = await factsOf(brain.engine, slug);
-    await brain.seed(slug, chatPage('Keeps T2', (await brain.body(slug)).truth));
-    let stuck = null as string | null;
-    const failOn = (text: string) => { stuck ??= text; return text === stuck; };
-    for (let run = 1; run <= WINDOW_FAILURE_LIMIT; run++) await extract(brain.engine, slug, { failOn });
-    const settled = await factsOf(brain.engine, slug);
-    const survivors = before.filter(f => settled.some(s => s.id === f.id));
-    expect({ facts: settled.length, survivors: survivors.length, stamped: await terminalStamps(brain.engine, slug) }).toEqual({ facts: before.length, survivors: 1, stamped: 1 });
+    const survivors = (facts: Awaited<ReturnType<typeof factsOf>>) => before.filter(f => facts.some(s => s.id === f.id)).length;
+    const stuck: string[] = [];
+    for (const title of ['Keeps T2', 'Keeps, a third and longer title']) {
+      await brain.seed(slug, chatPage(title, (await brain.body(slug)).truth));
+      let first = null as string | null;
+      const failOn = (text: string) => { first ??= text; return text === first; };
+      for (let run = 1; run <= WINDOW_FAILURE_LIMIT; run++) await extract(brain.engine, slug, { failOn });
+      stuck.push(first!);
+      const facts = await factsOf(brain.engine, slug);
+      expect({ title, survivors: survivors(facts), stamped: await terminalStamps(brain.engine, slug) }).toEqual({ title, survivors: before.length, stamped: 1 });
+    }
     const forced = await extract(brain.engine, slug, { force: true });
     const after = await factsOf(brain.engine, slug);
-    expect({ calls: forced.calls, facts: after.length, survivors: before.filter(f => after.some(a => a.id === f.id)).length }).toEqual({ calls: [stuck!], facts: before.length, survivors: 0 });
+    const rows = await derivations(brain.engine, slug);
+    expect({ calls: forced.calls, facts: after.length, survivors: survivors(after), anchored: after.every(f => rows.keys.includes(f.key)) })
+      .toEqual({ calls: [stuck[1]!], facts: rows.keys.length, survivors: 0, anchored: true });
   }, 600_000);
 }
 

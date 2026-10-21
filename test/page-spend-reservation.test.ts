@@ -25,7 +25,8 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { PAGE_EMBED_CAP_KEY, estimateChatCallUsd, estimateFactsExtractionUsd, meterPaidCall, planPageEmbedding, reservePageSpend, spendGrant,
   type PageSpendSignature } from '../src/core/page-embedding-budget.ts';
 import { PAGE_DERIVATION_CAP_KEY } from '../src/core/page-spend.ts';
-import { __setChatTransportForTests, __setGenerateTextTransportForTests, chat, configureGateway, resetGateway, withBudgetTracker, type ChatResult } from '../src/core/ai/gateway.ts';
+import { __setChatTransportForTests, __setEmbedTransportForTests, __setGenerateTextTransportForTests, chat, configureGateway, resetGateway, withBudgetTracker, type ChatResult } from '../src/core/ai/gateway.ts';
+import { embedBatch } from '../src/core/embedding.ts';
 import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
 import { BudgetExhausted, BudgetTracker, parsePricingOverrides } from '../src/core/budget/budget-tracker.ts';
 import { estimateChatInputTokens } from '../src/core/ai/chat-input-estimate.ts';
@@ -330,6 +331,26 @@ describe('per-page spend ledgers', () => {
         await ask();
       } finally {
         __setGenerateTextTransportForTests(null);
+        resetGateway();
+      }
+      expect(seen, name).toEqual([0, 'default']);
+    }
+  });
+
+  test('an embed inside a metered call (the synopsis step\'s embedBatch) runs with the SDK\'s hidden retries off too; an unmetered embed keeps the default', async () => {
+    for (const { name, engine } of engines) {
+      const page = await segmentedPage(engine);
+      configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 4, env: { OPENAI_API_KEY: 'sk-fake' } });
+      const seen: unknown[] = [];
+      __setEmbedTransportForTests((async (args: { values: string[]; maxRetries?: number }) => {
+        seen.push('maxRetries' in args ? args.maxRetries : 'default');
+        return { embeddings: args.values.map(() => [1, 0, 0, 0]), usage: { tokens: args.values.length } };
+      }) as never);
+      try {
+        await meterPaidCall(engine, page, 'synopsis:openai:gpt-4o', 0.2, () => embedBatch(['chunk one', 'chunk two']));
+        await embedBatch(['chunk three']);
+      } finally {
+        __setEmbedTransportForTests(null);
         resetGateway();
       }
       expect(seen, name).toEqual([0, 'default']);

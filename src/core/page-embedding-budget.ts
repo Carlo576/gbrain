@@ -294,16 +294,22 @@ class MeteredStepTracker extends BudgetTracker {
  * throw after the provider answered), and so is every failed attempt it may have billed (MeteredStepTracker); one it
  * definitively refused before generating (a rate limit, an auth error) and a failed embedding are not; an unpriced
  * model books the reservation; a step with no billed attempt books nothing. The attempts are reserved and recorded on
- * the caller's tracker too, so the caller's cap bounds them.
+ * the caller's tracker too, so the caller's cap bounds them. `unpricedModel` names the model when the step was refused
+ * under an unpriced model's ceiling estimate or booked its reservation because the model has no price: the caller's
+ * receipt then says `unpriced_model` (unpricedModelReceipt) and doctor derivation_unpriced_model names the fix.
  */
 export async function meterPaidCall<T>(engine: BrainEngine, page: BudgetPage, signature: PageSpendSignature, estimateUsd: number,
-  call: () => Promise<T>, opts: { pricingOverrides?: PricingOverrides } = {}): Promise<{ refused: Extract<PageSpendDecision, { kind: 'refused' }> } | { value: T }> {
+  call: () => Promise<T>, opts: { pricingOverrides?: PricingOverrides } = {}): Promise<({ refused: Extract<PageSpendDecision, { kind: 'refused' }> } | { value: T }) & { unpricedModel?: string }> {
   const decision = await reservePageSpend(engine, page, signature, estimateUsd);
-  if (decision.kind === 'refused') return { refused: decision };
+  // PR 4 (Wave B incremental derivation, transcripts): an unpriced model reserves the ceiling estimate, so a refusal under it is the missing price's.
+  const model = signature.slice(signature.indexOf(':') + 1);
+  const unpriced = reservationCostUsd(model, 'chat', 1, 1, opts.pricingOverrides) === null ? { unpricedModel: model } : {};
+  if (decision.kind === 'refused') return { refused: decision, ...unpriced };
   if (decision.kind === 'unmetered') return { value: await call() };
   const tracker = new MeteredStepTracker({ label: `page-spend:${signature}`, pricingOverrides: opts.pricingOverrides, providerRetries: 0 }, getCurrentBudgetTracker(), opts.pricingOverrides);
   try {
-    return { value: await withBudgetTracker(tracker, call) };
+    const value = await withBudgetTracker(tracker, call);
+    return { value, ...(tracker.unpricedAttempts > 0 ? { unpricedModel: model } : {}) };
   } finally {
     await decision.grant.settle({ ok: tracker.billedAttempts > 0, usd: tracker.unpricedAttempts > 0 ? decision.grant.reservedUsd : tracker.billedUsd });
   }
@@ -448,4 +454,16 @@ export function sizeStateLines(tally: SyncSizeStates | undefined): string[] {
   const lines = tally.pages.slice(0, 20).map(p => `  Size ${p.path ?? p.slug} (${p.bytes} bytes): ${what(p)}.`);
   if (tally.total > lines.length) lines.push(`  ... and ${tally.total - lines.length} more large or embed_skip page(s) (--json lists the first ${tally.pages.length}).`);
   return lines;
+}
+
+/**
+ * The receipt a segmented derivation occurrence carries when its model has no price (PR 4, Wave B incremental
+ * derivation): an unread_windows receipt the cap stopped under the model's ceiling estimate says reason `unpriced_model`
+ * and the model; a finished one that booked a reservation for an unpriced call is `{ kind: 'unpriced_model', model }`.
+ * Doctor derivation_unpriced_model reads both. `stop` is the run's stop reason; `unread` the windows left, if any.
+ */
+export function unpricedModelReceipt(pipeline: string, model: string | null, stop: string | null,
+  unread: { windows_read: number; windows_total: number } | null): Record<string, unknown> | null {
+  if (unread) return { kind: 'unread_windows', pipeline, reason: model && stop === 'cap_reached' ? 'unpriced_model' : stop, ...unread, ...(model ? { model } : {}) };
+  return model ? { kind: 'unpriced_model', pipeline, model } : null;
 }

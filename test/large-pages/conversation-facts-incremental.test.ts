@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe } from 'bun:test';
 import { openAppendBrain, type AppendBrain } from '../helpers/append-brain.ts';
 import { defineDerivationSpendCases } from '../helpers/derivation-spend-cases.ts';
 import { defineConversationFactsRecoveryCases } from '../helpers/conversation-facts-recovery-cases.ts';
+import { defineConversationFactsInvariantCases } from '../helpers/conversation-facts-invariant-cases.ts';
+import { defineDerivationUnpricedCases } from '../helpers/derivation-unpriced-cases.ts';
 import { defineConversationFactsIncrementalCases, defineSegmentedAtomsCases, defineSegmentedBackstopCases, defineSegmentReceiptDoctorCases } from '../helpers/conversation-facts-incremental-cases.ts';
 
 let brain: AppendBrain;
@@ -20,4 +22,6 @@ describe('conversation facts incremental [pglite]', () => {
   defineSegmentReceiptDoctorCases({ getBrain: () => brain });
   defineDerivationSpendCases({ getBrain: () => brain });
   defineConversationFactsRecoveryCases({ getBrain: () => brain });
+  defineConversationFactsInvariantCases({ getBrain: () => brain });
+  defineDerivationUnpricedCases({ getBrain: () => brain });
 });

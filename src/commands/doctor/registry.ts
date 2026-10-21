@@ -135,6 +135,7 @@ import { managedSyncBlockedEntry } from './checks/managed-sync-blocked.ts';
 import { syncAdmissionEntry } from './checks/sync-admission.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
 import { extractionInputTruncatedEntry } from './checks/extraction-input.ts';
+import { derivationUnpricedModelEntry } from './checks/derivation-pricing.ts'; // PR 4 (Wave B incremental derivation, transcripts)
 import {
   persistenceCapacityEntry,
   terminalFailuresEntry,
@@ -260,6 +261,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   persistenceConsumersEntry,
   atomHeldFailedEntry,
   extractionInputTruncatedEntry,
+  derivationUnpricedModelEntry,
   ghostPagesEntry,
   originTwinsEntry,
   renameIdentityDowngradesEntry,

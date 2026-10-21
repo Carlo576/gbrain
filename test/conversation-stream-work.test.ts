@@ -58,7 +58,7 @@ test('a message spanning 40 occurrences is parsed once, and the windows equal th
   const windows: string[] = [];
   try {
     await streamConversationWindows(occurrences, 0, occurrences.length, { page, gapMinutes: null }, async i => texts[i]!, {
-      window(_first, _last, seg) { windows.push(renderSegmentForExtraction('Stream work', seg)); },
+      window(_owner, seg) { windows.push(renderSegmentForExtraction('Stream work', seg)); },
       occurrence() {},
     });
   } finally {
