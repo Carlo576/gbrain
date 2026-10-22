@@ -503,7 +503,7 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
   const { batchRows: maxRows, statementMs } = sweepLimits;
   const deadline = performance.now() + (opts.inline ? Math.min(sweepLimits.inlineMs, sweepLimits.totalMs) : sweepLimits.totalMs);
   const pages = new Map<number, { scanned: number; normalized: number; deleted: number }>();
-  if (opts.retry) await engine.executeRaw('UPDATE page_segment_derivation_purges SET stalled_at = NULL, stalled_reason = NULL WHERE request_id=$1::uuid', [opts.retry]);
+  if (opts.retry) await engine.executeRaw('UPDATE page_segment_derivation_purges SET stalled_at = NULL, stalled_reason = NULL, pending_reason = NULL WHERE request_id=$1::uuid', [opts.retry]);
   const skip: string[] = [];
   const restart = 'cursor_page = NULL, cursor_pipeline = NULL, cursor_occurrence = NULL, found = 0, pending_reason = NULL';
   const toVerify = async (tx: BrainEngine, purge: SweepRecord) => {
@@ -577,7 +577,7 @@ export async function continueDerivationPurges(engine: BrainEngine, sourceId: st
   };
   const timedOut = (error: unknown) => (error as { code?: unknown } | null)?.code === '57014';
   const stall = async (requestId: string, reason: DerivationStallReason) => {
-    await engine.executeRaw('UPDATE page_segment_derivation_purges SET stalled_at = now(), stalled_reason = $2 WHERE request_id=$1::uuid', [requestId, reason]);
+    await engine.executeRaw('UPDATE page_segment_derivation_purges SET stalled_at = now(), stalled_reason = $2, pending_reason = NULL WHERE request_id=$1::uuid', [requestId, reason]);
     skip.push(requestId);
   };
   for (let batches = 0; batches === 0 || performance.now() <= deadline; batches++) {

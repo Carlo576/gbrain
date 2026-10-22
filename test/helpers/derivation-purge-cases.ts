@@ -961,6 +961,50 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
       expect({ rows: await exactHolders(brain.engine, rows, claim), recorded: await sweepsRecorded() }).toEqual({ rows: [], recorded: 0 });
     }, 600_000);
 
+    test('scope_lock_busy is cleared when a busy sweep stalls and when it is retried, so a retry that fails leaves no busy reason without a writer', async () => {
+      const claim = 'Purge Example cooper code is 4927';
+      await candidateRowsPage('notes/busy-cycle-rows', claim, 50, 1);
+      const params = await confirmed(await seed('notes/busy-cycle-purge', claim));
+      __setDerivationSweepLimitsForTests({ totalMs: 0 });
+      try { expect((await brain.call('purge_fact', params)).body.derivation_sweep).toBe('pending'); } finally { __setDerivationSweepLimitsForTests(null); }
+      const column = async () => (await brain.engine.executeRaw<{ pending_reason: string | null }>(`SELECT x.pending_reason FROM page_segment_derivation_purges x
+        JOIN persistence_requests r ON r.id = x.request_id WHERE r.request_id::text = $1`, [params.request_id]))[0]?.pending_reason ?? null;
+      const doctorReason = async () => ((await derivationPurgeSweepsEntry.run({ engine: brain.engine } as never) as Array<Record<string, any>>)[0]!.details.records as
+        Array<Record<string, any>>).find(r => r.request_id === params.request_id)?.reason ?? null;
+      const status = async (resume: boolean) => brain.call('purge_fact', { status: true, request_id: params.request_id, ...(resume ? { continue: true } : {}) });
+      // 1. A write holds the scope lock past the wait: the sweep is busy.
+      let mode: 'busy' | 'stall' | 'drop' | 'off' = 'busy';
+      installFaultHook(point => {
+        if (mode === 'busy' && point === 'purge:derivation_scope_lock') throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+        if (mode === 'stall' && (point === 'purge:derivation_batch' || point === 'purge:derivation_unread')) throw timeout();
+        if (mode === 'drop' && point === 'purge:derivation_batch') throw Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' });
+      });
+      const seen: Array<Record<string, unknown>> = [];
+      try {
+        const busyBody = (await status(true)).body;
+        seen.push({ step: 'busy', sweep: busyBody.derivation_sweep, reason: busyBody.derivation_sweep_reason ?? null, column: await column(), doctor: await doctorReason() });
+        // 2. The writer is gone; the sweep's next batch outruns its budget down to one row, and the unread delete too: it stalls.
+        mode = 'stall';
+        const stalled = (await status(true)).body;
+        seen.push({ step: 'stall', sweep: stalled.derivation_sweep, reason: stalled.derivation_sweep_reason ?? null, column: await column(), doctor: await doctorReason() });
+        // 3. Its retry loses its connection after clearing the stall: no writer is open, so no busy reason may come back.
+        mode = 'drop';
+        const dropped = await status(true);
+        const after = (await status(false)).body;
+        seen.push({ step: 'retry', failed: dropped.isError, sweep: after.derivation_sweep, reason: after.derivation_sweep_reason ?? null, column: await column(), doctor: await doctorReason() });
+        // 4. A retry that runs finishes the sweep.
+        mode = 'off';
+        const done = (await status(true)).body;
+        seen.push({ step: 'done', sweep: done.derivation_sweep, reason: done.derivation_sweep_reason ?? null, recorded: await sweepsRecorded() });
+      } finally { installFaultHook(undefined); }
+      expect(seen).toEqual([
+        { step: 'busy', sweep: 'pending', reason: 'scope_lock_busy', column: 'scope_lock_busy', doctor: 'scope_lock_busy' },
+        { step: 'stall', sweep: 'stalled', reason: 'statement_timeout', column: null, doctor: 'statement_timeout' },
+        { step: 'retry', failed: true, sweep: 'pending', reason: null, column: null, doctor: null },
+        { step: 'done', sweep: undefined, reason: null, recorded: 0 },
+      ]);
+    }, 600_000);
+
     if (kind === 'postgres') {
       const scopeKey = `hashtextextended('gbrain:derivation-scope:' || '${SOURCE}', 0)`;
       const advisoryLocks = (sql: any, mode: string) => sql.unsafe(`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND mode = $1 AND NOT granted
