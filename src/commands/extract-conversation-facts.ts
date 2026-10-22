@@ -289,7 +289,7 @@ export interface ExtractConversationFactsCoreOpts {
   /**
    * PR 4 (Wave B incremental derivation, transcripts): the operator's conversation format for the page (--grammar; null:
    * none, the page is not a transcript) for a page stored in segments on an unmanaged brain (the CLI refuses it otherwise:
-   * assertGrammarTarget). Recorded for the page's current version (later plain runs follow it until the page changes)
+   * resolveGrammarSource). Recorded for the page's current version (later plain runs follow it until the page changes)
    * unless dryRun; bypasses the fresh-outcome skip.
    */
   grammar?: string | null;
@@ -1612,12 +1612,14 @@ Options:
                          (falls back to the full allowlist).
   --slug <slug>          Process a single page (overrides multi-page enumeration).
   --slugs <a,b,...>      Process exactly these pages (comma-separated).
-  --grammar <format|none> With --slug: extract the page under this conversation format
+  --grammar <format|none> With --slug (and --source-id when the slug is in more than one
+                         source): extract that one page under this conversation format
                          (none: the page is not a transcript; it settles as not
                          extractable and its conversation facts are removed). For a page
                          held because no format is detected over it (gbrain doctor
-                         conversation_detection_ambiguous). Preview with --dry-run first;
-                         the choice is kept for the page until its text changes.
+                         conversation_detection_ambiguous). Preview with --dry-run first.
+                         The choice holds until the page changes; then it is detected
+                         again and, when still undetected, held for a new choice.
   --dry-run              Show segmentation + counts; no model calls, DB writes, or checkpoint advance.
   --limit <N>            Cap pages processed (default: all).
   --since <iso>          Only consider messages newer than this ISO timestamp.
@@ -1657,13 +1659,23 @@ in the facts table (source='${TERMINAL_AUDIT_SOURCE}'). gbrain doctor's
 conversation_facts_backlog check counts pages without this row.
 `;
 
-/** PR 4 (Wave B incremental derivation, transcripts): --grammar applies to a conversation page stored in segments on an unmanaged brain; anything else is refused before any work. */
-async function assertGrammarTarget(engine: BrainEngine, sourceIds: string[], slug: string): Promise<void> {
+/**
+ * PR 4 (Wave B incremental derivation, transcripts): the one source whose page --grammar applies to: --source-id, else the
+ * only source holding the slug (a slug is not a page identity across sources, so two refuse). The page must be stored in
+ * segments on an unmanaged brain. Anything else is refused before any work.
+ */
+async function resolveGrammarSource(engine: BrainEngine, explicit: string | undefined, slug: string): Promise<string> {
   if (await managedPersistenceEnabled(engine)) throw usageError('--grammar applies to an unmanaged brain: a managed brain extracts a conversation page whole', ECF_HELP_HINT);
-  for (const sourceId of sourceIds) {
-    const page = await engine.getPage(slug, { sourceId });
-    if (page && (!isSegmentedPage(page) || hasRawTranscriptSidecar(page))) throw usageError(`--grammar applies to a conversation page stored in segments; ${sourceId}:${slug} is extracted whole`, ECF_HELP_HINT);
+  const holders = explicit ? [explicit] : (await engine.executeRaw<{ source_id: string }>(
+    'SELECT source_id FROM pages WHERE slug = $1 AND deleted_at IS NULL ORDER BY source_id', [slug])).map(r => r.source_id);
+  if (holders.length !== 1) {
+    const commands = holders.map(s => `gbrain extract-conversation-facts --source-id ${s} --slug ${slug} --grammar <format|none> --dry-run`);
+    throw usageError(holders.length ? `--grammar chooses the format of one page, and ${slug} is in ${holders.length} sources (${holders.join(', ')}): pass --source-id`
+      : `--grammar: no page ${slug} in any source`, holders.length ? commands.join('; ') : ECF_HELP_HINT, { reason: holders.length ? 'grammar_source_ambiguous' : 'grammar_page_not_found' });
   }
+  const page = await engine.getPage(slug, { sourceId: holders[0]! });
+  if (page && (!isSegmentedPage(page) || hasRawTranscriptSidecar(page))) throw usageError(`--grammar applies to a conversation page stored in segments; ${holders[0]}:${slug} is extracted whole`, ECF_HELP_HINT);
+  return holders[0]!;
 }
 
 function buildJobParams(args: string[]): Record<string, unknown> {
@@ -1737,11 +1749,8 @@ export async function runExtractConversationFacts(
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
 
   // Multi-source enumeration when --source-id NOT set.
-  const sourceIds: string[] = parsed.sourceId
-    ? [parsed.sourceId]
-    : (await listSources(engine)).map((s) => s.id);
-
-  if (parsed.grammar !== undefined) await assertGrammarTarget(engine, sourceIds, parsed.slug!);
+  const sourceIds: string[] = parsed.grammar !== undefined ? [await resolveGrammarSource(engine, parsed.sourceId, parsed.slug!)]
+    : parsed.sourceId ? [parsed.sourceId] : (await listSources(engine)).map((s) => s.id);
   progress.start('extract.conversation_facts', sourceIds.length);
 
   try {
@@ -1856,8 +1865,8 @@ export async function runExtractConversationFacts(
       for (const failed of aggregate.failed_pages) console.error(`    ${failed.slug}: ${failed.error}`);
     }
     if (aggregate.pages_pending) console.log(`  ${aggregate.pages_pending} page(s) were accepted and are still pending; rerun the same command to confirm them (no model call).`);
-    if (aggregate.pages_detection_ambiguous) console.log(`  ${aggregate.pages_detection_ambiguous} page(s) are held: no conversation format is detected over them, yet some parse messages, so their facts were kept and nothing was extracted; gbrain doctor conversation_detection_ambiguous lists each with its formats, and --slug <slug> --grammar <format|none> --dry-run previews a choice.`);
-    for (const p of aggregate.grammar_previews ?? []) console.log(`  Preview of ${p.slug} under --grammar ${p.grammar ?? 'none'}: ${p.messages} message(s) in ${p.windows} window(s), ${p.windows_to_extract} to extract; a settled run removes ${p.facts_to_collect} conversation fact(s).`);
+    if (aggregate.pages_detection_ambiguous) console.log(`  ${aggregate.pages_detection_ambiguous} page(s) are held: no conversation format is detected over them, yet some parse messages, so their facts were kept and nothing was extracted; gbrain doctor conversation_detection_ambiguous lists each with its formats, and --source-id <source> --slug <slug> --grammar <format|none> --dry-run previews a choice.`);
+    for (const p of aggregate.grammar_previews ?? []) console.log(`  Preview of ${p.source_id}:${p.slug} under --grammar ${p.grammar ?? 'none'}: ${p.messages} message(s) in ${p.windows} window(s), ${p.windows_to_extract} to extract; a settled run removes ${p.facts_to_collect} conversation fact(s).`);
     if (aggregate.pages_blocked) console.log(`  ${aggregate.pages_blocked} page(s) are blocked at their current version after a request failed; they are retried only once the page changes (each SKIP line names the receipt).`);
     if (aggregate.pages_llm_fallback > 0) {
       console.log(`  Parsed ${aggregate.pages_llm_fallback} page(s) with the opt-in LLM fallback.`);

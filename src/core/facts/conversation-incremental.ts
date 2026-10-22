@@ -27,7 +27,8 @@
  *     and in runs, newest run first, so a stop reads only the runs it reached; a page nothing changed on reads nothing;
  *   - parses under the page's grammar: the one detectPagePattern picks over the whole page (the whole-page pass's
  *     choice; one unpaid read, counted in conversationDetectionWork), pinned on the rows while the occurrences that
- *     recorded it under the same context are mostly unchanged by bytes, or the one the operator chose for this page
+ *     recorded it under the same context are mostly unchanged by bytes (never rows written under an operator choice), or
+ *     the one the operator chose for this page
  *     version (--grammar; none settles the page as non-extractable); with none detected while some built-in format still
  *     parses a message, the page is held (a detection_ambiguous receipt with each format's count for the page version;
  *     no call, nothing published or collected; a plain run on the same version reuses it without reading the page)
@@ -94,7 +95,7 @@ export interface SegmentedConversationCounters {
 }
 
 /** What a run under the operator's format (null: none) would do on one page: its messages and windows, the windows it would extract, and the facts its settled collection would remove. */
-export interface GrammarPreview { slug: string; grammar: string | null; messages: number; windows: number; windows_to_extract: number; facts_to_collect: number }
+export interface GrammarPreview { source_id: string; slug: string; grammar: string | null; messages: number; windows: number; windows_to_extract: number; facts_to_collect: number }
 
 export interface SegmentedConversationRun extends ConversationWindowRun {
   result: SegmentedConversationCounters;
@@ -108,7 +109,7 @@ export interface SegmentedConversationRun extends ConversationWindowRun {
 interface WindowRecord { ordinal: number; sha: string; facts: number; failed?: WindowFailure }
 /** Failed extraction attempts of one window (by rendered-text sha) and the last error. */
 interface WindowFailure { attempts: number; error: string }
-interface RowOutput { windows: WindowRecord[]; starts_group?: boolean; prev?: number | null; pattern?: string | null; retries?: Array<{ sha: string } & WindowFailure> }
+interface RowOutput { windows: WindowRecord[]; starts_group?: boolean; prev?: number | null; pattern?: string | null; chosen?: boolean; retries?: Array<{ sha: string } & WindowFailure> }
 /** One window of the stream: `reused` (an earlier run's facts stand), `todo`, `extracted` by this run, or `failed` past the limit. */
 interface StreamWindow { owner: number; seg: ConversationSegment; text: string | null; window: SourceWindow;
   state: 'reused' | 'todo' | 'extracted' | 'failed'; facts: number; failed?: WindowFailure }
@@ -118,7 +119,7 @@ type Stop = 'segment_limit' | 'cap_reached' | 'purge_sweep_pending' | 'interrupt
 function rowOutput(row: SegmentDerivationInput | undefined): RowOutput {
   const output = row?.output as Partial<RowOutput> | null | undefined;
   return { windows: Array.isArray(output?.windows) ? output.windows : [], starts_group: output?.starts_group, prev: output?.prev,
-    pattern: output?.pattern ?? null, retries: Array.isArray(output?.retries) ? output.retries : [] };
+    pattern: output?.pattern ?? null, chosen: output?.chosen === true, retries: Array.isArray(output?.retries) ? output.retries : [] };
 }
 
 const keyOf = (occurrenceId: number, w: WindowRecord) => sourceWindowKey({ occurrence_id: occurrenceId, window_ordinal: w.ordinal, window_text_sha: w.sha });
@@ -207,13 +208,13 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   if (opts.grammar !== undefined && !run.dryRun) await setExtractionReceipt(engine, page.id, KIND, choiceReceipt);
   if (choice !== undefined) from = 0;
   let pattern = choice !== undefined ? choice
-    : !opts.redetect && kept.length && 2 * bytesOf(kept) > bytesOf(recorded) ? rowOutput(kept[0]).pattern ?? null : null;
+    : !opts.redetect && kept.length && 2 * bytesOf(kept) > bytesOf(recorded) && !recorded.some(row => rowOutput(row).chosen) ? rowOutput(kept[0]).pattern ?? null : null;
   const pinned = choice === undefined && pattern !== null;
   const detectedBytes = conversationDetectionWork.bytes;
   const hold = async (grammars: Record<string, number>, checked: boolean) => {
     if (checked && !run.dryRun) await setExtractionReceipt(engine, page.id, KIND, { kind: 'detection_ambiguous', pipeline: KIND, processed_chars: 0, grammars, version_token: versionToken });
     result.pages_detection_ambiguous = (result.pages_detection_ambiguous ?? 0) + 1;
-    process.stderr.write(`[extract-conversation-facts] ${page.slug}: held${checked ? '' : ' (unchanged since it was held, nothing read)'}: no format is detected over the page, yet ${Object.entries(grammars).map(([id, n]) => `${id} parses ${n}`).join(', ')} message(s); its facts were kept and nothing was extracted; gbrain extract-conversation-facts --slug ${page.slug} --grammar <format|none> --dry-run previews a choice\n`);
+    process.stderr.write(`[extract-conversation-facts] ${page.slug}: held${checked ? '' : ' (unchanged since it was held, nothing read)'}: no format is detected over the page, yet ${Object.entries(grammars).map(([id, n]) => `${id} parses ${n}`).join(', ')} message(s); its facts were kept and nothing was extracted; gbrain extract-conversation-facts --source-id ${sourceId} --slug ${page.slug} --grammar <format|none> --dry-run previews a choice\n`);
     return { newestEnd: null };
   };
   // A page held at this version stays held without reading it (a --force run checks it again).
@@ -299,7 +300,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     if (opts.grammar !== undefined) {
       // The operator's preview: what a run under the chosen format extracts and what its settled collection removes.
       const keys = windows.map(w => sourceWindowKey(w.window));
-      (result.grammar_previews ??= []).push({ slug: page.slug, grammar: opts.grammar, messages: parsedMessages, windows: windows.length, windows_to_extract: todo,
+      (result.grammar_previews ??= []).push({ source_id: sourceId, slug: page.slug, grammar: opts.grammar, messages: parsedMessages, windows: windows.length, windows_to_extract: todo,
         facts_to_collect: await countConversationFactsOutside(engine, sourceId, page.slug, keys) });
     }
     return { newestEnd: null };
@@ -330,7 +331,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
       const finished = records.length === mine.length;
       return { pageId: page.id, kind: KIND, occurrenceId, version: CONVERSATION_FACTS_DERIVATION_VERSION, segmentSha256: live[streamedFrom + k]!.sha256,
         contextHash, state: finished && !opts.sinceIso ? 'done' : 'partial',
-        output: { windows: records, starts_group: startsGroup.get(occurrenceId) ?? false, prev: prevOf(streamedFrom + k), pattern, ...(retries.length ? { retries } : {}) },
+        output: { windows: records, starts_group: startsGroup.get(occurrenceId) ?? false, prev: prevOf(streamedFrom + k), pattern, ...(choice !== undefined ? { chosen: true } : {}), ...(retries.length ? { retries } : {}) },
         receipt: !finished ? unpricedModelReceipt(KIND, unpricedModel, stop ?? 'in_progress', { windows_read: records.length, windows_total: mine.length })
           : failed.length ? { kind: 'failed_windows', pipeline: KIND, windows: failed } : unpricedModelReceipt(KIND, unpricedModel, null, null) };
     });
