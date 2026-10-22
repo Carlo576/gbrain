@@ -146,6 +146,19 @@ async function remoteRewriteImportMeta(engine: BrainEngine, dir: string | null, 
   expect((stored!.frontmatter as Record<string, any>).transcript_import).toEqual(fm.transcript_import);
 }
 
+/** A remote agent (`remote: true`, a registered writer) creates a page through MCP `put_page`. */
+async function remoteCreatePage(engine: BrainEngine, dir: string, slug: string, content: string): Promise<void> {
+  await withEnv({ GBRAIN_HOME: join(dir, 'home') }, async () => {
+    const registration = await registerLocalWriter(engine, 'stdio', { sourceIds: ['*'], operations: null, scopes: ['read', 'write'], slugPrefixes: null } as never);
+    const ctx = { remote: true, config: { engine: engine.kind }, sourceId: 'default', logger: { info() {}, warn() {}, error() {} },
+      auth: { token: 'fixture', clientId: 'remote-agent-example', scopes: ['read', 'write'], sourceId: 'default' } } as never;
+    const put = await withVerifiedLocalRegistration(engine, registration, () => dispatchToolCall(engine, 'put_page',
+      { slug, request_id: randomUUID(), content }, ctx));
+    expect((put as { isError?: boolean }).isError ? (put as { content: Array<{ text: string }> }).content[0]!.text : 'ok').toBe('ok');
+  });
+  await disposePersistenceConsumer(engine);
+}
+
 async function withDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'gb-part-churn-'));
   try { await fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -417,4 +430,49 @@ export function defineTranscriptPartChurnCases(opts: { getEngine: () => BrainEng
       expect(splitAfter.map(p => p.frontmatter.transcript_import.part_bytes)).toEqual([54_000, 54_000, 54_000, 54_000]);
       expect(splitAfter.slice(1, 3).map(p => p.hash)).toEqual(splitBefore.slice(1, 3).map(p => p.hash));
     }), { databaseUrl: opts.databaseUrl }), 300_000);
+
+  test('a remote page carrying the session\'s part-2 id is not split evidence; an importer-written part 2 still is', () => withDir(async (dir) => {
+    const engine = opts.getEngine();
+    const id = `squat-${randomUUID().slice(0, 8)}`;
+    const base = baseSlugOf(id);
+    const squat = `notes/squat-${id}`;
+    const partTwoId = `openclaw-${transcriptFullId(id)}-p2`;
+    await remoteCreatePage(engine, dir, squat, `---\n${dumpFrontmatterYaml({ type: 'note', title: 'Squat', id: partTwoId,
+      transcript_import: { harness: 'openclaw', session_id: id, version: 1, part: 2, part_bytes: PART_TARGET_BYTES } })}---\nsquatted\n`);
+    const s0 = regular(50);
+    const path = writeSession(dir, id, s0);
+    expect(await legacyGroupCount(path)).toBeGreaterThanOrEqual(4);
+    const r = await ingest(engine, path);
+    expect({ pages: r.pages, partsDeleted: r.partsDeleted, sessionsErrored: r.sessionsErrored })
+      .toEqual({ pages: { imported: 1, skipped: 0, errored: 0, planned: 0, pending: 0 }, partsDeleted: 0, sessionsErrored: 0 });
+    const pages = await liveParts(engine, base);
+    expect(pages.map(p => p.slug)).toEqual([base]);
+    expect(pages[0]!.frontmatter.transcript_import).toEqual({ harness: 'openclaw', session_id: id, version: 1, part: 1, of: 1 });
+    // The same squat at the session's own -p2 slug: part 1 is the importer's one page, so it stays one page and the stray part is reconciled away.
+    // (The first squat goes first: the importer's identity dedup would skip a second page with the same id.)
+    await engine.deletePage(squat, { sourceId: 'default' });
+    await remoteCreatePage(engine, dir, `${base}-p2`, `---\n${dumpFrontmatterYaml({ type: 'note', title: 'Squat', id: partTwoId,
+      transcript_import: { harness: 'openclaw', session_id: id, version: 1, part: 2, part_bytes: PART_TARGET_BYTES } })}---\nsquatted\n`);
+    expect((await liveParts(engine, base)).map(p => p.slug)).toEqual([base, `${base}-p2`]);
+    const grown = await ingest(engine, writeSession(dir, id, [...s0, { text: 'small follow-up' }]));
+    expect({ pages: grown.pages, partsDeleted: grown.partsDeleted })
+      .toEqual({ pages: { imported: 1, skipped: 0, errored: 0, planned: 0, pending: 0 }, partsDeleted: 1 });
+    expect((await liveParts(engine, base)).map(p => p.slug)).toEqual([base]);
+
+    // A genuinely split session whose part 1 a remote writer edited still reads as split from its importer-written part 2.
+    const splitId = `squat-split-${randomUUID().slice(0, 8)}`;
+    const splitBase = baseSlugOf(splitId);
+    const t0 = regular(30);
+    const n = await seedLegacySplit(engine, writeSession(dir, splitId, t0));
+    const t1 = [...t0, { text: 'small follow-up A' }];
+    expect((await ingest(engine, writeSession(dir, splitId, t1))).pages).toMatchObject({ imported: n, errored: 0 });
+    const before = await liveParts(engine, splitBase);
+    await remoteRewriteImportMeta(engine, dir, splitBase, ti => { ti.of = 1; });
+    const again = await ingest(engine, writeSession(dir, splitId, [...t1, { text: 'small follow-up B' }]));
+    expect({ partsDeleted: again.partsDeleted, sessionsErrored: again.sessionsErrored }).toEqual({ partsDeleted: 0, sessionsErrored: 0 });
+    expect(again.pages).toMatchObject({ imported: 2, skipped: n - 2, errored: 0 });
+    const after = await liveParts(engine, splitBase);
+    expect(after.map(p => p.slug)).toEqual(before.map(p => p.slug));
+    expect(after.slice(1, n - 1).map(p => p.hash)).toEqual(before.slice(1, n - 1).map(p => p.hash));
+  }), 180_000);
 }

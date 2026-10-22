@@ -691,9 +691,13 @@ const IMPORTER_INGESTED_VIA = 'cli:transcripts-ingest';
  *     from before attribution): trusted when `ingested_via` is the importer's
  *     or NULL; a remote write is always a journaled request, and on this path
  *     it also replaces the stamp with `mcp:<operation>`.
- * So a remote edit can't choose the layout or the part size. A live part 2
- * counts whoever wrote it last: ignoring it would merge a split session and
- * delete its parts. A `part_bytes` is accepted only between PART_TARGET_BYTES
+ * So a remote edit can't choose the layout or the part size. A part 2 is
+ * split evidence only under the same rule: its id is derivable from part 1's,
+ * so any writer can put a page carrying it anywhere. A split session the
+ * importer rewrote still reads as split from part 1 (no `of`), or from a
+ * part 2 the importer wrote. One exception keeps a remote edit from merging a
+ * split session (deleting its parts): when part 1's own fields are not
+ * trusted, a part 2 at part 1's slug plus `-p2` counts whoever wrote it. A `part_bytes` is accepted only between PART_TARGET_BYTES
  * (or the ceiling, when that is lower) and the current ceiling.
  */
 async function storedTranscriptLayout(engine: BrainEngine, sourceId: string, meta: ParsedSession['meta'], pageCeiling: number):
@@ -714,7 +718,8 @@ async function storedTranscriptLayout(engine: BrainEngine, sourceId: string, met
     return ti && typeof ti === 'object' ? ti as { of?: unknown; part_bytes?: unknown } : null;
   };
   const partOne = rows.find(row => row.fid === first);
-  const partTwo = rows.find(row => row.fid === second);
+  const partTwo = rows.find(row => row.fid === second && (row.trusted === true
+    || (partOne !== undefined && partOne.trusted !== true && row.slug === `${partOne.slug}-p2`)));
   const one = importMeta(partOne);
   const split = partTwo !== undefined || (one !== null && !(Number(one.of) <= 1));
   if (!split) return { layout: 'single', partTargetBytes: pageCeiling, existingSlug: partOne?.slug ?? null };
