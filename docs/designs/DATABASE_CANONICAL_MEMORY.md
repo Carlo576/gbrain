@@ -39,7 +39,7 @@ and cost" section makes that an exit criterion.
 |---|---|---|
 | Copy of record for an agent write | the file and the row, kept equal by coordination | the row |
 | An agent write is acknowledged when | the owner host has published the file and the row together (managed), or the row and then the file (classic) | the row commits |
-| A person edits a file the database also changed | the page is held (`file_drift`, `concurrent_write`) and every coordinated write to it refuses `source_changed` until someone picks a side | the import lane merges against the exported copy; a real conflict is one row, the page stays writable |
+| A person edits a file the database also changed | the page is held (`file_drift`, `concurrent_write`) and every coordinated write to it refuses `source_changed` until someone picks a side | the import lane imports the edit if the page did not change since it was exported; otherwise the edit is kept as one conflict row and the page stays writable |
 | A file is missing | the sync has to guess whether that is a deletion (`file_gone`, provenance, delete caps) | only a path the ledger exported and that then disappeared can mean deletion; everything else is "export pending" |
 | Commits to page files | the managed Git effect, `gbrain git commit-push`, hooks, crons, agents, people | the exporter (plus people's own commits, which are imported) |
 | Freshness | the git import watermark, which disagreement can stall | export lag and import lag, neither of which a conflict can stall |
