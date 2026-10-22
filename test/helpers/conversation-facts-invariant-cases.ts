@@ -20,7 +20,7 @@
  *    grammar, a lost grammar collects a transcript's facts (under a stale recorded format included) or holds a prose page's facts forever, or a run settles a page version it did not read.
  */
 import { expect, spyOn, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import type { AppendBrain } from './append-brain.ts';
 import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
@@ -32,7 +32,9 @@ import { conversationDetectionWork } from '../../src/core/page-body/segment-conv
 import { extractionInputTruncatedEntry } from '../../src/commands/doctor/checks/extraction-input.ts';
 import type { DoctorContext } from '../../src/commands/doctor/context.ts';
 import type { Check } from '../../src/commands/doctor.ts';
-import { chatDays, chatPage, derivations, extract, factsOf, turns } from './conversation-facts-incremental-cases.ts';
+import { chatDays, chatPage, derivations, extract, factsOf, SOURCE, turns } from './conversation-facts-incremental-cases.ts';
+import { importFromContent } from '../../src/core/import-file.ts';
+import { runExtractConversationFacts, runExtractConversationFactsCore } from '../../src/commands/extract-conversation-facts.ts';
 
 const caps = async (engine: BrainEngine, usd: string) => { await engine.setConfig(PAGE_DERIVATION_CAP_KEY, usd); await engine.setConfig(PAGE_EMBED_CAP_KEY, usd); };
 
@@ -406,12 +408,82 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
     const none = await extract(brain.engine, slug, { grammar: null, dryRun: true });
     const q = none.result.grammar_previews?.[0];
     expect({ calls: none.calls.length, preview: q, facts: (await factsOf(brain.engine, slug)).map(f => f.id) })
-      .toEqual({ calls: 0, preview: { slug, grammar: null, messages: 0, windows: 0, windows_to_extract: 0, facts_to_collect: kept.length }, facts: kept });
+      .toEqual({ calls: 0, preview: { source_id: 'default', slug, grammar: null, messages: 0, windows: 0, windows_to_extract: 0, facts_to_collect: kept.length }, facts: kept });
     const cleared = await extract(brain.engine, slug, { grammar: null });
     const later = await extract(brain.engine, slug);
     expect({ calls: cleared.calls.length + later.calls.length, nonExtractable: cleared.result.pages_marked_non_extractable, failed: cleared.result.pages_failed + later.result.pages_failed,
       held: later.result.pages_detection_ambiguous ?? 0, facts: (await factsOf(brain.engine, slug)).length, receipt: await receipt() })
       .toEqual({ calls: 0, nonExtractable: 1, failed: 0, held: 0, facts: 0, receipt: 'grammar_chosen' });
+  }, 600_000);
+
+  test('--grammar applies to one page: a slug in two sources refuses with nothing changed and names both commands; --source-id changes only that source; a slug in one source resolves to it', async () => {
+    const brain = opts.getBrain();
+    const engine = brain.engine;
+    const slug = `notes/shared-chat-${randomUUID().slice(0, 8)}`;
+    const other = `src-${randomUUID().slice(0, 8)}`;
+    await caps(engine, 'off');
+    await engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING', [other]);
+    const turns = Array.from({ length: 220 }, (_, i) => `${i % 2 ? 'Assistant' : 'User'}: turn ${i} ${'present '.repeat(800)}`).join('\n');
+    for (const sourceId of ['default', other]) {
+      await importFromContent(engine, slug, chatPage(`Chat in ${sourceId}`, turns), { noEmbed: true, sourceId });
+      await runExtractConversationFactsCore(engine, { sourceId, slugs: [slug], sleepMs: 0,
+        extractor: async input => [{ fact: `Alice Example noted window ${createHash('sha256').update(input.turnText).digest('hex').slice(0, 12)}`, kind: 'fact', entity_slug: null, source: SOURCE }] });
+    }
+    const state = async () => ({
+      facts: await engine.executeRaw<{ source_id: string; n: number }>("SELECT source_id, count(*)::int AS n FROM facts WHERE source_markdown_slug = $1 AND source = $2 AND expired_at IS NULL GROUP BY source_id ORDER BY source_id", [slug, SOURCE]),
+      choices: await engine.executeRaw<{ source_id: string; kind: string }>("SELECT p.source_id, s.input_truncated->>'kind' AS kind FROM page_extraction_state s JOIN pages p ON p.id = s.page_id WHERE p.slug = $1 AND s.pipeline = 'conversation_facts' ORDER BY 1", [slug]),
+    });
+    const cli = async (args: string[]) => {
+      const lines: string[] = [];
+      const log = spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')); });
+      try { await runExtractConversationFacts(engine, args); return { error: null, lines }; }
+      catch (error) { return { error: error as { code?: string; message: string; suggestion?: string; reason?: string }, lines }; }
+      finally { log.mockRestore(); }
+    };
+    const before = await state();
+    expect(before.facts.map(r => r.source_id).sort()).toEqual(['default', other].sort());
+    const refused = [await cli(['--slug', slug, '--grammar', 'none', '--dry-run']), await cli(['--slug', slug, '--grammar', 'none'])];
+    const afterRefused = await state();
+    const scoped = await cli(['--source-id', 'default', '--slug', slug, '--grammar', 'none']);
+    const afterScoped = await state();
+    await engine.executeRaw('UPDATE pages SET deleted_at = now() WHERE source_id = $1 AND slug = $2', [other, slug]);
+    const single = await cli(['--slug', slug, '--grammar', 'none', '--dry-run']);
+    const serialized = JSON.stringify(refused.map(r => r.error));
+    expect({
+      refused: refused.map(r => ({ code: r.error?.code, names: [other, 'default'].every(s => r.error?.message.includes(s)), command: [other, 'default'].every(s => serialized.includes(`--source-id ${s} --slug ${slug} --grammar`)) })),
+      unchangedByRefusal: JSON.stringify(afterRefused) === JSON.stringify(before),
+      scoped: scoped.error?.message ?? null,
+      afterScoped: { facts: afterScoped.facts, choices: afterScoped.choices },
+      single: { error: single.error?.message ?? null, preview: single.lines.some(l => l.includes(`Preview of default:${slug} under --grammar none`)) },
+    }).toEqual({
+      refused: [{ code: 'invalid_params', names: true, command: true }, { code: 'invalid_params', names: true, command: true }],
+      unchangedByRefusal: true,
+      scoped: null,
+      afterScoped: { facts: before.facts.filter(r => r.source_id === other), choices: [{ source_id: 'default', kind: 'grammar_chosen' }] },
+      single: { error: null, preview: true },
+    });
+  }, 600_000);
+
+  test('a choice holds only for the page version it was made for: after an append the chosen rows do not pin their format, so a page still undetected is held with every fact kept', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/choice-version-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    const transcript = Array.from({ length: 160 }, (_, i) => `${i % 2 ? 'Assistant' : 'User'}: turn ${i} ${'fixture detail '.repeat(550)}`).join('\n');
+    const preamble = Array.from({ length: 16_000 }, (_, i) => `Reference paragraph ${i} gives context, not a message.`).join('\n');
+    await brain.seed(slug, chatPage('Constant title', `${preamble}\n${transcript}`));
+    const receipt = async () => (await brain.engine.executeRaw<{ kind: string | null }>(
+      "SELECT s.input_truncated->>'kind' AS kind FROM page_extraction_state s JOIN pages p ON p.id = s.page_id WHERE p.slug = $1 AND s.pipeline = 'conversation_facts'", [slug]))[0]?.kind ?? null;
+    const summary = (r: Awaited<ReturnType<typeof extract>>) => ({ calls: r.calls.length, held: r.result.pages_detection_ambiguous ?? 0, failed: r.result.pages_failed });
+    const held = summary(await extract(brain.engine, slug));
+    const chosen = await extract(brain.engine, slug, { grammar: 'plain-role-no-time' });
+    const same = summary(await extract(brain.engine, slug));
+    const facts = (await factsOf(brain.engine, slug)).map(f => f.id);
+    expect(await brain.call('append_page', { slug, text: '\nUser: a new message after the choice.\nAssistant: an appended response.', request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
+    expect(await undetected(brain, slug)).toBeNull();
+    const after = summary(await extract(brain.engine, slug));
+    const again = summary(await extract(brain.engine, slug));
+    expect({ held, chose: chosen.calls.length > 0 && chosen.result.pages_failed === 0, same, after, again, facts: (await factsOf(brain.engine, slug)).map(f => f.id), receipt: await receipt() })
+      .toEqual({ held: { calls: 0, held: 1, failed: 0 }, chose: true, same: { calls: 0, held: 0, failed: 0 }, after: { calls: 0, held: 1, failed: 0 }, again: { calls: 0, held: 1, failed: 0 }, facts, receipt: 'detection_ambiguous' });
   }, 600_000);
 
   test('R3 (cases C, C2): a page turned to pure prose whose facts have no recorded grammar (rows without one, or no rows at all) is non-extractable and its facts are collected, --force too', async () => {
