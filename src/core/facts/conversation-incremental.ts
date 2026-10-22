@@ -160,6 +160,18 @@ async function messagesByGrammar(occurrences: Parameters<typeof streamConversati
 }
 
 /**
+ * Whether the run must stream from the page's head instead of reusing the rows before its start: a row there recorded
+ * another grammar than the run's (`pattern`; with it undefined, the rows disagree among themselves), or was written under
+ * an operator choice that no longer applies. Windows with the same rendered text are reused either way.
+ */
+function grammarRestart(rows: Array<SegmentDerivationRow | undefined>, pattern: string | null | undefined, choice: string | null | undefined): boolean {
+  const outputs = rows.filter((row): row is SegmentDerivationRow => !!row).map(rowOutput);
+  if (choice === undefined && outputs.some(o => o.chosen)) return true;
+  const grammars = new Set(outputs.map(o => o.pattern ?? null));
+  return pattern === undefined ? grammars.size > 1 : [...grammars].some(g => g !== pattern);
+}
+
+/**
  * One segmented page's conversation facts, incrementally (module doc). `gapMinutes` is the page's own
  * conversation_segment_gap_minutes (null: the default). Returns the end of the newest window it extracted.
  */
@@ -206,7 +218,7 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
     : stored?.kind === 'grammar_chosen' && stored.version_token === versionToken ? stored.grammar ?? null : undefined;
   const choiceReceipt: InputTruncated | null = choice === undefined ? null : { kind: 'grammar_chosen', pipeline: KIND, processed_chars: 0, grammar: choice, version_token: versionToken };
   if (opts.grammar !== undefined && !run.dryRun) await setExtractionReceipt(engine, page.id, KIND, choiceReceipt);
-  if (choice !== undefined) from = 0;
+  if (choice !== undefined || grammarRestart(liveIds.slice(0, from).map(id => priorRow.get(id)), undefined, choice)) from = 0;
   let pattern = choice !== undefined ? choice
     : !opts.redetect && kept.length && 2 * bytesOf(kept) > bytesOf(recorded) && !recorded.some(row => rowOutput(row).chosen) ? rowOutput(kept[0]).pattern ?? null : null;
   const pinned = choice === undefined && pattern !== null;
@@ -223,15 +235,15 @@ export async function processSegmentedConversationPage(run: SegmentedConversatio
   if (choice === undefined && !pattern && from < liveIds.length) pattern = await detectPagePattern(occurrences, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
   if (choice === undefined && !pattern && from < liveIds.length) {
     if (opts.sinceIso) { result.pages_skipped++; return { newestEnd: null }; }
-    // No format is detected over the whole page. One that still parses a message here may be the page's (text around a
-    // transcript can tip the density test) or a quoted part of it, and guessing has deleted current facts: the page is
-    // held, with no call, nothing published or collected and a detection_ambiguous receipt naming each format's count
-    // for this page version, until it changes or the operator chooses its format. A page no format parses a message in is not a transcript: it
-    // settles as non-extractable below and its conversation facts are collected.
+    // No format is detected over the whole page. One that still parses a message may be the page's (text around a
+    // transcript can tip the density test) or a quoted part of it: the page is held (no call, nothing published or
+    // collected, a detection_ambiguous receipt with each format's count for this version) until it changes or the operator
+    // chooses. A page no format parses a message in is not a transcript: it settles as non-extractable below, collected.
     const grammars = await messagesByGrammar(occurrences, { page, gapMinutes: opts.gapMinutes }, i => readOccurrenceText(engine, body, occurrences[i]!.row, { detection: true }));
     if (Object.keys(grammars).length) return hold(grammars, true);
     from = 0;
   }
+  if (pattern && grammarRestart(liveIds.slice(0, from).map(id => priorRow.get(id)), pattern, choice)) from = 0;
   // Earlier windows of the occurrences the stream covers (and of retired ones), reusable by rendered text under the same context.
   const reusable = new Map<string, Array<{ occurrenceId: number; record: WindowRecord }>>();
   const failures = new Map<string, WindowFailure>();

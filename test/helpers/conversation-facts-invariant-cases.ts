@@ -486,6 +486,38 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
       .toEqual({ held: { calls: 0, held: 1, failed: 0 }, chose: true, same: { calls: 0, held: 0, failed: 0 }, after: { calls: 0, held: 1, failed: 0 }, again: { calls: 0, held: 1, failed: 0 }, facts, receipt: 'detection_ambiguous' });
   }, 600_000);
 
+  test('a format detected after an operator chose another one streams the page from its head: the chosen windows before the change do not survive, and the page equals a fresh extraction', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/choice-switch-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    const day = (i: number) => new Date(Date.UTC(2025, 0, 1 + i)).toISOString().slice(0, 10);
+    const old = Array.from({ length: 6000 }, (_, i) => `Reference line ${i} before the conversation.`).join('\n') + '\n' + Array.from({ length: 100 }, (_, i) =>
+      `## ${day(i)}\n\n**Alice Example** (9:00 AM): old turn ${i} ${'detail '.repeat(800)}\n\n**Bob Example** (9:02 AM): old response ${i} ${'detail '.repeat(800)}`).join('\n\n');
+    await brain.seed(slug, chatPage('Constant title', old));
+    expect((await extract(brain.engine, slug)).result.pages_detection_ambiguous).toBe(1);
+    await extract(brain.engine, slug, { grammar: 'bold-paren-time-12h' });
+    const chosen = await factsOf(brain.engine, slug);
+    const added = Array.from({ length: 12_000 }, (_, i) => `${i % 2 ? 'Assistant' : 'User'}: new format turn ${i} about a synthetic topic.`).join('\n');
+    await brain.seed(slug, chatPage('Constant title', `${old}\n${added}`));
+    const page = (await brain.engine.getPage(slug, { sourceId: 'default' }))!;
+    const body = (await brain.body(slug)).truth;
+    expect(parser.parseConversation(body, { page }).matched_pattern_id).toBe('plain-role-no-time');
+    const run = await extract(brain.engine, slug);
+    const after = await factsOf(brain.engine, slug);
+    const freshSlug = `notes/choice-switch-fresh-${randomUUID().slice(0, 8)}`;
+    await brain.seed(freshSlug, chatPage('Constant title', body));
+    await extract(brain.engine, freshSlug);
+    const fresh = await factsOf(brain.engine, freshSlug);
+    const shas = (facts: typeof after) => facts.map(f => f.key.split(':')[2]).sort();
+    const forced = await extract(brain.engine, slug, { force: true });
+    const rows = await derivations(brain.engine, slug);
+    expect({ failed: run.result.pages_failed, held: run.result.pages_detection_ambiguous ?? 0, facts: after.length, same: shas(after).join() === shas(fresh).join(),
+      stale: shas(after).filter(s => shas(chosen).includes(s) && !shas(fresh).includes(s)).length, forcedCalls: forced.calls.length, forcedSame: shas(await factsOf(brain.engine, slug)).join() === shas(fresh).join(),
+      grammars: [...new Set(rows.rows.map(r => (r.output as { pattern?: string | null }).pattern ?? null))], chosenRows: rows.rows.filter(r => (r.output as { chosen?: boolean }).chosen).length,
+      mismatches: await claimMismatches(brain.engine, slug) })
+      .toEqual({ failed: 0, held: 0, facts: fresh.length, same: true, stale: 0, forcedCalls: 0, forcedSame: true, grammars: ['plain-role-no-time'], chosenRows: 0, mismatches: [] });
+  }, 600_000);
+
   test('R3 (cases C, C2): a page turned to pure prose whose facts have no recorded grammar (rows without one, or no rows at all) is non-extractable and its facts are collected, --force too', async () => {
     const brain = opts.getBrain();
     const out: Record<string, unknown> = {};
