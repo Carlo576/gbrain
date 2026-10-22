@@ -1051,11 +1051,18 @@ Revision 3 takes every recommendation:
   outbox instead of a journal cursor; Phase 2 is gated on a labeled fixture
   set; uncommitted deletions, oversized edits and `resolves_conflict` have
   defined rules; the hosted seam is named.
-- One direction change, recommended and awaiting the maintainer's answer at
-  the round-2 gate: the freeze on new two-way machinery applies to converted,
+- One direction change, recommended by the round-2 gate and accepted: the
+  freeze on new two-way machinery applies to converted,
   stable sources, and correctness, security and data-loss fixes continue for
   every files-mode source until its replacement is available and approved;
   the default mode for new brains is decided after Phase 4's first production
   source, not after Phase 3a.
 
-The round-2 gate (final plan approval) is the maintainer's to answer.
+**Approval of revision 3.** The round-2 gate was answered on 2026-10-22
+(UTC) by the coordinating thread under the maintainer's standing rule to take
+every recommendation: the freeze change above was accepted, and revision 3
+was accepted into the approved plan after both review phases had used their
+two rounds (gstack approval log for this branch, plan sha256 prefix
+`fde49360efaf`). Changes made in this revision are reviewed again when each
+phase's own plan is built. The default mode for new brains and turning the
+mode on for any source remain the maintainer's decisions.
