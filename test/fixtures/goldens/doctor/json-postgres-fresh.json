@@ -992,7 +992,7 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1336 column(s) verified against live schema",
+          "message": "1337 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },

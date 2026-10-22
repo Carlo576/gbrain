@@ -28,7 +28,7 @@ import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
 import { derivationAfterSql, derivationBatchRows, derivationNeedles, derivationPurgeState, recordDerivationStatement,
-  type DerivationKey, type DerivationStallReason, type DerivationSweepState } from '../page-body/segment-derive.ts';
+  type DerivationKey, type DerivationPendingReason, type DerivationStallReason, type DerivationSweepState } from '../page-body/segment-derive.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { derivationClaimCandidateSql, derivationHoldsClaimSql, derivationSweepScopeSql, stagingNeedsTextSql } from '../page-body/schema.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
@@ -703,7 +703,7 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
  */
 export async function purgeCompletion(engine: BrainEngine, row: Pick<WriteRequest, 'id' | 'request_id' | 'state' | 'source_id' | 'outcome'>, receipt?: Pick<PurgeReceipt, 'stores'>):
   Promise<{ completion: PurgeCompletion; effects: Array<{ kind: string; state: string; error_code: string | null }>; exit_code: number; fingerprint_probe?: Record<string, number>;
-    derivation_sweep?: DerivationSweepState; derivation_sweep_reason?: DerivationStallReason; next?: string[] }> {
+    derivation_sweep?: DerivationSweepState; derivation_sweep_reason?: DerivationStallReason | DerivationPendingReason; next?: string[] }> {
   if (row.state !== 'committed') return { completion: 'incomplete', effects: [], exit_code: 75 };
   const effects = await engine.executeRaw<{ kind: string; state: string; error_code: string | null; parked: boolean }>(`SELECT kind,state,error_code,
     jsonb_array_length(COALESCE(data->'parked','[]'::jsonb))>0 AS parked FROM persistence_effects WHERE request_id=$1::uuid ORDER BY kind`, [row.id]);
@@ -723,7 +723,9 @@ export async function purgeCompletion(engine: BrainEngine, row: Pick<WriteReques
   const completion: PurgeCompletion = failed || sweptResidual ? 'incomplete' : pending ? 'committed' : 'complete';
   return { completion, effects: effects.map(({ kind, state, error_code }) => ({ kind, state, error_code })),
     exit_code: completion === 'complete' ? 0 : completion === 'committed' ? 10 : 75, ...(fingerprint ? { fingerprint_probe: fingerprint } : {}),
-    ...(sweep ? { derivation_sweep: sweep.state, ...(sweep.reason ? { derivation_sweep_reason: sweep.reason } : {}), next: [sweep.state === 'pending'
+    ...(sweep ? { derivation_sweep: sweep.state, ...(sweep.reason ? { derivation_sweep_reason: sweep.reason } : {}), next: [sweep.reason === 'scope_lock_busy'
+      ? `The sweep of stored derivation results has walked to its end, but a write in the source that brings stored results into its scope (an import, sync or page edit) is still open and held the source's scope lock past the sweep's wait (derivation_sweep: pending, scope_lock_busy). Let that write finish, then continue the sweep with gbrain forget --purge --status --request-id ${row.request_id} --continue.`
+      : sweep.state === 'pending'
       ? `Stored derivation results are still being swept for the claim (derivation_sweep: pending). Continue the sweep with gbrain forget --purge --status --request-id ${row.request_id} --continue until completion is complete.`
       : sweep.reason === 'paid_row_unreadable'
         ? `The sweep of stored derivation results stopped on a paid result (atoms, synopsis or conversation facts) it could not read within its statement budget (derivation_sweep: stalled, paid_row_unreadable); paid results are never deleted unread, and other sweeps go on. Retry it with gbrain forget --purge --status --request-id ${row.request_id} --continue; if it stalls again, report it with the output of gbrain doctor --json.`

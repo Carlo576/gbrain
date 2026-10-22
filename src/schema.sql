@@ -2168,6 +2168,7 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
   batch_rows        INTEGER   CHECK (batch_rows >= 1),
   stalled_at        TIMESTAMPTZ,
   stalled_reason    TEXT      CHECK (stalled_reason IN ('statement_timeout','paid_row_unreadable')),
+  pending_reason    TEXT      CHECK (pending_reason IN ('scope_lock_busy')),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);

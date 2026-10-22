@@ -271,6 +271,7 @@
       "page_segment_derivation_purge_pages.page_segment_derivation_purge_pages_pkey": "p PRIMARY KEY (request_id, page_id)",
       "page_segment_derivation_purges.page_segment_derivation_purges_batch_rows_check": "c CHECK ((batch_rows >= 1))",
       "page_segment_derivation_purges.page_segment_derivation_purges_found_check": "c CHECK ((found >= 0))",
+      "page_segment_derivation_purges.page_segment_derivation_purges_pending_reason_check": "c CHECK ((pending_reason = 'scope_lock_busy'::text))",
       "page_segment_derivation_purges.page_segment_derivation_purges_phase_check": "c CHECK ((phase = ANY (ARRAY['sweep'::text, 'verify'::text, 'recheck'::text])))",
       "page_segment_derivation_purges.page_segment_derivation_purges_pkey": "p PRIMARY KEY (request_id)",
       "page_segment_derivation_purges.page_segment_derivation_purges_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
@@ -3021,7 +3022,8 @@
           "12 batch_rows integer/int4 NULL",
           "13 stalled_at timestamp with time zone/timestamptz NULL",
           "14 stalled_reason text/text NULL",
-          "15 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+          "15 pending_reason text/text NULL",
+          "16 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
         ],
         "flags": "relkind=r rls=true force_rls=false"
       },

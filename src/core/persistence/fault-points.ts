@@ -55,6 +55,9 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'purge:derivation_unread'
   // Inside each batch transaction of the purge receipt's derivation probe (purge-verify.ts derivationTextReport), with the batch size as `round`; a 57014 models a batch outrunning the probe's statement budget.
   | 'purge:derivation_probe'
+  // Before a purge's derivation sweep takes the source's scope lock at the end of a walk (segment-derive.ts continueDerivationPurges): tried without
+  // waiting, then waited for a bounded time. A 55P03 from the hook models a write in the source holding it: the try fails, the wait times out.
+  | 'purge:derivation_scope_lock'
   // #6712 PR 4b: after a page-row deletion of a managed Git source wrote its origin's deletion marker (sync-markers.ts), before the row goes.
   | 'purge:marker_written'
   // #6712 PR 4b: before each round of a pass reads its level (`round`), and after it read it (`level`: its statements and its

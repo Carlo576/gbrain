@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { runExtractFacts } from '../../src/core/cycle/extract-facts.ts';
 import { __setAfterDerivationSweepBatchForTests, __setBeforeDerivationWriteForTests, __setBeforeUnreadDerivationDeleteForTests, __setDerivationSweepLimitsForTests,
-  __setDerivationSweepWorkForTests, continueDerivationPurges, derivationPurgeState, derivationSweepStatements, derivationSweepWork,
+  __setDerivationSweepWorkForTests, continueDerivationPurges, DERIVATION_SWEEP_LIMITS, derivationPurgeState, derivationSweepStatements, derivationSweepWork,
   segmentDeriveWork } from '../../src/core/page-body/segment-derive.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { __setPurgeProbeLimitsForTests } from '../../src/core/facts/purge-verify.ts';
@@ -925,10 +925,72 @@ export function registerDerivationPurgeCases(kind: 'pglite' | 'postgres'): void 
       expect({ rows: await exactHolders(brain.engine, rows, claim), recorded: await sweepsRecorded() }).toEqual({ rows: [], recorded: 0 });
     }, 600_000);
 
+    /** A sweep's receipt while a write holds the scope lock past its wait, and doctor's view of it: the named reason, \`next\` and the doctor record. */
+    const busyView = async (requestId: string, body: Record<string, any>) => {
+      const [check] = await derivationPurgeSweepsEntry.run({ engine: brain.engine } as never) as Array<Record<string, any>>;
+      return { sweep: body.derivation_sweep, reason: body.derivation_sweep_reason ?? null,
+        next: (body.next as string[] | undefined ?? []).some(n => n.includes('Let that write finish, then continue') && n.includes(`--request-id ${requestId} --continue`)),
+        doctor: (check!.details.records as Array<Record<string, any>> | undefined)?.find(r => r.request_id === requestId)?.reason ?? null,
+        message: String(check!.message).includes('scope_lock_busy') && String(check!.message).includes('let that write finish') };
+    };
+    const busy = { sweep: 'pending', reason: 'scope_lock_busy', next: true, doctor: 'scope_lock_busy', message: true };
+
+    test('a sweep whose end waits past its bound on a write holding the scope lock says so (scope_lock_busy) until the write ends and the sweep finishes', async () => {
+      const claim = 'Purge Example quarry code is 3371';
+      const rows = await candidateRowsPage('notes/busy-hook-rows', claim, 50, 1);
+      const params = await confirmed(await seed('notes/busy-hook-purge', claim));
+      __setDerivationSweepLimitsForTests({ totalMs: 0 });
+      try { expect((await brain.call('purge_fact', params)).body.derivation_sweep).toBe('pending'); } finally { __setDerivationSweepLimitsForTests(null); }
+      // The hook models a write in the source holding the scope lock (55P03: the try fails, the bounded wait times out); PGLite has one connection.
+      let open = true, tried = 0;
+      installFaultHook(point => {
+        if (point !== 'purge:derivation_scope_lock' || !open) return;
+        tried++;
+        throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+      });
+      try {
+        const held = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+        expect({ tried: tried >= 2, ...await busyView(params.request_id, held) }).toEqual({ tried: true, ...busy });
+        const again = (await brain.call('purge_fact', { status: true, request_id: params.request_id }).then(r => r.body));
+        expect(await busyView(params.request_id, again)).toEqual(busy);
+        open = false;
+        const done = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+        const [clear] = await derivationPurgeSweepsEntry.run({ engine: brain.engine } as never) as Array<Record<string, any>>;
+        expect({ sweep: done.derivation_sweep, reason: done.derivation_sweep_reason, doctor: clear!.status }).toEqual({ sweep: undefined, reason: undefined, doctor: 'ok' });
+      } finally { installFaultHook(undefined); }
+      expect({ rows: await exactHolders(brain.engine, rows, claim), recorded: await sweepsRecorded() }).toEqual({ rows: [], recorded: 0 });
+    }, 600_000);
+
     if (kind === 'postgres') {
       const scopeKey = `hashtextextended('gbrain:derivation-scope:' || '${SOURCE}', 0)`;
       const advisoryLocks = (sql: any, mode: string) => sql.unsafe(`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND mode = $1 AND NOT granted
         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`, [mode]) as Promise<Array<{ pid: number }>>;
+
+      test('a write holding the scope lock longer than the sweep\'s wait leaves it pending with scope_lock_busy; once the write commits the sweep finishes and the reason is gone', async () => {
+        const claim = 'Purge Example forge code is 8142';
+        const rows = await candidateRowsPage('notes/busy-lock-rows', claim, 50, 1);
+        const params = await confirmed(await seed('notes/busy-lock-purge', claim));
+        __setDerivationSweepLimitsForTests({ totalMs: 0 });
+        try { expect((await brain.call('purge_fact', params)).body.derivation_sweep).toBe('pending'); } finally { __setDerivationSweepLimitsForTests(null); }
+        const sql = (brain.engine as any).sql;
+        const opened = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+        const writer = sql.begin(async (tx: any) => { await tx.unsafe(`SELECT pg_advisory_xact_lock_shared(${scopeKey})`); opened.resolve(); await release.promise; });
+        await opened.promise;
+        let held: Record<string, any> = {}, waited = 0;
+        try {
+          const t0 = performance.now();
+          held = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+          waited = performance.now() - t0;
+          expect({ waited: waited >= DERIVATION_SWEEP_LIMITS.finalizeWaitMs, ...await busyView(params.request_id, held) }).toEqual({ waited: true, ...busy });
+        } finally {
+          release.resolve();
+          await writer;
+        }
+        const done = (await brain.call('purge_fact', { status: true, request_id: params.request_id, continue: true })).body;
+        const [clear] = await derivationPurgeSweepsEntry.run({ engine: brain.engine } as never) as Array<Record<string, any>>;
+        expect({ sweep: done.derivation_sweep, reason: done.derivation_sweep_reason, doctor: clear!.status }).toEqual({ sweep: undefined, reason: undefined, doctor: 'ok' });
+        expect({ rows: await exactHolders(brain.engine, rows, claim), recorded: await sweepsRecorded() }).toEqual({ rows: [], recorded: 0 });
+      }, 600_000);
 
       test('a sweep waiting for the scope lock holds no other lock, and writes that arrive meanwhile queue behind it', async () => {
         const claim = 'Purge Example mill code is 6630';

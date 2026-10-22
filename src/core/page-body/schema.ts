@@ -248,7 +248,8 @@ export function derivationScopeLockSql(sourceId: string): string {
  *
  * page_segment_derivation_purges holds a fact purge's derivation sweep from the purge's commit until it is verified
  * (segment-derive.ts continueDerivationPurges): the claim's normalized forms, the pages the purge rewrote, the walk's
- * phase and cursor, its adaptive batch size and, once a row alone outran the statement budget, when it stalled. While it
+ * phase and cursor, its adaptive batch size, once a row alone outran the statement budget, when it stalled and, while a
+ * write still open in the source keeps it from ending past its bounded wait, that it waits on one (`pending_reason`). While it
  * is there, the trigger on page_segment_derivations drops a write of a row of the source that the sweep would delete (in
  * its scope, derivationSweepScopeSql, and holding the claim; returns NULL: the row is not stored and the pipeline derives
  * it again after the sweep; a paid pipeline makes no call on such a page meanwhile, page-embedding-budget.ts
@@ -301,6 +302,7 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
   batch_rows        INTEGER   CHECK (batch_rows >= 1),
   stalled_at        TIMESTAMPTZ,
   stalled_reason    TEXT      CHECK (stalled_reason IN ('statement_timeout','paid_row_unreadable')),
+  pending_reason    TEXT      CHECK (pending_reason IN ('scope_lock_busy')),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);
