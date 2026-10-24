@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 263184,
-    "stdoutSha256": "c7005801cc52a1238f2d591e5f00e0d58b16c4a379a02659bbeabec655ee402d",
+    "stdoutBytes": 262862,
+    "stdoutSha256": "408f2e9faacc52e34945b564e2a2e4cb6cb878226af4afb903cbd0dcccbe7777",
     "toolNames": [
       "remember",
       "entity",
@@ -190,7 +190,7 @@
     ],
     "tools": [
       {
-        "description": "MEMORY VERB (v1): save facts with provenance. Set `entity` (the subject) or recall misses it. Branch on `status` (inserted|duplicate|superseded); write_pending: poll get_write_request.",
+        "description": "Save facts with provenance; set `entity` (the subject) or recall misses it. Branch on `status`; write_pending: poll get_write_request.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
@@ -301,7 +301,7 @@
         "scope": "write"
       },
       {
-        "description": "MEMORY VERB (v1): person/company/account card, zero LLM. Previews are not evidence: fetch the page before stating status or dates. Miss: found:false with near matches (create_safety). Facts: recall.",
+        "description": "Person/company/account card, zero LLM. Previews are not evidence: fetch the page before stating status or dates. Miss: found:false with near matches (create_safety). Facts: recall.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -346,7 +346,7 @@
         "scope": "read"
       },
       {
-        "description": "[EXPENSIVE / SLOW: LLM calls, costs money] MEMORY VERB (v1): answer a broad question across pages with citations. For lookups use recall or entity.",
+        "description": "[EXPENSIVE / SLOW: LLM calls] Cited answer to a broad question across pages. Lookups: recall or entity.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -380,7 +380,7 @@
         "scope": "read"
       },
       {
-        "description": "MEMORY VERB (v1): expire a remembered fact by its fact_id (never a page slug). Idempotent; the audit trail is kept.",
+        "description": "Expire a remembered fact by its fact_id (never a page slug). Idempotent; the audit trail is kept.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
@@ -768,7 +768,7 @@
               "type": "boolean"
             },
             "limit": {
-              "description": "Max rows (default 50; remote max 100).",
+              "description": "Remote max 100.",
               "type": "number"
             },
             "offset": {
@@ -802,7 +802,7 @@
               "type": "string"
             },
             "updated_after": {
-              "description": "Pages updated after this ISO time.",
+              "description": "ISO time.",
               "type": "string"
             },
             "updated_after_slug": {
@@ -1064,7 +1064,7 @@
         "schema": {
           "properties": {
             "edits": {
-              "description": "1 to 50 {old_text, new_text} replacements.",
+              "description": "1-50 replacements.",
               "items": {
                 "additionalProperties": false,
                 "properties": {
@@ -5698,7 +5698,7 @@
         "scope": "read"
       },
       {
-        "description": "More tools: no arguments lists your catalog; {tools: [names]} returns schemas; {surface} widens it (per client or stdio session).",
+        "description": "More tools and params: no arguments lists your catalog; {tools: [names]} returns full schemas, every optional param included; {surface} widens it (per client or stdio session).",
         "idempotent": false,
         "local_only": false,
         "mutating": true,
@@ -5711,7 +5711,7 @@
         "schema": {
           "properties": {
             "surface": {
-              "description": "Surface to widen to (stdio: this session only).",
+              "description": "stdio: this session only.",
               "enum": [
                 "verbs",
                 "starter",
@@ -5722,7 +5722,6 @@
             "tools": {
               "description": "Tool names to fetch.",
               "items": {
-                "description": "A tool name from the catalog.",
                 "type": "string"
               },
               "type": "array"
@@ -5749,11 +5748,11 @@
         "schema": {
           "properties": {
             "days": {
-              "description": "Window in days (default 14).",
+              "description": "Default 14.",
               "type": "number"
             },
             "limit": {
-              "description": "Max results (default 20).",
+              "description": "Default 20.",
               "type": "number"
             },
             "recency_bias": {
@@ -6588,7 +6587,7 @@
         "scope": "write"
       },
       {
-        "description": "MEMORY VERB (v1): read facts by entity, since or session_id; `query` also searches pages. Remote callers: world facts only. One card: entity; reasoning: synthesize.",
+        "description": "Read facts by entity, since or session_id; `query` also searches pages. Remote callers: world facts only. One card: entity; reasoning: synthesize.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -6704,7 +6703,7 @@
         "scope": "read"
       },
       {
-        "description": "MEMORY VERB (v1): core memory, budget-packed cards, open threads and hot facts for up to 8 entities, zero LLM. Call at session start and after compaction.",
+        "description": "Core memory, budget-packed cards, open threads and hot facts for up to 8 entities, zero LLM. Call at session start and after compaction.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -6806,7 +6805,7 @@
         "scope": "read"
       },
       {
-        "description": "MEMORY VERB (v1): pages, facts, thread events changed since a cursor, zero LLM. Pass session_id, cursor or since.",
+        "description": "Pages, facts, thread events changed since a cursor, zero LLM. Pass session_id, cursor or since.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
