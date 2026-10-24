@@ -256,6 +256,18 @@ describe('minimum guidance (DX-14)', () => {
     }
   });
 
+  test('starter search and query keep the params agents need to scope and page a call (GBRA-156)', () => {
+    const listed = (name: string) => Object.keys(buildToolDefs(filterOpsForSurface(operations, 'starter').filter(o => o.name === name))[0].inputSchema.properties);
+    expect(listed('search')).toEqual(expect.arrayContaining(['query', 'limit', 'offset', 'match', 'cursor', 'source_id', 'types', 'return_unit']));
+    expect(listed('query')).toEqual(expect.arrayContaining(['query', 'limit', 'offset', 'source_id', 'types', 'since', 'until', 'return_unit', 'expand']));
+    // where and min_trust were full-surface-only before GBRA-156 too: callable on starter, schema via request_tools {tools}.
+    for (const name of ['search', 'query']) {
+      expect(listed(name)).not.toContain('where');
+      expect(listed(name)).not.toContain('min_trust');
+      expect(Object.keys(operations.find(o => o.name === name)!.params)).toEqual(expect.arrayContaining(['where', 'min_trust']));
+    }
+  });
+
   test('every required input of a starter tool is declared in its schema', () => {
     for (const def of buildToolDefs(operations.filter(o => STARTER_OPS.has(o.name)))) {
       for (const key of def.inputSchema.required) expect(def.inputSchema.properties, `${def.name}.${key}`).toHaveProperty(key);
