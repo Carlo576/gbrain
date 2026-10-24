@@ -6,13 +6,15 @@
  *    member may see. The request reads the intersection of `source_ids` and
  *    the caller's readable sources; each id is authorized exactly as an
  *    explicit `source_id` is (out-of-grant ids refuse with permission_denied
- *    for remote callers, non-live ids refuse with unknown_source), and an
- *    empty narrowed scope searches nothing.
+ *    for remote callers, non-live ids refuse with unknown_source). An empty
+ *    list or blank string is absent (#5390); a non-empty list whose
+ *    intersection with `source_id` is empty searches nothing.
  * 2. Fails when: the param is dropped or unknown (local callers read every
  *    source), any arm (keyword, vector, title, alias fan-out, entity
  *    anchoring, facts arm, saved facts, CRAG re-run, think escalation,
- *    evidence delivery, keyword paging) reads past the narrowed scope, or an
- *    empty narrowed scope falls back to the ambient or full scope.
+ *    evidence delivery, keyword paging) reads past the narrowed scope, an
+ *    empty intersection falls back to the ambient or full scope, or an empty
+ *    list stops behaving like an omitted one.
  * 3. Existing coverage pins only the scalar `source_id` (search-op-source-id).
  * 4. No production seam: the gateway embed transport stub and an engine proxy
  *    that records each search call's scope.
@@ -187,11 +189,14 @@ for (const kind of testBackends()) {
           expectNoSourceB(out);
         });
 
-        test(`${op}: an empty array searches nothing and says so`, async () => {
-          const out = await run(op, { query: 'zephyrblatt orchard harvest', source_ids: [] });
-          expect(out.rows).toEqual([]);
-          expect(out.calls).toEqual([]);
-          expect(out.notices.map(n => n.code)).toContain('empty_retrieval');
+        test(`${op}: an empty array or blank string behaves exactly like omitting it`, async () => {
+          const omitted = slugs(await run(op, { query: 'zephyrblatt orchard harvest' })).sort();
+          expect(omitted).toEqual(expect.arrayContaining(['notes/orchard-alpha', 'notes/orchard-bravo', 'notes/orchard-charlie']));
+          for (const sourceIds of [[], '', '  ']) {
+            const out = await run(op, { query: 'zephyrblatt orchard harvest', source_ids: sourceIds });
+            expect(slugs(out).sort()).toEqual(omitted);
+            expect(out.notices.map(n => n.code)).not.toContain('empty_retrieval');
+          }
         });
 
         test(`${op}: source_id intersects source_ids (disjoint pair searches nothing)`, async () => {
@@ -202,6 +207,7 @@ for (const kind of testBackends()) {
           const disjoint = await run(op, { query: 'zephyrblatt orchard harvest', source_id: 'source-b', source_ids: ['source-a'] });
           expect(disjoint.rows).toEqual([]);
           expect(disjoint.calls).toEqual([]);
+          expect(disjoint.notices.map(n => n.code)).toContain('empty_retrieval');
           const all = await run(op, { query: 'zephyrblatt orchard harvest', source_id: '__all__', source_ids: ['source-a'] });
           expectNoSourceB(all);
         });
@@ -213,6 +219,8 @@ for (const kind of testBackends()) {
           expect(await refusal(run(op, { query: 'zephyrblatt', source_ids: ['__all__'] }))).toBe('invalid_params');
           expect(await refusal(run(op, { query: 'zephyrblatt', source_ids: 'source-a' }))).toBe('invalid_params');
           expect(await refusal(run(op, { query: 'zephyrblatt', source_ids: [7] }))).toBe('invalid_params');
+          expect(await refusal(run(op, { query: 'zephyrblatt', source_ids: [''] }))).toBe('invalid_params');
+          expect(await refusal(run(op, { query: 'zephyrblatt', source_ids: ',' }))).toBe('invalid_params');
         });
       }
 
@@ -311,10 +319,15 @@ for (const kind of testBackends()) {
           });
         }
 
-        test(`${op}: an empty array searches nothing`, async () => {
-          const out = await run(op, { query: 'zephyrblatt orchard harvest', source_ids: [] }, remote);
-          expect(out.rows).toEqual([]);
-          expect(out.calls).toEqual([]);
+        test(`${op}: an empty array or blank string reads the grant, exactly like omitting it`, async () => {
+          const omitted = await run(op, { query: 'zephyrblatt orchard harvest', fields: 'full' }, remote);
+          expect(slugs(omitted)).toContain('notes/orchard-alpha');
+          expectNoSourceB(omitted);
+          for (const sourceIds of [[], '']) {
+            const out = await run(op, { query: 'zephyrblatt orchard harvest', fields: 'full', source_ids: sourceIds }, remote);
+            expect(slugs(out).sort()).toEqual(slugs(omitted).sort());
+            expectNoSourceB(out);
+          }
         });
 
         test(`${op}: the alias fan-out cannot reach source-b`, async () => {

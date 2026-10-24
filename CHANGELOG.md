@@ -20,7 +20,7 @@ identifiers and attribution are available in the pre-removal Git revision
 |---|---|---|
 | An agent acting for one member of a shared brain searches | every source the token can read came back; only one `source_id` (or all) could be named | `source_ids: ["source-a", "source-c"]` (CLI `--source-ids source-a,source-c`) reads only those sources, in every arm: keyword, vector, title, other names, entity anchoring, saved facts, the CRAG re-run, think escalation and evidence delivery |
 | A remote agent lists a source outside its grant | not possible | `permission_denied` for the whole request, as for `source_id`; a removed or archived source is `unknown_source` |
-| `source_ids` with `source_id`, or an empty list | not possible | the request reads the sources in both; when none remain, nothing is searched and an `empty_retrieval` notice says why (never a fallback to the wider scope) |
+| `source_ids` with `source_id` | not possible | the request reads the sources in both; when none remain, nothing is searched and an `empty_retrieval` notice says why (never a fallback to the wider scope). An empty list or blank string is the same as omitting `source_ids` |
 
 ### What to watch for after you upgrade
 

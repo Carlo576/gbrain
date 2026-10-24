@@ -8,10 +8,11 @@
  * set) gets permission_denied for the whole request, and a removed or
  * archived source gets unknown_source. So the list can only narrow a request
  * to sources the caller could already read; the token's grant stays the
- * security boundary. With `source_id` too, the request reads their
- * intersection (`__all__` keeps the list). An empty result searches
- * nothing: the handlers return no rows rather than fall back to the ambient
- * or full scope, and an `empty_retrieval` notice says why.
+ * security boundary. An empty list or blank string is absent (#5390). With
+ * `source_id` too, the request reads their intersection (`__all__` keeps the
+ * list); an empty intersection searches nothing: the handlers return no rows
+ * rather than fall back to the ambient or full scope, and an
+ * `empty_retrieval` notice says why.
  */
 import { ALL_SOURCES, isValidSourceId } from '../source-id.ts';
 import type { OperationContext } from './contract.ts';
@@ -21,12 +22,15 @@ import { invalidParam } from './op-fix.ts';
 export const SOURCE_IDS_PARAM = {
   type: 'array' as const,
   items: { type: 'string' as const },
-  description: 'Narrow to these sources ([] = none).',
+  description: 'Narrow to these sources (omit or [] for all you can read).',
 };
 
 /** `source_ids` as distinct, trimmed source ids; undefined when absent. */
 export function parseSourceIdsParam(ctx: OperationContext, tool: 'search' | 'query', raw: unknown): string[] | undefined {
   if (raw === undefined || raw === null) return undefined;
+  // #5390: OpenAI-family MCP clients fill every optional param with an empty value; [] and a blank string mean absent.
+  if (Array.isArray(raw) && raw.length === 0) return undefined;
+  if (typeof raw === 'string' && raw.trim() === '') return undefined;
   const example = ctx.remote === false ? 'source-a,source-b' : ['source-a', 'source-b'];
   if (!Array.isArray(raw)) throw invalidParam(ctx, tool, 'source_ids', '`source_ids` must be an array of source ids.', { example });
   const ids = new Set<string>();
@@ -54,8 +58,7 @@ export async function requestSourceScope(ctx: OperationContext, sourceIdParam: s
   for (const id of [sourceIdParam, ...sourceIds]) await assertExplicitSourceLive(ctx, id);
   const narrowed = sourceIdParam === undefined || sourceIdParam === ALL_SOURCES ? sourceIds : sourceIds.filter(id => id === sourceIdParam);
   if (narrowed.length === 0) {
-    ctx.emitNotice?.({ code: 'empty_retrieval', kind: 'info',
-      why: sourceIds.length === 0 ? 'source_ids was empty, so no source was searched.' : `source_ids does not include source_id '${sourceIdParam}', so no source was searched.` });
+    ctx.emitNotice?.({ code: 'empty_retrieval', kind: 'info', why: `source_ids does not include source_id '${sourceIdParam}', so no source was searched.` });
   }
   return { sourceIds: narrowed };
 }

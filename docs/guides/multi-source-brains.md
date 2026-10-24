@@ -146,10 +146,12 @@ grant.
   naming a source outside its grant gets `permission_denied` for the whole
   request, and a removed or archived source gets `unknown_source`. So the
   list can narrow a request but never widen it.
+- Omitting `source_ids`, or passing `[]` or a blank string, reads every
+  source the caller can read, as before.
 - With `source_id` as well, the request reads the sources in both
-  (`source_id: "__all__"` keeps the list). If none are left, or the list is
-  empty, nothing is searched: the result is empty with an
-  `empty_retrieval` notice, never a fallback to the wider scope.
+  (`source_id: "__all__"` keeps the list). If none are left, nothing is
+  searched: the result is empty with an `empty_retrieval` notice, never a
+  fallback to the wider scope.
 - `__all__` and malformed ids in the list are `invalid_params`.
 
 Every part of the request reads the narrowed sources: keyword, vector and

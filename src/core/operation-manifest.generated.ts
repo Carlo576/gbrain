@@ -1309,7 +1309,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "items": {
           "type": "string"
         },
-        "description": "Narrow to these sources ([] = none)."
+        "description": "Narrow to these sources (omit or [] for all you can read)."
       },
       "types": {
         "type": "array",
@@ -1531,7 +1531,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "items": {
           "type": "string"
         },
-        "description": "Narrow to these sources ([] = none)."
+        "description": "Narrow to these sources (omit or [] for all you can read)."
       },
       "cross_modal": {
         "type": "string",

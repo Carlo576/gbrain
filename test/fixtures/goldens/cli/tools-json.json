@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 263140,
-    "stdoutSha256": "1c472b785ce9480da19240c8b8fd36d52593149294542069d6ba20813ef4c192",
+    "stdoutBytes": 263184,
+    "stdoutSha256": "c7005801cc52a1238f2d591e5f00e0d58b16c4a379a02659bbeabec655ee402d",
     "toolNames": [
       "remember",
       "entity",
@@ -1723,7 +1723,7 @@
               "type": "string"
             },
             "source_ids": {
-              "description": "Narrow to these sources ([] = none).",
+              "description": "Narrow to these sources (omit or [] for all you can read).",
               "items": {
                 "type": "string"
               },
@@ -1936,7 +1936,7 @@
               "type": "string"
             },
             "source_ids": {
-              "description": "Narrow to these sources ([] = none).",
+              "description": "Narrow to these sources (omit or [] for all you can read).",
               "items": {
                 "type": "string"
               },
