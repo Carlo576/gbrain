@@ -1,4 +1,5 @@
-import type { StorageBackend, StorageConfig } from '../storage.ts';
+import { open } from 'fs/promises';
+import { readFileRange, type StorageBackend, type StorageConfig } from '../storage.ts';
 
 /** Size thresholds for upload method selection */
 const TUS_THRESHOLD = 100 * 1024 * 1024;   // 100 MB — use TUS resumable above this
@@ -45,9 +46,25 @@ export class SupabaseStorage implements StorageBackend {
 
   async upload(path: string, data: Buffer, mime?: string): Promise<void> {
     if (data.length >= TUS_THRESHOLD) {
-      await this.uploadTus(path, data, mime);
+      await this.uploadTus(path, data.length, async (offset, length) => data.subarray(offset, offset + length), mime);
     } else {
       await this.uploadStandard(path, data, mime);
+    }
+  }
+
+  /** Upload from disk: TUS reads each chunk from the file, so memory is bounded by the chunk size (#7427). */
+  async uploadFile(path: string, filePath: string, mime?: string): Promise<void> {
+    const file = await open(filePath, 'r');
+    try {
+      const { size } = await file.stat();
+      if (size < TUS_THRESHOLD) {
+        await this.uploadStandard(path, await readFileRange(file, Buffer.allocUnsafe(size), size, 0), mime);
+        return;
+      }
+      const chunk = Buffer.allocUnsafe(TUS_CHUNK_SIZE);
+      await this.uploadTus(path, size, (offset, length) => readFileRange(file, chunk, length, offset), mime);
+    } finally {
+      await file.close();
     }
   }
 
@@ -70,9 +87,15 @@ export class SupabaseStorage implements StorageBackend {
 
   /**
    * TUS resumable upload for files >= 100 MB.
-   * Sends in 6 MB chunks with retry + exponential backoff.
+   * Sends in 6 MB chunks with retry + exponential backoff; `readChunk` supplies
+   * each chunk's bytes, from memory or from disk.
    */
-  private async uploadTus(path: string, data: Buffer, mime?: string): Promise<void> {
+  private async uploadTus(
+    path: string,
+    size: number,
+    readChunk: (offset: number, length: number) => Promise<Buffer>,
+    mime?: string,
+  ): Promise<void> {
     const tusUrl = `${this.projectUrl}/storage/v1/upload/resumable`;
     const objectName = `${this.bucket}/${path}`;
 
@@ -82,7 +105,7 @@ export class SupabaseStorage implements StorageBackend {
       headers: {
         ...this.headers(),
         'Tus-Resumable': '1.0.0',
-        'Upload-Length': String(data.length),
+        'Upload-Length': String(size),
         'Upload-Metadata': [
           `bucketName ${btoa(this.bucket)}`,
           `objectName ${btoa(path)}`,
@@ -102,7 +125,7 @@ export class SupabaseStorage implements StorageBackend {
 
     // Step 2: Upload chunks
     let offset = 0;
-    while (offset < data.length) {
+    while (offset < size) {
       let attempt = 0;
       const maxAttempts = 3;
       while (attempt < maxAttempts) {
@@ -119,8 +142,8 @@ export class SupabaseStorage implements StorageBackend {
             }
           }
 
-          const end = Math.min(offset + TUS_CHUNK_SIZE, data.length);
-          const chunk = data.subarray(offset, end);
+          const end = Math.min(offset + TUS_CHUNK_SIZE, size);
+          const chunk = await readChunk(offset, end - offset);
 
           const patchRes = await this.fetchImpl(uploadUrl, {
             method: 'PATCH',
