@@ -39,10 +39,15 @@ beforeAll(async () => {
     for (const sourceId of ['default', 'source-a']) {
       await page(engine, 'people/alice-example', 'Alice Example', 'person', sourceId);
       await page(engine, 'companies/acme-example', 'Acme Example', 'company', sourceId);
-      await page(engine, 'ideas/automation-example', 'Automation Example', 'concept', sourceId);
+      await page(engine, 'concepts/automation-example', 'Automation Example', 'concept', sourceId);
     }
     // source-a also holds real entities named like a currency code and two label words.
     for (const title of ['CHF', 'Invoice', 'Work']) await page(engine, `companies/${title.toLowerCase()}`, title, 'company', 'source-a');
+    // source-b holds names that start with a label word.
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('source-b', 'source-b') ON CONFLICT DO NOTHING`);
+    await page(engine, 'companies/work-example', 'Work Example', 'company', 'source-b');
+    await page(engine, 'companies/work-acme-example', 'Work Acme Example', 'company', 'source-b');
+    await page(engine, 'companies/acme-example', 'Acme Example', 'company', 'source-b');
   }
 }, 120_000);
 
@@ -62,10 +67,13 @@ const CASES: Array<{ id: string; fact: string; expect: string | null }> = [
   { id: 'unknown-issuer', fact: 'Northstar Example issued an invoice to Alice Example', expect: null },
   { id: 'incidental-example', fact: 'Has a venture research folder with 17 enrolled documents including Automation Example notes', expect: null },
   { id: 'such-as-example', fact: 'Has research notes on concepts such as Automation Example', expect: null },
-  { id: 'example-literal', fact: 'Has research notes including ideas/automation-example', expect: null },
+  { id: 'for-example-comma', fact: 'Has research notes on several concepts, for example, Automation Example', expect: null },
+  { id: 'eg-comma', fact: 'Has research notes on several concepts (e.g., Acme Example and Automation Example)', expect: null },
+  { id: 'including-not-introducing', fact: 'Has notes including weekly sync items that belong to Alice Example', expect: ALICE },
+  { id: 'example-literal', fact: 'Has research notes including concepts/automation-example', expect: null },
   { id: 'currency-without-amount', fact: 'CHF billed Alice Example CHF 80', expect: null },
   { id: 'label-mid-sentence', fact: 'Alice Example joined Work Example last year', expect: null },
-  { id: 'subject-also-named-as-example', fact: 'ideas/automation-example lists 17 documents including ideas/automation-example notes', expect: 'ideas/automation-example' },
+  { id: 'subject-also-named-as-example', fact: 'concepts/automation-example lists 17 documents including concepts/automation-example notes', expect: 'concepts/automation-example' },
 ];
 
 describe('#7405 fact subject inference: currency amounts, label openers and incidental examples', () => {
@@ -83,6 +91,11 @@ describe('#7405 fact subject inference: currency amounts, label openers and inci
         expect(await inferFactSubject(engineFor(), 'default', {
           fact: 'Has 17 documents including Automation Example notes', pageSlug: 'companies/acme-example', mode,
         })).toMatchObject({ slug: null, reason: 'ambiguous' });
+      });
+
+      test(`[${backend}] ${mode}: a name that starts with a label word keeps it`, async () => {
+        expect((await inferFactSubject(engineFor(), 'source-b', { fact: 'Work Example raised a seed round', mode })).slug).toBe('companies/work-example');
+        expect((await inferFactSubject(engineFor(), 'source-b', { fact: 'Work Acme Example raised a seed round', mode })).slug).toBe('companies/work-acme-example');
       });
 
       test(`[${backend}] ${mode}: real entities named CHF, Invoice or Work still compete`, async () => {

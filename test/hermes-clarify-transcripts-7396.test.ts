@@ -9,9 +9,10 @@
  * tools/clarify_tool.py `_result`: `{responses: [{question, choices_offered,
  * status, user_response}], outcome}`, and the earlier batch shape without
  * `status`/`outcome`) imports as the user's message at the result's event
- * time, with the question and tool-call id kept as provenance in raw metadata;
- * unselected choices, the question text, skipped/unanswered/empty responses,
- * cancelled/timed-out/undelivered forms, the legacy single-question shape
+ * time, after the question as the assistant's turn, with the question and
+ * tool-call id kept as provenance in raw metadata; the answers a timed-out
+ * form already locked import too; unselected choices, skipped/unanswered/empty
+ * responses, cancelled/undelivered forms, a timed-out earlier batch shape, the legacy single-question shape
  * (which serializes a timeout as text) and every other tool's output never
  * become user speech; a store without the tool columns imports as before;
  * replay is idempotent.
@@ -84,16 +85,18 @@ describe('Hermes clarify answers (#7396)', () => {
     const session = await parseSession(clarifyStore(submitted));
     expect(texts(session)).toEqual([
       ['user', 'Plan the widget rollout.'],
+      ['assistant', 'Which rollout?'],
       ['user', 'Canary'],
+      ['assistant', 'Which regions?'],
       ['user', 'East\nWest'],
       ['assistant', 'Proceeding with the rollout you chose.'],
     ]);
     const at = new Date(ANSWERED_AT * 1000).toISOString();
-    expect(session.messages[1].timestamp).toBe(at);
     expect(session.messages[2].timestamp).toBe(at);
+    expect(session.messages[4].timestamp).toBe(at);
     expect(session.meta.raw).toMatchObject({
-      clarify_0_tool_call_id: 'call-clarify-1', clarify_0_question: 'Which rollout?', clarify_0_message_index: 1,
-      clarify_1_tool_call_id: 'call-clarify-1', clarify_1_question: 'Which regions?', clarify_1_message_index: 2,
+      clarify_0_tool_call_id: 'call-clarify-1', clarify_0_question: 'Which rollout?', clarify_0_message_index: 2,
+      clarify_1_tool_call_id: 'call-clarify-1', clarify_1_question: 'Which regions?', clarify_1_message_index: 4,
     });
     const userText = session.messages.filter(m => m.role === 'user').map(m => m.text).join('\n');
     for (const unselected of ['Broad', 'North', 'Which rollout?']) expect(userText).not.toContain(unselected);
@@ -103,7 +106,7 @@ describe('Hermes clarify answers (#7396)', () => {
     const answer = 'No — use the canary.\nKeep 日本語 intact.';
     const session = await parseSession(clarifyStore({ outcome: 'submitted', responses: [
       { question: 'Which rollout?', choices_offered: null, status: 'answered', user_response: answer }] }));
-    expect(session.messages[1]).toEqual({ role: 'user', timestamp: new Date(ANSWERED_AT * 1000).toISOString(), text: answer });
+    expect(session.messages[2]).toEqual({ role: 'user', timestamp: new Date(ANSWERED_AT * 1000).toISOString(), text: answer });
   });
 
   test('the earlier batch shape (no status/outcome) imports non-empty answers of a form that did not time out', async () => {
@@ -112,14 +115,24 @@ describe('Hermes clarify answers (#7396)', () => {
       { question: 'Which regions?', choices_offered: ['East', 'West'], user_response: '' },
     ] };
     expect(texts(await parseSession(clarifyStore(batch)))).toEqual([
-      ['user', 'Plan the widget rollout.'], ['user', 'Canary'], ['assistant', 'Proceeding with the rollout you chose.'],
+      ['user', 'Plan the widget rollout.'], ['assistant', 'Which rollout?'], ['user', 'Canary'], ['assistant', 'Proceeding with the rollout you chose.'],
     ]);
     expect(texts(await parseSession(clarifyStore({ ...batch, timed_out: true, notice: 'user did not respond' })))).toEqual(UNANSWERED);
   });
 
-  test.each(['cancelled', 'timed_out', 'undelivered', ''])('a %s form imports nothing', async outcome => {
+  test.each(['cancelled', 'undelivered', ''])('a %s form imports nothing', async outcome => {
     const session = await parseSession(clarifyStore({ ...submitted, outcome }));
     expect(texts(session)).toEqual(UNANSWERED);
+  });
+
+  test('a form that timed out part-way keeps the answers the user already locked', async () => {
+    const session = await parseSession(clarifyStore({ outcome: 'timed_out', notice: '[user did not respond within 5m]', responses: [
+      { question: 'Which rollout?', choices_offered: ['Broad', 'Canary'], status: 'answered', user_response: 'Canary' },
+      { question: 'Which regions?', choices_offered: ['East', 'West'], status: 'unanswered', user_response: null },
+    ] }));
+    expect(texts(session)).toEqual([
+      ['user', 'Plan the widget rollout.'], ['assistant', 'Which rollout?'], ['user', 'Canary'], ['assistant', 'Proceeding with the rollout you chose.'],
+    ]);
   });
 
   test('skipped, unanswered, empty and malformed responses import nothing; answered siblings survive', async () => {
@@ -130,7 +143,7 @@ describe('Hermes clarify answers (#7396)', () => {
       response('answered', { text: 'NOT-SPEECH-3' }), null, 'NOT-SPEECH-4', response('answered', 'Canary'),
     ] }));
     expect(texts(session)).toEqual([
-      ['user', 'Plan the widget rollout.'], ['user', 'Canary'], ['assistant', 'Proceeding with the rollout you chose.'],
+      ['user', 'Plan the widget rollout.'], ['assistant', 'Which rollout?'], ['user', 'Canary'], ['assistant', 'Proceeding with the rollout you chose.'],
     ]);
   });
 
@@ -183,7 +196,7 @@ describe('Hermes clarify answers through ingest (#7396)', () => {
       const first = await runTranscriptsIngest(engine, opts);
       expect(first.pages.imported, backend).toBe(1);
       const page = (await engine.getPage(slug, { sourceId: 'default' }))!;
-      expect(page.compiled_truth, backend).toMatch(/\*\*User\*\* \([^)]*\): Canary/);
+      expect(page.compiled_truth, backend).toMatch(/\*\*Assistant\*\* \([^)]*\): Which rollout\?\n+\*\*User\*\* \([^)]*\): Canary/);
       expect(page.compiled_truth, backend).not.toContain('Broad');
       const raw = await engine.getRawData(slug, 'transcript:hermes', { sourceId: 'default' });
       expect(raw[0].data, backend).toMatchObject({ clarify_0_tool_call_id: 'call-clarify-1', clarify_0_question: 'Which rollout?' });

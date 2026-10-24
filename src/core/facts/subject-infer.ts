@@ -105,8 +105,13 @@ const SENTENCE_OPENERS = new Set([
   'not', 'no', 'yes', 'after', 'before', 'during', 'since', 'until', 'while', 'per', 'via', 're', 'fyi', 'update', 'updated',
   'lunch', 'dinner', 'breakfast', 'coffee', 'drinks', 'call', 'sync', 'standup', 'interview', 'demo', 'pitch', 'board',
   'favorite', 'favourite', 'birthday', 'anniversary', 'allergic', 'vegetarian', 'vegan', 'lives', 'lived', 'works', 'worked',
-  'work', 'invoice', 'invoiced', 'billed', 'receipt', 'payment',
 ]);
+
+/**
+ * #7405: record-label openers ("Invoice total ...", "Work session ..."). Like SENTENCE_OPENERS they are no name evidence
+ * when they open a sentence and resolve to no page, but they are never shed from a candidate, so "Work Example" stays a name.
+ */
+const LABEL_OPENERS = new Set(['work', 'invoice', 'invoiced', 'billed', 'receipt', 'payment']);
 
 /** #7405: ISO 4217 codes; one counts as a unit (not a name) only where every use sits next to an amount ("CHF 80", "80 CHF"). */
 const CURRENCY_CODES = new Set(Intl.supportedValuesOf('currency'));
@@ -156,7 +161,7 @@ export async function inferFactSubject(engine: BrainEngine, sourceId: string, in
     // a real competing reference.
     if (r.miss === 'not_entity') continue;
     if (r.miss === 'no_page' && (isNonName(candidate.query) || isAmountUnit(input.fact, candidate.query)
-      || (candidate.sentenceStart && SENTENCE_OPENERS.has(candidate.query.toLowerCase())))) continue;
+      || (candidate.sentenceStart && (SENTENCE_OPENERS.has(candidate.query.toLowerCase()) || LABEL_OPENERS.has(candidate.query.toLowerCase()))))) continue;
     vetoed = true;
   }
 
@@ -198,11 +203,15 @@ function isAmountUnit(fact: string, query: string): boolean {
     /^\s*\d/u.test(fact.slice(m.index! + m[0].length)) || /\d\s*$/u.test(fact.slice(0, m.index)));
 }
 
-/** #7405: an entity named only as an example ("... including Automation Example notes") resolves, but cannot be the subject. */
+/**
+ * #7405: an entity named only as an example ("... including Automation Example notes", "for example, Automation Example")
+ * resolves, but cannot be the subject. The example phrase must introduce the mention: only other names of the same list
+ * may sit between them, so "notes including weekly items belong to Alice Example" keeps Alice.
+ */
+const EXAMPLE_LIST_LEAD = /(?:^|[^\p{L}])(?:[Ii]ncluding|[Ss]uch as|[Ff]or example|[Ff]or instance|[Ee]\.g\.)[,:]?\s+(?:\p{Lu}[\p{L}\p{N}'’./-]*(?:\s+\p{Lu}[\p{L}\p{N}'’./-]*)*\s*(?:,\s*(?:and\s+|or\s+)?|\s+(?:and|or)\s+))*$/u;
 function onlyExampleUses(fact: string, query: string): boolean {
   const uses = referenceUses(fact, query);
-  return uses.length > 0 && uses.every(m =>
-    /\b(?:including|such as|for example|for instance|e\.g\.)\s+[^.!?;]*$/iu.test(fact.slice(0, m.index)));
+  return uses.length > 0 && uses.every(m => EXAMPLE_LIST_LEAD.test(fact.slice(0, m.index)));
 }
 
 async function liveFactEntityPage(engine: BrainEngine, sourceId: string, slug: string, excludePrivate?: boolean): Promise<string | null> {

@@ -115,11 +115,14 @@ interface MessageRow {
 
 /**
  * #7396: the user's answers in a clarify tool result (hermes-agent
- * tools/clarify_tool.py `_result`), in question order. Only a form that ended
- * in a submit counts: `outcome: 'submitted'` with `status: 'answered'`, or the
- * earlier batch shape (no `outcome`, no `status`, unanswered as "") without
- * `timed_out`. The legacy single-question shape is never read: it serializes a
- * timeout into `user_response` as text. Offered choices are never returned.
+ * tools/clarify_tool.py `_result`), in question order. A `status: 'answered'`
+ * response counts when the form was submitted or timed out part-way (Hermes
+ * keeps the answers the user already locked under `outcome: 'timed_out'`), or,
+ * in the earlier batch shape (no `outcome`, no `status`, unanswered as ""), a
+ * non-empty response of a form without `timed_out`. Cancelled and undelivered
+ * forms count for nothing. The legacy single-question shape is never read: it
+ * serializes a timeout into `user_response` as text. Offered choices are never
+ * returned.
  */
 function clarifyAnswers(content: string | null): Array<{ question: string; text: string }> {
   let result: unknown;
@@ -128,7 +131,7 @@ function clarifyAnswers(content: string | null): Array<{ question: string; text:
   const { outcome, responses, timed_out: timedOut } = result as Record<string, unknown>;
   if (!Array.isArray(responses)) return [];
   const statusShape = outcome !== undefined;
-  if (statusShape ? outcome !== 'submitted' : timedOut === true) return [];
+  if (statusShape ? outcome !== 'submitted' && outcome !== 'timed_out' : timedOut === true) return [];
   const answers: Array<{ question: string; text: string }> = [];
   for (const response of responses) {
     if (typeof response !== 'object' || response === null) continue;
@@ -224,6 +227,8 @@ export const hermesAdapter: TranscriptAdapter = {
           for (const m of msgQuery.all(row.id)) {
             if (m.role === 'tool') {
               for (const answer of clarifyAnswers(m.content)) {
+                // The question the assistant asked comes first, so the answer reads in context; it is never user speech.
+                if (answer.question.trim()) messages.push({ role: 'assistant', timestamp: epochToIso(m.timestamp), text: answer.question });
                 raw[`clarify_${clarified}_tool_call_id`] = m.tool_call_id;
                 raw[`clarify_${clarified}_question`] = answer.question;
                 raw[`clarify_${clarified++}_message_index`] = messages.length;
