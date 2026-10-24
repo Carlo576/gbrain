@@ -7525,7 +7525,9 @@ vars — incident-time escape hatches, not everyday knobs.
    every queued sync job), and the daemon prints `git_pull: off
    (autopilot.git_pull=false)` once per tick (`{"event":"git_pull_disabled"}`
    under `--json`). Per-source `syncEnabled: false` still removes a source from
-   automatic sync entirely; an explicit `gbrain sync --source <id>` keeps its
+   automatic sync entirely (set it with `gbrain sources set-sync <id> off`;
+   preview with `--dry-run`, then apply the printed command, which carries
+   `--expect`); an explicit `gbrain sync --source <id>` keeps its
    own `--pull`/`--no-pull` choice. Managed brains never pull automatically
    whatever this key says (item 8).
 
