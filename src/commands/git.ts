@@ -35,6 +35,8 @@ rebase/stash/reset of the working tree, remote commits merged in memory, and the
 checkout advanced fast-forward only. In a managed canonical worktree it only
 commits the named paths (committed_local): no fetch, merge, push or checkout
 move; the owner's next Git publish, or --push-only --keep-checkout, pushes it.
+In a checkout with no Git remote it also only commits the named paths
+(committed_local, no_remote); the publishing modes are refused there.
 
 Flags:
   --path <dir>        Checkout to act on (default: the checkout containing the cwd).
@@ -184,6 +186,11 @@ export async function runGit(args: string[]): Promise<number> {
     });
     if (result.outcome === 'push_deferred') {
       emit(json, { ...result, repo }, `push deferred: another push is running in ${repo} and will publish HEAD too`);
+      return 0;
+    }
+    if (result.no_remote) {
+      emit(json, { ...result, repo }, result.committed ? `committed ${result.committed.slice(0, 7)} on ${result.branch}; not pushed: ${repo} has no Git remote (add one with git remote add origin <url>, then gbrain git commit-push --push-only)`
+        : `nothing to commit; not pushed: ${repo} has no Git remote`);
       return 0;
     }
     if (result.outcome === 'committed_local') {
