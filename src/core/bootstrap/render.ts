@@ -160,6 +160,21 @@ export function detectOpenClawWorkspace(
   return /^\.openclaw(-.+)?$/.test(profile) && underWorkspaceOf(join(home, profile));
 }
 
+/** The render host for `bootstrap render --host`: 'openclaw' forces it,
+ * 'generic' declines it, no flag detects it (never in minimal mode). An
+ * unknown value returns null for the dispatcher to refuse. */
+export function resolveRenderHost(workspaceDir: string, flag: string | undefined, minimal: boolean): 'openclaw' | undefined | null {
+  if (flag === 'openclaw') return 'openclaw';
+  if (flag === 'generic') return undefined;
+  if (flag !== undefined) return null;
+  return !minimal && detectOpenClawWorkspace(workspaceDir) ? 'openclaw' : undefined;
+}
+
+export const OPENCLAW_RENDER_NOTE =
+  'OpenClaw workspace: the due-job list renders as SCHEDULES.md, and AGENTS.md points there. OpenClaw 2026.10.6+ ' +
+  'retired HEARTBEAT.md, and its doctor migration imports and removes any workspace file by that name. ' +
+  'Pass --host generic to keep HEARTBEAT.md.';
+
 /**
  * [S3#3] Structural-marker escape for interview-sourced values (see module
  * doc). Applied at render time, per line, to answer values only — bank
