@@ -10,6 +10,20 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.429.0] - 2026-10-24
+
+**A design for an opt-in, per-source mode in which the database is the only copy of record for agent-written memory and page files become a one-way export. This release adds the design document only; nothing in gbrain's behavior changes.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Planning the move away from two copies of record for agent memory | no written design | `docs/designs/DATABASE_CANONICAL_MEMORY.md` describes the mode: agents write only to the database, one exporter per source commits page files, and outside file edits come back through a conservative import lane that records every two-sided edit as a per-page conflict. It covers conversion of a source with thousands of holds, flip back, backup, risks and a phased rollout behind `persistence.database_canonical.enabled` (default false) |
+
+### What to watch for after you upgrade
+
+- Nothing: this is a design document. No code, configuration, schema or default changed.
+
 ## [0.60.428.0] - 2026-10-24
 
 **Production agents can now follow a stable release channel: a release a maintainer promotes only after the production-shaped soak passed on its exact git tree. `gbrain upgrade` also restarts every gbrain process on the host onto the new build and verifies that one build runs, and doctor fails when two builds run.**
