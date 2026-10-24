@@ -24,7 +24,7 @@ gbrain search '"ZEBRA-42" OR "inventory sync"' --match keyword  # every page wit
 gbrain query "why did the launch move"                          # questions and concepts
 gbrain search "launch" --types '["meeting","person"]'           # only these page types
 gbrain query "launch" --since 2026-09-01 --until 2026-09-30     # date window (also --since 30d)
-gbrain search "launch" --source source-a --limit 5 --json 2>/dev/null | jq -r '.[].slug'
+gbrain search "launch" --source source-a --limit 5 --json | jq -r '.[].slug'
 gbrain get companies/acme-example                               # read the page a hit points to
 gbrain recall "Alice Example"                                   # facts saved with remember
 gbrain backlinks companies/acme-example --type meeting          # pages that link here (instead of grepping a slug)
@@ -40,7 +40,29 @@ gbrain list --type meeting --limit 50                           # enumerate by t
 - Without `--source`, a search reads the resolved source (a notice names it
   when it routes); `--source __all__` searches every source.
 - Notices and `[AGENT]` blocks go to stderr, so `--json` stdout is clean JSON.
-  Read a degraded notice before concluding the brain has nothing.
+  Read a degraded notice before concluding the brain has nothing. Never send
+  stderr to `/dev/null`: a refusal there (`no_brain`, `GBRAIN_DB_ACCESS`)
+  then reads as "no results". Check the exit code too.
+
+<a id="identity-exact-match"></a>
+## Identity needs an exact match
+
+Resolving an email sender, a calendar attendee or a contact to a person page is
+an identity decision, and a search's top hit is not one: ranking always returns
+something, so taking it files strangers onto known contacts. Accept a page only
+on one of these:
+
+1. **An exact email match.** `gbrain list --type person --where email=<address> --source-id __all__ --json`
+   returns the person pages whose `email` frontmatter equals the address or
+   lists it. The match is case-sensitive, so pass the address as written and
+   lowercased (`--where email=Alice@Acme-Example.com,alice@acme-example.com`),
+   and use the field your person pages use (`email`, or `emails` for a list).
+2. **An exact title match.** `gbrain search "<display name>" --types '["person"]' --json`,
+   then accept only a hit whose `title` equals the name exactly.
+
+Exactly one page is the person. No page, or more than one, means unknown: treat
+the sender as new or ask the user. Never take the top hit, a partial name or a
+similar address, and never merge a stranger into a known contact's page.
 
 ## Available GBrain Tools
 
