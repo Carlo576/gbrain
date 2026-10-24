@@ -10,6 +10,69 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.438.0] - 2026-10-24
+
+**A source can now be marked git-canonical: each page write is committed to Git before the database records it, a write interrupted after its commit keeps the committed file, and its Git effect only pushes. The mode is off by default and nothing turns it on yet.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed page write on a source with `config.canonical = "git"` | the database row committed first; a Git effect committed the file later | the published paths are committed with one path-only commit under the writer lock before the row commits, and the receipt names it (`persistence.git_commit`, `git_state: committed`); a group (`put_pages`, lane groups) shares one commit |
+| That write is interrupted after its commit | recovery restored the prior bytes | the committed file is kept, and the replay completes the row against it: one commit, the one made before the interruption |
+| Git refuses the commit (an ignored path) | not reached at publication | the write fails, recovery restores the prior bytes, and nothing is left behind |
+| That write's Git effect | staged and committed the file, then pushed | it only joins the push |
+| `gbrain git commit-push` meets a remote that brought back a version this checkout already replaced at a path | `integrate_conflict` | this checkout's version is kept and listed in `superseded_remote_paths` and the merge message; a real two-sided conflict still stops, and an explicit `--resolve` still wins |
+
+### What to watch for after you upgrade
+
+- Sources without the flag behave exactly as before. Setting `canonical: git` is for the coming conversion step; an older binary does not know the mode.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+## [0.60.437.0] - 2026-10-24
+
+**Chat-connector syncs stop cleanly on a bot challenge, sustained rate limiting or a run of failing fetches instead of retrying through them, and a cookie or token can never be echoed into an error, probe result, sync hint or log.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A connector cookie or token holds a line break, NUL, another control character or a non-ASCII character | the request was attempted, and a fetch layer that quotes the bad header value in its error (Node's undici does) had that value copied into probe detail, sync hints and the fetch-error log | the value is refused before any request (`invalid_header_value`, naming the header and never the value); `connectors auth` reports it and `connectors sync` returns `auth_required` with that hint (#7483) |
+| A request fails before any response | the runtime's error text was surfaced as is | only the error's code (`ECONNREFUSED`) or class name (`TypeError`) is surfaced (#7483) |
+| A bot challenge arrives on a status other than 403 (`cf-mitigated: challenge`, a challenge page on a 5xx, a redirect to a Cloudflare challenge) | it was treated as a retryable server error or followed | the run ends as `forbidden`; a Cloudflare 5xx error page that is no challenge stays retryable (#7482) |
+| A 429 outlasts its four retries, or asks for a `Retry-After` over two minutes | a long `Retry-After` was waited out in full and every remaining conversation was still tried | the run ends with the new status `rate_limited` without fetching the remaining conversations (#7482) |
+| Five conversation fetches in a row fail with a server error or no response | every remaining conversation was tried | the run stops as `partial` with `stopReason: consecutive_fetch_failures`; item errors such as a 404 reset the count (#7482) |
+
+### What to watch for after you upgrade
+
+- No existing retry, wait or quarantine bound changed. A stopped run does not advance the watermark, so the next sync resumes from the same place.
+- Scripts that read `connectors sync --json` may now see the status `rate_limited` and the stop reason `consecutive_fetch_failures`.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+## [0.60.436.0] - 2026-10-24
+
+**The install and operating guides now cover what an agent running gbrain beside a harness (cron jobs, workspace scripts, hooks, a managed checkout, a remote Postgres) needs to get right the first time: one wrapper for every scheduled call, scripts that commit through gbrain, purge consent, exact-match identity, the database's region, and the attended upgrade order.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A cron job, workspace script or hook calls gbrain | the guides showed bare `gbrain` lines; a job with another `HOME` found no database (every lookup silently empty) or acted as a second host (`refresh_not_owner`) | [cron-schedule.md](docs/guides/cron-schedule.md#calling-gbrain-unattended) gives one wrapper that sets `GBRAIN_HOME` (never `HOME`) and runs the installed binary, with rules for stderr, exit codes, clean `--json` stdout, timeouts of at least 10 s, quoted env files and never printing the environment; the cron-scheduler skill, INSTALL Step 7, AGENTS.md and the OpenClaw guide point at it |
+| A script writes files into a managed checkout | nothing said not to commit them with plain `git commit`, which made the checkout diverge and every refresh refuse `refresh_diverged` | [Scripts and the managed checkout](docs/guides/shared-checkout-git.md#scripts-and-the-managed-checkout): commit with `gbrain git commit-push -- <paths>`, keep the checkout current with a scheduled `gbrain sources refresh <id>`, `gbrain sources set-sync <id> off` before rewriting a source's history, and decide what a `git_target_ignored` path is |
+| An agent purges pages | the data-loss gate covered `pages purge-deleted` but not `gbrain delete --purge` | `delete --purge` needs an explicit go for that purge ("scrub the repo" is not one), runs one page at a time with each removal verified, and a stopped batch stays stopped |
+| A write exits 10 | the meaning lived only in the exit-code table | AGENTS.md says next to exit 3 that 10 is accepted and still pending, never "not found" or "failed" |
+| An agent resolves an email sender or attendee to a person page | the briefing, meeting-ingestion and executive-assistant guides took the first search hit | only an exact match from `gbrain whois` counts ([identity rule](skills/conventions/brain-first.md#identity-exact-match)) |
+| Choosing or switching the brain's Postgres | no guidance on region or on proving a switch | INSTALL puts the database in the agent host's region and lists every URL variable to change, the restart and the database-side proof |
+| Upgrading an always-on host | no order for autopilot and running jobs | pause autopilot, wait for a quiet queue, `gbrain upgrade` (which restarts and verifies), check every process, resume; production brains follow the stable channel |
+| OpenClaw's `openclaw doctor --fix` removes the rendered `HEARTBEAT.md` | nothing said what to do | INSTALL Step 6 explains how to restore it until the render adapts (#7470) |
+
+The troubleshooting table gains eight symptom rows for these cases, and the v0.60.427.0 entry now names `gbrain sources writer retry-effects`.
+
+### What to watch for after you upgrade
+
+- Nothing changes in gbrain's behavior: this is documentation and bundled skills only. Nothing is rewritten on upgrade, and there is no schema migration.
+- Harnesses that copied the cron-scheduler, data-loss-gate, gbrain-upgrade, briefing or meeting-ingestion skills pick up the new rules on their next skill sync.
+
 ## [0.60.435.0] - 2026-10-24
 
 **A search for a full name that uses a short first name ("Matt Example") now finds the page titled "Matthew Example", keyword search finds the page holding a rare query word when no page holds every word, and agents triaging email or calendar can ask whether a sender is a known contact and get an exact answer with `gbrain whois <email or name>` (MCP tool `whois`).**
@@ -212,7 +275,7 @@ Semantic search can rank the wrong person first for a name or address, and `gbra
 |---|---|---|
 | A managed cycle's extract phase gets no changed-page list (sync left out of the phases, or sync failed) on a source that is mostly stale | the stale-page pass ran over every stale page with no deadline, overran the cycle job's timeout, and retried from the same place every cycle | the pass stops at the cycle's 3-minute stale-drain budget, reports `stale_backlog`, and the rest drains across later cycles |
 | A sync holding a source's drain lease is killed before it releases the lease | its holder record (queue `gbrain-drain-lease`) stayed `active` until the next sync of that source, shown as a stalled sync job | the job stall sweep deletes a holder record whose lease lock is gone or expired; a live holder's record is never touched |
-| A Git effect's target file is excluded by a `.gitignore` rule | it retried through the full schedule, parked as `git_target_unsafe`, and suggested a per-request retry that could not succeed | it parks on its first attempt as `git_target_ignored` naming the rule (`<file>:<line>: <pattern>`). doctor `parked_effects` and `gbrain sources writer status` group parked targets per source and code with one bulk command each, and `gbrain sources retry-effects <source> --parked-code <code>` retries a group |
+| A Git effect's target file is excluded by a `.gitignore` rule | it retried through the full schedule, parked as `git_target_unsafe`, and suggested a per-request retry that could not succeed | it parks on its first attempt as `git_target_ignored` naming the rule (`<file>:<line>: <pattern>`). doctor `parked_effects` and `gbrain sources writer status` group parked targets per source and code with one bulk command each, and `gbrain sources writer retry-effects <source> --parked-code <code>` retries a group |
 | A process whose gbrain home has no host identity runs a worktree refresh | the owner check created a new `persistence/host.json` and then refused as a different host | it refuses `refresh_not_owner` without writing anything, naming the identity file it read, the HOME and GBRAIN_HOME it resolved and the owner it expected |
 | GBRAIN_HOME is set | feature offers, upgrade state and errors, `mounts.json` and the mounts cache, the brain-pull log, the default supervisor pid file, skillopt captures, the harvest pattern file, notability eval files and the greenfield audit directory were still written under `$HOME/.gbrain` | they live under `<GBRAIN_HOME>/.gbrain` |
 
