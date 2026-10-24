@@ -515,7 +515,7 @@ async function runHomeDirInWorktree(ctx: DoctorContext): Promise<Check[]> {
 
 export const homeDirInWorktreeEntry: DoctorEntry = {
   name: 'home_dir_in_worktree',
-  emits: ['home_dir_in_worktree', 'npm_squat', 'pglite_leftovers', 'graduation_interrupted', 'cron_gbrain_home'],
+  emits: ['home_dir_in_worktree', 'npm_squat', 'pglite_leftovers', 'cron_gbrain_home', 'graduation_interrupted'],
   run: runHomeDirInWorktree,
 };
 

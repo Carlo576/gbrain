@@ -33,8 +33,9 @@ test('the gbrain binary without GBRAIN_HOME is flagged only while this brain run
   expect(cronGbrainHomeFindings(`GBRAIN_HOME=/srv/brain-a\n${crontab}0 * * * * /opt/example/run-sync.sh\n`, '/srv/brain-a', read)).toEqual([]);
 });
 
-test('the check: no crontab emits nothing, a clean one is ok, findings warn with a user fix naming the home', () => {
+test('the check: no crontab, or one that never mentions gbrain, emits nothing; a clean one is ok; findings warn with a user fix naming the home', () => {
   expect(cronGbrainHomeCheck(null, undefined, read)).toBeNull();
+  expect(cronGbrainHomeCheck('0 3 * * * /usr/bin/backup --nightly\n', '/srv/brain-a', read)).toBeNull();
   expect(cronGbrainHomeCheck('0 * * * * gbrain sync --all\n', undefined, read)).toMatchObject({ name: 'cron_gbrain_home', status: 'ok' });
   const check = cronGbrainHomeCheck('0 * * * * gbrain sync --all\n', '/srv/brain-a', read)!;
   expect(check).toMatchObject({ name: 'cron_gbrain_home', status: 'warn', details: { gbrain_home: '/srv/brain-a' },

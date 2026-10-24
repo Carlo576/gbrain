@@ -4,7 +4,7 @@
  * a checkout, or the `gbrain` binary while this brain is under a non-default GBRAIN_HOME, reads and writes
  * `~/.gbrain` instead: a second, silent brain state (locks, queue, config) beside the real one.
  *
- * Read-only and bounded: `crontab -l` (5 s; no crontab, no check), plus at most 20 scripts the lines name (64 KiB
+ * Read-only and bounded: `crontab -l` (5 s; no check unless the crontab mentions gbrain or src/cli.ts), plus at most 20 scripts the lines name (64 KiB
  * each). A line or script counts as setting the home when it assigns GBRAIN_HOME (on the line, in the crontab's
  * environment lines, or anywhere in the script). Warns, never fails; the user edits the crontab.
  */
@@ -18,7 +18,7 @@ import { doctorVerify } from '../check-fix.ts';
 const SCRIPTS_MAX = 20;
 const SCRIPT_BYTES_MAX = 64 * 1024;
 const DIRECT_CLI = /(?:^|[\s;&|(=])(?:\S*\/)?src\/cli\.ts\b/;
-const GBRAIN_BINARY = /(?:^|[\s;&|(\/])gbrain\s+[a-z]/;
+const BINARY_CALL = /(?:^|[\s;&|(\/])gbrain\s+[a-z]/;
 const SETS_HOME = /(?:^|[\s;&|(])(?:export\s+)?GBRAIN_HOME=/;
 
 export interface CronGbrainHomeFinding { where: string; command: string; reason: 'direct_cli' | 'default_home' }
@@ -55,7 +55,7 @@ function scriptOf(command: string): string | null {
 function classify(command: string, homeSet: boolean, customHome: boolean): CronGbrainHomeFinding['reason'] | null {
   if (homeSet || SETS_HOME.test(command)) return null;
   if (DIRECT_CLI.test(command)) return 'direct_cli';
-  return customHome && GBRAIN_BINARY.test(command) ? 'default_home' : null;
+  return customHome && BINARY_CALL.test(command) ? 'default_home' : null;
 }
 
 /** Pure: the findings for one crontab text. `customHome` is this process's GBRAIN_HOME when it is set. */
@@ -84,7 +84,7 @@ export function cronGbrainHomeFindings(crontab: string, customHome: string | und
 }
 
 export function cronGbrainHomeCheck(crontab: string | null, customHome: string | undefined, read?: (path: string) => string | null): Check | null {
-  if (crontab === null) return null;
+  if (crontab === null || !/gbrain|src\/cli\.ts/.test(crontab)) return null;
   const findings = cronGbrainHomeFindings(crontab, customHome, read);
   if (!findings.length) return { name: 'cron_gbrain_home', status: 'ok', message: 'No cron line or script it runs calls gbrain without its GBRAIN_HOME.', details: { findings } };
   const home = customHome ? `GBRAIN_HOME=${customHome}` : 'GBRAIN_HOME set to the home this brain uses';
