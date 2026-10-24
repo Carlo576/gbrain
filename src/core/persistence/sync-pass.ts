@@ -24,7 +24,7 @@ import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { join } from 'node:path';
-import { isKeepDbSlug, loadStorageConfig } from '../storage-config.ts';
+import { isDeclaredDbOnlySlug, isKeepDbSlug, loadStorageConfig } from '../storage-config.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { currentCompanyBrainSync, getCompanyBrainProfile } from '../company-brain/profile.ts';
 import { sha256 } from './digest.ts';
@@ -628,7 +628,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const settings = await readLevelSettings(engine, context, scope, input);
   timings.setup = t();
   if (!settings) return null;
-  const { slugMode, exclude, pack, mirror, strategy, includeHidden, keepDbPrefixes, workingConfig, metafilePages } = settings;
+  const { slugMode, exclude, pack, mirror, strategy, includeHidden, keepDbPrefixes, storage, workingConfig, metafilePages } = settings;
   const sourceRelative = (gitPath: string) => (scope ? gitPath.slice(scope.length + 1) : gitPath);
   let metafilePage: (gitPath: string) => boolean = () => false;
   // Eligibility of a path outside the cached tree (every path of the tree is eligible); origins validate per call: a
@@ -799,6 +799,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
         : input.full === true && live,
       fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
       keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes),
+      dbOnly: row && isDeclaredDbOnlySlug(pages.slug[at!]!, storage),
       openWork: row && open.pageIds.has(Number(pages.id[at!])) || open.origins.has(origin),
     };
     return { state, ...(row ? { at } : {}), ...(legacyPageless ? { legacyPageless } : {}) };
@@ -817,7 +818,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     }).then(found => { timings.legacy = t(); return found; })
     : new Map<string, string>();
 
-  const classifiedKey = JSON.stringify([treeKey, mode, input.pass?.episodeFullId ?? null, input.full === true, mirror, keepDbPrefixes, pack?.identity ?? null, baselineCommit, !!input.pass?.bootstrap, [...colonRefused].sort()]);
+  const classifiedKey = JSON.stringify([treeKey, mode, input.pass?.episodeFullId ?? null, input.full === true, mirror, keepDbPrefixes, storage?.db_only ?? [], pack?.identity ?? null, baselineCommit, !!input.pass?.bootstrap, [...colonRefused].sort()]);
   const reuse = snapshot.changed && priorClassified?.key === classifiedKey ? reusableMatched(priorClassified.paths, matchedUnchanged({ pages, tree, byOrigin, claimants, holds: holdByGitPath, markers, open,
     changed: confirmChangedPaths(pages, snapshot.changed, (sourcePath, slug) => gitPathOf(pageOrigin(sourcePath, slug))), indexDelta, spelled: path => twins.has(path) || legacySpelling.has(path), originOf })) : null;
   // A round that reuses nothing lets the previous round's paths go before it builds its own: one level held, not two.
@@ -951,10 +952,11 @@ async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContex
   ]);
   const settled = <T>(read: PromiseSettledResult<T>): T => { if (read.status === 'rejected') throw read.reason; return read.value; };
   if (settled(company)) return null;
+  const storage = (() => { try { return loadStorageConfig(root); } catch { return null; } })();
   return { slugMode: settled(slugModeRead), exclude: settled(excludeRead), pack: settled(packRead), mirror: settled(mirrorRead), workingConfig: settled(workingRead),
     metafilePages: settled(metafilePagesRead), strategy: input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown',
     includeHidden: [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))],
-    keepDbPrefixes: (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })() };
+    keepDbPrefixes: storage?.keep_db ?? [], storage };
 }
 
 /** A failed mark, proof or delta read: the round reads again without them (it aborted a Postgres snapshot). */
