@@ -11,6 +11,7 @@
  *   gbrain git commit-push --pending [--path <dir>] [-m <msg>]
  *   gbrain git guard [--install | --uninstall] [--path <dir>] [--json]
  */
+import { realpathSync } from 'node:fs';
 import { commitAndPush, checkoutRoot, pullShared, scopePaths, COMMIT_LOCK_NAME, type Resolution } from '../core/git/commit-push.ts';
 import { guardStatus, installGuard, uninstallGuard } from '../core/git/commit-guard.ts';
 import { appendPushLog } from '../core/brain-repo-durability.ts';
@@ -37,7 +38,8 @@ move; the owner's next Git publish, or --push-only --keep-checkout, pushes it.
 
 Flags:
   --path <dir>        Checkout to act on (default: the checkout containing the cwd).
-  -m, --message <m>   Commit message (required unless --push-only or --pull).
+  -m, --message <m>   Commit message (required unless --push-only or --pull); repeat it, like git
+                      commit, for more paragraphs (a second -m <trailer> is the body).
   --push-only         Publish commits already on the branch; commit nothing.
   --branch <name>     With --push-only: publish HEAD to this remote branch (one exact name).
   --keep-checkout     With --push-only: never move the checkout and skip its pre-push hook. The one
@@ -102,7 +104,7 @@ function parse(args: string[]): Parsed {
     else if (a === '--install') p.install = true;
     else if (a === '--uninstall') p.uninstall = true;
     else if (a === '--path' || a.startsWith('--path=') || a === '--repo' || a.startsWith('--repo=')) p.path = take('--path');
-    else if (a === '-m' || a === '--message' || a.startsWith('--message=')) p.message = take('--message');
+    else if (a === '-m' || a === '--message' || a.startsWith('--message=')) { const m = take('--message'); p.message = p.message === undefined ? m : `${p.message}\n\n${m}`; }
     else if (a === '--resolve' || a.startsWith('--resolve=')) p.resolve.push(take('--resolve'));
     else if (a === '--branch' || a.startsWith('--branch=')) p.branch = take('--branch');
     else if (a === '--expect-remote' || a.startsWith('--expect-remote=')) p.expectRemote = take('--expect-remote');
@@ -142,7 +144,7 @@ export async function runGit(args: string[]): Promise<number> {
     if (p.sub !== 'commit-push') throw opError('commit_paths_invalid', `Unknown subcommand: gbrain git ${p.sub}.`, HELP.split('\n')[0]);
     if (p.install || p.uninstall) throw opError('commit_paths_invalid', '--install and --uninstall belong to gbrain git guard.', 'Run gbrain git guard --install.');
     const repo = checkoutRoot(p.path ?? process.cwd());
-    const cwd = p.path ? repo : process.cwd();
+    const cwd = p.path ? realpathSync(p.path) : process.cwd();
     if ((p.pull && p.pushOnly) || (p.pull && (p.message || p.paths.length || p.resolve.length || p.branch))
       || (p.pushOnly && (p.message || p.paths.length)) || ((p.resolve.length || p.branch || p.expectRemote || p.keepCheckout) && !p.pushOnly)
       || (p.pending && (p.pull || p.pushOnly || p.paths.length)) || (p.allowOutside && p.pull)) {

@@ -11,6 +11,9 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { acquireCommitLock, commitAndPush, commitPathsLocked, pullShared, readIntegrateConflict, readPendingWriteThrough } from '../src/core/git/commit-push.ts';
 import { getLastPushOutcome } from '../src/core/brain-repo-durability.ts';
+import { runGit } from '../src/commands/git.ts';
+import { argvFromCommand } from '../src/core/agent-output.ts';
+import { legacyCommitStep } from '../src/core/fence-repair/uncommitted.ts';
 
 let root: string;
 
@@ -483,4 +486,50 @@ describe('many writers, two clones, one remote', () => {
       expect(read(dir, `foreign-${dir === a ? 'a' : 'b'}.md`)).toBe('never committed\n');
     }
   }, 180_000);
+});
+
+describe('CLI: repeated -m, --path <subdir>, and the printed repair step', () => {
+  /** A checkout whose source root is the subdirectory brain/, cloned from a bare remote. */
+  function subdirSetup(): { bare: string; a: string; brain: string } {
+    const { bare, a } = setup();
+    mkdirSync(join(a, 'brain', 'notes'), { recursive: true });
+    for (const f of ['model.md', 'other.md']) writeFileSync(join(a, 'brain', 'notes', f), `${f} v1\n`);
+    git(a, 'add', 'brain'); git(a, 'commit', '-qm', 'brain'); git(a, 'push', '-q', 'origin', 'main');
+    return { bare, a, brain: join(a, 'brain') };
+  }
+
+  test('each -m is a new paragraph of the commit message, like git commit', async () => {
+    const { bare, a } = setup();
+    writeFileSync(join(a, 'x.md'), 'mine\n');
+    expect(await runGit(['commit-push', '--path', a, '-m', 'subject line', '-m', 'trailer-key: value', '--', 'x.md'])).toBe(0);
+    expect(git(bare, 'log', '-1', '--format=%B', 'main').startsWith('subject line\n\ntrailer-key: value')).toBe(true);
+    expect(git(bare, 'log', '-1', '--format=%(trailers:key=trailer-key,valueonly)', 'main')).toBe('value');
+  });
+
+  test('--path <subdir>: paths are relative to that directory (like git -C), not the checkout top', async () => {
+    const { bare, a, brain } = subdirSetup();
+    writeFileSync(join(brain, 'notes', 'model.md'), 'edited\n');
+    expect(await runGit(['commit-push', '--path', brain, '-m', 'edit model', '--', 'notes/model.md'])).toBe(0);
+    expect(git(bare, 'show', 'main:brain/notes/model.md')).toBe('edited');
+    expect(git(bare, 'log', '-1', '--format=%s', 'main')).toBe('edit model');
+    expect(status(a)).toBe('');
+  });
+
+  test('the legacy fence-repair commit step runs as printed: only that path, subject and trailer, on the remote', async () => {
+    const { bare, a, brain } = subdirSetup();
+    writeFileSync(join(brain, 'notes', 'model.md'), 'repaired\n');
+    writeFileSync(join(brain, 'notes', 'other.md'), 'another writer\n');
+    const step = legacyCommitStep(brain, 'notes/model.md', ['no_header'], 'llm');
+    expect(step).toBe(`gbrain git commit-push --path ${brain} -m 'gbrain: repair fence in notes/model.md (no_header)' -m 'gbrain-repair: invalid_fence llm high' -- notes/model.md`);
+    const argv = argvFromCommand(step)!;
+    expect(argv.slice(0, 2)).toEqual(['gbrain', 'git']);
+    expect(await runGit(argv.slice(2))).toBe(0);
+    expect(git(bare, 'log', '-1', '--format=%B', 'main').startsWith('gbrain: repair fence in notes/model.md (no_header)\n\ngbrain-repair: invalid_fence llm high')).toBe(true);
+    expect(git(bare, 'log', '-1', '--format=%(trailers:key=gbrain-repair,valueonly)', 'main')).toBe('invalid_fence llm high');
+    expect(git(bare, 'show', '--name-only', '--format=', 'main')).toBe('brain/notes/model.md');
+    expect(git(bare, 'show', 'main:brain/notes/model.md')).toBe('repaired');
+    expect(git(bare, 'show', 'main:brain/notes/other.md')).toBe('other.md v1');
+    expect(remoteHead(bare)).toBe(git(a, 'rev-parse', 'HEAD'));
+    expect(status(a)).toBe(' M brain/notes/other.md');
+  });
 });

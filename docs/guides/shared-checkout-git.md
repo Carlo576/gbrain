@@ -106,7 +106,9 @@ gbrain git commit-push --dry-run -m "people: add alice-example" -- people/alice-
 ```
 
 Flags: `--path <dir>` acts on a checkout other than the one containing the
-current directory, `--json` prints one JSON result (or the error envelope),
+current directory (the paths are then relative to `<dir>`, like `git -C`),
+`-m` repeats like `git commit` (each one is a new paragraph, so a second `-m`
+carries a trailer), `--json` prints one JSON result (or the error envelope),
 `--require-clean` makes `--pull` skip when the checkout has any local edit
 (the rule the unattended pull cron uses). The command is local only: it pushes
 with this machine's git credentials and is never exposed over MCP.

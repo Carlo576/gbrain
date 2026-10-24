@@ -34,6 +34,7 @@ import { GIT_ENV, GIT_ENV_AUTH, GIT_SSRF_SUBCOMMAND_FLAGS, durableSsrfFlags } fr
 import { assertManagedFilesystemWrite, hasFilesystemPublication, managedFilesystemRootFor, type ManagedFilesystemRoot } from '../persistence/filesystem-guard.ts';
 import { acquireNativeLock, acquireNativeLockSync, type NativeLockSyncHandle } from '../persistence/native-lock.ts';
 import { OperationError, opError } from '../ops/contract.ts';
+import { shellQuote } from '../agent-output.ts';
 
 export const COMMIT_LOCK_NAME = 'brain-commit.lock';
 /** Taken by pre-#6530 helpers and hooks; held too so they still exclude us during the mixed-version window. */
@@ -184,6 +185,11 @@ function absGitPath(root: string, rel: string): string {
 }
 
 /** The checkout's toplevel; throws `commit_paths_invalid` outside a work tree. */
+/** The operator step that commits and pushes only `paths` (relative to `root`) with one -m per message paragraph: the fix text doctor and repair print instead of a bare git add/commit. */
+export function commitPushCommand(root: string, paths: readonly string[], messages: readonly string[]): string {
+  return shellQuote(['gbrain', 'git', 'commit-push', '--path', root, ...messages.flatMap(m => ['-m', m]), '--', ...paths]);
+}
+
 export function checkoutRoot(dir: string): string {
   const r = git(dir, ['rev-parse', '--show-toplevel']);
   if (r.code !== 0 || !r.stdout.trim()) {
