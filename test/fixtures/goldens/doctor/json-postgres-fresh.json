@@ -924,6 +924,7 @@
             "git_push_holds": [],
             "inspected": 0,
             "parked_effects": 0,
+            "parked_groups": [],
             "truncated": false
           },
           "elapsed_ms": "<volatile>",

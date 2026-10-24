@@ -117,10 +117,14 @@ describeDb(`writes on read-only-default server connections (${pooled ? 'pgbounce
       `UPDATE minion_jobs SET lock_until = now() - interval '5 minutes', error_text = 'cannot execute INSERT in a read-only transaction' WHERE id = $1`,
       [job.id]);
     const stuck = { id: job.id };
+    // A live holder: its lease lock in gbrain_cycle_locks is current while its record's lock_until lags.
+    const leaseToken = '00000000-0000-4000-8000-000000007261';
+    await engine!.executeRaw(`INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at, last_refreshed_at, acquisition_token)
+       VALUES ('gbrain-sync:source-a', 1, 'host-a', now() - interval '10 minutes', now() + interval '10 minutes', now(), $1::uuid)`, [leaseToken]);
     const [beacon] = await engine!.executeRaw<{ id: number }>(
       `INSERT INTO minion_jobs(name, queue, status, submission_authority, data, max_attempts, max_stalled, lock_token, lock_until, started_at, remove_on_complete, remove_on_fail)
        VALUES ('sync', 'gbrain-drain-lease', 'active', '{"version":1,"kind":"application"}'::jsonb, '{"sourceId":"source-a"}'::jsonb, 1, 0,
-               'dead-lease-token', now() - interval '5 minutes', now() - interval '10 minutes', true, true) RETURNING id`);
+               $1, now() - interval '5 minutes', now() - interval '10 minutes', true, true) RETURNING id`, [leaseToken]);
     const { requeued, dead } = await queue.handleStalled(0);
     expect(requeued.map(j => j.id)).toEqual([stuck.id]);
     expect(dead).toEqual([]);

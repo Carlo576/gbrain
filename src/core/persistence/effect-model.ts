@@ -33,7 +33,8 @@ export function fenceRepairCommit(path: string, classes: readonly string[], tier
 export function contentRepairCommit(path: string, receipt: Pick<ContentRepairReceipt, 'tier' | 'confidence'>): GitCommitNote {
   return { subject: contentRepairCommitSubject(path), line: `${safe(path)} (frontmatter_slug_conflict)`, trailer: contentRepairTrailer(receipt) };
 }
-export interface ParkedTarget { slug?: string; error_code: string }
+/** `rule`: for `git_target_ignored`, the .gitignore rule that excludes the file (`<file>:<line>: <pattern>`). */
+export interface ParkedTarget { slug?: string; error_code: string; rule?: string }
 /** `page_body_segmented`: a segmented page an older binary's mirror or Git scan passed by; this one mirrors and commits it. */
 /** `preview_changed`: a `gbrain repair segmented-mirror` target whose file or render no longer has the hash its preview approved (`data.approved_file`). */
 export interface SkippedTarget { slug: string; reason: 'metafile' | 'file_database_drift' | 'page_body_segmented' | 'withdrawal_not_mirrored' | 'preview_changed' }

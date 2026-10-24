@@ -690,6 +690,8 @@ async function recordFailure(engine: BrainEngine, effect: PersistenceEffect, err
   }
   const [current] = await engine.executeRaw<{ recovering: boolean }>('SELECT recovery IS NOT NULL AS recovering FROM persistence_effects WHERE id=$1', [effect.id]);
   if (current?.recovering) { await retryEffect(engine, effect, code, 30_000); return; }
+  // GBRA-133: a target a .gitignore rule excludes fails the same way on every attempt; it parks at once, naming the rule.
+  if (code === 'git_target_ignored') { await parkEffectTarget(engine, effect, code, target, (error as OperationError).detail); return; }
   // A retried parked target has exactly one authorized attempt; otherwise the
   // counter only accumulates while the same target keeps failing.
   const prior = target !== undefined && effect.data.retry_slugs?.includes(target) ? PARK_AFTER_FAILURES - 1
@@ -739,10 +741,10 @@ const DEPENDENCY_CODES = ['recovery_required', 'owner_unavailable', 'write_claim
  * or a failure outside any target, parks the whole effect. Parked work stays
  * retained until `gbrain sources writer retry-effects` authorizes another attempt.
  */
-async function parkEffectTarget(engine: BrainEngine, effect: PersistenceEffect, code: string, target: string | undefined): Promise<void> {
+async function parkEffectTarget(engine: BrainEngine, effect: PersistenceEffect, code: string, target: string | undefined, rule?: string): Promise<void> {
   const { target_failures: _failures, failing_target: _target, retry_slugs: retrying = [], ...data } = effect.data;
   const scanning = target !== undefined && (targetedWithdrawalEffect(effect) || effect.data.source_scan === true);
-  const parked = [...(effect.data.parked ?? []), { ...(target ?? effect.data.slug ? { slug: target ?? effect.data.slug } : {}), error_code: code }];
+  const parked = [...(effect.data.parked ?? []), { ...(target ?? effect.data.slug ? { slug: target ?? effect.data.slug } : {}), error_code: code, ...(rule ? { rule } : {}) }];
   if (!scanning) { await parkEffect(engine, effect, { ...data, ...(retrying.length ? { retry_slugs: retrying } : {}), parked }); return; }
   const remaining = retrying.filter(slug => slug !== target);
   // An embedding scan's next page starts with a full attempt budget, as when the cursor advances.
