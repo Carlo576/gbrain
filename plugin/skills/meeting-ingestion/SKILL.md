@@ -350,9 +350,9 @@ five pages costs five corrections.
 ### Phase 7: Attendee enrichment (MANDATORY)
 
 For EACH attendee:
-1. Does a people page exist? Only an exact match counts: the attendee's email
-   in a page's `email` frontmatter, or a person page whose title equals the
-   name ([identity rule](../conventions/brain-first.md#identity-exact-match)).
+1. Does a people page exist? Only an exact match counts: one match from
+   `gbrain whois <email> --json`, else from `gbrain whois "<name>" --json`
+   ([identity rule](../conventions/brain-first.md#identity-exact-match)).
    A search's top hit is a candidate to check, never the attendee.
 2. If NO → create via the enrich skill (`skills/enrich/SKILL.md`). Every
    person who was actually IN the meeting gets a page, even a thin one. Skip

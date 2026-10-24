@@ -137,19 +137,19 @@ Before generating any briefing, load context from gbrain systematically.
 ### Before a meeting
 
 For every attendee on the calendar invite:
-- Find their brain page by an exact match only: their email in the page's
-  `email` frontmatter, or a person page whose title equals their name
-  ([identity rule](../conventions/brain-first.md#identity-exact-match)). A
-  search's top hit is not the attendee.
+- Find their brain page by an exact match only: `gbrain whois <email> --json`,
+  then `gbrain whois "<name>" --json` when the address has no match; exactly
+  one match counts ([identity rule](../conventions/brain-first.md#identity-exact-match)).
+  A search's top hit is not the attendee.
 - `gbrain get <slug>` -- load compiled truth, recent timeline, relationship context
 - If no page exists, note the gap ("No brain page for alice-example -- consider enrichment")
 
 ### Before an email reply
 
 Before drafting or triaging any email:
-- Resolve the sender by exact email or exact title match
-  ([identity rule](../conventions/brain-first.md#identity-exact-match)); no
-  exact match means an unknown sender, not the nearest known contact
+- Resolve the sender with `gbrain whois <address> --json` (exact email, title
+  or alias; [identity rule](../conventions/brain-first.md#identity-exact-match)); no
+  match, or an ambiguous one, means an unknown sender, not the nearest known contact
 - Read their compiled truth to understand who they are, what they care about, and
   your relationship history. This turns a cold reply into an informed one.
 

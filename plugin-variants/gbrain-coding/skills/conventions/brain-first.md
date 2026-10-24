@@ -49,20 +49,22 @@ gbrain list --type meeting --limit 50                           # enumerate by t
 
 Resolving an email sender, a calendar attendee or a contact to a person page is
 an identity decision, and a search's top hit is not one: ranking always returns
-something, so taking it files strangers onto known contacts. Accept a page only
-on one of these:
+something, so taking it files strangers onto known contacts. Use the exact
+lookup:
 
-1. **An exact email match.** `gbrain list --type person --where email=<address> --source-id __all__ --json`
-   returns the person pages whose `email` frontmatter equals the address or
-   lists it. The match is case-sensitive, so pass the address as written and
-   lowercased (`--where email=Alice@Acme-Example.com,alice@acme-example.com`),
-   and use the field your person pages use (`email`, or `emails` for a list).
-2. **An exact title match.** `gbrain search "<display name>" --types '["person"]' --json`,
-   then accept only a hit whose `title` equals the name exactly.
+```bash
+gbrain whois alice@acme-example.com --source-id __all__ --json   # an email address
+gbrain whois "Alice Example" --source-id __all__ --json          # a display name
+```
 
-Exactly one page is the person. No page, or more than one, means unknown: treat
-the sender as new or ask the user. Never take the top hit, a partial name or a
-similar address, and never merge a stranger into a known contact's page.
+`whois` returns the entity pages whose frontmatter email, title or declared
+alias equals the query, ignoring case, accents and quotes, and never anything
+fuzzy. Look up the email address first and the display name only when the
+address has no match. One match is the person. `matches: []` means no exact
+match: treat the sender as new or ask the user. `ambiguous: true` means
+several pages match: ask, or resolve by the email address. Never fall back to
+a search's top hit, a partial name or a similar address, and never merge a
+stranger into a known contact's page.
 
 ## Available GBrain Tools
 
