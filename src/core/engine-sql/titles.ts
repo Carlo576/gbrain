@@ -47,6 +47,7 @@ import type { SearchOpts, SearchResult } from '../types.ts';
 import { searchLimitCap } from '../search/eval-pool-depth.ts';
 import { boundWebsearchQuery, buildOrFallbackWebsearchQuery, orFallbackTokens } from '../search/sql-ranking.ts';
 import { buildSearchTitlesStatement, type SearchTitlesDialect } from '../search/title-statement.ts';
+import { RARITY_MAX_TERMS } from '../search/keyword-or-rarity.ts';
 import { rowToSearchResult } from '../utils.ts';
 import type { ScopedRead } from './brands.ts';
 import type { ScopedReadRunner } from './cjk-search.ts';
@@ -107,8 +108,6 @@ export async function searchTitles(
   return relaxedRows.map((r) => ({ ...rowToSearchResult(r), keyword_relaxed: true as const }));
 }
 
-/** Queries of at most this many words also run the OR fallback once per word (rankByRarity). */
-export const RARITY_MAX_TERMS = 4;
 
 /**
  * #7471: the OR fallback ranks every title holding one query word alike
