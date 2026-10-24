@@ -230,32 +230,37 @@ On a managed brain the persistence owner is the only Git writer in the
 canonical checkout, and `gbrain sources refresh` is the only way upstream
 commits come in. Four rules keep that checkout able to move:
 
-1. **Scripts write through gbrain, never with `git commit`.** A cron job or
-   hook that writes files into the checkout and commits them without pushing
-   leaves commits the upstream lacks. The checkout diverges, and every later
-   refresh refuses `refresh_diverged` and changes nothing. Save pages with
-   `put_page`, `edit_page`, `remember` or `capture` (CLI calls go through
-   the [one wrapper](cron-schedule.md#calling-gbrain-unattended)). On a classic
-   shared checkout, commit with `gbrain git commit-push -- <paths>`.
+1. **Scripts commit through gbrain, never with plain `git commit`.** A cron
+   job or hook that writes files into the checkout and commits them with
+   plain git leaves commits the upstream lacks and nobody publishes. The
+   checkout diverges, and every later refresh refuses `refresh_diverged` and
+   changes nothing. Commit the files a script wrote with
+   `gbrain git commit-push -m "<msg>" -- <paths>`: on a managed worktree it
+   commits only those paths under the commit lock (`committed_local`) and the
+   owner publishes them on its next Git publish. Pages can also go through
+   `put_page`, `edit_page`, `remember` or `capture`. CLI calls go through
+   the [one wrapper](cron-schedule.md#calling-gbrain-unattended).
 2. **Refresh on a schedule.** `gbrain sources refresh <id>` drains queued
    writes, refuses new ones until it finishes, fast-forwards with
    `git merge --ff-only` and re-syncs every source on the checkout; run it
    from cron on the owner host
    ([cron line](../../skills/cron-scheduler/SKILL.md#managed-brain)).
-   `refresh_diverged` means something commits outside gbrain:
+   `refresh_diverged` means something committed outside gbrain:
    `git log --format='%h %an %ad %s' @{upstream}..HEAD` lists the stray
-   commits, so find and fix that writer, then reconcile as the
-   [refusal](write-refusals.md#refresh_diverged) says. Never force the
-   checkout.
+   commits. Fix that writer first, then, after the user agrees, publish the
+   stray commits merged with the upstream
+   (`gbrain git commit-push --push-only --keep-checkout --path <checkout>`)
+   and retry the refresh, as the [refusal](write-refusals.md#refresh_diverged)
+   says. Never force the checkout.
 3. **Stop syncing a source before rewriting its history.** Before a
-   force-push or `git filter-repo`, take the source out of automatic sync
-   (`syncEnabled: false` in its config, with the user's agreement; there is
-   no CLI verb for it yet) and run `gbrain sources mirror-readonly <id>` so
-   no managed write touches its checkout. A sync whose recorded base commit no
-   longer exists makes sync and the maintenance cycle re-read the whole tree.
-   After the rewrite, move the checkout onto the new history
+   force-push or `git filter-repo`, run `gbrain sources set-sync <id> off`
+   (with the user's agreement) so automatic sync skips it, and
+   `gbrain sources mirror-readonly <id>` so no managed write touches its
+   checkout. A sync whose recorded base commit no longer exists makes sync and
+   the maintenance cycle re-read the whole tree. After the rewrite, move the
+   checkout onto the new history
    ([upstream rewritten](troubleshooting.md#upstream-rewritten)), then
-   `gbrain sources mirror-writable <id>` and turn sync back on.
+   `gbrain sources mirror-writable <id>` and `gbrain sources set-sync <id> on`.
 4. **Decide what a gitignored path is.** A page whose file a `.gitignore`
    rule excludes cannot be committed, so its Git effect parks at once as
    `git_target_ignored` naming the rule (since v0.60.427.0). Either un-ignore

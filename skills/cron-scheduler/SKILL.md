@@ -53,6 +53,9 @@ This skill guarantees:
    the installed binary. Log stderr to a file, check the exit code, keep hook
    output off stdout, and give each call a timeout of at least 10 s.
    The lines below write `gbrain-run`; doctor prints the bare command.
+   `gbrain doctor --only cron_gbrain_home` warns about any crontab line or
+   script that runs `src/cli.ts` directly or calls gbrain without the brain's
+   `GBRAIN_HOME`.
 
 ## Idempotency Requirement
 
@@ -114,8 +117,10 @@ sources:
   `;` is deliberate: the sync still runs when a refresh refuses.
 - `refresh_diverged`: the checkout has commits its upstream lacks, so
   something commits outside gbrain (usually a script that writes files and
-  runs `git commit` in the checkout). Fix that writer so it saves pages
-  through `put_page` or `capture`; never force the checkout
+  runs `git commit` in the checkout). Fix that writer so it commits with
+  `gbrain git commit-push -- <paths>`, then reconcile as the refusal says
+  (`gbrain git commit-push --push-only --keep-checkout`, after the user
+  agrees); never force the checkout
   ([scripts and the managed checkout](https://github.com/garrytan/gbrain/blob/master/docs/guides/shared-checkout-git.md#scripts-and-the-managed-checkout)).
 - `--hard-deadline 13m` stays under the 15-minute interval. Managed sync takes
   no per-source lock, so a run that outlives the interval would overlap the
@@ -161,7 +166,8 @@ Follow the [agent operator protocol](../conventions/agent-operator-protocol.md) 
 - A bare `gbrain` or `bun run src/cli.ts` in a cron line, script or hook
   instead of the wrapper; a wrapper that sets `HOME` instead of `GBRAIN_HOME`
 - `2>/dev/null` on a gbrain call, or ignoring its exit code
-- A script that writes files and `git commit`s them in a managed checkout
+- A script that writes files and runs plain `git commit` in a managed checkout
+  instead of `gbrain git commit-push -- <paths>`
 - Printing `env` or a process environment into a log or transcript while
   debugging (it holds the database URL and keys)
 - Separate per-source `gbrain sync --source <id>` cron entries when

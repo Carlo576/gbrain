@@ -168,8 +168,10 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
   `no_brain` refusal then reads as "no results"), check the exit code, keep
   hook output off stdout, allow at least 10 s per call, and never print the
   process environment into a transcript. On a managed brain, schedule
-  `gbrain sources refresh <id>` and never commit files into the checkout from a
-  script. Wrapper and rules:
+  `gbrain sources refresh <id>`, and have scripts commit the files they write
+  with `gbrain git commit-push -- <paths>`, never plain `git commit`
+  (`gbrain doctor --only cron_gbrain_home` flags cron lines that skip the
+  wrapper). Wrapper and rules:
   [cron-schedule.md](docs/guides/cron-schedule.md#calling-gbrain-unattended),
   [scripts and the managed checkout](docs/guides/shared-checkout-git.md#scripts-and-the-managed-checkout).
 - **Delete or purge pages:** `gbrain delete --purge` skips the 72-hour soft

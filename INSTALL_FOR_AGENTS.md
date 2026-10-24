@@ -588,10 +588,12 @@ timeout of at least 10 s. The wrapper and its rules:
 
 - **Managed brain checkout** (every 15 min, on the owner host):
   `gbrain sources refresh <id>` is the only sanctioned fast-forward; it drains
-  writes, fast-forwards and re-syncs. Scripts save pages through
-  `put_page`/`capture`, never by writing and committing files in the
-  checkout: an unpushed local commit makes the checkout diverge and every
-  refresh refuse `refresh_diverged`
+  writes, fast-forwards and re-syncs. Scripts commit the files they write
+  with `gbrain git commit-push -- <paths>` (or save pages through
+  `put_page`/`capture`), never with plain `git commit`: an unpublished local
+  commit makes the checkout diverge and every refresh refuse
+  `refresh_diverged`. `gbrain doctor --only cron_gbrain_home` flags cron
+  lines that skip the wrapper
   ([scripts and the managed checkout](docs/guides/shared-checkout-git.md#scripts-and-the-managed-checkout)).
 - **Workers**: start `gbrain jobs supervisor` with `--max-rss <MB>`; with
   `--job-isolation process` the cap also covers each job child's process tree
@@ -702,10 +704,14 @@ verification are separate stages; report pending stages rather than claiming
 the whole migration completed.
 
 On a host with resident processes (autopilot, a jobs worker, a serve), pause
-autopilot (`gbrain autopilot pause`), wait until no job is active, upgrade
-every install, restart every gbrain process and verify that each reports the
-new version, then `gbrain autopilot resume`
-([the order](skills/gbrain-upgrade/SKILL.md#always-on-hosts-pause-drain-upgrade-verify-resume)).
+autopilot (`gbrain autopilot pause`), wait until no job is active, run
+`gbrain upgrade` on every install (it restarts every gbrain process onto the
+new build and verifies one build runs, or refuses `restart_refused` naming the
+process it cannot restart), check that each process reports the new version,
+then `gbrain autopilot resume`. A production brain follows the stable channel
+(`gbrain config set self_upgrade.channel stable`)
+([the order](skills/gbrain-upgrade/SKILL.md#always-on-hosts-pause-drain-upgrade-verify-resume),
+[stable channel](docs/guides/upgrades-auto-update.md#stable-channel)).
 
 For memory-only upgrades, keep services and paid reindexing opt-in. The same
 command works for `bun install -g` and `git clone + bun link` installs:

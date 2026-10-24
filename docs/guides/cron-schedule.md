@@ -159,8 +159,12 @@ Rules for the wrapper and everything that calls it:
 
 On a managed brain the same wrapper runs `gbrain-run sources refresh <id>` on
 a schedule ([the managed cron line](../../skills/cron-scheduler/SKILL.md#managed-brain)).
-Scripts never write files and `git commit` straight into the managed checkout;
-see [shared-checkout git](shared-checkout-git.md#scripts-and-the-managed-checkout).
+Scripts commit the files they write with `gbrain git commit-push -- <paths>`,
+never plain `git commit`, in the managed checkout; see
+[shared-checkout git](shared-checkout-git.md#scripts-and-the-managed-checkout).
+`gbrain doctor --only cron_gbrain_home --json` reads the crontab and the scripts
+it names and warns about a line that runs `src/cli.ts` straight from a checkout,
+or calls gbrain without the brain's `GBRAIN_HOME`.
 
 ### Quiet Hours Gate (MANDATORY)
 

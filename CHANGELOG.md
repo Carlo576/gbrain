@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.436.0] - 2026-10-24
+
+**The install and operating guides now cover what an agent running gbrain beside a harness (cron jobs, workspace scripts, hooks, a managed checkout, a remote Postgres) needs to get right the first time: one wrapper for every scheduled call, scripts that commit through gbrain, purge consent, exact-match identity, the database's region, and the attended upgrade order.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A cron job, workspace script or hook calls gbrain | the guides showed bare `gbrain` lines; a job with another `HOME` found no database (every lookup silently empty) or acted as a second host (`refresh_not_owner`) | [cron-schedule.md](docs/guides/cron-schedule.md#calling-gbrain-unattended) gives one wrapper that sets `GBRAIN_HOME` (never `HOME`) and runs the installed binary, with rules for stderr, exit codes, clean `--json` stdout, timeouts of at least 10 s, quoted env files and never printing the environment; the cron-scheduler skill, INSTALL Step 7, AGENTS.md and the OpenClaw guide point at it |
+| A script writes files into a managed checkout | nothing said not to commit them with plain `git commit`, which made the checkout diverge and every refresh refuse `refresh_diverged` | [Scripts and the managed checkout](docs/guides/shared-checkout-git.md#scripts-and-the-managed-checkout): commit with `gbrain git commit-push -- <paths>`, keep the checkout current with a scheduled `gbrain sources refresh <id>`, `gbrain sources set-sync <id> off` before rewriting a source's history, and decide what a `git_target_ignored` path is |
+| An agent purges pages | the data-loss gate covered `pages purge-deleted` but not `gbrain delete --purge` | `delete --purge` needs an explicit go for that purge ("scrub the repo" is not one), runs one page at a time with each removal verified, and a stopped batch stays stopped |
+| A write exits 10 | the meaning lived only in the exit-code table | AGENTS.md says next to exit 3 that 10 is accepted and still pending, never "not found" or "failed" |
+| An agent resolves an email sender or attendee to a person page | the briefing, meeting-ingestion and executive-assistant guides took the first search hit | only an exact frontmatter email or an exact title match counts ([identity rule](skills/conventions/brain-first.md#identity-exact-match)) |
+| Choosing or switching the brain's Postgres | no guidance on region or on proving a switch | INSTALL puts the database in the agent host's region and lists every URL variable to change, the restart and the database-side proof |
+| Upgrading an always-on host | no order for autopilot and running jobs | pause autopilot, wait for a quiet queue, `gbrain upgrade` (which restarts and verifies), check every process, resume; production brains follow the stable channel |
+| OpenClaw's `openclaw doctor --fix` removes the rendered `HEARTBEAT.md` | nothing said what to do | INSTALL Step 6 explains how to restore it until the render adapts (#7470) |
+
+The troubleshooting table gains eight symptom rows for these cases, and the v0.60.427.0 entry now names `gbrain sources writer retry-effects`.
+
+### What to watch for after you upgrade
+
+- Nothing changes in gbrain's behavior: this is documentation and bundled skills only. Nothing is rewritten on upgrade, and there is no schema migration.
+- Harnesses that copied the cron-scheduler, data-loss-gate, gbrain-upgrade, briefing or meeting-ingestion skills pick up the new rules on their next skill sync.
+
 ## [0.60.434.0] - 2026-10-24
 
 **Each darwin native-locks cell now ends its own heartbeat status in `success`. Before, one slow post could leave it `pending` on a green job. Two drain-governor tests no longer fail when a loaded runner stalls the event loop.**
