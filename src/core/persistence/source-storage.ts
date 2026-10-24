@@ -46,6 +46,12 @@ function load(root: string): StorageConfig | null {
  * logged once per version; `refuse` then throws `storage_error`, while
  * `not_db_only` answers false so the caller keeps its non-db_only behavior.
  */
+/** #7423: the declared `storage.db_only` dir this page slug falls under at this source root, or null; an invalid gbrain.yml refuses (`storage_error`). */
+export function sourceDbOnlyDir(root: string, slug: string): string | null {
+  const config = load(root);
+  return config?.db_only.find(dir => isDeclaredDbOnlySlug(slug, { ...config, db_only: [dir] })) ?? null;
+}
+
 export function isSourceDbOnlySlug(root: string, slug: string, onInvalid: 'refuse' | 'not_db_only'): boolean {
   try {
     return isDeclaredDbOnlySlug(slug, load(root));
