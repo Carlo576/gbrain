@@ -37,6 +37,7 @@ import { formatTrustRef, pageRef, parseTrustRef, resolvePageRef, type TrustRef }
 import { storedTrustTier, trustLabel, type TrustTier } from './tier.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { getWriteGateHold, releaseWriteGateHold, type WriteGateHold } from '../write-gate-store.ts';
+import { submitTrustRelease } from './release-publish.ts';
 import { withCoordinatedWrite, withTrustPromotion, withWriteAttribution, withWriteTrust } from '../persistence/context.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
@@ -145,6 +146,8 @@ export interface HoldStoreAdapter {
   /** Marks the hold released and publishes its payload at user_confirmed in `tx`; false when it was no longer held. */
   release(tx: BrainEngine, id: number, by: string): Promise<boolean>;
   drop(tx: BrainEngine, id: number, by: string): Promise<boolean>;
+  /** A managed release published through the page-mutation door (trust/release-publish.ts); null when the hold takes `release`. */
+  publish?(engine: BrainEngine, id: number, by: string, config?: GBrainConfig): Promise<boolean | null>;
 }
 async function holdTableExists(engine: BrainEngine): Promise<boolean> {
   const [row] = await engine.executeRaw<{ t: string | null }>(`SELECT to_regclass('write_gate_holds')::text AS t`);
@@ -183,10 +186,13 @@ const defaultHoldStore: HoldStoreAdapter = {
     return true;
   },
   async drop(tx, id, by) { return (await tx.executeRaw(decideHoldSql('dropped'), [id, by])).length === 1; },
+  publish: submitTrustRelease,
 };
 /**
- * The released fact enters memory as the owner's confirmed row: database-only (the hold kept no fence
- * position; its embedding is filled by the usual backfill), stamped user_confirmed under the promotion capability.
+ * The transactional release: the fact enters memory as the owner's confirmed row, database-only (its embedding is
+ * filled by the usual backfill), stamped user_confirmed under the promotion capability. A managed brain takes it only
+ * for a hold with no entity slug or whose page is missing; every other managed fact release publishes its fence row
+ * through the door (`submitTrustRelease`, trust/release-publish.ts).
  */
 async function publishReleasedFact(tx: BrainEngine, hold: WriteGateHold): Promise<void> {
   const p = hold.payload;
@@ -463,7 +469,8 @@ export async function applyOwnerAction(engine: BrainEngine, input: OwnerActionIn
       }
       if (ref?.kind === 'proposal') return fromDecision('confirm', await decideTrustProposal(engine, ref.id, 'accept', decision));
       if (ref?.kind === 'hold') {
-        const released = await engine.transaction(tx => holdStore.release(tx, ref.id, principalLabel(by)));
+        const released = await holdStore.publish?.(engine, ref.id, principalLabel(by), opts.config)
+          ?? await engine.transaction(tx => holdStore.release(tx, ref.id, principalLabel(by)));
         if (!released) throw opError('preview_changed', `h${ref.id} was decided meanwhile; nothing was changed.`, 'Run gbrain trust review.');
         return { action: 'release', ref: preview.ref, status: 'released', tier: 'user_confirmed', prior_tier: preview.tier };
       }
