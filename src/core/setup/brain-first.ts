@@ -77,7 +77,7 @@ export function renderBrainFirstSnippet(harness: string, access: BrainFirstAcces
   return `${BRAIN_FIRST_BEGIN}\n${renderBrainFirstBlock(harness, access, optOut)}\n${BRAIN_FIRST_END}\n`;
 }
 
-const CURSOR_HEAD = '---\ndescription: GBrain memory, managed by gbrain\nalwaysApply: true\n---\n';
+export const CURSOR_HEAD = '---\ndescription: GBrain memory, managed by gbrain\nalwaysApply: true\n---\n';
 
 export interface BrainFirstTarget {
   harness: BrainFirstHarness;
@@ -267,7 +267,7 @@ export interface BrainFirstOutcome {
 }
 
 /** A directory entry exists, a dangling symlink included (existsSync follows links). */
-function direntExists(path: string): boolean {
+export function direntExists(path: string): boolean {
   try { lstatSync(path); return true; } catch { return false; }
 }
 
@@ -282,7 +282,7 @@ function ownedEmptyFile(prior: BrainFirstLedgerEntry | undefined, path: string, 
  * reports the file as changed instead. A file that appeared since we found
  * none is never replaced.
  */
-function writeUnlessChanged(path: string, read: string, wasMissing: boolean, next: string): void {
+export function writeUnlessChanged(path: string, read: string, wasMissing: boolean, next: string): void {
   const now = direntExists(path) && existsSync(path) ? readFileSync(path, 'utf8') : null;
   if (wasMissing ? now !== null : now !== read) throw new Error('the file changed while gbrain was updating it; re-run to apply the block to the new contents');
   atomicWriteTextFile(path, next, { freshMode: 0o644 });
