@@ -1461,6 +1461,7 @@ cross-subsystem duplicate entries, and byte caps for the entry docs and referenc
 | **R5** | `configureGateway(` with no `resetGateway(` (comments ignored): the global gateway leaks to later files | `afterAll(() => resetGateway())`; a child-script-only call takes `isolation-lint: R5-subprocess-only` |
 | **R6** | `currentExitCode(` with no verdict reset outside an after-hook | `beforeEach(() => _resetCliExitVerdictForTests())` |
 | **R7** | `__unconfigureGatewayForTests(` or `_clearGatewayForTests(` with no `resetGateway(` in an `afterEach`/`afterAll` hook (comments ignored): an empty gateway leaks into the next file, and an inline restore does not survive a throw or a `-t` filter | `afterEach(() => resetGateway())` (#6514) |
+| **R9** | A process-global hook with no undo in an `afterEach`/`afterAll` hook (comments ignored): `installOutputCapture(` or `startCliSocketServer(` without `_uninstallOutputCaptureForTests`, `redirectStdoutLoggingToStderr(` or an inline `_resetStdoutRedirectForTests(` without the reset in a hook, `installSigchldHandler(` without `_uninstallSigchldHandlerForTests`. Each patches console, stderr or a signal listener for every later file in the shard (#7494) | `afterEach(() => _uninstallOutputCaptureForTests())` (or the named undo) |
 
 Files that violated these rules at the lint baseline are listed in `scripts/check-test-isolation.allowlist`. **The allow-list MUST shrink over time**: never add entries.
 
