@@ -28,8 +28,8 @@ import {
   UnresolvedTokenError,
   BootstrapRenderError,
   DERIVED_DEFAULTS,
-  detectOpenClawWorkspace,
 } from '../src/core/bootstrap/render.ts';
+import { detectOpenClawWorkspace } from '../src/core/bootstrap/render-host.ts';
 import { BOOTSTRAP_TEMPLATES } from '../src/core/bootstrap/assets.ts';
 import { readManifest, writeManifest, TEMPLATE_PLACEHOLDER_MANIFEST } from '../src/core/bootstrap/format.ts';
 import { setAnswer, skipAnswer, interviewStatePath } from '../src/core/bootstrap/interview.ts';
@@ -473,6 +473,7 @@ describe('renderWorkspace — OpenClaw host keeps its schedule list out of HEART
   test('host openclaw renders the due-job list as SCHEDULES.md and AGENTS.md points only there', () => {
     const ws = answeredWs();
     const result = renderWorkspace(ws, { host: 'openclaw' });
+    expect(result.note).toContain('SCHEDULES.md');
     expect(result.written).toContain('SCHEDULES.md');
     expect(result.written).not.toContain('HEARTBEAT.md');
     expect(existsSync(join(ws, 'HEARTBEAT.md'))).toBe(false);
@@ -486,9 +487,16 @@ describe('renderWorkspace — OpenClaw host keeps its schedule list out of HEART
     expect(agents).toContain('| Schedules | SCHEDULES.md |');
   });
 
+  test('an unknown host refuses before writing anything', () => {
+    const ws = answeredWs();
+    expect(() => renderWorkspace(ws, { host: 'bogus' })).toThrow(/unknown render host 'bogus'/);
+    expect(existsSync(join(ws, 'AGENTS.md'))).toBe(false);
+  });
+
   test('every other harness keeps HEARTBEAT.md', () => {
     const ws = answeredWs();
     const result = renderWorkspace(ws);
+    expect(result.note).toBeUndefined();
     expect(result.written).toContain('HEARTBEAT.md');
     expect(existsSync(join(ws, 'SCHEDULES.md'))).toBe(false);
     expect(readFileSync(join(ws, 'HEARTBEAT.md'), 'utf8').startsWith('# HEARTBEAT.md\n')).toBe(true);

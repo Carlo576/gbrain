@@ -50,7 +50,7 @@ import {
   readInterviewState,
   routeProviderKeyToConfig,
 } from '../core/bootstrap/interview.ts';
-import { renderWorkspace, BootstrapRenderError, resolveRenderHost, OPENCLAW_RENDER_NOTE } from '../core/bootstrap/render.ts';
+import { renderWorkspace, BootstrapRenderError } from '../core/bootstrap/render.ts';
 import { acquireBootstrapLock, BootstrapError } from '../core/bootstrap/lock.ts';
 import { createPrivateRepo, defaultRunner, type ExecRunner, type RepoReceipt } from '../core/bootstrap/repo.ts';
 import { attachWorkspace } from '../core/bootstrap/attach.ts';
@@ -123,10 +123,9 @@ Subcommands (run \`gbrain bootstrap status\` first — it is the resume entrypoi
             --status              Gate: exits nonzero until required answers exist.
             --show                Read-back payload (all answers + confirm hash).
             --confirm <hash>      Record the human's confirmation of the read-back.
-  render [--force] [--only F] [--minimal] [--host openclaw|generic]
+  render [--force] [--only F] [--minimal] [--host openclaw|generic|auto]
                                   Render identity files from the confirmed answers.
-                                  Never clobbers; --force backs up first. OpenClaw
-                                  (detected or --host): HEARTBEAT.md → SCHEDULES.md.
+                                  Never clobbers; --force backs up first. OpenClaw: SCHEDULES.md.
   contract [--repair]             Audit the same-turn GBrain write-back contract.
                                   --repair appends it additively and backs up AGENTS.md.
   hooks [--harness claude-code|codex|opencode] [--repair] [--no-hooks] [--gbrain-bin <path>]
@@ -889,8 +888,6 @@ async function runRender(ws: string, rest: string[], home: string): Promise<numb
   const force = rest.includes('--force');
   const minimal = rest.includes('--minimal');
   const only = flagValues(rest, '--only');
-  const host = resolveRenderHost(ws, flagValue(rest, '--host'), minimal);
-  if (host === null) { console.error('unknown --host: pass --host openclaw or --host generic'); return 2; }
 
   // Public-origin gate [FIX6]: identity files (SOUL.md/USER.md/…) must NEVER
   // land in a public repo. `bootstrap status` enforces this for the template
@@ -954,27 +951,25 @@ async function runRender(ws: string, rest: string[], home: string): Promise<numb
       /* canonical fallback applies */
     }
 
-    // source_id seam [source-id collision]: render is ENGINE-FREE (D5/ENG-2)
-    // and the sources registry lives only in the DB, so render cannot detect a
-    // 'workspace' id already claimed by another checkout. It therefore passes
-    // NO sourceId: render.ts preserves an existing manifest source_id and
-    // defaults new manifests to 'workspace'; verify (which holds the engine)
-    // detects the collision and persists a derived 'workspace-<hash>' id that
-    // every consumer reads back from the manifest.
+    // source_id seam [source-id collision]: render is ENGINE-FREE (D5/ENG-2) and the sources
+    // registry lives only in the DB, so render cannot detect a 'workspace' id already claimed
+    // by another checkout. It therefore passes NO sourceId: render.ts preserves an existing
+    // manifest source_id and defaults new manifests to 'workspace'; verify (which holds the
+    // engine) detects the collision and persists a derived 'workspace-<hash>' id that every
+    // consumer reads back from the manifest.
     const res = renderWorkspace(ws, {
       force,
       ...(only.length > 0 ? { only } : {}),
       minimal,
       derived,
       createdBy: `gbrain@${VERSION}`,
-      ...(host ? { host } : {}),
+      host: flagValue(rest, '--host'),
     });
 
     if (only.length === 0 && !minimal) writeRenderReceipt(home, ws);
     abortIfInjected('render');
 
-    if (host) console.log(OPENCLAW_RENDER_NOTE);
-    console.log(`rendered: ${res.written.join(', ') || '(nothing new)'}`);
+    console.log(`${res.note ? `${res.note}\n` : ''}rendered: ${res.written.join(', ') || '(nothing new)'}`);
     if (res.skipped.length > 0) console.log(`kept (already present — use --force to overwrite): ${res.skipped.join(', ')}`);
     if (res.backups.length > 0) console.log(`backups: ${res.backups.join(', ')}`);
     return 0;

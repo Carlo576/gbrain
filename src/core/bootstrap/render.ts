@@ -39,8 +39,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { BOOTSTRAP_TEMPLATES, DERIVED_TOKENS, GITHUB_URL_PLACEHOLDER, loadQuestionBank, readTemplate } from './assets.ts';
 import {
@@ -51,6 +50,7 @@ import {
   type AgentManifest,
 } from './format.ts';
 import { readInterviewState, type InterviewState } from './interview.ts';
+import { OPENCLAW_RENDER_NOTE, resolveRenderHost } from './render-host.ts';
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -102,13 +102,16 @@ export interface RenderOptions {
   /** Recorded as agent.json `source_id`. When unset, an existing initialized
    * manifest's source_id is preserved; otherwise defaults to 'workspace'. */
   sourceId?: string;
-  /** The harness the workspace belongs to. 'openclaw' writes each template's
-   * `openclawDest` instead of its dest (HEARTBEAT.md → SCHEDULES.md, #7470).
-   * Ignored in minimal mode (determinism). */
-  host?: 'openclaw';
+  /** The harness the workspace belongs to (render-host.ts): 'openclaw' writes
+   * each template's `openclawDest` instead of its dest (HEARTBEAT.md →
+   * SCHEDULES.md, #7470), 'generic' never does, 'auto' (the default) detects.
+   * Ignored in minimal mode (determinism). An unknown value throws. */
+  host?: string;
 }
 
 export interface RenderResult {
+  /** Why the render used host-specific names, when it did. */
+  note?: string;
   written: string[];
   skipped: string[];
   backups: string[];
@@ -133,47 +136,6 @@ const TOKEN_RE = /\{\{([A-Z0-9_]+)\}\}/g;
 export function isBootstrapRenderDest(relPath: string): boolean {
   return BOOTSTRAP_TEMPLATES.some((t) => t.dest === relPath || t.openclawDest === relPath);
 }
-
-/**
- * Whether a workspace belongs to OpenClaw, from OpenClaw's own layout: the
- * configured workspace (OPENCLAW_WORKSPACE_DIR, or gbrain's OPENCLAW_WORKSPACE),
- * or a `workspace` tree under the state directory (OPENCLAW_STATE_DIR,
- * ~/.openclaw, or a profile's ~/.openclaw-<profile>). A workspace elsewhere
- * that OpenClaw was pointed at by config alone needs `render --host openclaw`.
- */
-export function detectOpenClawWorkspace(
-  workspaceDir: string,
-  env: Record<string, string | undefined> = process.env,
-  home: string = homedir(),
-): boolean {
-  const ws = resolve(workspaceDir);
-  for (const configured of [env.OPENCLAW_WORKSPACE_DIR, env.OPENCLAW_WORKSPACE]) {
-    if (configured && resolve(configured) === ws) return true;
-  }
-  const underWorkspaceOf = (stateDir: string): boolean => {
-    const rel = relative(resolve(stateDir), ws);
-    const first = rel.split(sep)[0] ?? '';
-    return rel !== '' && !rel.startsWith('..') && /^workspace(-.+)?$/.test(first);
-  };
-  if (env.OPENCLAW_STATE_DIR && underWorkspaceOf(env.OPENCLAW_STATE_DIR)) return true;
-  const profile = relative(resolve(home), ws).split(sep)[0] ?? '';
-  return /^\.openclaw(-.+)?$/.test(profile) && underWorkspaceOf(join(home, profile));
-}
-
-/** The render host for `bootstrap render --host`: 'openclaw' forces it,
- * 'generic' declines it, no flag detects it (never in minimal mode). An
- * unknown value returns null for the dispatcher to refuse. */
-export function resolveRenderHost(workspaceDir: string, flag: string | undefined, minimal: boolean): 'openclaw' | undefined | null {
-  if (flag === 'openclaw') return 'openclaw';
-  if (flag === 'generic') return undefined;
-  if (flag !== undefined) return null;
-  return !minimal && detectOpenClawWorkspace(workspaceDir) ? 'openclaw' : undefined;
-}
-
-export const OPENCLAW_RENDER_NOTE =
-  'OpenClaw workspace: the due-job list renders as SCHEDULES.md, and AGENTS.md points there. OpenClaw 2026.10.6+ ' +
-  'retired HEARTBEAT.md, and its doctor migration imports and removes any workspace file by that name. ' +
-  'Pass --host generic to keep HEARTBEAT.md.';
 
 /**
  * [S3#3] Structural-marker escape for interview-sourced values (see module
@@ -224,7 +186,7 @@ type Resolution =
   | { kind: 'placeholder' }
   | { kind: 'unresolved' };
 
-function buildResolver(opts: RenderOptions, state: InterviewState | null): (token: string) => Resolution {
+function buildResolver(opts: RenderOptions, state: InterviewState | null, host: 'openclaw' | undefined): (token: string) => Resolution {
   const bank = loadQuestionBank();
   const minimal = opts.minimal === true;
   const derivedSet = new Set<string>(DERIVED_TOKENS);
@@ -235,7 +197,7 @@ function buildResolver(opts: RenderOptions, state: InterviewState | null): (toke
       if (minimal) return { kind: 'value', value: canonical };
       const supplied = opts.derived?.[token];
       if (supplied !== undefined) return { kind: 'value', value: supplied };
-      if (token === 'SCHEDULES_FILE' && opts.host === 'openclaw') {
+      if (token === 'SCHEDULES_FILE' && host === 'openclaw') {
         return { kind: 'value', value: BOOTSTRAP_TEMPLATES.find((t) => t.dest === canonical)!.openclawDest! };
       }
       return { kind: 'value', value: canonical };
@@ -277,9 +239,14 @@ export function renderWorkspace(workspaceDir: string, opts: RenderOptions = {}):
     }
   }
 
+  const host = resolveRenderHost(workspaceDir, opts.host ?? 'auto', minimal);
+  if (host === null) {
+    throw new BootstrapRenderError('unknown_host', `unknown render host '${opts.host}': pass --host openclaw, generic or auto.`);
+  }
+
   // Validate --only against the known dest list (typo protection).
   const destFor = (t: (typeof BOOTSTRAP_TEMPLATES)[number]): string =>
-    !minimal && opts.host === 'openclaw' && t.openclawDest ? t.openclawDest : t.dest;
+    !minimal && host === 'openclaw' && t.openclawDest ? t.openclawDest : t.dest;
   const selected = BOOTSTRAP_TEMPLATES.filter(
     (t) => !opts.only || opts.only.includes(t.dest) || (t.openclawDest !== undefined && opts.only.includes(t.openclawDest)),
   );
@@ -304,7 +271,7 @@ export function renderWorkspace(workspaceDir: string, opts: RenderOptions = {}):
     state = read.state;
   }
 
-  const resolve = buildResolver(opts, state);
+  const resolve = buildResolver(opts, state, minimal ? undefined : host);
 
   // Phase 1 — render everything in memory. Nothing is written until every
   // selected file resolves cleanly (hard-fail lists ALL unresolved tokens).
@@ -348,7 +315,7 @@ export function renderWorkspace(workspaceDir: string, opts: RenderOptions = {}):
   // backup write with EEXIST. Claim the stamp dir ATOMICALLY (non-recursive
   // mkdir; EEXIST → bump a numeric suffix) lazily on the first backup, so
   // every render call owns a distinct backup dir.
-  const result: RenderResult = { written: [], skipped: [], backups: [] };
+  const result: RenderResult = { ...(host && !minimal ? { note: OPENCLAW_RENDER_NOTE } : {}), written: [], skipped: [], backups: [] };
   let backupStamp: string | null = null;
   const claimBackupStamp = (): string => {
     if (backupStamp) return backupStamp;
