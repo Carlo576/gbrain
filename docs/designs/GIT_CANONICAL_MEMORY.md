@@ -70,7 +70,26 @@ A write from a remote MCP caller or a thin client becomes a journal request that
 
 ## Conversion
 
-A source changes mode only through a preview-bound verb. The preview is the git-gap census: every page whose row differs from its committed blob, every page with no file that is not in a declared class, held items and parked effects, by category. The operator chooses per category to commit the database content through the door, declare it, or let git win. The preview lists any database content that git-wins would discard, and the apply binds to that preview. A source can return to its previous mode.
+A source changes mode only through a preview-bound verb. The preview is the [git-gap census](#the-git-gap-census): every page whose row differs from its committed blob, every page with no file that is not in a declared class, held items and parked effects, by category. The operator chooses per category to commit the database content through the door, declare it, or let git win. The preview lists any database content that git-wins would discard, and the apply binds to that preview. A source can return to its previous mode.
+
+## The git-gap census
+
+`gbrain sources git-gap <source-id> [--sample n] [--json]` is the read-only preview conversion will bind to, and doctor `db_ahead_of_git` reports its totals per source with a Git checkout (informational in G1: always ok). It compares every live page with the blob committed at HEAD, read with hardened plumbing (`ls-tree`, `cat-file --batch`, `check-ignore`), so no repository filter, textconv or hook runs. It never reads `git status` or `git diff`. Each page lands in exactly one state:
+
+| State | Meaning | What conversion does with it |
+|---|---|---|
+| `equal` | The row equals the HEAD blob under the export equality contract (fact withdrawals overlaid; a segmented page byte for byte). | Nothing; the indexer would derive the same row. |
+| `database_ahead` | A blob exists at HEAD and the row differs; the sample lists the differing field paths. | The operator commits the database content through the door or lets git win; the preview lists what git-wins would discard. |
+| `git_ahead` | The HEAD blob is not the blob the page last imported, per its sync import record (`blob_oid` / `disk_blob_oid`), so git moved since the import. `git_ahead_database_also_moved` counts pages whose row moved too. | Git wins: the indexer imports the committed blob. Where both moved, the preview lists the database edit git-wins would discard. |
+| `declared_database_only` | A declared class (counted per class): `mirror_source`, `private`, `alias_private`, `lineage_private`, `database_only` (`database_only_reason`), `db_only_prefix` (`storage.db_only`), `derive_folder` (a never-filed page under the derive-phase defaults), `git_ignored`. `declared_with_head_blob` counts those whose file is still committed, such as a page that turned private. | They stay out of git. A still-committed file of a private page is removed by a door commit; earlier commits keep it. |
+| `undeclared_database_only` | No blob at HEAD and no declared reason. | Commit it through the door, declare its class, or delete it. Strict mode refuses it until then. |
+| `worktree_only` | A file exists in the working tree but not at HEAD. | Commit it through the door or remove it; a strict indexer reads only commits. |
+| `unparseable` | The committed blob is not UTF-8 Markdown the importer accepts, or is a symlink. | A person fixes the file; conversion refuses the page until then. |
+| `unsafe_path` | The recorded `source_path` maps to no safe file path. | Reconcile the path first. |
+
+Without an import record (classic sync, or a page imported before records were written) the census cannot tell which side moved, so a page whose file changed in git counts as `database_ahead`; `database_ahead_without_import_record` says how many. The working tree is reported separately by raw bytes against HEAD (`clean`, `modified`, `deleted`, `untracked`, `absent`); a checkout whose attributes convert line endings reads as modified. In strict mode an uncommitted change means nothing.
+
+The census also counts rows with no Git home, which G4 and G5 give a file form: active facts with no fence row, fenced facts whose fence page is missing or has no committed file, links whose `link_source` is not one a file derives (`markdown`, `frontmatter`, `mentions`, `wikilink-resolved`; `manual`, custom tags, `concept-provenance`, `atom-provenance` and legacy NULL rows all count), and timeline rows on pages with no committed file. Open sync holds are counted by code and parked effect targets by kind and code; strict mode retires both in G8.
 
 ## Waves
 
