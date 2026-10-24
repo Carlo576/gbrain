@@ -311,7 +311,8 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
         () => members.length ? tx.executeRaw(`UPDATE persistence_requests r SET publication_started=true FROM unnest($1::uuid[],$2::uuid[]) AS t(id,token)
           WHERE r.id=t.id AND r.execution_token=t.token AND r.state='running' RETURNING r.id`, [members.map(row => row.id), members.map(row => row.execution_token)]) : Promise.resolve([]),
         () => prepared.some(member => member.file) ? sourceMirrorReadOnly(tx, head.source_id, true) : Promise.resolve(false),
-        () => recorded.size ? sourceCanonicalGit(tx, head.source_id, true) : Promise.resolve(strict),
+        // A group prepared strict rechecks its flag under the source lock; one prepared without it publishes as before.
+        () => strict ? sourceCanonicalGit(tx, head.source_id, true) : Promise.resolve(false),
         () => tx.lockPageKeys(keys),
         // The owner's host binding every file member's Git effect records (a STABLE_IN_GROUP read), fetched with the guards.
         () => prepared.some(member => member.file && !member.noop) ? tx.executeRaw(HOST_BINDING_SQL, [head.worktree_id]) : Promise.resolve([]),

@@ -583,7 +583,8 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
           'Retry the write with a new request_id; it is now stored database-only.');
       }
       const door = recovery?.version === 1 ? recovery : null;
-      if (door && await sourceCanonicalGit(tx, row.source_id, true) !== !!door.door) throw strictChanged(row.source_id);
+      // A write prepared strict rechecks its flag under the source lock; one prepared without it publishes as before (only conversion sets the flag).
+      if (door?.door && !await sourceCanonicalGit(tx, row.source_id, true)) throw strictChanged(row.source_id);
       if (recovery) {
         const records = recoveryFiles(recovery);
         for (const record of records) if ((skill ? bundleFileHash(record) : fileHash(record.path)) !== record.beforeHash) {
