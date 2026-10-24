@@ -28,13 +28,27 @@ identifiers and attribution are available in the pre-removal Git revision
 
 - A managed commit is not on the remote until the owner's next Git publish. `gbrain sources writer status --json` (`checkouts`) shows it as ahead until then.
 - `--pending`, `--branch`, `--resolve`, `--expect-remote` and `--allow-outside-source-root` are refused in a managed worktree (`commit_paths_invalid`), and `--push-only` without `--keep-checkout` still refuses `writer_coordinator_required`.
-- doctor now runs `crontab -l` once (read-only, 5 s). A host without a crontab gets no `cron_gbrain_home` result.
+- doctor now runs `crontab -l` once (read-only, 5 s). A host whose crontab never mentions gbrain gets no `cron_gbrain_home` result.
 - Nothing is rewritten on upgrade, and there is no schema migration.
 
 ### For contributors
 
 - `src/core/persistence/checkout-state.ts` is the one reader of a checkout's unpushed commits and porcelain, shared by writer status and `git_convergence`.
 - The `persistence:interruption_charged` and `persistence:recovery_interruption_charged` fault points now carry `interruption` (cause, SQLSTATE, error). `test/pathological/lp-c-publication-ceiling-retry.test.ts` prints every charge and the row when a claim or charge count is off, so its load-only double charge names its cause the next time it appears.
+
+## [0.60.429.0] - 2026-10-24
+
+**A design for an opt-in, per-source mode in which the database is the only copy of record for agent-written memory and page files become a one-way export. This release adds the design document only; nothing in gbrain's behavior changes.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Planning the move away from two copies of record for agent memory | no written design | `docs/designs/DATABASE_CANONICAL_MEMORY.md` describes the mode: agents write only to the database, one exporter per source commits page files, and outside file edits come back through a conservative import lane that records every two-sided edit as a per-page conflict. It covers conversion of a source with thousands of holds, flip back, backup, risks and a phased rollout behind `persistence.database_canonical.enabled` (default false) |
+
+### What to watch for after you upgrade
+
+- Nothing: this is a design document. No code, configuration, schema or default changed.
 
 ## [0.60.428.0] - 2026-10-24
 

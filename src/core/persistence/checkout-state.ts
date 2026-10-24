@@ -8,6 +8,7 @@
  * Every git call is time-bounded and read-only; the comparison is with the last fetched upstream.
  */
 import { execFileSync } from '../spawn.ts';
+import { gitChildEnv } from '../git-env.ts';
 
 const GIT_TIMEOUT_MS = 5_000;
 export const CHECKOUT_COMMITS_MAX = 20;
@@ -21,7 +22,7 @@ export interface CheckoutState {
 }
 
 function git(root: string, args: string[]): string | null {
-  try { return execFileSync('git', ['-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'], timeout: GIT_TIMEOUT_MS }).toString(); }
+  try { return execFileSync('git', ['-C', root, ...args], { stdio: ['ignore', 'pipe', 'ignore'], timeout: GIT_TIMEOUT_MS, env: gitChildEnv() }).toString(); }
   catch { return null; }
 }
 
