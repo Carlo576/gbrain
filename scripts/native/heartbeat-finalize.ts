@@ -74,4 +74,5 @@ async function main(): Promise<void> {
   }
 }
 
+export {};
 await main().catch(error => { console.log(`::warning::darwin-x64 heartbeat finalize: ${error instanceof Error ? error.message : String(error)}`); });
