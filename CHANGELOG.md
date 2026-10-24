@@ -10,6 +10,36 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.433.0] - 2026-10-24
+
+**Eight fixes for memory writes and maintenance. A `remember` batch now applies its top-level `entity`, `content_origin` and `valid_from` to every item, so batched facts keep their subject and batched tool output keeps its lower trust tier. Conversation-fact extraction no longer throws away a page's facts over one purged claim. `facts relink` works on strict structured-output backends and no longer times out on large brains, `think` gives reasoning models behind a proxy room to answer, Hermes imports keep clarify answers, and raising the extract_atoms input cap re-extracts the pages it cut.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `remember` with a top-level `entity` and `items` | the entity was ignored; every item without its own was saved with no subject and a `NO_ENTITY` warning, so entity recall missed them | the top-level `entity` is the default subject; an item's own `entity` (or explicit null) still wins |
+| `remember` batch with `content_origin: tool_output` or `valid_from` | ignored at the top level and refused on an item, so batched tool output was stored at the writer's trust tier | both apply as defaults and per item; batched tool output is stored as `external_untrusted`, like a single `remember` |
+| Conversation-fact extraction meets a claim the owner purged | the facts insert refused the whole page after the model call was paid for; on a managed brain every page in the same batch failed and was blocked after three tries | the purged claim is left out (`facts_skipped_purged`) and the rest of the page publishes |
+| `gbrain facts relink` model tier on a strict structured-output backend | every batch was rejected (`invalid_json_schema`) and recorded as `model_unavailable` | the response schema is strict-compatible |
+| `gbrain facts relink --conversation` on a large brain | each relink attempt scanned every live page of its source and the run hit `statement_timeout`, dry runs included | an index on live pages by source and creation time answers each check with one probe |
+| Subject inference on "paid CHF 80", "Invoice total ...", "including X notes" | a currency amount or a label word made a one-person fact ambiguous; an entity named only as an example became the subject | amounts and label openers don't block the subject; an example is never chosen as the subject; a page actually named CHF, Invoice or Work still counts |
+| `gbrain think` on `litellm:gpt-6-luna`, `openrouter:openai/gpt-5.2` or `openai:gpt-6-*` | 4,000 output tokens; long answers came back truncated (`LLM_OUTPUT_TRUNCATED`) | 16,000, as gpt-5 and the o-series already got under `openai:` |
+| Hermes transcript import of a `clarify` form | the user's answers were dropped, so the imported conversation skipped their correction | answered responses (submitted, or locked before a timeout) import as user turns after their question; skipped, cancelled and unselected options never do |
+| `dream --phase extract_atoms --drain` after raising `cycle.extract_atoms.max_input_chars` | reported drained with 0 batches; the pages cut at the old cap stayed partial | the backlog counts them, so the drain re-extracts them under the new cap |
+
+### What to watch for after you upgrade
+
+- Upgrading builds the index `pages_source_created_idx` (migration v270): online on Postgres, a short plain build on PGLite. Nothing else is rewritten.
+- If you raised the extract_atoms input cap earlier, the next drain or autopilot run re-extracts the pages that were cut, with model calls.
+- Hermes sessions that hold clarify answers re-render on their next import, which can re-run fact extraction for those pages.
+- Thanks to @Masashi-Ono0611, @javieraldape and @veltri-23, whose pull requests these fixes build on.
+
+### For contributors
+
+- `notePurgedSkips` in `src/core/facts/conversation-publication.ts` counts and logs purged claims for both the managed and unmanaged publication paths.
+- The remember batch builds its top-level defaults from the item field list (`src/core/remember-batch.ts`), so the two can't drift apart again.
+
 ## [0.60.430.0] - 2026-10-24
 
 **On a managed brain, a script or cron can now commit the files it wrote with `gbrain git commit-push -m <msg> -- <paths>`. It commits only those paths and never fetches, pushes or moves the checkout. A checkout whose local commits diverged from the remote now has a supported fix: one ask-user command publishes them merged, after which `gbrain sources refresh` fast-forwards. `sources writer status` and doctor list each unpushed commit (sha, author, date, paths) with the porcelain counts. `gbrain sources set-sync` turns a source's automatic sync off and on, and doctor `cron_gbrain_home` flags cron commands that would act on `~/.gbrain` instead of this brain.**
