@@ -337,6 +337,8 @@ export interface ExtractConversationFactsResult {
   segments_processed: number;
   facts_extracted: number;
   facts_inserted: number;
+  /** #7438: extracted claims left out because they match a purge tombstone (the rest of the page still publishes). */
+  facts_skipped_purged?: number;
   /** Entity values that reached the shipped deterministic fallback slug path. */
   fallback_slugify_count: number;
   /** Entity values kept raw after a best-effort resolution failure. */
@@ -641,7 +643,7 @@ function logLockBusyRateLimited(sourceId: string, slug: string): void {
  * active batch and the facts inserted.
  */
 function publishPageFacts(state: ExtractCoreState, slug: string, rows: Array<NewFact & { row_num: number; source_markdown_slug: string }>,
-  scope: ConversationScope): Promise<{ deleted: number; facts_inserted: number; duplicates_skipped: number }> {
+  scope: ConversationScope): Promise<{ deleted: number; facts_inserted: number; duplicates_skipped: number; purged_skipped: number }> {
   return writeDerivedFacts(state.engine, state.sourceId, slug, db => publishConversationFacts(db, state.sourceId, slug, rows, { scope }));
 }
 
@@ -1136,7 +1138,11 @@ async function processPage(
   state.result.facts_inserted += published.facts_inserted;
   state.result.orphan_facts_cleaned += published.deleted;
   if (published.duplicates_skipped) process.stderr.write(`[extract-conversation-facts] ${page.slug}: skipped ${published.duplicates_skipped} fact(s) an active fact of the source already states (#7043)\n`);
-  if (published.facts_inserted + published.duplicates_skipped < pageRows.filter(row => row.source !== TERMINAL_AUDIT_SOURCE).length) {
+  if (published.purged_skipped) {
+    state.result.facts_skipped_purged = (state.result.facts_skipped_purged ?? 0) + published.purged_skipped;
+    process.stderr.write(`[extract-conversation-facts] ${page.slug}: left out ${published.purged_skipped} extracted fact(s) that match a purge tombstone (#7438)\n`);
+  }
+  if (published.facts_inserted + published.duplicates_skipped + published.purged_skipped < pageRows.filter(row => row.source !== TERMINAL_AUDIT_SOURCE).length) {
     process.stderr.write(`[extract-conversation-facts] ${page.slug}: kept its prior facts; this ${scope} run's facts were not published over them (#7013)\n`);
   }
 
