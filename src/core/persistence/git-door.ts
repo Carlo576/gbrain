@@ -1,5 +1,5 @@
 /**
- * G2, the door (plans/git-canonical-build.md): a source whose row says `config.canonical = "git"` (strict, default off)
+ * G2, the door of git-canonical memory (Git is the source of truth; the database derives from it): a source whose row says `config.canonical = "git"` (strict, default off)
  * commits each published file to Git before its database row commits. publishMutation and publishGroup commit the
  * published paths with one path-only `commit --only` under the worktree's writer lock, after the files are renamed into
  * place and before the database transaction commits, and stamp the commit on the receipt

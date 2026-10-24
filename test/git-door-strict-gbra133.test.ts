@@ -1,5 +1,5 @@
 /**
- * G2, the door (plans/git-canonical-build.md; src/core/persistence/git-door.ts). On a strict source
+ * G2, the door of git-canonical memory (src/core/persistence/git-door.ts). On a strict source
  * (`sources.config.canonical = "git"`, default off) a page write is committed to Git before its database row:
  *   - the commit exists at the publication's before_commit seam, inside the transaction, and the receipt names it;
  *   - a publication interrupted after that commit (the before_commit seam, a dropped connection) keeps the committed
