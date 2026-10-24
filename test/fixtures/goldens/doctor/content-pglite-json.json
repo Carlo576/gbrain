@@ -961,6 +961,7 @@
             "git_push_holds": [],
             "inspected": 0,
             "parked_effects": 0,
+            "parked_groups": [],
             "truncated": false
           },
           "elapsed_ms": "<volatile>",
@@ -1020,6 +1021,28 @@
           "status": "ok"
         },
         {
+          "category": "brain",
+          "details": {
+            "alias_pages_without_visibility": 0,
+            "count": "exact",
+            "fact_ids_truncated": false,
+            "looser_atoms": 0,
+            "looser_concepts": 0,
+            "looser_events": 0,
+            "remotely_readable_fact_ids": [],
+            "repair": "visibility",
+            "truncated": false,
+            "unstamped_atoms": 0,
+            "unstamped_concepts": 0,
+            "world_facts_from_private_sources": 0,
+            "world_facts_remotely_readable": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Every derived page and fact carries a visibility no looser than its source, and no page relies on a privacy alias alone.",
+          "name": "derived_visibility",
+          "status": "ok"
+        },
+        {
           "category": "ops",
           "elapsed_ms": "<volatile>",
           "message": "Skipped (PGLite — no PostgREST exposure, RLS not applicable)",
@@ -1036,14 +1059,14 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1296 column(s) verified against live schema",
+          "message": "1351 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "All 152 table(s) the applied migrations create exist.",
+          "message": "All 157 table(s) the applied migrations create exist.",
           "name": "schema_missing_tables",
           "status": "ok"
         },
@@ -1297,28 +1320,6 @@
           "elapsed_ms": "<volatile>",
           "message": "Every timeline row has a bullet in its page (4 page(s) inspected).",
           "name": "timeline_history",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "details": {
-            "alias_pages_without_visibility": 0,
-            "count": "exact",
-            "fact_ids_truncated": false,
-            "looser_atoms": 0,
-            "looser_concepts": 0,
-            "looser_events": 0,
-            "remotely_readable_fact_ids": [],
-            "repair": "visibility",
-            "truncated": false,
-            "unstamped_atoms": 0,
-            "unstamped_concepts": 0,
-            "world_facts_from_private_sources": 0,
-            "world_facts_remotely_readable": 0
-          },
-          "elapsed_ms": "<volatile>",
-          "message": "Every derived page and fact carries a visibility no looser than its source, and no page relies on a privacy alias alone.",
-          "name": "derived_visibility",
           "status": "ok"
         },
         {
@@ -1712,6 +1713,7 @@
             "count": 0,
             "docs": "docs/guides/repair.md#atoms-restore",
             "hold_until": null,
+            "ledger_covered": 0,
             "newest_retired_at": null,
             "oldest_retired_at": null,
             "origins": 0,
@@ -1721,6 +1723,50 @@
           "elapsed_ms": "<volatile>",
           "message": "No atom retired by an empty re-extraction is waiting to be restored.",
           "name": "atom_retirements_restorable",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "by_source": [],
+            "docs": "docs/guides/repair.md#generations",
+            "items": 0,
+            "keys": 0,
+            "repair": "generations",
+            "restore_days": 30
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No live generation retired items in the last 30 day(s).",
+          "name": "generation_retirements",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "by_reason": [],
+            "count": 0,
+            "docs": "docs/guides/repair.md#generations",
+            "releasable": 0,
+            "repair": "generations"
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No derived generation is held.",
+          "name": "generation_held",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "docs": "docs/guides/repair.md#generations",
+            "orphan_candidates": [],
+            "orphans": 0,
+            "pending": 0,
+            "pending_items": [],
+            "retire_pending": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No activated generation waits on a member request, and no orphan candidate exists.",
+          "name": "generation_pending",
           "status": "ok"
         },
         {
@@ -1791,6 +1837,24 @@
           "elapsed_ms": "<volatile>",
           "message": "No active fact holds a redaction marker.",
           "name": "facts_redaction_marker",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "days": [],
+            "docs": "docs/guides/repair.md#fact-claim-dates",
+            "repair": "fact-claim-dates",
+            "rule": {
+              "min_entities": 20,
+              "min_facts": 200,
+              "min_share": 0.25
+            },
+            "source_ids": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No calendar day holds a bulk-loaded share of any source's facts.",
+          "name": "fact_bulk_dates",
           "status": "ok"
         },
         {
@@ -2508,6 +2572,7 @@
                 "commits": 0,
                 "source_id": "default",
                 "unresolved_commits": 0,
+                "waiting_commits": null,
                 "window_hours": 24
               },
               {
@@ -2526,6 +2591,7 @@
                 "commits": 0,
                 "source_id": "notes",
                 "unresolved_commits": 0,
+                "waiting_commits": null,
                 "window_hours": 24
               }
             ],
@@ -3138,6 +3204,17 @@
           "status": "ok"
         },
         {
+          "category": "ops",
+          "details": {
+            "docs": "docs/guides/cli-socket.md",
+            "refusals": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "The warm CLI socket refused no CLI call in the last 24 hours.",
+          "name": "cli_socket_refusals",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "details": {
             "code": "held_failed",
@@ -3195,6 +3272,29 @@
           "elapsed_ms": "<volatile>",
           "message": "pages_live_origin_key is present: no two live pages can record one file.",
           "name": "origin_twins",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "count": 0,
+            "docs": "docs/guides/repair.md#slug-path-mismatch",
+            "file_limit": 200,
+            "files": {
+              "file_missing": 0,
+              "no_checkout": 0,
+              "not_read": 0,
+              "stamped": 0,
+              "unstamped": 0
+            },
+            "inspected": 0,
+            "samples": [],
+            "scan_limit": 20000,
+            "truncated": false
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Every live page's slug is the one its recorded file path derives (0 candidate(s) inspected).",
+          "name": "slug_path_mismatch",
           "status": "ok"
         },
         {
@@ -4002,6 +4102,7 @@
       "unknown_sections": []
     },
     "stderr": [
+      "[gbrain] reading doctor checks; large brains can take minutes. Progress prints here every 10 s; the result prints on stdout when it is ready.",
       "[gbrain doctor] non-interactive run: the check run (not connect or migrations) is capped at 90000 ms (doctor.default_budget_ms); checks past it report health unknown. Off for one run: --budget-ms 0; off for good: gbrain config set doctor.default_budget_ms 0. On PGLite a statement already running cannot be stopped, so a check can finish late.",
       "[backup] checked 2 asset(s): 1 without a git remote (computed_by=doctor)"
     ],

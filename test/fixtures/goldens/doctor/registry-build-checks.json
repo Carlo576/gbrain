@@ -346,6 +346,10 @@
         "name": "pglite_scale"
       },
       {
+        "category": "brain",
+        "name": "derived_visibility"
+      },
+      {
         "category": "ops",
         "name": "rls"
       },
@@ -440,10 +444,6 @@
       {
         "category": "brain",
         "name": "timeline_history"
-      },
-      {
-        "category": "brain",
-        "name": "derived_visibility"
       },
       {
         "category": "brain",
@@ -547,6 +547,18 @@
       },
       {
         "category": "brain",
+        "name": "generation_retirements"
+      },
+      {
+        "category": "brain",
+        "name": "generation_held"
+      },
+      {
+        "category": "brain",
+        "name": "generation_pending"
+      },
+      {
+        "category": "brain",
         "name": "extractor_facts_expired"
       },
       {
@@ -564,6 +576,10 @@
       {
         "category": "brain",
         "name": "facts_redaction_marker"
+      },
+      {
+        "category": "brain",
+        "name": "fact_bulk_dates"
       },
       {
         "category": "brain",
@@ -802,6 +818,22 @@
         "name": "tracked_ownership_marker"
       },
       {
+        "category": "brain",
+        "name": "checkout_lagging"
+      },
+      {
+        "category": "brain",
+        "name": "dirty_age"
+      },
+      {
+        "category": "brain",
+        "name": "commits_outside_source_root"
+      },
+      {
+        "category": "brain",
+        "name": "quarantined_changes"
+      },
+      {
         "category": "ops",
         "name": "decide_health"
       },
@@ -886,6 +918,10 @@
         "name": "runtime_build_skew"
       },
       {
+        "category": "ops",
+        "name": "cli_socket_refusals"
+      },
+      {
         "category": "brain",
         "name": "extract_atoms_held_failed"
       },
@@ -900,6 +936,10 @@
       {
         "category": "brain",
         "name": "origin_twins"
+      },
+      {
+        "category": "brain",
+        "name": "slug_path_mismatch"
       },
       {
         "category": "brain",

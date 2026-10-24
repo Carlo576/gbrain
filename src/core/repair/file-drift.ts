@@ -83,7 +83,7 @@ import { DETACHED_REASON } from '../persistence/detached-pages.ts';
 import { DELETION_PROVENANCES, readDeletionProvenance, type DeletionProvenance } from '../persistence/sync-origin-evidence.ts';
 import { ghostPageNow, scanGhostSource, type GhostOwner, type GhostPage } from '../ghost-pages.ts';
 import { MASS_RECONCILE_MIN_PAGES, MASS_RECONCILE_RATIO, massReconcileAllowed } from '../sync-reconcile.ts';
-import { GHOST_PURGE_FUSE_HOURS, GHOST_REPAIR_LIMIT, ghostScanRefusal, massGhosts, massRefusal, retireGhost } from './ghost-pages.ts';
+import { DATABASE_AHEAD_CODE, databaseAheadDetail, ghostFileBacked, GHOST_PURGE_FUSE_HOURS, GHOST_REPAIR_LIMIT, ghostScanRefusal, massGhosts, massRefusal, retireGhost } from './ghost-pages.ts';
 import { prepareReconcileResult } from '../persistence/reconcile-prepare.ts';
 import { canonicalOriginPage, originConflictMessage, originTwinsFix } from '../persistence/origin-guard.ts';
 import { assertReconcileOutputPath, assertReconcileSize } from '../persistence/reconcile-backup.ts';
@@ -351,10 +351,16 @@ async function selectHeld(engine: BrainEngine, sourceId: string, opts: RepairPla
   let window = selected.filter(target => target.inWindow).map(({ inWindow: _inWindow, ...target }) => target);
   // GBRA-133: a gone file's provenance (sync-origin-evidence.ts), read for every held file a --provenance selection filters, else for one window.
   const gone = window.filter(target => target.state === 'file_gone').slice(0, opts.provenance ? undefined : HELD_WINDOW_PAGES);
-  const provenance: Record<string, number> = {};
+  const provenance: Record<string, number> = Object.fromEntries([...DELETION_PROVENANCES, 'unknown'].map(kind => [kind, 0]));
   if (gone.length) {
     const binding = await getWorktreeBinding(engine, sourceId);
-    const read = await readDeletionProvenance(join(binding!.local_path!, binding!.relative_path), gone.map(target => target.hold.path));
+    // One walk of the history; a long one takes a while, so the preview says it is reading (stderr).
+    opts.progress?.start('repair.file_drift.provenance', gone.length);
+    let read: Map<string, DeletionProvenance>;
+    try {
+      read = await readDeletionProvenance(join(binding!.local_path!, binding!.relative_path), gone.map(target => target.hold.path),
+        { onCommit: commits => opts.progress?.heartbeat(`read ${commits} commit(s) of history for ${gone.length} held file(s)`) });
+    } finally { opts.progress?.finish(); }
     for (const target of gone) {
       target.provenance = read.get(target.hold.path) ?? { kind: 'unknown' };
       provenance[target.provenance.kind] = (provenance[target.provenance.kind] ?? 0) + 1;
@@ -511,6 +517,7 @@ async function fileGonePage(engine: BrainEngine, sourceId: string, slug: string,
     return { page: { slug, prefer: 'database', exceptions: [], detach_page: { path: now.ghost.path, page_id: now.ghost.page_id, revision: now.ghost.revision, observed_at: target.hold.observed_at } },
       detail: `keeps the page database-only: no commit ever held ${now.ghost.path}, so the page holds the only copy; no file is written and the page forgets that path` };
   }
+  if (opts.prefer === 'file' && !await ghostFileBacked(engine, now.ghost, now.owner)) return { skip: DATABASE_AHEAD_CODE, detail: databaseAheadDetail(now.ghost) };
   if (opts.prefer === 'file') return { page: { slug, prefer: 'file', exceptions: [], soft_delete: { ghost: now.ghost, owner: now.owner } },
     detail: `soft-deletes the page: its file ${now.ghost.path} is gone from the last commit (purged after ${GHOST_PURGE_FUSE_HOURS} h; gbrain restore ${slug} --force undoes it until then)` };
   const page = await prepareDriftPage(engine, sourceId, slug, 'database', assessmentAt, { fileGone: true });

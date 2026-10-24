@@ -226,7 +226,7 @@ const get_page: Operation = {
     // Read-only, over the same visibility-filtered body the reader gets.
     const lineGrammar = p.grammar_diagnostics !== true ? undefined : await (await import('../line-grammar-report.ts')).grammarDiagnosticsForPage(ctx.engine, page, visibleBody);
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true); // #6259
-    const fileHeld = held ? { file_held: fileHeldField(held, isUntrustedReader) } : {};
+    const fenceHeld = (await (await import('../generations/fence.ts')).fenceHoldEntries(ctx.engine, [page.source_id], { slug: page.slug }).catch(() => [])).map(({ source_id: _s, slug: _g, ...hold }) => hold); const fileHeld = { ...(held ? { file_held: fileHeldField(held, isUntrustedReader) } : {}), ...(fenceHeld.length ? { fence_held: fenceHeld } : {}) };
     const segmented = isSegmentedPage(page);
     const pin = authorizedReadPin(ctx, page, snapshot!.bodyGeneration, p.min_trust, () => pageNotFoundError(ctx, slug, { includeDeleted, sourceIdParam }));
     const whole = bodyRequest.mode === 'full'
@@ -705,12 +705,13 @@ const capture: Operation = {
   cliHints: { name: 'capture', hidden: true },
   handler: async (ctx, p) => {
     const { pageMutationSource, submitPageMutation } = await pageMutations();
-    pageMutationSource(ctx, p, 'capture');
+    const sourceId = pageMutationSource(ctx, p, 'capture');
     if (ctx.dryRun) {
       if (typeof p.slug === 'string') {
         validatePageSlug(p.slug);
         enforceClientSlugFence(ctx, p.slug, 'capture');
         enforceSubagentSlugFence(ctx, p.slug, 'capture');
+        await suffixedSlugDryRun(ctx, sourceId, p.slug, 'capture');
       }
       return { dry_run: true, action: 'capture', slug: p.slug };
     }

@@ -32,18 +32,19 @@ import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { colonFileRefusal, COLON_REFUSAL_MESSAGES, readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGitAsync, type ManagedSyncContext, type SyncFileRefusal } from './sync-discovery.ts';
 import { isWindowsColonTarget } from './native-file-target.ts';
 import { confirmedSyncDelta } from '../sync-rename-identity.ts';
-import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
+import { fileDriftSide, holdBasisMoved, holdRescreenDue, type DeletionCandidate, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
   type GitHoldRecord, type SyncImportParser, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { sameSyncOrigin, selectOriginClaimant, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
 import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexDelta, readIndexLevel, readTreeLevel, workingChanged, type GitIndexEntry, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { readOriginEvidence } from './sync-origin-evidence.ts';
+import { levelReuseVerify, readTreeLevelReusing, reportLevelReuseCheck, type TreeReuse } from './sync-tree-reuse.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
 import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, type SyncSelection } from './sync-pass-row.ts';
 import { faultPoint } from './fault-points.ts';
-import { filterYielding, loopYield, sortYielding, turnYield, type LoopYield } from './sync-yield.ts';
+import { filterYielding, loopYield, progressYield, sortYielding, turnYield, whileActive, type LoopYield } from './sync-yield.ts';
 import { countsMatch, proveConfirm, readLevelMark, type ConfirmProof, type LevelMark } from './sync-pass-confirm.ts';
 import { domainCache, levelDomain, narrowedWalk, walkAttestations, type LevelDomainCache } from './sync-pass-narrow.ts';
 
@@ -70,10 +71,16 @@ export interface PassLevelInput {
   slugMode?: 'git-root' | 'source-root';
   /** The pass's own cache (it dies with the pass): the eligible tree of the commit and selection its last round read. */
   cache?: PassLevelCache;
+  /** `sync.level_reuse` (read once per pass): the round may patch the `T` listing the last pass of this process kept (sync-tree-reuse.ts). */
+  levelReuse?: boolean;
   /** The pass's id: a round after the first reuses the cached `I⋈P` when its writes are all the database changed (sync-pass-confirm.ts). */
   passId?: string;
   /** The pages whose import record the pass's previous round wrote (sync-pass-apply.ts `recorded`). */
   recorded?: ReadonlySet<number>;
+  /** #7355: called while the read works (its loops' pauses, at most once a second, and the origin history walk), so the drain sees progress before the first commit. */
+  onProgress?: () => void;
+  /** Throws once the pass must stop (a job deadline, a lost drain lease): checked at the read's pauses and while its origin history walk runs. */
+  assertActive?: () => void;
 }
 /** PGLite's keyset page size (design v3.2 §2.1). */
 const PGLITE_KEYSET_ROWS = 2_000;
@@ -92,8 +99,11 @@ const SYNC_WRITE_KINDS = ['managed_sync_import', 'managed_sync_delete'];
 /** What one pass reuses between its rounds: a commit's tree never changes, so the next round at the same commit and selection reads it from here. */
 export interface PassLevelCache {
   tree?: { key: string; tree: Map<string, GitTreeEntry>; colon: string[] };
-  /** The last committed-mode round's `I⋈P` and its mark (S1), keyed by source, incarnation, worktree, HEAD and expected parser. */
-  pages?: { key: string; mark: LevelMark; table: PageTable };
+  /**
+   * The last committed-mode round's `I⋈P` and its mark (S1), keyed by source, incarnation, worktree, HEAD and expected parser;
+   * `across`: the last pass's, kept by its process (sync-tree-reuse.ts), keyed without HEAD (`acrossKey`).
+   */
+  pages?: { key: string; acrossKey: string; mark: LevelMark; table: PageTable; across?: true };
   /** The last committed-mode round's classified paths, keyed by every level-wide input the classifier reads (`classifiedKey`). */
   classified?: { key: string; treeKey: string; paths: ShadowPath[] };
   /** The last committed-mode round's origin domain, which a taken confirm round at its tree patches (sync-pass-narrow.ts). */
@@ -258,6 +268,11 @@ export interface ShadowLevel {
   heldRenames: Array<{ path: string; rename: { sourcePath: string; slug: string; pageId: number; revision: string } }>;
   /** Holds on paths outside the level's domain (no file at L, no page, or no longer eligible): the stamp releases them, as discovery did (#6278 B7). */
   releasableHolds: string[];
+  /**
+   * GBRA-133: deleted-side `file_drift` holds whose file is gone from `L` and the disk. The stamp releases each whose page is
+   * no longer live (`settledDeletionHolds`): a soft delete, a purge or the file's removal decided it.
+   */
+  deletionCandidates: DeletionCandidate[];
   /** Working mode: the stat cache this round's rehash left (`hashWorkingLevel`); the stamp's round is the one a pass remembers. */
   workingCache: WorkingStatCache | null;
   /** Live file-backed pages whose origin is eligible: the mass-delete valve's denominator (#2828). */
@@ -267,11 +282,13 @@ export interface ShadowLevel {
   timings_ms: Record<string, number>;
   statements: number;
   /** A round after a pass's first: whether it reused the previous round's `I⋈P` (`rows` re-read), or why it read it whole. */
-  confirm?: { taken: boolean; reason: string | null; rows: number;
+  confirm?: { taken: boolean; reason: string | null; rows: number; across?: true;
     /** A taken confirm round: `taken` when it patched the previous round's domain and classification, else why it built them whole. */
     narrow?: string };
   /** A taken confirm round: the paths whose previous-round classification it kept (`reusableMatched`). */
   reused?: number;
+  /** How a round that listed `T` got it (sync-tree-reuse.ts): read whole, the last pass's listing at the same commit, or that listing patched. */
+  treeReuse?: TreeReuse;
 }
 
 /** A page of the source with the import-record fields the classifier reads; `arm1` / `attested_hash` (`A`) are filled for the pages that need a proof. */
@@ -462,17 +479,24 @@ async function readAttestations(exec: Exec, kind: 'postgres' | 'pglite', sourceI
   for (let i = 0; i < rows.length; i += size) {
     const chunk = rows.slice(i, i + size);
     statements++;
-    const found = await exec.executeRaw<{ page_id: number; arm1: boolean; attested_hash: string | null }>(`SELECT x.page_id,
+    const found = await readRevisionAttestations(exec, sourceId, incarnation, chunk.map(row => ({ pageId: Number(pages.id[row]), requestId: pages.requestId[row] ?? null,
+      revision: pages.revision[row]!, sourcePath: pages.sourcePath[row] ?? null })));
+    for (const hit of found) pages.attested.set(byId.get(Number(hit.page_id))!, { arm1: hit.arm1, hash: hit.attested_hash });
+  }
+  return statements;
+}
+
+/** `A` for one statement's pages, by the request that wrote each page's current revision (see `readAttestations`); a page with no committed request has no row. */
+export async function readRevisionAttestations(exec: Exec, sourceId: string, incarnation: string,
+  rows: ReadonlyArray<{ pageId: number; requestId: string | null; revision: string; sourcePath: string | null }>): Promise<Array<{ page_id: number; arm1: boolean; attested_hash: string | null }>> {
+  return exec.executeRaw<{ page_id: number; arm1: boolean; attested_hash: string | null }>(`SELECT x.page_id,
         (r.intent->>'kind' = ANY($3::text[]) AND r.source_incarnation::text=$2 AND (r.page_id IS NULL OR r.page_id=x.page_id)) AS arm1,
         COALESCE((SELECT e.data->>'expected_hash' FROM persistence_effects e WHERE e.request_id=r.id AND e.kind='git' AND e.revision=x.revision
           AND e.data->>'expected_hash' IS NOT NULL AND (e.data->>'relative_path'=x.source_path OR right(e.data->>'relative_path', length(x.source_path)+1)='/'||x.source_path) LIMIT 1),
           CASE WHEN r.intent->>'kind'='managed_file_import' AND r.intent->>'sourcePath'=x.source_path AND r.intent->>'inputHash'=r.intent->>'targetHash' THEN r.intent->>'targetHash' END) AS attested_hash
       FROM unnest($4::int[], $5::uuid[], $6::uuid[], $7::text[]) AS x(page_id, request_id, revision, source_path)
       JOIN persistence_requests r ON r.id=x.request_id AND r.state='committed' AND r.source_id=$1`,
-      [sourceId, incarnation, SYNC_WRITE_KINDS, chunk.map(row => Number(pages.id[row])), chunk.map(row => pages.requestId[row]), chunk.map(row => pages.revision[row]), chunk.map(row => pages.sourcePath[row])]);
-    for (const hit of found) pages.attested.set(byId.get(Number(hit.page_id))!, { arm1: hit.arm1, hash: hit.attested_hash });
-  }
-  return statements;
+      [sourceId, incarnation, SYNC_WRITE_KINDS, rows.map(row => row.pageId), rows.map(row => row.requestId), rows.map(row => row.revision), rows.map(row => row.sourcePath)]);
 }
 
 /** `U_db`: open requests of the worktree (the `persistence_requests_pending` index) and pending Git effects of the source. */
@@ -567,15 +591,23 @@ async function readUntracked(gitRoot: string, scope: string): Promise<string[]> 
 const timer = () => { const started = performance.now(); return () => Math.round((performance.now() - started) * 10) / 10; };
 
 /** #7130: an absent file is deletion evidence only when Git once committed it (sync-origin-evidence.ts); read for those paths alone. */
-async function reclassifyByOrigin(gitRoot: string, tips: Array<string | null | undefined>, paths: ShadowPath[], step: LoopYield): Promise<boolean> {
+async function reclassifyByOrigin(gitRoot: string, tips: Array<string | null | undefined>, paths: ShadowPath[], step: LoopYield, pass?: PassLevelInput): Promise<boolean> {
   const absent = await filterYielding(paths, entry => (entry.result.cls === 'delete' || entry.result.cls === 'delete_drift') && entry.state.originEvidence === undefined, step);
   if (!absent.length) return false;
-  const evidence = await readOriginEvidence(gitRoot, tips, absent.map(entry => entry.path));
+  // A stopped pass leaves the shared walk running: the next pass joins it, or reads the history it cached.
+  pass?.assertActive?.();
+  const evidence = await whileActive(readOriginEvidence(gitRoot, tips, absent.map(entry => entry.path), { onCommit: pass?.onProgress }), pass?.assertActive);
   for (const entry of absent) {
     const state = { ...entry.state, originEvidence: evidence.get(entry.path) ?? 'unknown' as const };
     Object.assign(entry, { state, result: classifySyncPath(state) });
   }
   return true;
+}
+
+/** GBRA-133: the deleted-side `file_drift` holds whose file is gone (`gone`, on the Git path); the stamp releases those whose page is no longer live. */
+function deletionCandidates(holds: readonly GitHoldRecord[], gone: (path: string) => boolean, toGit: (path: string) => string): DeletionCandidate[] {
+  return holds.filter(hold => hold.code === 'file_drift' && fileDriftSide(hold.meta) === 'deleted' && gone(toGit(hold.path)))
+    .map(hold => ({ path: hold.path, page_id: hold.page_id ?? null, slug: hold.slug ?? null }));
 }
 
 /**
@@ -613,7 +645,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   // the one rule discovery and preparation use (sameSyncOrigin; it refuses an origin that could name two files).
   const originScope = { sourceId, root, scope, slugMode };
   const pageOrigin = (sourcePath: string, slug: string): string => scopedPageOrigin(originPath(sourcePath), slug, originScope);
-  const step = turnYield();
+  const step = progressYield(turnYield(), { onProgress: input.pass?.onProgress, assertActive: input.pass?.assertActive });
 
   t = timer();
   const { head, detached } = await readLevelHead(gitRoot, sourceId);
@@ -630,16 +662,14 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   let priorClassified = cache?.classified?.treeKey === treeKey ? cache.classified : undefined;
   const priorDomain = cache?.domain;
   if (cache) { cache.classified = undefined; cache.domain = undefined; }
+  let treeReuse: TreeReuse | undefined;
   // The tree's ':' paths (#5032) are kept apart: they are refused, never part of the level.
   const eligibleTree = async (): Promise<{ tree: Map<string, GitTreeEntry>; colon: string[] }> => {
     if (cache?.tree?.key === treeKey) return cache.tree;
     if (cache) cache.tree = undefined;
-    const tree = new Map<string, GitTreeEntry>(), colon: string[] = [];
-    for (const [path, entry] of levelMetafiles.primeTree(await readTreeLevel(gitRoot, head, scope, step))) {
-      if (isWindowsColonTarget(path)) colon.push(path);
-      else if (eligible(path)) tree.set(path, entry);
-      if (step.due()) await step.pause();
-    }
+    const { tree, colon, reuse } = await eligibleListing(gitRoot, head, scope, { key: [sourceId, incarnation], allowed: input.pass?.levelReuse === true, step, eligible,
+      prime: listing => levelMetafiles.primeTree(listing) });
+    treeReuse = reuse;
     if (cache) cache.tree = { key: treeKey, tree, colon };
     return { tree, colon };
   };
@@ -833,7 +863,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     t = timer();
     const candidateIndex = new Map<string, GitIndexEntry>();
     for (const path of candidates) { if (step.due()) await step.pause(); const entry = indexed(path); if (entry) candidateIndex.set(path, entry); }
-    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex, { step });
+    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex, { step, persist: input.pass?.levelReuse === true,
+      ...(levelReuseVerify() ? { verify: (reused: number, differs: string | null) => { if (reused) reportLevelReuseCheck('dirtiness probes', `${reused} reused`, differs); } } : {}) });
     timings.Dp = (timings.Dp ?? 0) + t();
     t = timer();
     for (const [k, path] of candidates.entries()) {
@@ -847,7 +878,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   }
 
   t = timer();
-  if (await reclassifyByOrigin(gitRoot, [head, baselineCommit], paths, step)) timings.origin = t();
+  if (await reclassifyByOrigin(gitRoot, [head, baselineCommit], paths, step, input.pass)) timings.origin = t();
 
   // Adoption by hash needs the level's bytes: committed mode reads the blobs of the candidates that could adopt.
   const needBytes = await filterYielding(paths, entry => !['matched', 'held', 'dirty'].includes(entry.result.cls) && entry.state.levelSha256 === null && entry.state.level !== null
@@ -875,8 +906,10 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
     releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
+    deletionCandidates: deletionCandidates(holds, path => domain.has(path) && !tree.has(path)
+      && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !readPresent(root, path, scope), toGit),
     paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3,
-    ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), pack: pack?.identity ?? null,
+    ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), ...(treeReuse ? { treeReuse } : {}), pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
     rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
 }
@@ -890,6 +923,20 @@ function scopedPageOrigin(recorded: string, slug: string, originScope: SyncOrigi
 }
 
 /** The level's settings, one round trip each and all in flight together; null for a company-brain source. */
+/** `T`'s eligible entries and its ':' paths (#5032: refused, never part of the level), walked from the listing the last pass may have kept (sync-tree-reuse.ts). */
+async function eligibleListing(gitRoot: string, head: string, scope: string, opts: { key: string[]; allowed: boolean; step: LoopYield; eligible: (path: string) => boolean;
+  prime: (listing: Map<string, GitTreeEntry>) => Map<string, GitTreeEntry> }): Promise<{ tree: Map<string, GitTreeEntry>; colon: string[]; reuse: TreeReuse }> {
+  const listed = await readTreeLevelReusing(gitRoot, head, scope, { key: opts.key, allowed: opts.allowed, shared: opts.step });
+  const tree = new Map<string, GitTreeEntry>(), colon: string[] = [];
+  for (const [path, entry] of opts.prime(listed.tree)) {
+    if (isWindowsColonTarget(path)) colon.push(path);
+    else if (opts.eligible(path)) tree.set(path, entry);
+    if (opts.step.due()) await opts.step.pause();
+  }
+  listed.keep();
+  return { tree, colon, reuse: listed.reuse };
+}
+
 async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContext, scope: string, input: { workingTree?: boolean; pass?: PassLevelInput }) {
   const { sourceId, root } = context;
   const [company, slugModeRead, excludeRead, includeHiddenRead, workingRead, packRead, mirrorRead, metafilePagesRead] = await Promise.allSettled([
@@ -923,15 +970,17 @@ const confirmGuard = <T>(read: Promise<T>) => read.catch((error: unknown) => { t
 async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; worktreeId: string; parser: SyncImportParser; step: LoopYield;
   reuse?: { cache: PassLevelCache; passId: string; recorded?: ReadonlySet<number>; working: boolean; head: string } }, timed: <T>(key: string, read: () => Promise<T>) => Promise<T>) {
   const { kind, sourceId, incarnation, worktreeId, reuse } = input;
-  // Reused only at the same commit, worktree and parser, in committed mode: working mode always reads `I⋈P` whole.
-  const key = JSON.stringify([sourceId, incarnation, worktreeId, reuse?.head, input.parser]);
-  const unkeyed = reuse?.cache.pages && (reuse.working || reuse.cache.pages.key !== key) ? { taken: false, reason: reuse.working ? 'working' : 'key', rows: 0 } : undefined;
+  // Reused only at the same commit (a pass's own rounds; across passes any), worktree and parser, in committed mode: working mode always reads `I⋈P` whole.
+  const key = JSON.stringify([sourceId, incarnation, worktreeId, reuse?.head, input.parser]), acrossKey = JSON.stringify([sourceId, incarnation, worktreeId, input.parser]);
+  const cached = reuse?.cache.pages, across = cached?.across;
+  const unkeyed = cached && (reuse!.working || cached.key !== (across ? acrossKey : key)) ? { taken: false, reason: reuse!.working ? 'working' : 'key', rows: 0, ...(across ? { across } : {}) } : undefined;
   let prior = reuse && !unkeyed ? reuse.cache.pages : undefined;
   const confirming = prior !== undefined;
   if (reuse) reuse.cache.pages = undefined;
   const round = (marking: boolean) => withRoundSnapshot(engine, async exec => {
     const base = marking ? prior?.mark : undefined;
-    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded, postgres: kind === 'postgres', parallel: true }))) : null;
+    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded, postgres: kind === 'postgres', parallel: true,
+      ...(across ? { across } : {}) }))) : null;
     const marked = marking && !base ? confirmGuard(readLevelMark(exec, sourceId, incarnation)) : null;
     // PGLite has no snapshot: the mark (or the proof, the next round's mark) runs before the reads it vouches for.
     if (kind === 'pglite') await (proof ?? marked)?.catch(() => undefined);
@@ -944,8 +993,9 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
     // A failed mark fails what was pipelined after it: the mark's failure is the one to report.
     const read = confirmed?.read ?? await timed('pages', () => readPages(exec, kind, sourceId, incarnation, input.parser, undefined, input.step)).catch(async (error: unknown) => { await marked; throw error; });
     const mark = confirmed?.mark ?? (marked ? await marked : null);
+    if (confirmed?.read && levelReuseVerify()) await verifyReusedPages(exec, { kind, sourceId, incarnation, parser: input.parser, table: confirmed.read.pages, how: across ? 'across passes' : 'in a pass' });
     const [work, markers, passRow] = await others;
-    if (reuse && mark) reuse.cache.pages = { key, mark, table: read!.pages };
+    if (reuse && mark) reuse.cache.pages = { key, acrossKey, mark, table: read!.pages };
     const confirm = confirmed?.confirm ?? unkeyed;
     return { pages: read!.pages, open: work, markers, passRow, statements: read!.statements + work.statements + 2 + (marked ? 1 : proof ? (kind === 'postgres' ? 6 : 1) : 0), ...(confirm ? { confirm } : {}),
       ...(confirmed?.read ? { changed: confirmed.changed } : {}) };
@@ -954,7 +1004,7 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
   try { return await round(true); } catch (error) {
     if (!(error instanceof ConfirmFailure)) throw error;
     prior = undefined;
-    return { ...await round(false), ...(confirming ? { confirm: { taken: false, reason: 'error', rows: 0 } } : {}) };
+    return { ...await round(false), ...(confirming ? { confirm: { taken: false, reason: 'error', rows: 0, ...(across ? { across } : {}) } } : {}) };
   }
 }
 
@@ -963,10 +1013,27 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
  * re-read into them, when the counts then account for every row (no deletion); else `read: null` and the caller reads
  * whole. Either way S2's mark is the next round's.
  */
+/** Pages a cross-pass delta may re-read whatever the table's size. */
+const LEVEL_REUSE_DELTA_MIN = 2_000;
+
+/** GBRAIN_SYNC_LEVEL_REUSE_VERIFY: the reused `I⋈P` against a whole read in the same snapshot, page by page (sync-tree-reuse.ts). */
+async function verifyReusedPages(exec: Exec, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; parser: SyncImportParser; table: PageTable; how: string }): Promise<void> {
+  const whole = (await readPages(exec, input.kind, input.sourceId, input.incarnation, input.parser))!.pages;
+  const rows = (table: PageTable) => new Map(Array.from({ length: table.length }, (_, i) => {
+    const { arm1: _a, attested_hash: _h, ...row } = table.row(i);
+    return [String(row.id), JSON.stringify(row)] as const;
+  }));
+  const reused = rows(input.table), fresh = rows(whole);
+  reportLevelReuseCheck('I⋈P', input.how, reused.size !== fresh.size ? `${reused.size} pages, whole read ${fresh.size}`
+    : [...fresh].find(([id, row]) => reused.get(id) !== row)?.[0]);
+}
+
 async function confirmPages(exec: Exec, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; parser: SyncImportParser;
   prior: NonNullable<PassLevelCache['pages']>; proof: Promise<ConfirmProof> }, timed: <T>(key: string, read: () => Promise<T>) => Promise<T>) {
-  const proof = await input.proof, { table } = input.prior;
-  if (!proof.ok) return { read: null, mark: proof.mark, confirm: { taken: false, reason: proof.reason, rows: 0 } };
+  const proof = await input.proof, { table } = input.prior, across = input.prior.across ? { across: input.prior.across } : {};
+  if (!proof.ok) return { read: null, mark: proof.mark, confirm: { taken: false, reason: proof.reason, rows: 0, ...across } };
+  // Across passes a delta past a quarter of the table (and LEVEL_REUSE_DELTA_MIN pages) reads whole: cheaper, and no larger a risk.
+  if (proof.across && proof.pages.length > Math.max(LEVEL_REUSE_DELTA_MIN, table.length / 4)) return { read: null, mark: proof.mark, confirm: { taken: false, reason: 'delta_large', rows: 0, ...across } };
   const want = new Set(proof.pages), slots = new Map<string, number>();
   const step = loopYield();
   for (let i = 0; i < table.length && slots.size < want.size; i++) {
@@ -981,9 +1048,9 @@ async function confirmPages(exec: Exec, input: { kind: 'postgres' | 'pglite'; so
   const changed = { rewritten: [...slots.values()].map(slot => ({ slot, sourcePath: table.sourcePath[slot]!, slug: table.slug[slot]! })), from: table.length };
   const read = proof.pages.length ? await confirmGuard(timed('pages', () => readPages(exec, input.kind, input.sourceId, input.incarnation, input.parser, { table, ids: proof.pages, slots })))
     : { pages: table, statements: 0 };
-  if (!read) return { read: null, mark: proof.mark, confirm: { taken: false, reason: 'page_left_level', rows: 0 } };
-  if (!countsMatch(input.prior.mark, proof, { pages: read.pages.length, newRecords })) return { read: null, mark: proof.mark, confirm: { taken: false, reason: 'counts', rows: 0 } };
-  return { read, mark: proof.mark, confirm: { taken: true, reason: null, rows: proof.pages.length }, changed };
+  if (!read) return { read: null, mark: proof.mark, confirm: { taken: false, reason: 'page_left_level', rows: 0, ...across } };
+  if (!countsMatch(input.prior.mark, proof, { pages: read.pages.length, newRecords })) return { read: null, mark: proof.mark, confirm: { taken: false, reason: 'counts', rows: 0, ...across } };
+  return { read, mark: proof.mark, confirm: { taken: true, reason: null, rows: proof.pages.length, ...across }, changed };
 }
 
 /**

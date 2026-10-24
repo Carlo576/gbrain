@@ -20,7 +20,7 @@
  *             coherent?" question.
  *
  * Why this matters: the doctor's legacy `health_score` ( 100 − 20×fails −
- * 5×warns ) weights every check equally. A skill routing miss costs the same
+ * 5×warns, over the checks that finished: #7276 ) weights every check equally. A skill routing miss costs the same
  * as a corrupt embedding column. With categorization, the doctor surfaces a
  * brain_checks_score and category_scores so operators see signal-to-noise on
  * the question they're actually asking.
@@ -62,12 +62,18 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'captured_facts_active',
   // #7125: facts whose stored text holds a pre-fix sanitizer redaction marker (doctor/checks/facts-redaction-marker.ts).
   'facts_redaction_marker',
+  // #7247: a calendar day holding a bulk-loaded share of a source's facts as their valid_from (doctor/checks/fact-bulk-dates.ts).
+  'fact_bulk_dates',
   'conversation_label_facts',
   'conversation_outcomes_stale',
   'connector_checkpoints',
   'connector_held_items',
   'git_held_files',
   'fence_integrity',
+  // GBRA-161: derived items live generations retired in the restore window, and results held instead of published (doctor/checks/generations.ts).
+  'generation_held',
+  'generation_pending',
+  'generation_retirements',
   // #5575: stored trust tier counts, the legacy-row backfill, scan and source claims.
   'trust_tiers',
   'trust_scan',
@@ -191,6 +197,11 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'git_convergence',
   // #5186: an ownership marker committed to a source checkout's Git index.
   'tracked_ownership_marker',
+  // #7381: a source checkout behind its upstream, write-through files or staged files waiting for a commit, unpushed commits outside the source root (doctor/checks/git-writer.ts).
+  'checkout_lagging',
+  'dirty_age',
+  'commits_outside_source_root',
+  'quarantined_changes',
   'takes_count',
   'takes_weight_grid',
   // #5836: active facts with no entity (invisible to entity recall and the conflict sweep).
@@ -211,6 +222,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'ghost_pages',
   // #6948: files recorded by several live pages (origin twins) and the pages_live_origin_key index (doctor/checks/origin-twins.ts).
   'origin_twins',
+  // #7305: live pages whose slug their recorded file path does not derive, and whose file lacks the slug: stamp (doctor/checks/slug-path-mismatch.ts).
+  'slug_path_mismatch',
   // #6729: inexact renames whose identity sync did not keep, until the pair gets a disposition (doctor/checks/rename-identity-downgrades.ts).
   'rename_identity_downgrades',
   // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
@@ -331,6 +344,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'serve_build_drift',
   // #7245: serve, the jobs supervisor, worker parents and job children on different builds (doctor/checks/runtime-build-skew.ts).
   'runtime_build_skew',
+  // GBRA-156: the warm CLI socket refused CLI calls by identity part in the last 24 h (doctor/checks/cli-socket-refusals.ts).
+  'cli_socket_refusals',
   'stale_embedding_effects',
   'vector_plan',
   'keyword_plan',

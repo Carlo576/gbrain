@@ -121,7 +121,7 @@ for (const backend of testBackends()) describe(`GBRA-133: a held file-drift prev
       heartbeat() {}, finish: () => ticks.push('finish'), child: () => progress } as unknown as ProgressReporter;
     const first = await run(f.sourceId, { deadline: Date.now() - 1, progress });
     expect(slugsOf(first)).toEqual([slugs[0]]);
-    expect(ticks).toEqual(['start repair.file_drift.preview 3', `tick ${slugs[0]}`, 'finish']);
+    expect(ticks).toEqual(['start repair.file_drift.provenance 3', 'finish', 'start repair.file_drift.preview 3', `tick ${slugs[0]}`, 'finish']);
     expect(window(first)).toMatchObject({ previewed: 1, remaining: 2, complete: false });
     expect(first.residuals).toMatchObject({ after_window: 2 });
     const cursor = window(first).next_cursor!;

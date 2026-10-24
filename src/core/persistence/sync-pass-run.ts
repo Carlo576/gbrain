@@ -42,7 +42,7 @@ import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
 import { idleClear, readIdleFacts } from './sync-idle-skips.ts';
 import { digest } from './digest.ts';
 import { readSyncTail } from './sync-tail-record.ts';
-import { clearGitHold, clearGitHoldRetryPaths, holdRescreenDue, readGitHoldRetryPaths, readSyncHoldPolicy, readGitSourceHolds, readSyncImportProvenances, syncImportParserFor } from './sync-holds.ts';
+import { clearGitHold, clearGitHoldRetryPaths, holdRescreenDue, readGitHoldRetryPaths, readSyncHoldPolicy, readGitSourceHolds, readSyncImportProvenances, settledDeletionHolds, syncImportParserFor } from './sync-holds.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { loadConfig } from '../config.ts';
 import { startPersistenceConsumer } from './service.ts';
@@ -52,12 +52,14 @@ import { withCoordinatedWrite } from './context.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { principalAttribution } from './attribution.ts';
 import { isCodeFilePath, readMetafilePagesMode, resolveSlugForPath } from '../sync.ts';
+import { readPassSwitches } from './sync-held-deletions.ts';
+import { keepPassPages, takePassPages } from './sync-tree-reuse.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { databaseOnlyPageSql } from './unbound-pages.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
 import { SYNC_SLICE_OP } from './sync-slices.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
-import { applyPassRound, finishPassApply, holdPassIdentities, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
+import { applyPassRound, sweepLegacy, finishPassApply, holdPassIdentities, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
 import { passClosureMemo, passCostDecision, type passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
 import { currentEmbeddingPricePerMTok } from '../embedding.ts';
 import { SIZE_STATE_SAMPLE, type SyncSizeStates } from '../page-embedding-budget.ts';
@@ -70,6 +72,8 @@ export const PASS_MAX_ROUNDS = 4;
 export const PASS_BATCH_MAX = 10_000;
 /** Waits for in-flight work a pass makes before it stops `writer_pending`, each bounded by the wait budget. */
 const IN_FLIGHT_WAITS = 4;
+/** #7355: how often a long level read writes the open pass row, so a follower and `sync status` see it working. */
+const PASS_HEARTBEAT_MS = 30_000;
 
 export interface SyncPassInput {
   opts: SyncOpts; slice?: { maxPages: number; maxMs: number }; context: ManagedSyncContext; authority: SyncAuthority;
@@ -150,7 +154,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   await faultPoint('sync:batch_entries', { sourceId: level.sourceId });
   const working = (entry: ShadowPath) => level.mode === 'working' && entry.state.level !== entry.state.tree;
   const deleteEntries = new Map<string, PassEntry>(deletes.map(entry => [entry.path, { ...entryPaths(level, entry.path), action: 'delete' as const, working: level.mode === 'working',
-    slug: entry.slug!, pageId: entry.pageId, revision: entry.revision, level: null }]));
+    slug: entry.slug!, pageId: entry.pageId, revision: entry.revision, level: null, ...(entry.result.heldDeletion ? { heldDeletion: entry.result.heldDeletion } : {}) }]));
   const leaving = new Map(deletes.map(entry => [entry.path, entry]));
   const fresh = imports.filter(entry => !entry.state.page);
   // Same-blob twins per level, and the leaving pages per recorded blob, counted once: a scan per winner was quadratic.
@@ -172,6 +176,8 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   const discovery = { root: level.root, gitRoot: level.gitRoot, target: level.head, sourceId: level.sourceId } as SyncDiscovery;
   const named = (entry: ShadowPath): SyncEntry => ({ ...entryPaths(level, entry.path), action: 'import', working: working(entry) });
   if (adopting.length) {
+    // A batch-wide read runs on this thread under PGLite (at 8k new files, about as long as the loops' budget): it starts a stretch of its own.
+    await step.pause();
     const identities = await engine.executeRaw<LegacyIdentity>("SELECT id, slug, source_path, deleted_at, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND (source_path IS NULL OR slug=ANY($2::text[]))",
       [level.sourceId, [...new Set(adopting.map(entry => slugOf.get(entry.path)!))]]);
     const bySlug = new Map(identities.map(page => [page.slug, page]));
@@ -183,6 +189,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     }
   }
   const slugs = [...new Set([...slugOf.values()].filter(Boolean))];
+  if (slugs.length) await step.pause();
   const holders = new Map((slugs.length ? await engine.executeRaw<{ id: number | string; slug: string; source_path: string | null; revision: string; deleted: boolean; unbound: boolean; fm_id: string | null }>(
     `SELECT id, slug, source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted, ${databaseOnlyPageSql('pages')} AS unbound, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])`, [level.sourceId, slugs]) : [])
     .map(page => [page.slug, page]));
@@ -190,7 +197,9 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   // #6887: a both-moved import imports when the page still holds what its recorded disk blob imports (sync-screen.ts driftBaselineContent).
   const bothDrift = imports.filter(entry => entry.result.cls === 'drift' && entry.result.side === 'both' && entry.pageId !== null);
   const baselineRecords = await readSyncImportProvenances(engine, level.sourceId, level.incarnation, bothDrift.map(entry => entry.pageId!));
-  const driftBaseline = (entry: ShadowPath) => entry.result.side === 'both' && entry.pageId !== null ? baselineRecords.get(entry.pageId)?.disk_blob_oid ?? undefined : undefined;
+  // #7338: a page with no import record (imported by an older gbrain) has its file at the incarnation's baseline commit as its baseline.
+  const driftBaseline = (entry: ShadowPath) => entry.pageId === null ? undefined : entry.result.side === 'both' ? baselineRecords.get(entry.pageId)?.disk_blob_oid ?? undefined
+    : entry.result.side === 'unknown' ? entry.state.baseline ?? undefined : undefined;
   const entries: PassEntry[] = [], collisions: SyncSlugCollision[] = [], skipped: ShadowPath[] = [], identity: Array<{ entry: ShadowPath; origin: ShadowPath | null; slug: string; ids: { page: string; file: string } }> = [];
   const claims = new Map<string, ShadowPath[]>();
   for (const entry of imports) {
@@ -278,7 +287,10 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     }
     entries.push({ ...base, pageId: null, revision: null });
   }
-  return { entries: [...deleteEntries.values(), ...entries.sort((a, b) => a.path.localeCompare(b.path))], collisions, skipped, downgrades, identity };
+  const batch = [...deleteEntries.values(), ...entries.sort((a, b) => a.path.localeCompare(b.path))];
+  // The drain freezes the batch's first entry (and reads its blob window) right after: it starts on a turn of its own too.
+  await step.pause();
+  return { entries: batch, collisions, skipped, downgrades, identity };
 }
 
 /**
@@ -381,10 +393,15 @@ async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNull
   // GBRA-150: `sync.metafile_pages typed` widens the level's universe, so it joins the selection fingerprint (`off` keeps
   // the fingerprint an older pass stamped): the first pass after the upgrade or a flip reads the whole level once.
   const metafilePages = await readMetafilePagesMode(engine);
-  const selectionFp = digest(metafilePages === 'off' ? selection : { ...selection, metafile_pages: metafilePages }), parserFp = parserFingerprint();
+  // GBRA-133: so does `sync.apply_held_deletions` when on (sync-held-deletions.ts): turning it on reads the level, and its held deletions, once.
+  // `sync.level_reuse` rides the same read (sync-tree-reuse.ts); it changes how the level is read, not what it is.
+  const { heldDeletions, levelReuse } = await readPassSwitches(engine, sourceId);
+  const selectionFp = digest({ ...selection, ...(metafilePages === 'off' ? {} : { metafile_pages: metafilePages }), ...(heldDeletions ? { apply_held_deletions: true } : {}) }), parserFp = parserFingerprint();
   const obligations: ManagedSyncPassValue['obligations'] = prior ? structuredClone(prior.value.obligations)
     : { baseline_commit: context.source.last_commit, mismatch: {}, not_converged_streak: 0, faults: {} };
   obligations.mismatch ??= {}; obligations.faults ??= {}; obligations.not_converged_streak ??= 0;
+  const abandoned = prior?.value.telemetry.outcome === 'open' ? (obligations.abandoned_streak ?? 0) + 1 : 0;
+  if (abandoned) obligations.abandoned_streak = abandoned; else delete obligations.abandoned_streak;
   if (handover.episode && !obligations.episode) obligations.episode = handover.episode;
   const passId = randomUUID();
   // #6696: a cost-gate deferral rides as noEmbed but is this run's constraint (its requests carry embedDeferred), never an opt-out an episode keeps.
@@ -431,7 +448,25 @@ async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNull
   // The incarnation's legacy markers (§2.7 b1) are owed until a local pass wrote them, not only by its first row.
   const markersOwed = () => remote ? !prior : !value.obligations.legacy_markers_at;
   return { prior, admission, tail, retry, failed, holds, idleFacts, head, mode, selection, configured, selectionFp, parserFp, obligations, passId, optOutEpisode, episode,
-    processingOptions, inherited, pack, converged, cacheKey, kindStarted, working, kind, value, markersOwed };
+    processingOptions, inherited, pack, converged, cacheKey, kindStarted, working, kind, value, markersOwed, heldDeletions, levelReuse };
+}
+
+/**
+ * #7355: a level read that screens a large source for minutes before its first commit is progress too. `report` tells the
+ * drain's governor it is working and, every PASS_HEARTBEAT_MS, saves the open row (what a follower and `sync status` read);
+ * `pending` is that save, which the pass's next save waits for so an older row never lands over a newer one.
+ */
+function levelBeat(opts: SyncOpts, sliceBase: { pages: number }, save: () => Promise<void>): { report: () => void; readonly pending: Promise<void> | null } {
+  let at = Date.now(), pending: Promise<void> | null = null;
+  return {
+    report: () => {
+      opts.onProgress?.({ phase: 'managed_sync.level_progress', bankedFiles: sliceBase.pages });
+      if (Date.now() - at < PASS_HEARTBEAT_MS || pending) return;
+      at = Date.now();
+      pending = save().catch(() => undefined).finally(() => { pending = null; });
+    },
+    get pending() { return pending; },
+  };
 }
 
 /** A pass result that imported nothing, at the source's last commit. */
@@ -522,7 +557,7 @@ async function stampUnchangedPass(engine: BrainEngine, input: SyncPassInput, rou
     await assertDrainLease(tx, sourceId);
     await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
     // Holds on paths that left the level go with it here too, as a stamp releases them.
-    for (const path of level.releasableHolds) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
+    for (const path of [...level.releasableHolds, ...await settledDeletionHolds(tx, sourceId, level.deletionCandidates)]) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
     await recordPassFenceTrend(tx, { worktreeId: context.binding.worktree_id, sourceId, passId, since: converged?.request_hwm ?? null });
     const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP, { prior: converged?.writeback });
     value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
@@ -566,7 +601,9 @@ function addCounts(counts: Record<string, number>, add: Record<string, number | 
 /**
  * #7149: a requested re-screen is consumed once the pass settled its path (imported, held, or settled at its level), not
  * only by the stamp: a pass that stopped before its stamp (timeout, writer_pending, not_converged) left the whole row
- * behind, so doctor kept reporting imported files as waiting and every later pass was forced to a full round.
+ * behind, so doctor kept reporting imported files as waiting and every later pass was forced to a full round. #7327: a
+ * batch that stops (a deadline, a yield, a block) consumes those of the entries its cursor passed, so the next pass resumes
+ * after them instead of re-screening every one again.
  */
 function retryConsumer(engine: BrainEngine, sourceId: string, incarnation: string, retry: readonly string[]): (paths: Iterable<string>) => Promise<void> {
   const open = new Set(retry);
@@ -592,7 +629,7 @@ async function passStampFor(engine: BrainEngine, input: { context: ManagedSyncCo
   const closesEpisode = closure?.closes === true;
   if (closure?.released) counts.episodeReleased = closure.released;
   return { leaseToken: input.leaseToken, incarnation: context.incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id && closure!.stampChunker)),
-    closesEpisode, retryTaken: [...input.retry], releasedHolds: input.level.releasableHolds, selectionFp: input.selectionFp, parserFp: input.parserFp, pack: input.pack, full: input.full,
+    closesEpisode, retryTaken: [...input.retry], releasedHolds: input.level.releasableHolds, ...(input.level.deletionCandidates.length ? { deletionCandidates: input.level.deletionCandidates } : {}), selectionFp: input.selectionFp, parserFp: input.parserFp, pack: input.pack, full: input.full,
     changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: input.extract, since: input.since, ...(input.rescreen ? { rescreen: true as const } : {}) };
 }
 
@@ -636,6 +673,16 @@ async function pinPassRow(engine: BrainEngine, value: ManagedSyncPassValue, inpu
   }
 }
 
+/**
+ * The pass's level cache: its next round at the same commit reuses the tree; it dies with the pass. With `sync.level_reuse` its
+ * first round starts from the `I⋈P` of this process's last pass of the source that ended synced (sync-tree-reuse.ts; taken
+ * either way, so off drops it), and a synced end keeps its own.
+ */
+function openPassLevelCache(sourceId: string, incarnation: string, levelReuse: boolean): PassLevelCache {
+  const kept = takePassPages<NonNullable<PassLevelCache['pages']>>([sourceId, incarnation]);
+  return { pages: levelReuse ? kept : undefined };
+}
+
 /** Design §7 (v3 §7): whether this batch crossed the approved envelope, which defers embeddings for the rest of the pass. */
 async function envelopeCrossed(engine: BrainEngine, value: ManagedSyncPassValue, costScope: string, processingOptions: SyncProcessingOptions): Promise<boolean> {
   const envelope = value.obligations.cost;
@@ -646,10 +693,17 @@ async function envelopeCrossed(engine: BrainEngine, value: ManagedSyncPassValue,
   return true;
 }
 
+/** #7243: a round's level read, then its `managed_sync.round_level` progress event, so a long round (the legacy sweep, the import walk) says where it stands first. */
+async function readLevelReporting(engine: BrainEngine, levelInput: Parameters<typeof readShadowLevel>[1], round: number, onProgress: SyncOpts['onProgress']): Promise<Awaited<ReturnType<typeof readShadowLevel>>> {
+  const started = Date.now();
+  const level = await readShadowLevel(engine, levelInput);
+  if (level) onProgress?.({ phase: 'managed_sync.round_level', round: { round, target: level.head, paths: level.paths.length, read_ms: Date.now() - started } });
+  return level;
+}
+
 export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Promise<SyncResult> {
   const { opts, context, authority, assertActive } = input;
-  const { sourceId, incarnation } = context;
-  const remote = authority.writer.remote;
+  const { sourceId, incarnation } = context, remote = authority.writer.remote;
   const lease = currentDrainLease(sourceId);
   if (!lease) throw new Error(`The live sync pass of ${sourceId} runs only under the source's drain lease.`);
   lease.tailClear = false; lease.idleClear = false;
@@ -657,7 +711,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const pinned = await pinPass(engine, input, lease, started);
   if (pinned.ended) return pinned.ended;
   const { prior, admission, tail, retry, failed, mode, selection, configured, selectionFp, parserFp, obligations, passId, optOutEpisode,
-    processingOptions, inherited, pack, converged, cacheKey, working, kind, value, markersOwed } = pinned;
+    processingOptions, inherited, pack, converged, cacheKey, working, kind, value, markersOwed, heldDeletions, levelReuse } = pinned;
   let { head, episode } = pinned;
 
   if (kind === 'idle' && working.cache) rememberWorkingStatCache(cacheKey, working.cache);
@@ -701,7 +755,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     pack, full: kind === 'full', counts, extract: !processingOptions.noExtract, since: value.telemetry.started_at, rescreen: legacyWaived.size > 0, closures });
 
   const save = async (outcome: PassOutcome, stopReason: string | null, pin = false) => {
-    const ended = outcome !== 'open';
+    await beat.pending; const ended = outcome !== 'open';
     if (ended && outcome !== 'synced') {
       const open = await openPassRequests(engine, { sourceId, passId, carried: value.obligations.pending_requests ?? [] });
       if (open.length) value.obligations.pending_requests = open; else delete value.obligations.pending_requests;
@@ -712,8 +766,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     if (outcome === 'blocked' || stopReason === 'not_converged') value.obligations.stuck_since ??= new Date().toISOString();
     await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin }); });
   };
-  // GBRA-108: a committed legacy-sweep slice is progress: the row a follower watches and the drain's in-pass governor see it.
-  const onSwept = async () => { assertActive(); await save('open', null); opts.onProgress?.({ phase: 'managed_sync.legacy_swept', bankedFiles: sliceBase.pages }); };
+  // GBRA-108: a committed legacy-sweep slice is progress the row and the drain's governor see; #7355: so is a level read still working (`levelBeat`).
+  const onSwept = async () => { assertActive(); await save('open', null); opts.onProgress?.({ phase: 'managed_sync.legacy_swept', bankedFiles: sliceBase.pages }); }, beat = levelBeat(opts, sliceBase, () => save('open', null));
   const identityDowngrades: DowngradedRename[] = [];
   const fileRefusals = new Map<string, SyncFileRefusal>();
   const keptCount = () => lastLevel?.paths.filter(entry => entry.result.cls === 'kept').length ?? 0;
@@ -752,12 +806,14 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       foldReport(c.sizeStates);
       return null;
     }
-    return drained;
+    return await consumeRetry(entries.slice(0, drained.managedCursor?.index ?? 0).map(entry => entry.path)).then(() => drained);
   };
+  const levelCache = openPassLevelCache(sourceId, incarnation, levelReuse);
   /** The pass ended on its stamp; a folded one (sync-pass-fold.ts) saves the round's telemetry beside the obligations it wrote. */
   const synced = async (onFold: boolean): Promise<SyncResult> => {
     if (onFold) await save('synced', configured ? null : 'selection_scoped');
     rememberLevel();
+    if (levelReuse && levelCache.pages) keepPassPages([sourceId, incarnation], { ...levelCache.pages, key: levelCache.pages.acrossKey, across: true });
     await clearPassFailures(engine, sourceId, incarnation);
     await finishPassApply(engine, sourceId, applied);
     return result(configured && context.source.last_commit === null ? 'first_sync' : 'synced', configured ? undefined : 'selection_scoped');
@@ -795,8 +851,6 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       const drained = await input.drainBatch(`${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`, replay, sliceBase);
       if (!('entries' in drained)) return await stop(drained);
     }
-    // The pass's level cache: its next round at the same commit reuses the tree; it dies with the pass.
-    const levelCache: PassLevelCache = {};
     for (let round = 1; round <= PASS_MAX_ROUNDS; round++) {
       assertActive();
       value.telemetry.round = round;
@@ -809,8 +863,8 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         writeIds: value.obligations.converged?.writeback ?? [] })) return synced(true);
       const levelInput = { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
-          slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } };
-      const level = await readShadowLevel(engine, levelInput);
+          slugMode: value.obligations.slug_mode, cache: levelCache, levelReuse, passId, recorded: applied.recorded, onProgress: beat.report, assertActive } };
+      const level = await readLevelReporting(engine, levelInput, round, opts.onProgress);
       await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null, reused: level.reused ?? 0, shadow: level, input: levelInput } : undefined });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
@@ -826,10 +880,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         await writeLegacyMarkers(engine, level);
         value.obligations.legacy_markers_at = new Date().toISOString();
       }
-      await applyPassRound(engine, level, { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions,
-        grantPrefixes: remote ? authority.writer.slugPrefixes : null, onSwept }, applied);
+      const roundInput = { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions, grantPrefixes: remote ? authority.writer.slugPrefixes : null, onSwept, heldDeletions };
+      await applyPassRound(engine, level, roundInput, applied);
       assertActive();
-      if (applied.sweptAll && !value.obligations.legacy_sweep?.first_full_at) value.obligations.legacy_sweep = { ...value.obligations.legacy_sweep, first_full_at: new Date().toISOString() };
       if (!remote) value.obligations.deletes_withheld = applied.withheld?.set_hash ?? null;
       const { deletes, imports, inFlight, mismatch, owed } = await triageRound(level, { S, legacyWaived, readmitted, admission, remote, counts, consumeRetry });
       // Earlier passes' requests that committed since they stopped are this pass's imports (sync-pass-carried.ts).
@@ -887,6 +940,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: configured ? null : 'selection_scoped', remaining: 0 };
         return synced(false);
       }
+      opts.onProgress?.({ phase: 'managed_sync.round_admit', round: { round, target: head, paths: level.paths.length, imports: imports.length, deletes: deletes.length, in_flight: inFlight.length } });
       const built = await batchEntries(engine, level, deletes, imports).catch(async (error: unknown) => {
         if ((error as { code?: string } | null | undefined)?.code === 'page_identity_changed') await save('blocked', 'page_identity_changed');
         throw error;
@@ -920,6 +974,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       // Every candidate of the round settled: committed, waived, held, deferred to a hold, a collision, or (a rename's
       // deletion) carried by its import.
       for (const entry of [...deletes, ...imports]) if (!S.has(settledKey(entry.path, entry.state.level))) S.set(settledKey(entry.path, entry.state.level), 'settled');
+      if (!remote) await sweepLegacy(engine, level, roundInput, applied);
       roundSettled = 0;
       lastMismatch = [];
     }

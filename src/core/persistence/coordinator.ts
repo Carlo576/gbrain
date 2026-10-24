@@ -38,13 +38,13 @@ import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, recoveryStagingFil
 import { assertManagedFilesystemWrite } from './filesystem-guard.ts';
 import { beforeStagePath, fileContentBytes, fileContentHash, hashDescriptor, hashFile, isStreamedContent, LARGE_FILE_MIN_BYTES, stageBeforeCopy, stageStreamedContent, type StreamedFileContent } from './large-file.ts';
 import { declarePublication, publicationTransaction } from './publication-deadline.ts';
-import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
+import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, isPersistenceDeclaration, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertBundleRecoveryBinding, bundleFileHash, prepareBundleRecovery, publishStagedBundleFile, stageBundleFile, type MutationFile } from './bundle-files.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { classifyMirrorPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { PENDING_IMPORT, SYNC_HELD } from './pending-import.ts';
 import { CANONICAL_FILE_MISSING, databaseRefusal, ownerExceptionFailure, withAttempt, type PublicationFailure, type PublicationFailureDetail, type PublicationStage } from './publication-failure.ts';
-import { SYNC_CURSOR_REPLACED } from './sync-checkpoint-replaced.ts';
+import { SYNC_CURSOR_REPLACED, SYNC_PASS_SUPERSEDED } from './sync-checkpoint-replaced.ts';
 import { fenceFailureDetail } from '../fence-repair/refusal.ts';
 import { withdrawalFailureDetail } from '../facts/withdrawal.ts';
 import { faultPoint, withFaultPoints } from './fault-points.ts';
@@ -52,6 +52,7 @@ import { recordPublicationFenceTrend } from '../fence-repair/census-store.ts';
 import { segmentWriteScope } from '../page-body/ingest.ts';
 import { publicationBeliefOptions, withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
+import { classifyPgAccessError } from '../pg-access-classify.ts';
 
 interface PreparedMutationBase {
   sourceExclusive?: boolean;
@@ -213,12 +214,19 @@ function requestError(error: unknown): PublicationFailure {
   if (code === 'revision_backfill_pending' && error instanceof Error) return { code, message: error.message };
   return ownerExceptionFailure(error);
 }
-function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','revision_backfill_pending','source_changed','page_identity_changed',SYNC_CURSOR_REPLACED].includes(code); }
+function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','revision_backfill_pending','source_changed','page_identity_changed',SYNC_CURSOR_REPLACED,SYNC_PASS_SUPERSEDED].includes(code); }
 /** The terminal state of an unpublished failure: `admission_paused` (#6712 PR 4b, a destructive write `sync.admission` paused at publication) is `cancelled`. */
 function failureState(code: string): 'conflict' | 'failed' | 'cancelled' { return code === 'admission_paused' ? 'cancelled' : conflictCode(code) ? 'conflict' : 'failed'; }
 export function transientDatabaseFailure(error: unknown): boolean {
   return ['40001','40P01','55P03','57014','53300','57P01','57P02','57P03','08000','08003','08006','08001','08004',
-    'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code));
+    'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code)) || connectionCapFailure(error);
+}
+/**
+ * GBRA-133: a pooler's client cap (Supavisor `EMAXCONNSESSION`, "too many clients already") is the same contention as
+ * SQLSTATE 53300 whatever code the pooler sends with it, so a write that meets it is released, never failed terminally.
+ */
+export function connectionCapFailure(error: unknown): boolean {
+  return classifyPgAccessError(error).reason === 'pool_exhausted';
 }
 /**
  * Flip lane C: the shared-read failures (`sharedReadFailure`) already charged. A group's memoized read the database cancelled
@@ -610,7 +618,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       const committed = await completeWrite(tx, current, 'committed', outcome, undefined, current);
       transactionBodyCompleted = true;
       return committed;
-    });
+    }, { pipelineFirst: isPersistenceDeclaration });
     await hooks.boundary?.('after_commit', done);
     if (beliefReport.appended && done.state === 'committed') await markBeliefCommits(engine, [row.id]).catch(() => undefined);
     if (recovery) {

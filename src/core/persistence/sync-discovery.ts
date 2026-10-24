@@ -51,14 +51,16 @@ export interface SyncEntry { path: string; sourcePath: string; action: 'import' 
   prescreened?: true;
   /** #6712 PR 1: the page moved since its last recorded import (or has no record); imported only when the freeze proves it a no-op, else held `file_drift`. */
   drift?: SyncDriftSide;
-  /** #6712: for `both`, the blob the last recorded import left on disk; the freeze imports when the page still holds what that blob imports. */
+  /** #6712: for `both`, the blob the last recorded import left on disk; #7338: for `unknown`, the file at the baseline commit. The freeze imports when the page still holds what that blob imports. */
   driftBaseline?: string;
   /** #6727: live pages with no recorded origin whose slugs fold to this file's slug, several or one the importer cannot write; the freeze holds it `legacy_slug_conflict`. */
   legacySlugs?: string[];
   /** #6729 x #6727: the one legacy page carries an explicit frontmatter id that differs from the file's, so it is another document; held `legacy_slug_conflict` (`explicit_id_conflict`). */
   legacyIdVeto?: true;
   /** #6948: several live pages record this file as their origin; the freeze holds it `origin_conflict` (sync.holds=fail refuses). */
-  originConflict?: OriginConflict; }
+  originConflict?: OriginConflict;
+  /** GBRA-133: a held committed deletion `sync.apply_held_deletions` proved (sync-held-deletions.ts); its request carries the proof as the receipt. */
+  heldDeletion?: { commit: string; blob_oid: string }; }
 /** Files that map to a slug another origin keeps; they are left out of the manifest until one is renamed. */
 export interface SyncSlugCollision { slug: string; kept: string; skipped: string[]; }
 /** #5032: a file sync skipped on this host with a named refusal, without failing the run. */

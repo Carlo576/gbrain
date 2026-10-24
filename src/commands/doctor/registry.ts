@@ -60,6 +60,7 @@ import {
 } from './checks/embedding-health.ts';
 import { projectionResidentEntry } from './checks/projection-readiness.ts';
 import {
+  derivedVisibilityEntry,
   graphCoverageEntry,
   orphanRatioEntry,
   staleMentionsEntry,
@@ -94,7 +95,9 @@ import { grantNewOpsEntry } from './checks/grant-new-ops.ts';
 import { linksExtractionLagEntry, syncFreshnessEntry, searchModeEntry } from './checks/sync-search.ts';
 import { persistenceConsumersEntry, serveBuildDriftEntry } from './checks/persistence-consumers.ts';
 import { runtimeBuildSkewEntry } from './checks/runtime-build-skew.ts';
+import { cliSocketRefusalsEntry } from './checks/cli-socket-refusals.ts';
 import { gitConvergenceEntry } from './checks/git-convergence.ts';
+import { gitWriterEntry } from './checks/git-writer.ts';
 import { retrievalFeedbackEntry } from './checks/retrieval-feedback.ts';
 import { transcriptSecretExposureEntry } from './checks/transcript-secrets.ts';
 import { autoChronicleEntry } from './checks/auto-chronicle.ts';
@@ -122,6 +125,7 @@ import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
 import { syncConfigKeysEntry } from './checks/sync-config-keys.ts';
 import { ghostPagesEntry } from './checks/ghost-pages.ts';
 import { originTwinsEntry } from './checks/origin-twins.ts';
+import { slugPathMismatchEntry } from './checks/slug-path-mismatch.ts';
 import { renameIdentityDowngradesEntry } from './checks/rename-identity-downgrades.ts';
 import { unindexedFilesEntry } from './checks/unindexed-files.ts';
 import { syncLandingGapsEntry } from './checks/landing-gaps.ts';
@@ -196,6 +200,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   partialEmbeddingEntry,
   syncLandingGapsEntry,
   pgvectorEntry,
+  // #7276: the privacy check next, with its own entry budget, before any full scan.
+  derivedVisibilityEntry,
   rlsEntry,
   schemaVersionEntry,
   rlsEventTriggerEntry,
@@ -244,6 +250,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   managedSyncLatencyEntry,
   commitNotifierEntry,
   gitConvergenceEntry,
+  gitWriterEntry,
   decideHealthEntry,
   unlinkedFactsEntry,
   edgeValidityEntry,
@@ -261,10 +268,12 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   coreMemoryEntry,
   persistenceConsumersEntry,
   runtimeBuildSkewEntry,
+  cliSocketRefusalsEntry,
   atomHeldFailedEntry,
   extractionInputTruncatedEntry,
   ghostPagesEntry,
   originTwinsEntry,
+  slugPathMismatchEntry,
   renameIdentityDowngradesEntry,
   purgeParkedPagesEntry,
   missingRecordedFilesEntry,

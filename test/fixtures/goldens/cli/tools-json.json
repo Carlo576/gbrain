@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 262181,
-    "stdoutSha256": "55f775c0820181eeb400b0c9a3468f5827a8aaffc466ba3cabc19dfc09f34f12",
+    "stdoutBytes": 262702,
+    "stdoutSha256": "bfd962a82f16847c7969963ab23410170196491231dcdef214ab3863873b495e",
     "toolNames": [
       "remember",
       "entity",
@@ -4337,6 +4337,7 @@
         "mutating": false,
         "name": "list_jobs",
         "parameters": {
+          "cursor": "string?",
           "fields": "array?",
           "finished_since": "string?",
           "limit": "number?",
@@ -4347,6 +4348,10 @@
         "required_scopes": [],
         "schema": {
           "properties": {
+            "cursor": {
+              "description": "next_cursor from the last job of the previous page (it carries truncated: true): returns the next older jobs.",
+              "type": "string"
+            },
             "fields": {
               "description": "Return only these job fields (e.g. [\"id\",\"name\",\"status\"]) to save tokens; omit for every field.",
               "items": {
@@ -4359,7 +4364,7 @@
               "type": "string"
             },
             "limit": {
-              "description": "Max results (default: 50)",
+              "description": "Max results (default 50); MCP callers are capped at 500 per call.",
               "type": "number"
             },
             "name": {
@@ -4678,6 +4683,7 @@
         "name": "find_orphans",
         "parameters": {
           "count_only": "boolean?",
+          "cursor": "string?",
           "include_pseudo": "boolean?",
           "limit": "number?",
           "mode": "string?",
@@ -4691,12 +4697,16 @@
               "description": "Return the totals with no rows.",
               "type": "boolean"
             },
+            "cursor": {
+              "description": "next_cursor from the previous page, with the same filters (instead of offset).",
+              "type": "string"
+            },
             "include_pseudo": {
               "description": "Include auto-generated and pseudo pages (default: false)",
               "type": "boolean"
             },
             "limit": {
-              "description": "Rows per page (default 100, max 1000); total_orphans counts every orphan and next_offset names the next page.",
+              "description": "Rows per page (default 100, max 1000); total_orphans counts every orphan, complete says whether this page holds the rest, and next_cursor (or next_offset) names the next page.",
               "type": "number"
             },
             "mode": {
