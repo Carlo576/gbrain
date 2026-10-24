@@ -30,6 +30,23 @@ then prompts `Enable all N tools? [Y/n/select]:`. Three gotchas, all observed:
   `mcp add`'s exit status — verify with `hermes mcp list` and
   `hermes mcp test gbrain` (below).
 
+## Brain-first instructions
+
+Registering the MCP server only makes the tools available. Agents seldom call a
+brain nobody told them about, so finish the install with:
+
+```bash
+gbrain setup hermes --instructions-only
+```
+
+It writes one short marked block into `$HERMES_HOME/SOUL.md` (default `~/.hermes/SOUL.md`), after your identity
+text, which stays first and unchanged: search the brain before reading
+sources one by one, read the best hit, fill gaps with other tools, apply your own
+access rules, then finish the task. Text outside the markers is never touched, a
+re-run upgrades the block in place, `--dry-run` previews it,
+`--no-instructions` opts out (and is remembered) and `--remove` takes it out.
+`gbrain doctor` warns when the block is missing or out of date.
+
 ## Direct config (equally supported)
 
 The add command writes an `mcp_servers` block into `$HERMES_HOME/config.yaml`

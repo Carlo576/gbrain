@@ -59,7 +59,7 @@ import {
   renderAmbientInstructionBlock,
   stripAmbientWritebackBlockAt,
 } from './instructions-block.ts';
-import { brainFirstTargetAt, describeBrainFirstOutcome, installerBrainFirst, readBrainFirstLedger, removeBrainFirst } from '../setup/brain-first.ts';
+import { removeHarnessBrainFirst, writeHarnessBrainFirst } from './harness-brain-first.ts';
 import { createEngine } from '../engine-factory.ts';
 import { isValidSourceId } from '../source-id.ts';
 import { ALL_SOURCES, isResolverUserError, localFederatedSourceIds, resolveSourceWithTier } from '../source-resolver.ts';
@@ -891,8 +891,6 @@ function logAmbientPostureNotes(
     );
   }
 }
-
-const BOOTSTRAP_INSTRUCTIONS_WRITER = 'gbrain bootstrap harness';
 
 export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): Promise<number> {
   const d = resolveHarnessDeps(rawDeps);
@@ -1984,17 +1982,9 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
   const cleanup = await convergeHarnessCleanup({ receipt, prior, current: currentSkills, wired: allConfirmed && smokeOk, skillsReady,
     memoryOnly: skillsPolicy === 'memory-only', leave: leaveHarnessSkills, save }, d);
 
-  // 10b. Brain-first instructions: each host whose MCP entry is confirmed gets
-  // the managed block in its own instruction file (src/core/setup/brain-first.ts).
-  for (const host of hosts) {
-    if (targets.find((t) => t.host === host && t.kind === 'mcp')?.state !== 'confirmed') continue;
-    const path = host === 'claude-code' ? d.claudeMemoryPath
-      : host === 'codex' ? (existsSync(d.codexAgentsOverride) ? d.codexAgentsOverride : d.codexAgentsPath)
-        : d.opencodeAgentsPath;
-    const o = installerBrainFirst({ target: brainFirstTargetAt(host, path), access: { kind: 'mcp', server: flags.name },
-      writer: BOOTSTRAP_INSTRUCTIONS_WRITER, instructions: flags.noInstructions ? false : undefined });
-    d.log(describeBrainFirstOutcome(o, false).trim());
-  }
+  // 10b. Brain-first instructions beside each confirmed MCP entry.
+  writeHarnessBrainFirst({ hosts: hosts.filter((h) => targets.some((t) => t.host === h && t.kind === 'mcp' && t.state === 'confirmed')),
+    server: flags.name, optOut: flags.noInstructions === true, paths: d, log: d.log });
 
   // 11. Degradation + skew honesty.
   if (health.engine === 'postgres') {
@@ -2271,9 +2261,7 @@ export async function removeHarness(flags: HarnessFlags, rawDeps: HarnessDeps): 
     d.log('current token was supplied via --token — not revoked (not ours to revoke).');
   }
 
-  for (const e of readBrainFirstLedger().filter((entry) => entry.writer === BOOTSTRAP_INSTRUCTIONS_WRITER)) {
-    d.log(describeBrainFirstOutcome(removeBrainFirst({ harness: e.harness, path: e.path, dryRun: false }), false).trim());
-  }
+  removeHarnessBrainFirst(d.log);
 
   if (remaining.length === 0 && tokenDone && skillsDone) {
     deleteHarnessReceipt(d.gbrainHome);

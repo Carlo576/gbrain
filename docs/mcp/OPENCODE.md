@@ -43,6 +43,23 @@ Three facts about `opencode mcp add`, all observed:
   project-scoped entry, write the project `opencode.json` directly (next
   section) — but read the sharing warning first.
 
+## Brain-first instructions
+
+Registering the MCP server only makes the tools available. Agents seldom call a
+brain nobody told them about, so finish the install with:
+
+```bash
+gbrain setup opencode --instructions-only
+```
+
+It writes one short marked block into `~/.config/opencode/AGENTS.md` (opencode's global rules): search the brain before reading
+sources one by one, read the best hit, fill gaps with other tools, apply your own
+access rules, then finish the task. Text outside the markers is never touched, a
+re-run upgrades the block in place, `--dry-run` previews it,
+`--no-instructions` opts out (and is remembered) and `--remove` takes it out.
+`gbrain connect --agent opencode --install` writes it for you.
+`gbrain doctor` warns when the block is missing or out of date.
+
 ## Direct config (equally supported)
 
 Global (`~/.config/opencode/opencode.jsonc`) or project (`opencode.json` in

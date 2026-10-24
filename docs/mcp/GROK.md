@@ -38,6 +38,21 @@ Three facts about `grok mcp add`, all observed:
   to write a committable `./.grok/config.toml` instead (reference secrets as
   `${VAR}` in project scope — values are stored verbatim).
 
+## Brain-first instructions
+
+Registering the MCP server only makes the tools available. Agents seldom call a
+brain nobody told them about, so finish the install with:
+
+```bash
+gbrain setup grok-build --instructions-only
+```
+
+Grok Build has no instruction file gbrain writes, so this prints the block to
+paste into your Grok Build instructions: search the brain before reading
+sources one by one, read the best hit, fill gaps with other tools, apply your own
+access rules, then finish the task. Keep the marker lines, so a later paste
+replaces the old block; delete the block to opt out.
+
 ## Direct config (equally supported)
 
 The add command writes an `[mcp_servers.gbrain]` block into

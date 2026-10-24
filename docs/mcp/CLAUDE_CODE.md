@@ -70,9 +70,12 @@ tools use the plugin lane's own approval flow.
 
 ```bash
 claude mcp add gbrain -- "$(command -v gbrain)" serve --surface full
+gbrain setup claude-code --instructions-only
 ```
 
-That's it. Claude Code spawns `gbrain serve` as a stdio subprocess. No server, no
+(`gbrain setup claude-code` alone does both, plus hooks and a smoke test.)
+The second line adds the [brain-first instructions](#brain-first-instructions).
+Claude Code spawns `gbrain serve` as a stdio subprocess. No server, no
 tunnel, no token needed. Works with both PGLite and Supabase engines.
 
 > **PGLite brains are single-process.** PGLite is a single-writer embedded
@@ -162,6 +165,23 @@ Replace the host with your MagicDNS name (or your ngrok domain) and
 > A `gbrain auth create` token is a long-lived, full-access secret. Keep it
 > private (it lands in `~/.claude.json`), and prefer a scoped/short-lived token
 > where your host supports one.
+
+## Brain-first instructions
+
+Registering the MCP server only makes the tools available. Agents seldom call a
+brain nobody told them about, so finish the install with:
+
+```bash
+gbrain setup claude-code --instructions-only
+```
+
+It writes one short marked block into `~/.claude/CLAUDE.md` (with `--scope project`, `./CLAUDE.local.md`): search the brain before reading
+sources one by one, read the best hit, fill gaps with other tools, apply your own
+access rules, then finish the task. Text outside the markers is never touched, a
+re-run upgrades the block in place, `--dry-run` previews it,
+`--no-instructions` opts out (and is remembered) and `--remove` takes it out.
+`gbrain setup claude-code` and `gbrain connect --install` write it for you.
+`gbrain doctor` warns when the block is missing or out of date.
 
 ## Verify
 

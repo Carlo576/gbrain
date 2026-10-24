@@ -182,6 +182,25 @@ Codex stores the env-var *name* (`GBRAIN_REMOTE_TOKEN`), not the token itself, a
 reads the value when it launches the MCP server. Add the `export` line to your
 `~/.zshrc` / `~/.bashrc` so it's set in every session.
 
+## Brain-first instructions
+
+Registering the MCP server only makes the tools available. Agents seldom call a
+brain nobody told them about, so finish the install with:
+
+```bash
+gbrain setup codex --instructions-only
+```
+
+It writes one short marked block into `$CODEX_HOME/AGENTS.md` (or `AGENTS.override.md` when that exists, since Codex
+then reads only the override): search the brain before reading
+sources one by one, read the best hit, fill gaps with other tools, apply your own
+access rules, then finish the task. Text outside the markers is never touched, a
+re-run upgrades the block in place, `--dry-run` previews it,
+`--no-instructions` opts out (and is remembered) and `--remove` takes it out.
+`gbrain setup codex` and `gbrain connect --agent codex --install` write it for
+you; the Codex plugin and a hand-run `codex mcp add` do not.
+`gbrain doctor` warns when the block is missing or out of date.
+
 ## Always-loaded core memory
 
 Codex does not put MCP server instructions in the prompt, so core memory
