@@ -39,7 +39,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
 import { BOOTSTRAP_TEMPLATES, DERIVED_TOKENS, GITHUB_URL_PLACEHOLDER, loadQuestionBank, readTemplate } from './assets.ts';
 import {
@@ -101,6 +102,10 @@ export interface RenderOptions {
   /** Recorded as agent.json `source_id`. When unset, an existing initialized
    * manifest's source_id is preserved; otherwise defaults to 'workspace'. */
   sourceId?: string;
+  /** The harness the workspace belongs to. 'openclaw' writes each template's
+   * `openclawDest` instead of its dest (HEARTBEAT.md → SCHEDULES.md, #7470).
+   * Ignored in minimal mode (determinism). */
+  host?: 'openclaw';
 }
 
 export interface RenderResult {
@@ -114,6 +119,7 @@ export interface RenderResult {
 export const DERIVED_DEFAULTS: Record<(typeof DERIVED_TOKENS)[number], string> = {
   GITHUB_REPO_URL: GITHUB_URL_PLACEHOLDER,
   CORPUS_RETENTION_DAYS: '30',
+  SCHEDULES_FILE: 'HEARTBEAT.md',
 };
 
 const TOKEN_RE = /\{\{([A-Z0-9_]+)\}\}/g;
@@ -125,7 +131,33 @@ const TOKEN_RE = /\{\{([A-Z0-9_]+)\}\}/g;
 /** [ENG-10] The only paths the renderer may ever write, relative to the
  * workspace root. Skillpack scaffolds, skills/, and anything else are out. */
 export function isBootstrapRenderDest(relPath: string): boolean {
-  return BOOTSTRAP_TEMPLATES.some((t) => t.dest === relPath);
+  return BOOTSTRAP_TEMPLATES.some((t) => t.dest === relPath || t.openclawDest === relPath);
+}
+
+/**
+ * Whether a workspace belongs to OpenClaw, from OpenClaw's own layout: the
+ * configured workspace (OPENCLAW_WORKSPACE_DIR, or gbrain's OPENCLAW_WORKSPACE),
+ * or a `workspace` tree under the state directory (OPENCLAW_STATE_DIR,
+ * ~/.openclaw, or a profile's ~/.openclaw-<profile>). A workspace elsewhere
+ * that OpenClaw was pointed at by config alone needs `render --host openclaw`.
+ */
+export function detectOpenClawWorkspace(
+  workspaceDir: string,
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+): boolean {
+  const ws = resolve(workspaceDir);
+  for (const configured of [env.OPENCLAW_WORKSPACE_DIR, env.OPENCLAW_WORKSPACE]) {
+    if (configured && resolve(configured) === ws) return true;
+  }
+  const underWorkspaceOf = (stateDir: string): boolean => {
+    const rel = relative(resolve(stateDir), ws);
+    const first = rel.split(sep)[0] ?? '';
+    return rel !== '' && !rel.startsWith('..') && /^workspace(-.+)?$/.test(first);
+  };
+  if (env.OPENCLAW_STATE_DIR && underWorkspaceOf(env.OPENCLAW_STATE_DIR)) return true;
+  const profile = relative(resolve(home), ws).split(sep)[0] ?? '';
+  return /^\.openclaw(-.+)?$/.test(profile) && underWorkspaceOf(join(home, profile));
 }
 
 /**
@@ -187,7 +219,11 @@ function buildResolver(opts: RenderOptions, state: InterviewState | null): (toke
       const canonical = DERIVED_DEFAULTS[token as (typeof DERIVED_TOKENS)[number]];
       if (minimal) return { kind: 'value', value: canonical };
       const supplied = opts.derived?.[token];
-      return { kind: 'value', value: supplied !== undefined ? supplied : canonical };
+      if (supplied !== undefined) return { kind: 'value', value: supplied };
+      if (token === 'SCHEDULES_FILE' && opts.host === 'openclaw') {
+        return { kind: 'value', value: BOOTSTRAP_TEMPLATES.find((t) => t.dest === canonical)!.openclawDest! };
+      }
+      return { kind: 'value', value: canonical };
     }
     const spec = bank.questions[token];
     if (!spec) return { kind: 'unresolved' };
@@ -227,9 +263,13 @@ export function renderWorkspace(workspaceDir: string, opts: RenderOptions = {}):
   }
 
   // Validate --only against the known dest list (typo protection).
-  const selected = BOOTSTRAP_TEMPLATES.filter((t) => !opts.only || opts.only.includes(t.dest));
+  const destFor = (t: (typeof BOOTSTRAP_TEMPLATES)[number]): string =>
+    !minimal && opts.host === 'openclaw' && t.openclawDest ? t.openclawDest : t.dest;
+  const selected = BOOTSTRAP_TEMPLATES.filter(
+    (t) => !opts.only || opts.only.includes(t.dest) || (t.openclawDest !== undefined && opts.only.includes(t.openclawDest)),
+  );
   if (opts.only) {
-    const known = new Set(BOOTSTRAP_TEMPLATES.map((t) => t.dest));
+    const known = new Set(BOOTSTRAP_TEMPLATES.flatMap((t) => (t.openclawDest ? [t.dest, t.openclawDest] : [t.dest])));
     const unknown = opts.only.filter((o) => !known.has(o));
     if (unknown.length > 0) {
       throw new BootstrapRenderError(
@@ -278,7 +318,7 @@ export function renderWorkspace(workspaceDir: string, opts: RenderOptions = {}):
       const token = m[1]!;
       if (!placeholders.has(token)) unresolved.add(token);
     }
-    rendered.push({ dest: t.dest, content: collapseBlankLines(out) });
+    rendered.push({ dest: destFor(t), content: collapseBlankLines(out) });
   }
 
   if (unresolved.size > 0) {

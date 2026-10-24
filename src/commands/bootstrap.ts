@@ -50,7 +50,7 @@ import {
   readInterviewState,
   routeProviderKeyToConfig,
 } from '../core/bootstrap/interview.ts';
-import { renderWorkspace, BootstrapRenderError } from '../core/bootstrap/render.ts';
+import { renderWorkspace, BootstrapRenderError, detectOpenClawWorkspace } from '../core/bootstrap/render.ts';
 import { acquireBootstrapLock, BootstrapError } from '../core/bootstrap/lock.ts';
 import { createPrivateRepo, defaultRunner, type ExecRunner, type RepoReceipt } from '../core/bootstrap/repo.ts';
 import { attachWorkspace } from '../core/bootstrap/attach.ts';
@@ -123,9 +123,11 @@ Subcommands (run \`gbrain bootstrap status\` first — it is the resume entrypoi
             --status              Gate: exits nonzero until required answers exist.
             --show                Read-back payload (all answers + confirm hash).
             --confirm <hash>      Record the human's confirmation of the read-back.
-  render [--force] [--only F] [--minimal]
+  render [--force] [--only F] [--minimal] [--host openclaw|generic]
                                   Render identity files from the confirmed answers.
-                                  Never clobbers; --force backs up first.
+                                  Never clobbers; --force backs up first. In an
+                                  OpenClaw workspace (detected, or --host openclaw)
+                                  the due-job list renders as SCHEDULES.md.
   contract [--repair]             Audit the same-turn GBrain write-back contract.
                                   --repair appends it additively and backs up AGENTS.md.
   hooks [--harness claude-code|codex|opencode] [--repair] [--no-hooks] [--gbrain-bin <path>]
@@ -888,6 +890,12 @@ async function runRender(ws: string, rest: string[], home: string): Promise<numb
   const force = rest.includes('--force');
   const minimal = rest.includes('--minimal');
   const only = flagValues(rest, '--only');
+  const hostFlag = flagValue(rest, '--host');
+  if (hostFlag !== undefined && hostFlag !== 'openclaw' && hostFlag !== 'generic') {
+    console.error(`unknown --host '${hostFlag}' — pass --host openclaw or --host generic`);
+    return 2;
+  }
+  const host = hostFlag === 'openclaw' || (hostFlag === undefined && !minimal && detectOpenClawWorkspace(ws)) ? 'openclaw' : undefined;
 
   // Public-origin gate [FIX6]: identity files (SOUL.md/USER.md/…) must NEVER
   // land in a public repo. `bootstrap status` enforces this for the template
@@ -964,11 +972,19 @@ async function runRender(ws: string, rest: string[], home: string): Promise<numb
       minimal,
       derived,
       createdBy: `gbrain@${VERSION}`,
+      ...(host ? { host } : {}),
     });
 
     if (only.length === 0 && !minimal) writeRenderReceipt(home, ws);
     abortIfInjected('render');
 
+    if (host) {
+      console.log(
+        'OpenClaw workspace: the due-job list renders as SCHEDULES.md, and AGENTS.md points there. OpenClaw 2026.10.6+ ' +
+          'retired HEARTBEAT.md, and its doctor migration imports and removes any workspace file by that name. ' +
+          'Pass --host generic to keep HEARTBEAT.md.',
+      );
+    }
     console.log(`rendered: ${res.written.join(', ') || '(nothing new)'}`);
     if (res.skipped.length > 0) console.log(`kept (already present — use --force to overwrite): ${res.skipped.join(', ')}`);
     if (res.backups.length > 0) console.log(`backups: ${res.backups.join(', ')}`);
