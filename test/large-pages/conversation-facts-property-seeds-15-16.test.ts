@@ -1,7 +1,7 @@
 /**
- * Seeded property test of the conversation facts deletion invariant, PGLite arm, seeds 28 to 30 (PR 4 lane 4b round 5).
+ * Seeded property test of the conversation facts deletion invariant, PGLite arm, seeds 15 to 16 (PR 4 lane 4b round 5).
  * Cases and seed ranges: test/helpers/conversation-facts-property-cases.ts. Postgres arm:
- * test/e2e/conversation-facts-property-seeds-28-30-postgres.test.ts.
+ * test/e2e/conversation-facts-property-seeds-15-16-postgres.test.ts.
  */
 import { afterAll, beforeAll, describe } from 'bun:test';
 import { openAppendBrain, type AppendBrain } from '../helpers/append-brain.ts';
@@ -13,6 +13,6 @@ let fresh: AppendBrain;
 beforeAll(async () => { brain = await openAppendBrain('pglite'); fresh = await openAppendBrain('pglite'); }, 120_000);
 afterAll(async () => { await brain.close(); await fresh.close(); }, 120_000);
 
-describe('conversation facts deletion invariant, seeds 28 to 30 [pglite]', () => {
-  defineConversationFactsPropertyCases({ getBrain: () => brain, getFresh: () => fresh, first: 28 });
+describe('conversation facts deletion invariant, seeds 15 to 16 [pglite]', () => {
+  defineConversationFactsPropertyCases({ getBrain: () => brain, getFresh: () => fresh, first: 15 });
 });
