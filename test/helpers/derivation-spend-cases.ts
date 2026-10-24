@@ -1,7 +1,7 @@
 /**
  * Paid derivations on a segmented page under their spend caps (wave-b spec 8.2, 8.3; PR 4 lane 4b round 2), shared by
- * the PGLite arm (test/large-pages/conversation-facts-incremental.test.ts) and the Postgres arm
- * (test/e2e/conversation-facts-incremental-postgres.test.ts). Fake extractors and fake chat transports only.
+ * the PGLite arm (test/large-pages/conversation-facts-incremental-core.test.ts) and the Postgres arm
+ * (test/e2e/conversation-facts-incremental-core-postgres.test.ts). Fake extractors and fake chat transports only.
  *
  * 1. Protects: a window that throws after the provider answered is booked and the windows finished before it keep their
  *    facts and rows; an abort partway through a page keeps the finished windows; a facts call reserves every attempt

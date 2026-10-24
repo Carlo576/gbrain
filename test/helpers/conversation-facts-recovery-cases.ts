@@ -1,7 +1,7 @@
 /**
  * Conversation facts on a segmented page when things go wrong (wave-b spec 8.2, 8.3; PR 4 lane 4b round 3), shared by
- * the PGLite arm (test/large-pages/conversation-facts-incremental.test.ts) and the Postgres arm
- * (test/e2e/conversation-facts-incremental-postgres.test.ts). Fake extractors only; appends go through the remote
+ * the PGLite arms (test/large-pages/conversation-facts-incremental-{recovery,page-change}.test.ts) and the Postgres arms
+ * (test/e2e/conversation-facts-incremental-{recovery,page-change}-postgres.test.ts). Fake extractors only; appends go through the remote
  * append_page operation (remote=true).
  *
  * 1. Protects: a partial run on a transcript without per-message times (every message at the page date) clears only
@@ -59,6 +59,7 @@ const terminalStamps = async (engine: BrainEngine, slug: string) => {
     [slug, TERMINAL_AUDIT_SOURCE, outcomeSession(TERMINAL_AUDIT_SOURCE, slug, regularPageVersionToken(page!))]))[0]!.n);
 };
 
+/** Partial runs, failed checkpoint writes and failing windows: what a run keeps when a window or the provider fails. */
 export function defineConversationFactsRecoveryCases(opts: { getBrain: () => AppendBrain }): void {
   test('a partial run on a transcript without message times deletes nothing: the window it extracted is added beside the old facts', async () => {
     const brain = opts.getBrain();
@@ -179,6 +180,63 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
     expect({ calls: forced.calls, receipts: (await derivations(brain.engine, slug)).receipts.filter(Boolean) }).toEqual({ calls: [stuck!], receipts: [] });
   }, 600_000);
 
+  test('provider-wide failures (an auth error, a 503) never count against a window: it is never marked failed and extracts once the provider recovers', async () => {
+    const brain = opts.getBrain();
+    await caps(brain.engine, 'off');
+    await brain.engine.setConfig('facts.extraction_model', PAID_MODEL);
+    try {
+      for (const [label, failure] of [['auth', () => Object.assign(new Error('invalid x-api-key'), { status: 401 })], ['503', () => Object.assign(new Error('upstream unavailable'), { status: 503 })]] as const) {
+        const slug = `notes/provider-down-${label}-${randomUUID().slice(0, 8)}`;
+        await brain.seed(slug, chatPage('Provider down', chatDays(3600, 100, 25)));
+        let attempts = 0;
+        __setChatTransportForTests(async () => { attempts++; throw failure(); });
+        const runs: Array<{ attempts: number; failed: number }> = [];
+        for (let run = 0; run < WINDOW_FAILURE_LIMIT + 2; run++) {
+          attempts = 0;
+          const result = await extractProductionRun(brain.engine, slug);
+          runs.push({ attempts, failed: result.pages_failed });
+        }
+        const receipts = (await derivations(brain.engine, slug)).receipts.filter(Boolean).map(r => (r as { kind: string }).kind);
+        __setChatTransportForTests(paidTransport);
+        const recovered = await extractProductionRun(brain.engine, slug);
+        const rows = await derivations(brain.engine, slug);
+        expect({ label, runs, receipts, recovered: recovered.pages_failed, states: [...new Set(rows.states)], failedWindows: rows.receipts.filter(r => (r as { kind?: string } | null)?.kind === 'failed_windows').length }).toEqual({
+          label, runs: Array.from({ length: WINDOW_FAILURE_LIMIT + 2 }, () => ({ attempts: 1, failed: 1 })), receipts: ['unread_windows'], recovered: 0, states: ['done'], failedWindows: 0 });
+      }
+    } finally {
+      __setChatTransportForTests(null);
+      await brain.engine.setConfig('facts.extraction_model', '');
+    }
+  }, 600_000);
+
+  test('a window marked failed blocks collection across two context changes: every earlier fact stands until a --force run extracts it', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/failed-keeps-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    await brain.seed(slug, chatPage('Keeps T1', chatDays(3700, 100, 26)));
+    await extract(brain.engine, slug);
+    const before = await factsOf(brain.engine, slug);
+    const survivors = (facts: Awaited<ReturnType<typeof factsOf>>) => before.filter(f => facts.some(s => s.id === f.id)).length;
+    const stuck: string[] = [];
+    for (const title of ['Keeps T2', 'Keeps, a third and longer title']) {
+      await brain.seed(slug, chatPage(title, (await brain.body(slug)).truth));
+      let first = null as string | null;
+      const failOn = (text: string) => { first ??= text; return text === first; };
+      for (let run = 1; run <= WINDOW_FAILURE_LIMIT; run++) await extract(brain.engine, slug, { failOn });
+      stuck.push(first!);
+      const facts = await factsOf(brain.engine, slug);
+      expect({ title, survivors: survivors(facts), stamped: await terminalStamps(brain.engine, slug) }).toEqual({ title, survivors: before.length, stamped: 1 });
+    }
+    const forced = await extract(brain.engine, slug, { force: true });
+    const after = await factsOf(brain.engine, slug);
+    const rows = await derivations(brain.engine, slug);
+    expect({ calls: forced.calls, facts: after.length, survivors: survivors(after), anchored: after.every(f => rows.keys.includes(f.key)) })
+      .toEqual({ calls: [stuck[1]!], facts: rows.keys.length, survivors: 0, anchored: true });
+  }, 600_000);
+}
+
+/** A page that changes shape: oversized turns under a new title, another chat format, prose, and a private transcript. */
+export function defineConversationFactsPageChangeCases(opts: { getBrain: () => AppendBrain }): void {
   test('a one-window run on a page of oversized turns after a title of another length deletes nothing (piece numbers move with the title)', async () => {
     const brain = opts.getBrain();
     const slug = `notes/oversized-turns-${randomUUID().slice(0, 8)}`;
@@ -238,60 +296,6 @@ export function defineConversationFactsRecoveryCases(opts: { getBrain: () => App
     const check = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
     const groups = ((check.details as { groups?: Array<{ pipeline: string; kind: string; samples: string[] }> } | undefined)?.groups ?? []);
     expect(groups.some(g => g.kind === 'no_messages' && g.samples.includes(`default:${slug}`))).toBe(false);
-  }, 600_000);
-
-  test('provider-wide failures (an auth error, a 503) never count against a window: it is never marked failed and extracts once the provider recovers', async () => {
-    const brain = opts.getBrain();
-    await caps(brain.engine, 'off');
-    await brain.engine.setConfig('facts.extraction_model', PAID_MODEL);
-    try {
-      for (const [label, failure] of [['auth', () => Object.assign(new Error('invalid x-api-key'), { status: 401 })], ['503', () => Object.assign(new Error('upstream unavailable'), { status: 503 })]] as const) {
-        const slug = `notes/provider-down-${label}-${randomUUID().slice(0, 8)}`;
-        await brain.seed(slug, chatPage('Provider down', chatDays(3600, 100, 25)));
-        let attempts = 0;
-        __setChatTransportForTests(async () => { attempts++; throw failure(); });
-        const runs: Array<{ attempts: number; failed: number }> = [];
-        for (let run = 0; run < WINDOW_FAILURE_LIMIT + 2; run++) {
-          attempts = 0;
-          const result = await extractProductionRun(brain.engine, slug);
-          runs.push({ attempts, failed: result.pages_failed });
-        }
-        const receipts = (await derivations(brain.engine, slug)).receipts.filter(Boolean).map(r => (r as { kind: string }).kind);
-        __setChatTransportForTests(paidTransport);
-        const recovered = await extractProductionRun(brain.engine, slug);
-        const rows = await derivations(brain.engine, slug);
-        expect({ label, runs, receipts, recovered: recovered.pages_failed, states: [...new Set(rows.states)], failedWindows: rows.receipts.filter(r => (r as { kind?: string } | null)?.kind === 'failed_windows').length }).toEqual({
-          label, runs: Array.from({ length: WINDOW_FAILURE_LIMIT + 2 }, () => ({ attempts: 1, failed: 1 })), receipts: ['unread_windows'], recovered: 0, states: ['done'], failedWindows: 0 });
-      }
-    } finally {
-      __setChatTransportForTests(null);
-      await brain.engine.setConfig('facts.extraction_model', '');
-    }
-  }, 600_000);
-
-  test('a window marked failed blocks collection across two context changes: every earlier fact stands until a --force run extracts it', async () => {
-    const brain = opts.getBrain();
-    const slug = `notes/failed-keeps-${randomUUID().slice(0, 8)}`;
-    await caps(brain.engine, 'off');
-    await brain.seed(slug, chatPage('Keeps T1', chatDays(3700, 100, 26)));
-    await extract(brain.engine, slug);
-    const before = await factsOf(brain.engine, slug);
-    const survivors = (facts: Awaited<ReturnType<typeof factsOf>>) => before.filter(f => facts.some(s => s.id === f.id)).length;
-    const stuck: string[] = [];
-    for (const title of ['Keeps T2', 'Keeps, a third and longer title']) {
-      await brain.seed(slug, chatPage(title, (await brain.body(slug)).truth));
-      let first = null as string | null;
-      const failOn = (text: string) => { first ??= text; return text === first; };
-      for (let run = 1; run <= WINDOW_FAILURE_LIMIT; run++) await extract(brain.engine, slug, { failOn });
-      stuck.push(first!);
-      const facts = await factsOf(brain.engine, slug);
-      expect({ title, survivors: survivors(facts), stamped: await terminalStamps(brain.engine, slug) }).toEqual({ title, survivors: before.length, stamped: 1 });
-    }
-    const forced = await extract(brain.engine, slug, { force: true });
-    const after = await factsOf(brain.engine, slug);
-    const rows = await derivations(brain.engine, slug);
-    expect({ calls: forced.calls, facts: after.length, survivors: survivors(after), anchored: after.every(f => rows.keys.includes(f.key)) })
-      .toEqual({ calls: [stuck[1]!], facts: rows.keys.length, survivors: 0, anchored: true });
   }, 600_000);
 
   test('facts from a private segmented transcript stay private on a world-default brain, on the import run and on the incremental run after an append', async () => {
