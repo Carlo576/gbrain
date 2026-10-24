@@ -229,10 +229,10 @@ UNCONFIGURE_CODE_SCAN='
   END { if (calls != "" && !restored) printf "%s", calls }
 '
 # R9: installer pattern|restorer name, one pair per line.
-PAIRED_RULES='installOutputCapture[[:space:]]*\(|startCliSocketServer[[:space:]]*\(|_uninstallOutputCaptureForTests
-redirectStdoutLoggingToStderr[[:space:]]*\(|_resetStdoutRedirectForTests[[:space:]]*\(|_resetStdoutRedirectForTests
-installSigchldHandler[[:space:]]*\(|_uninstallSigchldHandlerForTests'
-PAIRED_PATTERN='installOutputCapture[[:space:]]*\(|startCliSocketServer[[:space:]]*\(|redirectStdoutLoggingToStderr[[:space:]]*\(|_resetStdoutRedirectForTests[[:space:]]*\(|installSigchldHandler[[:space:]]*\('
+PAIRED_RULES='installOutputCapture[[:space:]]*[(]|startCliSocketServer[[:space:]]*[(]|_uninstallOutputCaptureForTests
+redirectStdoutLoggingToStderr[[:space:]]*[(]|_resetStdoutRedirectForTests[[:space:]]*[(]|_resetStdoutRedirectForTests
+installSigchldHandler[[:space:]]*[(]|_uninstallSigchldHandlerForTests'
+PAIRED_PATTERN='installOutputCapture[[:space:]]*[(]|startCliSocketServer[[:space:]]*[(]|redirectStdoutLoggingToStderr[[:space:]]*[(]|_resetStdoutRedirectForTests[[:space:]]*[(]|installSigchldHandler[[:space:]]*[(]'
 # R9: same comment removal and after-hook tracking as UNCONFIGURE_CODE_SCAN,
 # with the installer pattern in trig and the restorer name in rest.
 PAIRED_CODE_SCAN='
@@ -249,12 +249,12 @@ PAIRED_CODE_SCAN='
     code = $0
     sub(/(^|[[:space:];,(){}])\/\/.*$/, "", code)
     opens = gsub(/\{/, "{", code); closes = gsub(/\}/, "}", code)
-    if (in_after) { depth += opens - closes; if (code ~ rest) restored = 1; if (depth <= 0) in_after = 0; next }
+    if (in_after) { depth += opens - closes; if (code ~ ENVIRON["REST"]) restored = 1; if (depth <= 0) in_after = 0; next }
     if (code ~ /after(Each|All)[[:space:]]*\(/) {
-      if (code ~ rest) restored = 1
+      if (code ~ ENVIRON["REST"]) restored = 1
       depth = opens - closes; if (depth > 0) in_after = 1; next
     }
-    if (code ~ trig && code !~ /import/) calls = calls NR ":" $0 "\n"
+    if (code ~ ENVIRON["TRIG"] && code !~ /import/) calls = calls NR ":" $0 "\n"
   }
   END { if (calls != "" && !restored) printf "%s", calls }
 '
@@ -357,7 +357,7 @@ while IFS= read -r f; do
     while IFS= read -r pair; do
       trig="${pair%|*}"; rest="${pair##*|}"
       grep -qE "$trig" "$f" 2>/dev/null || continue
-      unrestored=$(awk -v trig="$trig" -v rest="$rest" "$PAIRED_CODE_SCAN" "$f" 2>/dev/null || true)
+      unrestored=$(TRIG="$trig" REST="$rest" awk "$PAIRED_CODE_SCAN" "$f" 2>/dev/null || true)
       if [ -n "$unrestored" ]; then
         emit_violation "$f" "R9" "process-global hook installed with no $rest() in an afterEach/afterAll hook; it stays installed for every later file in the shard. Add afterEach(() => $rest()) or rename to *.serial.test.ts" "$unrestored"
       fi
