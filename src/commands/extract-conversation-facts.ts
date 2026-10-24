@@ -78,7 +78,7 @@ import {
 import { configureGatewayIfUninitialized, isAvailable, withBudgetTracker } from '../core/ai/gateway.ts';
 import { writeDerivedFacts } from '../core/persistence/derived-facts.ts';
 import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
-import { countConversationFacts, enqueueManagedPage, flushManagedBatch, managedConversationPublisher, publishConversationFacts, startManagedPage, stopsRun, type ConversationScope, type ManagedConversationPublisher } from '../core/facts/conversation-publication.ts';
+import { countConversationFacts, enqueueManagedPage, flushManagedBatch, managedConversationPublisher, notePurgedSkips, publishConversationFacts, startManagedPage, stopsRun, type ConversationScope, type ManagedConversationPublisher } from '../core/facts/conversation-publication.ts';
 import { ConversationRunClaims, listConversationPagesBySlug } from '../core/facts/conversation-enumeration.ts';
 import { BudgetTracker, BudgetExhausted, loadPricingOverrides, type BudgetReason, type NoPricingGuidance } from '../core/budget/budget-tracker.ts';
 import { noPricingMessage } from '../core/budget/no-pricing.ts';
@@ -1138,10 +1138,7 @@ async function processPage(
   state.result.facts_inserted += published.facts_inserted;
   state.result.orphan_facts_cleaned += published.deleted;
   if (published.duplicates_skipped) process.stderr.write(`[extract-conversation-facts] ${page.slug}: skipped ${published.duplicates_skipped} fact(s) an active fact of the source already states (#7043)\n`);
-  if (published.purged_skipped) {
-    state.result.facts_skipped_purged = (state.result.facts_skipped_purged ?? 0) + published.purged_skipped;
-    process.stderr.write(`[extract-conversation-facts] ${page.slug}: left out ${published.purged_skipped} extracted fact(s) that match a purge tombstone (#7438)\n`);
-  }
+  notePurgedSkips(state.result, page.slug, published.purged_skipped);
   if (published.facts_inserted + published.duplicates_skipped + published.purged_skipped < pageRows.filter(row => row.source !== TERMINAL_AUDIT_SOURCE).length) {
     process.stderr.write(`[extract-conversation-facts] ${page.slug}: kept its prior facts; this ${scope} run's facts were not published over them (#7013)\n`);
   }

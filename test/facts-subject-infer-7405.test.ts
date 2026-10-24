@@ -72,6 +72,9 @@ const CASES: Array<{ id: string; fact: string; expect: string | null }> = [
   { id: 'including-not-introducing', fact: 'Has notes including weekly sync items that belong to Alice Example', expect: ALICE },
   { id: 'example-literal', fact: 'Has research notes including concepts/automation-example', expect: null },
   { id: 'currency-without-amount', fact: 'CHF billed Alice Example CHF 80', expect: null },
+  { id: 'currency-after-date', fact: 'On 2025-01-01 CHF billed Alice Example', expect: null },
+  { id: 'currency-before-date', fact: 'Alice Example met CHF 2025-01-01', expect: null },
+  { id: 'amount-with-separators', fact: 'Alice Example paid CHF 1,250.50 for gardening', expect: ALICE },
   { id: 'label-mid-sentence', fact: 'Alice Example joined Work Example last year', expect: null },
   { id: 'subject-also-named-as-example', fact: 'concepts/automation-example lists 17 documents including concepts/automation-example notes', expect: 'concepts/automation-example' },
 ];

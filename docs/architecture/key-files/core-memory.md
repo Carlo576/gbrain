@@ -54,7 +54,8 @@ notice). User guide: [core memory](../../guides/core-memory.md).
 - `src/core/remember-batch.ts`: `remember` with `items[]` (all-or-none
   validation, deterministic child request ids, per-item status; #7248: an
   item still publishing is `pending` with its `target`, not `failed`; #7432:
-  a top-level `entity` is the default subject of every item that sets none).
+  every item field but `fact` and `replaces`, `entity`, `content_origin` and
+  `valid_from` included, is also a top-level default an item's own value overrides).
 - `src/commands/core.ts` (`gbrain core`), `src/commands/doctor/checks/core-memory.ts`
   (`core_memory`), schema `src/core/core-memory-schema.ts` + migration v213.
 - Tests: `test/core-memory.test.ts`, `test/core-guard.test.ts`,

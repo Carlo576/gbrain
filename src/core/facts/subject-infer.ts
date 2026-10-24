@@ -189,18 +189,27 @@ function isNonName(query: string): boolean {
   return isCommonCapitalizedWord(query) || ROLE_AND_TERM_TOKENS.has(query.toLowerCase());
 }
 
-/** Every whole-word use of `query` in the fact, case-insensitive. */
-function referenceUses(fact: string, query: string): RegExpMatchArray[] {
-  const literal = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return [...fact.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_/-])${literal}(?![\\p{L}\\p{N}_/-])`, 'giu'))];
+const WORD_CHAR = /[\p{L}\p{N}_/-]/u;
+/** The start offsets of every whole-word use of `query` in the fact, case-insensitive. */
+function referenceUses(fact: string, query: string): number[] {
+  const haystack = fact.toLowerCase(), needle = query.toLowerCase(), starts: number[] = [];
+  if (!needle || haystack.length !== fact.length) return starts;
+  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
+    if (!WORD_CHAR.test(fact.charAt(at - 1)) && !WORD_CHAR.test(fact.charAt(at + needle.length))) starts.push(at);
+  }
+  return starts;
 }
 
-/** #7405: a currency code is a unit only when every use is next to an amount; resolution runs first, so a page named CHF still competes. */
+/**
+ * #7405: a currency code is a unit only when every use is next to an amount ("CHF 80", "80 CHF"), never a date or time
+ * ("2025-01-01 CHF"); resolution runs first, so a page named CHF still competes.
+ */
+const AMOUNT_AFTER = /^\s*\d[\d,.']*(?![\d/:-])/u;
+const AMOUNT_BEFORE = /(?:^|[^\d,.'/:-])\d[\d,.']*\s*$/u;
 function isAmountUnit(fact: string, query: string): boolean {
   if (!CURRENCY_CODES.has(query)) return false;
   const uses = referenceUses(fact, query);
-  return uses.length > 0 && uses.every(m =>
-    /^\s*\d/u.test(fact.slice(m.index! + m[0].length)) || /\d\s*$/u.test(fact.slice(0, m.index)));
+  return uses.length > 0 && uses.every(at => AMOUNT_AFTER.test(fact.slice(at + query.length)) || AMOUNT_BEFORE.test(fact.slice(0, at)));
 }
 
 /**
@@ -211,7 +220,7 @@ function isAmountUnit(fact: string, query: string): boolean {
 const EXAMPLE_LIST_LEAD = /(?:^|[^\p{L}])(?:[Ii]ncluding|[Ss]uch as|[Ff]or example|[Ff]or instance|[Ee]\.g\.)[,:]?\s+(?:\p{Lu}[\p{L}\p{N}'’./-]*(?:\s+\p{Lu}[\p{L}\p{N}'’./-]*)*\s*(?:,\s*(?:and\s+|or\s+)?|\s+(?:and|or)\s+))*$/u;
 function onlyExampleUses(fact: string, query: string): boolean {
   const uses = referenceUses(fact, query);
-  return uses.length > 0 && uses.every(m => EXAMPLE_LIST_LEAD.test(fact.slice(0, m.index)));
+  return uses.length > 0 && uses.every(at => EXAMPLE_LIST_LEAD.test(fact.slice(0, at)));
 }
 
 async function liveFactEntityPage(engine: BrainEngine, sourceId: string, slug: string, excludePrivate?: boolean): Promise<string | null> {

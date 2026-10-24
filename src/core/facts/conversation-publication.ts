@@ -795,14 +795,18 @@ async function enqueueEntry(state: ManagedRunState, entry: ConversationPageEntry
   if (m.batch.length >= batchCaps.pages || factPages >= batchCaps.factPages || m.bytes >= cap) await flushManagedBatch(state);
 }
 
+/** #7438: counts and logs a page's extracted claims left out because they match a purge tombstone. */
+export function notePurgedSkips(counters: { facts_skipped_purged?: number }, slug: string, skipped: number): void {
+  if (!skipped) return;
+  counters.facts_skipped_purged = (counters.facts_skipped_purged ?? 0) + skipped;
+  log(`${slug}: left out ${skipped} extracted fact(s) that match a purge tombstone (#7438)`);
+}
+
 /** Books one member's committed-batch result into the run's counters. */
 function bookPage(state: ManagedRunState, result: ConversationPageResult): void {
   state.result.orphan_facts_cleaned += Number(result.deleted ?? 0);
   state.result.facts_inserted += Number(result.facts_inserted ?? 0);
-  if (result.facts_skipped_purged) {
-    state.result.facts_skipped_purged = (state.result.facts_skipped_purged ?? 0) + result.facts_skipped_purged;
-    log(`${result.slug}: left out ${result.facts_skipped_purged} extracted fact(s) that match a purge tombstone (#7438)`);
-  }
+  notePurgedSkips(state.result, result.slug, result.facts_skipped_purged ?? 0);
   if (result.status === 'skipped') {
     state.result.pages_failed++;
     log(`${result.slug} changed during extraction (${result.reason}); its prior facts were kept and it stays unfinished for the next run`);

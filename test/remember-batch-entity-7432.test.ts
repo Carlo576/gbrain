@@ -67,5 +67,25 @@ for (const backend of testBackends()) {
         'SELECT fact, entity_slug FROM facts WHERE expired_at IS NULL ORDER BY id');
       expect(rows.map(row => row.entity_slug)).toEqual([SHARED, SHARED, OWN]);
     }, 120_000);
+
+    for (const remote of [false, true]) {
+      test(`content_origin and valid_from reach every item as they reach a single fact (remote=${remote})`, async () => {
+        const ctx = { engine, config: {}, logger: { info() {}, warn() {}, error() {} }, dryRun: false, remote, sourceId: 'default' } as unknown as OperationContext;
+        const fact = (text: string) => engine.executeRaw<{ trust_tier: string; valid_from: string }>(
+          'SELECT trust_tier, valid_from::text AS valid_from FROM facts WHERE fact=$1 AND expired_at IS NULL', [text]);
+        await operationsByName.remember!.handler(ctx, { fact: `Single synthetic tool claim ${remote}.`, entity: SHARED, provenance: 'synthetic tool',
+          content_origin: 'tool_output', valid_from: '2026-03-01' });
+        const [single] = await fact(`Single synthetic tool claim ${remote}.`);
+        expect(single!.trust_tier).toBe('external_untrusted');
+        const out = await operationsByName.remember!.handler(ctx, { entity: SHARED, provenance: 'synthetic tool', content_origin: 'tool_output', valid_from: '2026-03-01',
+          items: [`Batched synthetic tool claim ${remote}.`, { fact: `Per-item synthetic tool claim ${remote}.`, content_origin: 'tool_output', valid_from: '2026-03-02', entity: OWN }] }) as { failed: number };
+        expect(out.failed).toBe(0);
+        const [batched] = await fact(`Batched synthetic tool claim ${remote}.`);
+        const [perItem] = await fact(`Per-item synthetic tool claim ${remote}.`);
+        expect(batched).toEqual(single);
+        expect(perItem!.trust_tier).toBe('external_untrusted');
+        expect(perItem!.valid_from.startsWith('2026-03-02')).toBe(true);
+      }, 120_000);
+    }
   });
 }
