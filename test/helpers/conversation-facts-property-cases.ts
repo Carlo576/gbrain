@@ -167,16 +167,18 @@ function heldOracle(checked: { problems: string[]; after: Fact[]; fired: Set<Pro
 /**
  * The seed ranges, one per arm file, together exactly 1..PROPERTY_SEEDS, and the steps each range's seeds must exercise
  * per path: half, rounded up, of the steps they exercise (the same on both engines; the 30 seeds exercise 206, 153, 47,
- * 153, 27, 23, 24, 18, 24). A range whose seeds never reach a path has floor 0 for it.
+ * 153, 27, 23, 24, 18, 24), raised where needed so each path's floors sum to at least the old 30-seed floor (moved 96,
+ * failed_window 82, marked_failed 23, collected 66, since 14, cap 10, grammar_lost 12, held_quoted 9,
+ * held_two_grammars 12). A range whose seeds never reach a path has floor 0 for it.
  */
 export const PROPERTY_PARTITIONS: ReadonlyArray<{ first: number; last: number; floors: Record<PropertyPath, number> }> = [
-  { first: 1, last: 3, floors: { moved: 12, failed_window: 9, marked_failed: 5, collected: 8, since: 0, cap: 1, grammar_lost: 2, held_quoted: 1, held_two_grammars: 3 } },
+  { first: 1, last: 3, floors: { moved: 12, failed_window: 10, marked_failed: 5, collected: 8, since: 0, cap: 1, grammar_lost: 2, held_quoted: 1, held_two_grammars: 3 } },
   { first: 4, last: 6, floors: { moved: 11, failed_window: 6, marked_failed: 3, collected: 8, since: 3, cap: 2, grammar_lost: 1, held_quoted: 1, held_two_grammars: 1 } },
   { first: 7, last: 9, floors: { moved: 11, failed_window: 7, marked_failed: 3, collected: 10, since: 1, cap: 1, grammar_lost: 3, held_quoted: 2, held_two_grammars: 0 } },
-  { first: 10, last: 12, floors: { moved: 9, failed_window: 10, marked_failed: 4, collected: 6, since: 1, cap: 1, grammar_lost: 1, held_quoted: 1, held_two_grammars: 2 } },
-  { first: 13, last: 15, floors: { moved: 10, failed_window: 8, marked_failed: 0, collected: 8, since: 2, cap: 1, grammar_lost: 2, held_quoted: 2, held_two_grammars: 2 } },
+  { first: 10, last: 12, floors: { moved: 9, failed_window: 11, marked_failed: 4, collected: 6, since: 1, cap: 1, grammar_lost: 1, held_quoted: 1, held_two_grammars: 2 } },
+  { first: 13, last: 15, floors: { moved: 10, failed_window: 9, marked_failed: 0, collected: 8, since: 2, cap: 1, grammar_lost: 2, held_quoted: 2, held_two_grammars: 2 } },
   { first: 16, last: 18, floors: { moved: 12, failed_window: 7, marked_failed: 3, collected: 9, since: 1, cap: 1, grammar_lost: 2, held_quoted: 2, held_two_grammars: 1 } },
-  { first: 19, last: 21, floors: { moved: 11, failed_window: 9, marked_failed: 1, collected: 7, since: 1, cap: 2, grammar_lost: 0, held_quoted: 0, held_two_grammars: 2 } },
+  { first: 19, last: 21, floors: { moved: 11, failed_window: 10, marked_failed: 1, collected: 7, since: 1, cap: 2, grammar_lost: 0, held_quoted: 0, held_two_grammars: 2 } },
   { first: 22, last: 24, floors: { moved: 9, failed_window: 8, marked_failed: 2, collected: 8, since: 2, cap: 2, grammar_lost: 0, held_quoted: 0, held_two_grammars: 1 } },
   { first: 25, last: 27, floors: { moved: 10, failed_window: 6, marked_failed: 3, collected: 9, since: 2, cap: 1, grammar_lost: 2, held_quoted: 2, held_two_grammars: 1 } },
   { first: 28, last: 30, floors: { moved: 11, failed_window: 8, marked_failed: 2, collected: 6, since: 2, cap: 2, grammar_lost: 1, held_quoted: 0, held_two_grammars: 1 } },
