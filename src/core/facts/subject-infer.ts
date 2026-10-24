@@ -105,7 +105,11 @@ const SENTENCE_OPENERS = new Set([
   'not', 'no', 'yes', 'after', 'before', 'during', 'since', 'until', 'while', 'per', 'via', 're', 'fyi', 'update', 'updated',
   'lunch', 'dinner', 'breakfast', 'coffee', 'drinks', 'call', 'sync', 'standup', 'interview', 'demo', 'pitch', 'board',
   'favorite', 'favourite', 'birthday', 'anniversary', 'allergic', 'vegetarian', 'vegan', 'lives', 'lived', 'works', 'worked',
+  'work', 'invoice', 'invoiced', 'billed', 'receipt', 'payment',
 ]);
+
+/** #7405: ISO 4217 codes; one counts as a unit (not a name) only where every use sits next to an amount ("CHF 80", "80 CHF"). */
+const CURRENCY_CODES = new Set(Intl.supportedValuesOf('currency'));
 
 /**
  * Slugs written verbatim in the fact text ("people/alice-example owns the checklist", "people/例子").
@@ -127,6 +131,7 @@ export async function inferFactSubject(engine: BrainEngine, sourceId: string, in
     ...extractCandidates(input.fact).filter(c => !c.weak).map(shedOpener),
   ];
   const resolved = new Set<string>();
+  const subjects = new Set<string>();
   const misses: Array<Exclude<StrictResolution, { slug: string }>['miss']> = [];
   let vetoed = false;
   const memo = new Map<string, StrictResolution>();
@@ -140,15 +145,18 @@ export async function inferFactSubject(engine: BrainEngine, sourceId: string, in
     }
     if (r.slug !== null) {
       resolved.add(r.slug);
+      if (!onlyExampleUses(input.fact, candidate.query)) subjects.add(r.slug);
       if (resolved.size >= DISTINCT_ENTITY_LIMIT) return { slug: null, reason: 'ambiguous', resolved: [...resolved] };
       continue;
     }
     misses.push(r.miss);
     // A name that is not an entity page (a meeting title) does not compete. A
-    // capitalized sentence opener with no page ("Met", "Raised") is no name
-    // evidence; anything else unresolved is a real competing reference.
+    // capitalized sentence opener ("Met", "Raised") or a currency code next to
+    // an amount with no page is no name evidence; anything else unresolved is
+    // a real competing reference.
     if (r.miss === 'not_entity') continue;
-    if (r.miss === 'no_page' && (isNonName(candidate.query) || (candidate.sentenceStart && SENTENCE_OPENERS.has(candidate.query.toLowerCase())))) continue;
+    if (r.miss === 'no_page' && (isNonName(candidate.query) || isAmountUnit(input.fact, candidate.query)
+      || (candidate.sentenceStart && SENTENCE_OPENERS.has(candidate.query.toLowerCase())))) continue;
     vetoed = true;
   }
 
@@ -157,7 +165,7 @@ export async function inferFactSubject(engine: BrainEngine, sourceId: string, in
     if (vetoed || (resolved.size === 1 && !resolved.has(page))) return { slug: null, reason: 'ambiguous', resolved: [...resolved] };
     return { slug: page, via: 'page' };
   }
-  if (resolved.size === 1 && !vetoed) return { slug: [...resolved][0]!, via: 'mention' };
+  if (subjects.size === 1 && !vetoed) return { slug: [...subjects][0]!, via: 'mention' };
   const miss = (reason: InferMissReason): InferResult => ({ slug: null, reason, resolved: [...resolved] });
   if (resolved.size > 0 || misses.includes('ambiguous')) return miss('ambiguous');
   if (misses.includes('unverified')) return miss('unverified_match');
@@ -174,6 +182,27 @@ function shedOpener<T extends { query: string }>(c: T): T {
 function isNonName(query: string): boolean {
   if (/\s/.test(query)) return false;
   return isCommonCapitalizedWord(query) || ROLE_AND_TERM_TOKENS.has(query.toLowerCase());
+}
+
+/** Every whole-word use of `query` in the fact, case-insensitive. */
+function referenceUses(fact: string, query: string): RegExpMatchArray[] {
+  const literal = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [...fact.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_/-])${literal}(?![\\p{L}\\p{N}_/-])`, 'giu'))];
+}
+
+/** #7405: a currency code is a unit only when every use is next to an amount; resolution runs first, so a page named CHF still competes. */
+function isAmountUnit(fact: string, query: string): boolean {
+  if (!CURRENCY_CODES.has(query)) return false;
+  const uses = referenceUses(fact, query);
+  return uses.length > 0 && uses.every(m =>
+    /^\s*\d/u.test(fact.slice(m.index! + m[0].length)) || /\d\s*$/u.test(fact.slice(0, m.index)));
+}
+
+/** #7405: an entity named only as an example ("... including Automation Example notes") resolves, but cannot be the subject. */
+function onlyExampleUses(fact: string, query: string): boolean {
+  const uses = referenceUses(fact, query);
+  return uses.length > 0 && uses.every(m =>
+    /\b(?:including|such as|for example|for instance|e\.g\.)\s+[^.!?;]*$/iu.test(fact.slice(0, m.index)));
 }
 
 async function liveFactEntityPage(engine: BrainEngine, sourceId: string, slug: string, excludePrivate?: boolean): Promise<string | null> {
