@@ -16,6 +16,7 @@
  * rare words their page holds, then in retry order. With no rare word, or
  * when the read fails, the retry's rows are returned unchanged.
  */
+import { chunkVisibleFilter } from './safe-chunks.ts';
 import { orFallbackTokens } from './sql-ranking.ts';
 
 /** OR retries of at most this many words rank rare words first (this module and the title arm's rankByRarity). */
@@ -27,8 +28,8 @@ export const RARE_TERM_CHUNK_CAP = 400;
 /** Per word (`$1` text[]), the distinct pages of its first `$2` + 1 matching text chunks and that chunk count. */
 export function rareTermPagesSql(ftsLang: string): string {
   return `SELECT u.term,
-      (SELECT count(*) FROM (SELECT 1 FROM content_chunks cc WHERE cc.search_vector @@ websearch_to_tsquery('${ftsLang}', u.term) AND cc.modality = 'text' LIMIT $2::int + 1) m)::int AS chunks,
-      ARRAY(SELECT DISTINCT m.page_id FROM (SELECT cc.page_id FROM content_chunks cc WHERE cc.search_vector @@ websearch_to_tsquery('${ftsLang}', u.term) AND cc.modality = 'text' LIMIT $2::int + 1) m) AS page_ids
+      (SELECT count(*) FROM (SELECT 1 FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.search_vector @@ websearch_to_tsquery('${ftsLang}', u.term) AND cc.modality = 'text' AND ${chunkVisibleFilter('p', 'cc')} LIMIT $2::int + 1) m)::int AS chunks,
+      ARRAY(SELECT DISTINCT m.page_id FROM (SELECT cc.page_id FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE cc.search_vector @@ websearch_to_tsquery('${ftsLang}', u.term) AND cc.modality = 'text' AND ${chunkVisibleFilter('p', 'cc')} LIMIT $2::int + 1) m) AS page_ids
     FROM unnest($1::text[]) WITH ORDINALITY AS u(term, ord)
     ORDER BY u.ord`;
 }

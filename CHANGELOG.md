@@ -12,13 +12,13 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.434.0] - 2026-10-24
 
-**Agents triaging email or calendar can now ask whether a sender or attendee is a known contact and get an exact answer: `gbrain whois <email or name>` (MCP tool `whois`) returns only pages whose email, title or declared alias equals the query, and an empty list when none does.**
+**Keyword search now finds the page holding a rare query word when no page holds every word, and agents triaging email or calendar can ask whether a sender or attendee is a known contact and get an exact answer: `gbrain whois <email or name>` (MCP tool `whois`) returns only pages whose email, title or declared alias equals the query, and an empty list when none does.**
 
 Semantic search can rank the wrong person first for a name or address, and `gbrain entity` resolves fuzzy name variants on purpose. `whois` never does either.
 
 **Say to your agent:** *"Is alice@acme-example.com a known contact in my brain?"*
 
-### What changed
+### Exact identity lookup
 
 | Situation | Before | Now |
 |---|---|---|
@@ -26,6 +26,12 @@ Semantic search can rank the wrong person first for a name or address, and `gbra
 | Checking a display name | search, or `entity`, which accepts nicknames, initials and one-letter typos | `whois "José Example"` matches a title or declared alias equal to the name, ignoring case, accents, width forms and surrounding quotes; "Jose Example" finds "José Example", "Matt Example" never finds "Matthew Example" |
 | Two pages carry the same name or address | the agent saw whichever ranked first | every match is returned, labeled `email`, `title` or `alias` (in that order), with `ambiguous: true` |
 | No page matches | an unrelated nearest result | `matches: []`, not an error and never a search fallback |
+
+### Keyword search with a rare word
+
+| Situation | Before | Now |
+|---|---|---|
+| A keyword search of up to four words where no page holds every word, on a brain where one word is common ("Acme Quokka" over many Acme notes) | the any-word retry ranked pages that repeat the common word first, so the one page holding the rare word could fall past the result limit | pages holding the rarest query words come first, then the rest in their usual order; the strict all-words search, and queries of five or more words, are unchanged |
 
 ### What to watch for after you upgrade
 
