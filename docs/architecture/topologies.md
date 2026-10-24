@@ -208,11 +208,12 @@ Three storage paths in priority order:
 3. macOS Keychain integration is not supported (roadmap item).
 
 The access token the thin client mints is cached in
-`~/.gbrain/remote-token-cache.json` (0600, bearer and expiry only, no secret)
-and reused by every `gbrain` command until 30 seconds before it expires, so a
+`~/.gbrain/remote-tokens/` (one 0600 file per client, bearer and expiry only,
+no secret) and reused by every `gbrain` command until 30 seconds before it expires, so a
 per-prompt hook mints about one token per token lifetime instead of one per
 command. Changing the client id or secret starts a fresh token; deleting the
-file is always safe. The host still checks each request against the client's
+directory is always safe. Processes that start together with no cached token
+each mint one. The host still checks each request against the client's
 current grant, so narrowing or revoking the client takes effect on the cached
 token at once.
 

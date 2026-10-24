@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { callRemoteTool, RemoteMcpError, _clearMcpClientTokenCache } from '../src/core/mcp-client.ts';
+import { tokenCacheKey } from '../src/core/remote-token-cache.ts';
 import { ownerCookie, registerOAuthClient, startServeHttp, thinClientConfig, type LiveServeHttp } from './helpers/live-mcp-servers.ts';
 import { runCli } from './helpers/cli-spawn.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -33,7 +34,9 @@ let serve: LiveServeHttp;
 let cookie: string;
 const home = mkdtempSync(join(tmpdir(), 'gbrain-token-cache-7360-'));
 const inHome = (fn: () => Promise<void>) => () => withEnv({ GBRAIN_HOME: home }, fn);
-const cacheFile = () => join(home, '.gbrain', 'remote-token-cache.json');
+type Client = { clientId: string; clientSecret: string };
+const cacheFile = (client: Client, root = home) =>
+  join(root, '.gbrain', 'remote-tokens', `${tokenCacheKey(thinClientConfig(serve, client).remote_mcp!, client.clientSecret)}.json`);
 
 async function mintedTokens(clientId: string): Promise<number> {
   const rows = await engine.executeRaw<{ n: number }>(
@@ -88,7 +91,7 @@ describe('#7360 token reuse across processes', () => {
         expect(`${r.exitCode}\n${r.stderr}`).toBe('0\n');
       }
       expect(await mintedTokens(client.clientId)).toBe(1);
-      const mode = statSync(join(cliHome, '.gbrain', 'remote-token-cache.json')).mode & 0o777;
+      const mode = statSync(cacheFile(client, cliHome)).mode & 0o777;
       expect(mode).toBe(0o600);
     } finally {
       rmSync(cliHome, { recursive: true, force: true });
@@ -99,9 +102,9 @@ describe('#7360 token reuse across processes', () => {
     const client = await registerOAuthClient(serve, cookie, 'read write');
     const config = thinClientConfig(serve, client);
     await callRemoteTool(config, 'get_brain_identity', {});
-    const cached = JSON.parse(readFileSync(cacheFile(), 'utf8'));
-    for (const entry of Object.values(cached.entries) as Array<{ expires_at_ms: number }>) entry.expires_at_ms = Date.now() - 1;
-    writeFileSync(cacheFile(), JSON.stringify(cached), { mode: 0o600 });
+    const cached = JSON.parse(readFileSync(cacheFile(client), 'utf8'));
+    cached.expires_at_ms = Date.now() - 1;
+    writeFileSync(cacheFile(client), JSON.stringify(cached), { mode: 0o600 });
     newProcess();
     await callRemoteTool(config, 'get_brain_identity', {});
     expect(await mintedTokens(client.clientId)).toBe(2);
@@ -167,8 +170,8 @@ describe('#7360 cache file hygiene', () => {
   test('the cache file is 0600 and holds no secret', inHome(async () => {
     const client = await registerOAuthClient(serve, cookie, 'read write');
     await callRemoteTool(thinClientConfig(serve, client), 'get_brain_identity', {});
-    expect(statSync(cacheFile()).mode & 0o777).toBe(0o600);
-    const text = readFileSync(cacheFile(), 'utf8');
+    expect(statSync(cacheFile(client)).mode & 0o777).toBe(0o600);
+    const text = readFileSync(cacheFile(client), 'utf8');
     expect(text).not.toContain(client.clientSecret);
     expect(text).not.toContain(client.clientId);
   }), 60_000);
@@ -177,22 +180,48 @@ describe('#7360 cache file hygiene', () => {
     const client = await registerOAuthClient(serve, cookie, 'read write');
     const config = thinClientConfig(serve, client);
     await callRemoteTool(config, 'get_brain_identity', {});
-    chmodSync(cacheFile(), 0o644);
+    chmodSync(cacheFile(client), 0o644);
     newProcess();
     await callRemoteTool(config, 'get_brain_identity', {});
     expect(await mintedTokens(client.clientId)).toBe(2);
-    expect(statSync(cacheFile()).mode & 0o777).toBe(0o600);
+    expect(statSync(cacheFile(client)).mode & 0o777).toBe(0o600);
   }), 60_000);
 
   test('a symlinked cache file is replaced, never written through', inHome(async () => {
     const client = await registerOAuthClient(serve, cookie, 'read write');
     const target = join(home, 'elsewhere.json');
     writeFileSync(target, 'untouched', { mode: 0o600 });
-    rmSync(cacheFile(), { force: true });
-    symlinkSync(target, cacheFile());
+    mkdirSync(join(home, '.gbrain', 'remote-tokens'), { recursive: true, mode: 0o700 });
+    rmSync(cacheFile(client), { force: true });
+    symlinkSync(target, cacheFile(client));
     await callRemoteTool(thinClientConfig(serve, client), 'get_brain_identity', {});
     expect(readFileSync(target, 'utf8')).toBe('untouched');
-    expect(lstatSync(cacheFile()).isSymbolicLink()).toBe(false);
-    expect(existsSync(cacheFile())).toBe(true);
+    expect(lstatSync(cacheFile(client)).isSymbolicLink()).toBe(false);
+    expect(existsSync(cacheFile(client))).toBe(true);
+  }), 60_000);
+
+  test('a symlinked entry is never read, even when it points at a private file holding a token', inHome(async () => {
+    const client = await registerOAuthClient(serve, cookie, 'read write');
+    const config = thinClientConfig(serve, client);
+    await callRemoteTool(config, 'get_brain_identity', {});
+    const target = join(home, 'planted.json');
+    writeFileSync(target, JSON.stringify({ access_token: 'planted-token', expires_at_ms: Date.now() + 3_600_000 }), { mode: 0o600 });
+    rmSync(cacheFile(client), { force: true });
+    symlinkSync(target, cacheFile(client));
+    newProcess();
+    await callRemoteTool(config, 'get_brain_identity', {});
+    expect(await mintedTokens(client.clientId)).toBe(2);
+    expect(lstatSync(cacheFile(client)).isSymbolicLink()).toBe(false);
+  }), 60_000);
+
+  test('two clients keep separate entries', inHome(async () => {
+    const a = await registerOAuthClient(serve, cookie, 'read');
+    const b = await registerOAuthClient(serve, cookie, 'read');
+    await callRemoteTool(thinClientConfig(serve, a), 'get_brain_identity', {});
+    await callRemoteTool(thinClientConfig(serve, b), 'get_brain_identity', {});
+    newProcess();
+    await callRemoteTool(thinClientConfig(serve, a), 'get_brain_identity', {});
+    await callRemoteTool(thinClientConfig(serve, b), 'get_brain_identity', {});
+    expect([await mintedTokens(a.clientId), await mintedTokens(b.clientId)]).toEqual([1, 1]);
   }), 60_000);
 });
