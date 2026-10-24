@@ -229,6 +229,11 @@ requests. Added scopes require a fresh token; refresh cannot widen the original
 token's scope ceiling. Native OAuth clients must reconnect and obtain fresh
 owner approval. TTL changes affect future tokens only.
 
+For one bot acting for several members of a shared brain, give each member a
+separate client or token restricted to that member's sources. The grant is the
+security boundary; a request's `source_ids` can only narrow inside it. See
+[a bot acting for many members](../guides/multi-source-brains.md#a-bot-acting-for-many-members).
+
 New `memory-reader`, `memory-writer` and `coding-agent` grants are callable and
 listed on the full surface; their operation snapshot is still the ceiling, so a
 reader still has no write operation. `delegating-agent` grants keep the starter

@@ -137,6 +137,50 @@ still go to the bound source only.
 rule: an explicit `source_id` must be inside the connection's own source or
 grant.
 
+### Narrow one request with `source_ids`
+
+`search` and `query` take `source_ids`, a list of source ids (CLI:
+`--source-ids source-a,source-b`). The request reads only those sources:
+
+- Each id is checked exactly like an explicit `source_id`. A remote agent
+  naming a source outside its grant gets `permission_denied` for the whole
+  request, and a removed or archived source gets `unknown_source`. So the
+  list can narrow a request but never widen it.
+- With `source_id` as well, the request reads the sources in both
+  (`source_id: "__all__"` keeps the list). If none are left, or the list is
+  empty, nothing is searched: the result is empty with an
+  `empty_retrieval` notice, never a fallback to the wider scope.
+- `__all__` and malformed ids in the list are `invalid_params`.
+
+Every part of the request reads the narrowed sources: keyword, vector and
+title matches, other names, entity anchoring, saved facts, the CRAG re-run,
+think escalation and evidence delivery.
+
+**Say to your agent:** *"Search my brain for the acme-example renewal, but
+only in source-a."*
+
+### A bot acting for many members
+
+A shared brain often holds one source per member or project, with one bot
+answering for several people. Give each member their own token, granted only
+the sources that member may read, and send each member's requests with that
+member's token:
+
+```bash
+gbrain auth create bot-alice-example
+gbrain auth rescope --token bot-alice-example --sources source-a
+# OAuth client instead of a bearer token:
+gbrain auth rescope --client <client_id> --sources source-a
+```
+
+The token's grant is the security boundary: the server scopes every call to
+the grant of the token that made it, whatever the call's arguments say.
+`source_ids` is a convenience inside that boundary. A bot holding one token
+granted several sources can pass `source_ids` to keep one request to the
+current member's sources, but a prompt-injected or buggy bot can omit it, so
+it does not separate members who must not see each other's pages. Use
+per-member tokens for that, and `source_ids` to narrow further.
+
 ### Links, backlinks and the graph across sources
 
 `gbrain links`, `gbrain backlinks` and `gbrain graph` (MCP: `get_links`,

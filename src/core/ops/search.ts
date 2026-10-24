@@ -69,9 +69,8 @@ import { loadPageTrust, stampPageTrust } from '../eligibility/stamp.ts';
 import type { TrustTier } from '../trust/tier.ts';
 import type { Operation, OperationContext } from './contract.ts';
 import { invalidParam, paramUse, readFix } from './op-fix.ts';
+import { parseSourceIdsParam, requestSourceScope, SOURCE_IDS_PARAM } from './search-source-scope.ts';
 import {
-  assertExplicitSourceLive,
-  federatedSearchScope,
   parseSourceIdParam,
   resolvePerCallMode,
   stampDeepResearchIds,
@@ -99,9 +98,9 @@ async function resolveEffectiveLimit(ctx: OperationContext, p: Record<string, un
 
 type SourceScope = { sourceId?: string; sourceIds?: string[]; minTrust?: TrustTier };
 
-/** The caller's source scope plus its effective read floor (#5575: token floor, `min_trust`, read policy). */
-async function trustedSearchScope(ctx: OperationContext, p: Record<string, unknown>, sourceIdParam: string | undefined): Promise<SourceScope> {
-  const scope = federatedSearchScope(ctx, sourceIdParam);
+/** The caller's source scope (`source_id`, narrowed by `source_ids`) plus its effective read floor (#5575: token floor, `min_trust`, read policy). */
+async function trustedSearchScope(ctx: OperationContext, p: Record<string, unknown>, sourceIdParam: string | undefined, sourceIds?: string[]): Promise<SourceScope> {
+  const scope = await requestSourceScope(ctx, sourceIdParam, sourceIds);
   const { floor } = await resolveReadEligibility(ctx, { minTrust: p.min_trust });
   return floor ? { ...scope, minTrust: floor } : scope;
 }
@@ -719,6 +718,7 @@ const search: Operation = {
     // #4398: per-call source scope, mirroring `query` — MCP clients passed it
     // here, got 'unknown parameter ignored', and read UNSCOPED results.
     source_id: { type: 'string', description: SOURCE_ID_PARAM_DESCRIPTION },
+    source_ids: SOURCE_IDS_PARAM,
     // #3985: multi-type filter (plumbing shipped v0.33; exposed here).
     types: { type: 'array', items: { type: 'string' }, description: TYPES_PARAM_DESCRIPTION },
     where: WHERE_PARAM,
@@ -756,11 +756,11 @@ const search: Operation = {
     // (invalid ids throw invalid_params) then resolved through the single
     // trust+grant resolver (resolveRequestedScope inside federatedSearchScope)
     // — out-of-grant ids throw permission_denied, and #2561's unqualified
-    // trusted-local federated span is unchanged.
+    // trusted-local federated span is unchanged. `source_ids` only narrows it
+    // (search-source-scope.ts); #4620 liveness runs after the grant check.
     const sourceIdParam = parseSourceIdParam(p.source_id, 'search', { allowAll: true });
-    const scope = await setup(() => trustedSearchScope(ctx, p, sourceIdParam));
-    // #4620: an explicit source_id must name a live source (after the grant check).
-    await setup(() => assertExplicitSourceLive(ctx, sourceIdParam));
+    const scope = await setup(() => trustedSearchScope(ctx, p, sourceIdParam, parseSourceIdsParam(ctx, 'search', p.source_ids)));
+    if (scope.sourceIds?.length === 0) return [];
     // #4352 — untrusted callers never see `visibility: private` pages
     // (config-gated; trusted local CLI unchanged).
     const excludePrivate = await setup(() => resolveExcludePrivatePages(ctx.engine, ctx.remote));
@@ -916,6 +916,7 @@ const query: Operation = {
     since: { type: 'string', description: 'On/after: YYYY-MM-DD or 7d/2w/1y.' },
     until: { type: 'string', description: 'On/before.' },
     source_id: { type: 'string', description: SOURCE_ID_PARAM_DESCRIPTION },
+    source_ids: SOURCE_IDS_PARAM,
     cross_modal: { type: 'string', enum: ['text', 'image', 'both', 'auto'], description: 'Default auto.' },
     embedding_column: { type: 'string', description: 'Registered embedding column.' },
     adaptive_return: { type: 'boolean', description: 'true for one answer (fewer rows, never empty); omit for breadth.' },
@@ -952,9 +953,9 @@ const query: Operation = {
     const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
     // #2561: unqualified trusted-local query spans federated sources (per-call
     // source_id / remote grants still resolve through resolveRequestedScope).
-    const querySourceScope = await setup(() => trustedSearchScope(ctx, p, sourceIdParam));
-    // #4620: an explicit source_id must name a live source (after the grant check).
-    await setup(() => assertExplicitSourceLive(ctx, sourceIdParam));
+    // `source_ids` only narrows it (search-source-scope.ts); #4620 liveness runs after the grant check.
+    const querySourceScope = await setup(() => trustedSearchScope(ctx, p, sourceIdParam, parseSourceIdsParam(ctx, 'query', p.source_ids)));
+    if (querySourceScope.sourceIds?.length === 0) return [];
     // #4352 — same enforcement for the full-control query op (both the image
     // searchVector branch and the text hybrid path below).
     const excludePrivate = await setup(() => resolveExcludePrivatePages(ctx.engine, ctx.remote));

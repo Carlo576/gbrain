@@ -1304,6 +1304,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "string",
         "description": "One source, or '__all__'."
       },
+      "source_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Narrow to these sources ([] = none)."
+      },
       "types": {
         "type": "array",
         "items": {
@@ -1518,6 +1525,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "source_id": {
         "type": "string",
         "description": "One source, or '__all__'."
+      },
+      "source_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Narrow to these sources ([] = none)."
       },
       "cross_modal": {
         "type": "string",

@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 262702,
-    "stdoutSha256": "bfd962a82f16847c7969963ab23410170196491231dcdef214ab3863873b495e",
+    "stdoutBytes": 263140,
+    "stdoutSha256": "1c472b785ce9480da19240c8b8fd36d52593149294542069d6ba20813ef4c192",
     "toolNames": [
       "remember",
       "entity",
@@ -1625,6 +1625,7 @@
           "salience": "string?",
           "snippet_chars": "number?",
           "source_id": "string?",
+          "source_ids": "array?",
           "token_budget": "number?",
           "types": "array?",
           "where": "object?"
@@ -1721,6 +1722,13 @@
               "description": "One source, or '__all__'.",
               "type": "string"
             },
+            "source_ids": {
+              "description": "Narrow to these sources ([] = none).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "token_budget": {
               "description": "Default 6000.",
               "type": "number"
@@ -1777,6 +1785,7 @@
           "since": "string?",
           "snippet_chars": "number?",
           "source_id": "string?",
+          "source_ids": "array?",
           "symbol_kind": "string?",
           "token_budget": "number?",
           "types": "array?",
@@ -1925,6 +1934,13 @@
             "source_id": {
               "description": "One source, or '__all__'.",
               "type": "string"
+            },
+            "source_ids": {
+              "description": "Narrow to these sources ([] = none).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "symbol_kind": {
               "description": "Code symbol type.",
