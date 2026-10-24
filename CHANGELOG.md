@@ -10,6 +10,24 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.427.0] - 2026-10-24
+
+**A search for a full name that uses a short first name ("Matt Example") now finds the page titled "Matthew Example". Before, the person's own page could drop out of the results entirely, behind a different person who only shared the first name.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `search` / `query` for "Matt Example" when the page is titled "Matthew Example" (no aliases) | the title arm needed every query word in the title, so it found no title with both words and fell back to titles with either word. Every "Matt …" title tied with the one "Example" title, ties broke by page id, and on a brain with many "Matt" pages the person page fell out of the arm. A different "Matt" page and a page that was first in the keyword arm then tied for first place with identical scores | the title arm also matches the other forms of the given name (Matt and Matthew, Bob and Robert, Liz and Elizabeth and the other common given-name groups), so "Matthew Example" matches both words and ranks first in the arm. The title boost counts the variant as a title match |
+| A query of up to four words where no title holds every word | one any-word query ranked a title holding a rare word the same as a title holding only a common word | the any-word retry runs once per word and ranks titles holding the rarest word first |
+
+A page titled exactly like the query still ranks above its name variant, and a query with a quoted phrase, a `-` negation or a literal OR gets no variants.
+
+### What to watch for after you upgrade
+
+- Short name queries can now return a page whose title spells the first name another way. When "Matt Example" and "Matthew Example" are two different people, both pages show up and the one titled exactly like the query ranks first.
+- Nothing is rewritten on upgrade, no setting changed, and there is no schema migration.
+
 ## [0.60.426.0] - 2026-10-24
 
 **With `--job-isolation process`, `--max-rss` now caps each job child as well as the worker. A child whose memory runs away is stopped before it can exhaust the host, and a job that grows the same way on every retry ends at its `max_attempts` instead of restarting the box over and over.**
