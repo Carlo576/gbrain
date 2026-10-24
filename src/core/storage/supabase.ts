@@ -1,5 +1,5 @@
 import { open } from 'fs/promises';
-import { readFileRange, type StorageBackend, type StorageConfig } from '../storage.ts';
+import { FileDigest, type StorageBackend, type StorageConfig } from '../storage.ts';
 
 /** Size thresholds for upload method selection */
 const TUS_THRESHOLD = 100 * 1024 * 1024;   // 100 MB — use TUS resumable above this
@@ -53,16 +53,23 @@ export class SupabaseStorage implements StorageBackend {
   }
 
   /** Upload from disk: TUS reads each chunk from the file, so memory is bounded by the chunk size (#7427). */
-  async uploadFile(path: string, filePath: string, mime?: string): Promise<void> {
+  async uploadFile(path: string, filePath: string, mime?: string, sha256?: string): Promise<void> {
     const file = await open(filePath, 'r');
+    const digest = new FileDigest(filePath, sha256);
     try {
       const { size } = await file.stat();
       if (size < TUS_THRESHOLD) {
-        await this.uploadStandard(path, await readFileRange(file, Buffer.allocUnsafe(size), size, 0), mime);
+        const data = await digest.read(file, Buffer.allocUnsafe(size), size, 0);
+        digest.assertMatches(size);
+        await this.uploadStandard(path, data, mime);
         return;
       }
       const chunk = Buffer.allocUnsafe(TUS_CHUNK_SIZE);
-      await this.uploadTus(path, size, (offset, length) => readFileRange(file, chunk, length, offset), mime);
+      await this.uploadTus(path, size, async (offset, length) => {
+        const bytes = await digest.read(file, chunk, length, offset);
+        if (offset + length === size) digest.assertMatches(size);
+        return bytes;
+      }, mime);
     } finally {
       await file.close();
     }

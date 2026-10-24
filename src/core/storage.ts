@@ -1,4 +1,4 @@
-import { closeSync, openSync, readSync, statSync, type Stats } from 'fs';
+import { closeSync, openSync, readSync } from 'fs';
 import type { FileHandle } from 'fs/promises';
 import { createHash } from 'crypto';
 
@@ -11,8 +11,11 @@ import { createHash } from 'crypto';
 
 export interface StorageBackend {
   upload(path: string, data: Buffer, mime?: string): Promise<void>;
-  /** Upload a file from disk with memory bounded independently of its size (#7427). */
-  uploadFile(path: string, filePath: string, mime?: string): Promise<void>;
+  /**
+   * Upload a file from disk with memory bounded independently of its size (#7427). With `sha256`, bytes that differ
+   * from it are refused before anything is published, so a stored object is never replaced by them.
+   */
+  uploadFile(path: string, filePath: string, mime?: string, sha256?: string): Promise<void>;
   download(path: string): Promise<Buffer>;
   delete(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
@@ -73,15 +76,36 @@ export function hashStorageFile(filePath: string): string {
   }
 }
 
+/** Upload a file under the hash the caller recorded; a file that changed since then is refused before it is published. */
+export async function uploadUnchangedFile(storage: StorageBackend, path: string, filePath: string, sha256: string, mime?: string): Promise<void> {
+  await storage.uploadFile(path, filePath, mime, sha256);
+}
+
+export function fileChangedDuringUpload(filePath: string): Error {
+  return Object.assign(new Error(`${filePath} changed during the upload, so its bytes no longer match the hash taken before it; nothing was stored or recorded. Upload it again once it stops changing.`), { code: 'file_changed_during_upload' });
+}
+
 /**
- * Upload a file whose hash the caller already computed, then refuse when the file changed since `before` was taken,
- * so a row is never recorded under a hash the stored bytes may not match.
+ * Hashes the bytes a backend reads from a file in order (re-reads of a retried range count once), so the backend can
+ * refuse before its publishing step when they differ from the hash the caller recorded.
  */
-export async function uploadUnchangedFile(storage: StorageBackend, path: string, filePath: string, before: Stats, mime?: string): Promise<void> {
-  await storage.uploadFile(path, filePath, mime);
-  const after = statSync(filePath);
-  if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
-    throw new Error(`${filePath} changed during the upload, so its hash may not match the stored bytes; nothing was recorded. Upload it again once it stops changing.`);
+export class FileDigest {
+  private readonly hash = createHash('sha256');
+  private hashed = 0;
+
+  constructor(private readonly filePath: string, private readonly expected?: string) {}
+
+  async read(file: FileHandle, buffer: Buffer, length: number, position: number): Promise<Buffer> {
+    const bytes = await readFileRange(file, buffer, length, position);
+    if (position <= this.hashed && position + length > this.hashed) {
+      this.hash.update(bytes.subarray(this.hashed - position));
+      this.hashed = position + length;
+    }
+    return bytes;
+  }
+
+  assertMatches(size: number): void {
+    if (this.expected !== undefined && (this.hashed !== size || this.hash.copy().digest('hex') !== this.expected)) throw fileChangedDuringUpload(this.filePath);
   }
 }
 

@@ -311,9 +311,9 @@ describe('upload callers hash and upload from disk (#7427)', () => {
       sourceId: 'default',
     } as never;
     const original = LocalStorage.prototype.uploadFile;
-    const spy = spyOn(LocalStorage.prototype, 'uploadFile').mockImplementation(async function (this: LocalStorage, path: string, filePath: string, mime?: string) {
-      fs.appendFileSync(filePath, 'edited while uploading');
-      return original.call(this, path, filePath, mime);
+    const spy = spyOn(LocalStorage.prototype, 'uploadFile').mockImplementation(async function (this: LocalStorage, ...args: Parameters<LocalStorage['uploadFile']>) {
+      fs.appendFileSync(args[1], 'edited while uploading');
+      return original.apply(this, args);
     });
     try {
       await expect(operationsByName['file_upload'].handler(ctx, { path: src, page_slug: 'media/changing-example' }))
@@ -367,3 +367,106 @@ describe('upload callers hash and upload from disk (#7427)', () => {
     rmSync(storageDir, { recursive: true, force: true });
   });
 });
+
+describe('a refused upload never replaces stored bytes (#7427 review)', () => {
+  test('local: re-uploading a stored object onto its own key keeps its bytes', async () => {
+    const storageDir = mkdtempSync(join(tmpdir(), 'gb-7427-self-'));
+    const storage = new LocalStorage(storageDir);
+    const src = join(workDir, 'self-src.bin');
+    writePatterned(src, 2 * MiB + 9);
+    const expected = sha256Of(src);
+    await storage.uploadFile('media/self/clip.bin', src);
+    const stored = join(storageDir, 'media/self/clip.bin');
+    await storage.uploadFile('media/self/clip.bin', stored, undefined, expected);
+    expect(sha256Of(stored)).toBe(expected);
+    fs.linkSync(stored, join(storageDir, 'media/self/alias.bin'));
+    await storage.uploadFile('media/self/clip.bin', join(storageDir, 'media/self/alias.bin'));
+    expect(sha256Of(stored)).toBe(expected);
+    expect(fs.readdirSync(join(storageDir, 'media/self')).sort()).toEqual(['alias.bin', 'clip.bin']);
+    rmSync(storageDir, { recursive: true, force: true });
+  });
+
+  test('file_upload: a changed re-upload keeps the existing attachment bytes and row', async () => {
+    const storageDir = mkdtempSync(join(tmpdir(), 'gb-7427-keep-'));
+    const src = join(workDir, 'keep-original.mp4');
+    writePatterned(src, MiB + 21);
+    const firstHash = sha256Of(src);
+    const ctx = {
+      engine,
+      config: { engine: 'pglite', storage: { backend: 'local', bucket: 'b', localPath: storageDir } },
+      logger: { info() {}, warn() {}, error() {} },
+      dryRun: false,
+      remote: false,
+      sourceId: 'default',
+    } as never;
+    const first = await operationsByName['file_upload'].handler(ctx, { path: src, page_slug: 'media/keep-example' }) as { storage_path: string };
+    fs.appendFileSync(src, 'second version');
+    const original = LocalStorage.prototype.uploadFile;
+    const spy = spyOn(LocalStorage.prototype, 'uploadFile').mockImplementation(async function (this: LocalStorage, ...args: Parameters<LocalStorage['uploadFile']>) {
+      fs.appendFileSync(args[1], 'edited while uploading');
+      return original.apply(this, args);
+    });
+    try {
+      await expect(operationsByName['file_upload'].handler(ctx, { path: src, page_slug: 'media/keep-example' }))
+        .rejects.toThrow(/changed during the upload/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(sha256Of(join(storageDir, first.storage_path))).toBe(firstHash);
+    const rows = await engine.executeRaw<{ content_hash: string }>('SELECT content_hash FROM files WHERE storage_path = $1', [first.storage_path]);
+    expect(rows.map(r => r.content_hash)).toEqual([firstHash]);
+    expect(fs.readdirSync(join(storageDir, 'media/keep-example'))).toEqual(['keep-original.mp4']);
+    rmSync(storageDir, { recursive: true, force: true });
+  });
+
+  test('S3: bytes that differ from the recorded hash abort the multipart upload before it completes', async () => {
+    const src = join(workDir, 's3-changing.bin');
+    writePatterned(src, 2 * S3_PART + 5);
+    const expected = sha256Of(src);
+    const { client, sent } = s3Stub((command) => {
+      if (command instanceof CreateMultipartUploadCommand) return { UploadId: 'upload-c' };
+      if (command instanceof UploadPartCommand) {
+        if (command.input.PartNumber === 1) { const fd = openSync(src, 'r+'); writeSync(fd, Buffer.from('edited'), 0, 6, S3_PART + 1); closeSync(fd); }
+        return { ETag: '"e' + command.input.PartNumber + '"' };
+      }
+      return {};
+    });
+    await expect(new S3Storage({ backend: 's3', bucket: 'originals' }, client).uploadFile('media/s3-changing.bin', src, undefined, expected))
+      .rejects.toThrow(/changed during the upload/);
+    expect(sent.some(c => c instanceof CompleteMultipartUploadCommand)).toBe(false);
+    expect(sent.at(-1)).toBeInstanceOf(AbortMultipartUploadCommand);
+  });
+
+  test('S3: a single-part file whose bytes differ from the recorded hash is never put', async () => {
+    const src = join(workDir, 's3-small-changed.txt');
+    writeFileSync(src, 'first version');
+    const expected = sha256Of(src);
+    writeFileSync(src, 'second version');
+    const { client, sent } = s3Stub(() => ({}));
+    await expect(new S3Storage({ backend: 's3', bucket: 'originals' }, client).uploadFile('notes/small.txt', src, 'text/plain', expected))
+      .rejects.toThrow(/changed during the upload/);
+    expect(sent).toEqual([]);
+  });
+
+  test('Supabase: a TUS upload whose bytes differ from the recorded hash never sends its final chunk', async () => {
+    const src = join(workDir, 'supabase-changing.bin');
+    const size = 100 * MiB + 2 * MiB + 3;
+    writeFileSync(src, '');
+    truncateSync(src, size);
+    const expected = sha256Of(src);
+    let patched = 0;
+    const fetchImpl = async (_url: string, init: RequestInit) => {
+      const headers = init.headers as Record<string, string>;
+      if (init.method === 'POST') return new Response(null, { status: 201, headers: { Location: 'https://example.test/tus/2' } });
+      if (init.method === 'HEAD') return new Response(null, { status: 200, headers: { 'Upload-Offset': String(patched) } });
+      const body = init.body as Uint8Array;
+      if (patched === 0) { const fd = openSync(src, 'r+'); writeSync(fd, Buffer.from('edited'), 0, 6, 50 * MiB); closeSync(fd); }
+      patched += body.byteLength;
+      return new Response(null, { status: 204, headers: { 'Upload-Offset': String(Number(headers['Upload-Offset']) + body.byteLength) } });
+    };
+    const storage = new SupabaseStorage({ backend: 'supabase', bucket: 'b', projectUrl: 'https://example.test', serviceRoleKey: 'k' }, fetchImpl);
+    await expect(storage.uploadFile('media/supabase-changing.bin', src, undefined, expected)).rejects.toThrow(/changed during the upload/);
+    expect(patched).toBeLessThan(size);
+  }, 30_000);
+});
+

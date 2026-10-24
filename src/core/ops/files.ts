@@ -127,7 +127,7 @@ const file_upload: Operation = {
     }
 
     try {
-      await uploadUnchangedFile(storage, storagePath, filePath, stat, mimeType || undefined);
+      await uploadUnchangedFile(storage, storagePath, filePath, hash, mimeType || undefined);
     } catch (uploadErr) {
       throw opError('storage_error', `Upload failed: ${uploadErr instanceof Error ? uploadErr.message : String(uploadErr)}`,
         'Nothing was recorded. Check the storage backend (credentials, bucket, disk) with `gbrain doctor --json`, then upload again; the upload is keyed by content hash, so repeating it is safe.');

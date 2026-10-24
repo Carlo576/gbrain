@@ -11,7 +11,7 @@ import {
   HeadObjectCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
-import { readFileRange, type StorageBackend, type StorageConfig } from '../storage.ts';
+import { FileDigest, type StorageBackend, type StorageConfig } from '../storage.ts';
 
 const MIN_PART_SIZE = 16 * 1024 * 1024;
 const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
@@ -75,8 +75,9 @@ export class S3Storage implements StorageBackend {
    * bounded by the part size, not the file size (#7427). A file that fits in
    * one part is a single PutObject.
    */
-  async uploadFile(path: string, filePath: string, mime?: string): Promise<void> {
+  async uploadFile(path: string, filePath: string, mime?: string, sha256?: string): Promise<void> {
     const file = await open(filePath, 'r');
+    const digest = new FileDigest(filePath, sha256);
     const target = { Bucket: this.bucket, Key: path };
     let uploadId: string | undefined;
     try {
@@ -84,7 +85,9 @@ export class S3Storage implements StorageBackend {
       const partSize = multipartPartSize(size);
       const buffer = Buffer.allocUnsafe(Math.min(size, partSize));
       if (size <= partSize) {
-        await this.upload(path, await readFileRange(file, buffer, size, 0), mime);
+        const data = await digest.read(file, buffer, size, 0);
+        digest.assertMatches(size);
+        await this.upload(path, data, mime);
         return;
       }
       const created = await this.client.send(new CreateMultipartUploadCommand({
@@ -98,12 +101,13 @@ export class S3Storage implements StorageBackend {
         const PartNumber = parts.length + 1;
         const result = await this.client.send(new UploadPartCommand({
           ...target, UploadId: uploadId, PartNumber,
-          Body: await readFileRange(file, buffer, length, offset), ContentLength: length,
+          Body: await digest.read(file, buffer, length, offset), ContentLength: length,
         }));
         if (!result.ETag) throw new Error(`S3 multipart part ${PartNumber} returned no ETag`);
         parts.push({ PartNumber, ETag: result.ETag });
         offset += length;
       }
+      digest.assertMatches(size);
       await this.client.send(new CompleteMultipartUploadCommand({
         ...target, UploadId: uploadId, MultipartUpload: { Parts: parts },
       }));
