@@ -20,7 +20,7 @@
  *
  * The text stays short on purpose: it is loaded into every turn.
  */
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
@@ -91,6 +91,18 @@ export interface BrainFirstTarget {
 function home(): string { return process.env.HOME?.trim() || homedir(); }
 function expandHome(p: string): string { return p === '~' ? home() : p.startsWith('~/') ? join(home(), p.slice(2)) : p; }
 
+/**
+ * The global file Codex actually loads: AGENTS.override.md when it exists
+ * and is non-empty, else AGENTS.md (Codex uses the first non-empty file at
+ * this level, so writing into an empty override would hide AGENTS.md).
+ */
+export function codexInstructionFile(overridePath: string, agentsPath: string): string {
+  try {
+    if (readFileSync(overridePath, 'utf8').trim() !== '') return overridePath;
+  } catch { /* no override */ }
+  return agentsPath;
+}
+
 /** OpenClaw's state directory: OPENCLAW_STATE_DIR, else ~/.openclaw (or ~/.openclaw-<profile>). */
 function openclawStateDir(): string {
   const explicit = process.env.OPENCLAW_STATE_DIR?.trim();
@@ -105,7 +117,9 @@ function openclawStateDir(): string {
  * caller asks for --workspace rather than guess.
  */
 function parseJson5ish(text: string): unknown {
-  for (const candidate of [text, text.replace(/([{,]\s*)([A-Za-z_$][\w$-]*)\s*:/g, '$1"$2":')]) {
+  const quotedKeys = text.replace(/([{,]\s*)([A-Za-z_$][\w$-]*)\s*:/g, '$1"$2":');
+  const doubleQuoted = quotedKeys.replace(/'((?:[^'\\\n]|\\.)*)'/g, (_m, s: string) => JSON.stringify(s.replace(/\\'/g, "'")));
+  for (const candidate of [text, quotedKeys, doubleQuoted]) {
     const errors: ParseError[] = [];
     const value = parseJsonc(candidate, errors, { allowTrailingComma: true });
     if (errors.length === 0) return value;
@@ -121,14 +135,16 @@ function parseJson5ish(text: string): unknown {
  * workspace, so the caller must name one.
  */
 export function resolveOpenclawWorkspace(): { path: string } | { error: string } {
-  const configPath = join(openclawStateDir(), 'openclaw.json');
+  const configPath = process.env.OPENCLAW_CONFIG_PATH?.trim() ? expandHome(process.env.OPENCLAW_CONFIG_PATH.trim()) : join(openclawStateDir(), 'openclaw.json');
   let configured: string | undefined;
   if (existsSync(configPath)) {
     const cfg = parseJson5ish(readFileSync(configPath, 'utf8')) as { agents?: { defaults?: { workspace?: unknown }; list?: unknown; entries?: unknown } } | undefined;
     if (!cfg || typeof cfg !== 'object') return { error: `${configPath} could not be read as JSON, so the workspace is unknown. Pass --workspace <dir>.` };
     const roster = Array.isArray(cfg.agents?.list) ? cfg.agents.list.length : cfg.agents?.entries && typeof cfg.agents.entries === 'object' ? Object.keys(cfg.agents.entries).length : 0;
     if (roster > 1) return { error: `${configPath} defines ${roster} agents, each with its own workspace. Pass --workspace <dir> for the agent that should use gbrain.` };
-    if (typeof cfg.agents?.defaults?.workspace === 'string' && cfg.agents.defaults.workspace.trim()) configured = cfg.agents.defaults.workspace.trim();
+    const sole = roster === 1 ? (Array.isArray(cfg.agents?.list) ? cfg.agents.list[0] : Object.values(cfg.agents?.entries as object)[0]) as { workspace?: unknown } | undefined : undefined;
+    const workspace = [sole?.workspace, cfg.agents?.defaults?.workspace].find((w): w is string => typeof w === 'string' && w.trim() !== '');
+    if (workspace) configured = workspace.trim();
   }
   const fromEnv = process.env.OPENCLAW_WORKSPACE_DIR?.trim();
   return { path: expandHome(configured ?? fromEnv ?? join(openclawStateDir(), 'workspace')) };
@@ -143,10 +159,10 @@ export function brainFirstTarget(harness: BrainFirstHarness, opts: { scope?: 'us
         ? { harness, path: join(projectDir, 'CLAUDE.local.md'), role: 'Claude Code local project instructions', project: true }
         : { harness, path: claudeUserMemoryPath(), role: 'Claude Code user instructions', project: false };
     case 'codex': {
-      const override = codexAgentsOverridePath();
-      return existsSync(override)
-        ? { harness, path: override, role: 'Codex user instructions (AGENTS.override.md, which Codex loads instead of AGENTS.md)', project: false }
-        : { harness, path: codexGlobalAgentsPath(), role: 'Codex user instructions', project: false };
+      const path = codexInstructionFile(codexAgentsOverridePath(), codexGlobalAgentsPath());
+      return path === codexGlobalAgentsPath()
+        ? { harness, path, role: 'Codex user instructions', project: false }
+        : { harness, path, role: 'Codex user instructions (a non-empty AGENTS.override.md, which Codex loads instead of AGENTS.md)', project: false };
     }
     case 'opencode':
       return { harness, path: join(opencodeConfigDir(), 'AGENTS.md'), role: 'opencode global rules', project: false };
@@ -208,8 +224,10 @@ function dropLedger(harness: string, path: string): void {
   if (rest.length !== all.length) writeLedger(rest);
 }
 
+/** The record for this surface; failing that, an opt-out recorded for the same harness at another path (the target moved), so an opt-out survives the move. */
 export function priorBrainFirst(harness: string, path: string): BrainFirstLedgerEntry | undefined {
-  return readBrainFirstLedger().find((e) => e.harness === harness && e.path === path);
+  const all = readBrainFirstLedger();
+  return all.find((e) => e.harness === harness && e.path === path) ?? all.find((e) => e.harness === harness && e.status === 'declined');
 }
 
 // ── Decision, inspection, sync, removal ───────────────────────────────────
@@ -218,7 +236,7 @@ export type BrainFirstDecisionSource = 'flag' | 'default' | 'prior' | 'opt_out';
 export interface BrainFirstDecision { value: 'accepted' | 'declined'; source: BrainFirstDecisionSource }
 
 /** --instructions / --no-instructions win, then GBRAIN_AGENT_INSTRUCTIONS=0, then a recorded decision, then on by default. */
-export function resolveBrainFirstDecision(flag: boolean | undefined, prior: BrainFirstLedgerEntry | undefined): BrainFirstDecision {
+export function resolveBrainFirstDecision(flag: boolean | undefined, prior: Pick<BrainFirstLedgerEntry, 'status'> | undefined): BrainFirstDecision {
   if (flag !== undefined) return { value: flag ? 'accepted' : 'declined', source: 'flag' };
   if (process.env[BRAIN_FIRST_OPT_OUT_ENV] === '0') return { value: 'declined', source: 'opt_out' };
   if (prior) return { value: prior.status === 'declined' ? 'declined' : 'accepted', source: 'prior' };
@@ -248,6 +266,28 @@ export interface BrainFirstOutcome {
   detail: string;
 }
 
+/** A directory entry exists, a dangling symlink included (existsSync follows links). */
+function direntExists(path: string): boolean {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
+/** gbrain created this file, it is still a plain file, and nothing but our block was in it. */
+function ownedEmptyFile(prior: BrainFirstLedgerEntry | undefined, path: string, stripped: string): boolean {
+  return (prior?.created_file ?? false) && !lstatSync(path).isSymbolicLink() && (stripped.trim() === '' || stripped === CURSOR_HEAD);
+}
+
+/**
+ * Write `next` only if the file still holds what we read: another writer (an
+ * editor, a second install) that saved in between keeps its text, and this run
+ * reports the file as changed instead. A file that appeared since we found
+ * none is never replaced.
+ */
+function writeUnlessChanged(path: string, read: string, wasMissing: boolean, next: string): void {
+  const now = direntExists(path) && existsSync(path) ? readFileSync(path, 'utf8') : null;
+  if (wasMissing ? now !== null : now !== read) throw new Error('the file changed while gbrain was updating it; re-run to apply the block to the new contents');
+  atomicWriteTextFile(path, next, { freshMode: 0o644 });
+}
+
 /**
  * Make the surface match the decision: write or upgrade the block when
  * accepted, strip it when declined, record the decision. Never throws: a
@@ -260,7 +300,8 @@ export function syncBrainFirst(opts: { target: BrainFirstTarget; access: BrainFi
   const before = inspectBrainFirst(target.path, body);
   const out = (action: BrainFirstOutcome['action'], detail: string): BrainFirstOutcome =>
     ({ harness: target.harness, path: target.path, role: target.role, decision, action, state_before: before.state, detail });
-  const prior = priorBrainFirst(target.harness, target.path);
+  const recorded = priorBrainFirst(target.harness, target.path);
+  const prior = recorded?.path === target.path ? recorded : undefined;
   const record = (status: 'installed' | 'declined', created: boolean) => {
     if (opts.dryRun) return;
     upsertLedger({ harness: target.harness, path: target.path, status, block_version: BRAIN_FIRST_VERSION, access, writer: opts.writer, created_file: created, updated_at: new Date().toISOString() });
@@ -277,8 +318,8 @@ export function syncBrainFirst(opts: { target: BrainFirstTarget; access: BrainFi
       const existing = readFileSync(target.path, 'utf8');
       if (!opts.dryRun) {
         const stripped = removeBlock(MARKERS, existing).text;
-        if ((prior?.created_file ?? false) && (stripped.trim() === '' || stripped === CURSOR_HEAD)) unlinkSync(target.path);
-        else atomicWriteTextFile(target.path, stripped);
+        if (ownedEmptyFile(prior, target.path, stripped)) unlinkSync(target.path);
+        else writeUnlessChanged(target.path, existing, false, stripped);
       }
       record('declined', false);
       return out('remove', `brain-first block from ${target.path}; opt-out recorded`);
@@ -287,10 +328,13 @@ export function syncBrainFirst(opts: { target: BrainFirstTarget; access: BrainFi
       record('installed', prior?.created_file ?? false);
       return out('keep', `brain-first block in ${target.path} is current`);
     }
-    const created = before.state === 'no_file';
+    if (target.harness === 'hermes' && (before.state === 'no_file' || readFileSync(target.path, 'utf8').trim() === '')) {
+      return out('skip', `${target.path} is missing or empty, and Hermes uses a non-empty SOUL.md instead of its default identity; start Hermes once (it seeds SOUL.md) or write your identity there, then re-run`);
+    }
+    const created = before.state === 'no_file' && !direntExists(target.path);
     if (!opts.dryRun) {
-      const existing = created ? (target.harness === 'cursor' ? CURSOR_HEAD : '') : readFileSync(target.path, 'utf8');
-      atomicWriteTextFile(target.path, spliceBlock(MARKERS, existing, body), { freshMode: 0o644 });
+      const existing = before.state === 'no_file' ? (created && target.harness === 'cursor' ? CURSOR_HEAD : '') : readFileSync(target.path, 'utf8');
+      writeUnlessChanged(target.path, existing, before.state === 'no_file', spliceBlock(MARKERS, existing, body));
       if (created && target.project) {
         try { ensureGitExcluded(target.path); } catch { /* a project file outside git, or an unwritable exclude, stays as written */ }
       }
@@ -303,23 +347,27 @@ export function syncBrainFirst(opts: { target: BrainFirstTarget; access: BrainFi
 }
 
 /** The uninstall path: strip the block, delete the file only when gbrain created it and nothing else is left, forget the record. */
-export function removeBrainFirst(opts: { harness: string; path: string; dryRun: boolean }): BrainFirstOutcome {
-  const prior = priorBrainFirst(opts.harness, opts.path);
+export function removeBrainFirst(opts: { harness: string; path: string; dryRun: boolean; server?: string }): BrainFirstOutcome {
+  const prior = readBrainFirstLedger().find((e) => e.harness === opts.harness && e.path === opts.path);
   const before = inspectBrainFirst(opts.path);
   const decision: BrainFirstDecision = { value: 'declined', source: 'flag' };
   const out = (action: BrainFirstOutcome['action'], detail: string): BrainFirstOutcome =>
     ({ harness: opts.harness, path: opts.path, role: 'instruction file', decision, action, state_before: before.state, detail });
   try {
     if (before.state === 'damaged') return out('preserve', `the brain-first markers in ${opts.path} were hand-edited; remove the block by hand`);
+    if (opts.server !== undefined && prior?.status === 'installed' && prior.access.kind === 'mcp' && prior.access.server !== opts.server) {
+      return out('skip', `the brain-first block in ${opts.path} was last written for the \`${prior.access.server}\` connection, so removing \`${opts.server}\` leaves it`);
+    }
     if (before.state === 'no_file' || before.state === 'absent') {
       if (!opts.dryRun) dropLedger(opts.harness, opts.path);
       return out('skip', `no brain-first block in ${opts.path}`);
     }
     if (!opts.dryRun) {
-      const stripped = removeBlock(MARKERS, readFileSync(opts.path, 'utf8')).text;
-      const deleteFile = (prior?.created_file ?? false) && (stripped.trim() === '' || stripped === CURSOR_HEAD);
+      const existing = readFileSync(opts.path, 'utf8');
+      const stripped = removeBlock(MARKERS, existing).text;
+      const deleteFile = ownedEmptyFile(prior, opts.path, stripped);
       if (deleteFile) unlinkSync(opts.path);
-      else atomicWriteTextFile(opts.path, stripped);
+      else writeUnlessChanged(opts.path, existing, false, stripped);
       dropLedger(opts.harness, opts.path);
       return out('remove', `brain-first block from ${opts.path}${deleteFile ? ' (file removed: gbrain created it and nothing else was in it)' : ''}`);
     }
@@ -340,7 +388,9 @@ export function brainFirstTargetAt(harness: BrainFirstHarness, path: string): Br
  * write or upgrade the block unless opted out, or strip it on removal.
  */
 export function installerBrainFirst(opts: { target: BrainFirstTarget; access: BrainFirstAccess; writer: string; instructions?: boolean; remove?: boolean; dryRun?: boolean }): BrainFirstOutcome {
-  if (opts.remove) return removeBrainFirst({ harness: opts.target.harness, path: opts.target.path, dryRun: opts.dryRun ?? false });
+  if (opts.remove) {
+    return removeBrainFirst({ harness: opts.target.harness, path: opts.target.path, dryRun: opts.dryRun ?? false, ...(opts.access.kind === 'mcp' ? { server: opts.access.server } : {}) });
+  }
   const decision = resolveBrainFirstDecision(opts.instructions, priorBrainFirst(opts.target.harness, opts.target.path));
   return syncBrainFirst({ target: opts.target, access: opts.access, decision, writer: opts.writer, dryRun: opts.dryRun ?? false });
 }

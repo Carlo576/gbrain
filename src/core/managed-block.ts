@@ -29,12 +29,17 @@ function damagedMarkersError(m: BlockMarkers, begins: number, ends: number): Err
   );
 }
 
+/** A line as an editor may have saved it: a CRLF line ending or a leading BOM does not hide a marker. */
+function bare(line: string, i: number): string {
+  return (i === 0 ? line.replace(/^\uFEFF/, '') : line).replace(/\r$/, '');
+}
+
 function scanMarkers(m: BlockMarkers, lines: string[]): { begin: number; end: number } | 'absent' {
   const begins: number[] = [];
   const ends: number[] = [];
   lines.forEach((line, i) => {
-    if (line === m.begin) begins.push(i);
-    if (line === m.end) ends.push(i);
+    if (bare(line, i) === m.begin) begins.push(i);
+    if (bare(line, i) === m.end) ends.push(i);
   });
   if (begins.length === 0 && ends.length === 0) return 'absent';
   if (begins.length !== 1 || ends.length !== 1 || begins[0] > ends[0]) throw damagedMarkersError(m, begins.length, ends.length);
@@ -47,7 +52,7 @@ export function probeBlock(m: BlockMarkers, text: string): { state: 'absent' | '
   try {
     const scan = scanMarkers(m, lines);
     if (scan === 'absent') return { state: 'absent' };
-    return { state: 'present', interior: lines.slice(scan.begin + 1, scan.end).join('\n') };
+    return { state: 'present', interior: lines.slice(scan.begin + 1, scan.end).map((l) => l.replace(/\r$/, '')).join('\n') };
   } catch {
     return { state: 'damaged' };
   }
@@ -80,12 +85,13 @@ export function removeBlock(m: BlockMarkers, existing: string): { text: string; 
   const scan = scanMarkers(m, lines);
   if (scan === 'absent') return { text: existing, removed: false };
   let after = scan.end + 1;
-  if (after < lines.length - 1 && lines[after] === '') after++;
+  if (after < lines.length - 1 && bare(lines[after], after) === '') after++;
   const out = [...lines.slice(0, scan.begin), ...lines.slice(after)];
-  return { text: out.join('\n'), removed: true };
+  const bom = scan.begin === 0 && lines[0].startsWith('\uFEFF') ? '\uFEFF' : '';
+  return { text: bom + out.join('\n'), removed: true };
 }
 
 /** True when any exact marker line is present, well-formed or damaged. */
 export function blockPresent(m: BlockMarkers, text: string): boolean {
-  return text.split('\n').some((l) => l === m.begin || l === m.end);
+  return text.split('\n').some((l, i) => bare(l, i) === m.begin || bare(l, i) === m.end);
 }

@@ -136,10 +136,11 @@ harness's own instruction file (search the brain first, read the hit, fill gaps
 with other tools, apply your own access rules, finish the task). Text outside the
 markers is never touched; a re-run upgrades the block in place.
   claude-code  ~/.claude/CLAUDE.md (project scope: ./CLAUDE.local.md)
-  codex        $CODEX_HOME/AGENTS.md (AGENTS.override.md when that exists)
+  codex        $CODEX_HOME/AGENTS.md (a non-empty AGENTS.override.md instead)
   opencode     ~/.config/opencode/AGENTS.md
   openclaw     <workspace>/AGENTS.md
-  hermes       $HERMES_HOME/SOUL.md (the identity text above it is left as it is)
+  hermes       $HERMES_HOME/SOUL.md, after the identity text (never created: an
+               empty SOUL.md would replace Hermes's default identity)
   cursor       ./.cursor/rules/gbrain-brain-first.mdc (project rule)
   Other clients (Claude Desktop, ChatGPT, Perplexity, Grok, Muse): --instructions-only
   prints the block to paste into the client's custom instructions.

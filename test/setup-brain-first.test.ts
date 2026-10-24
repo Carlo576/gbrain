@@ -13,7 +13,7 @@
  * Spawns \`bun src/cli.ts setup\` against a temp HOME / GBRAIN_HOME.
  */
 import { afterAll, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { runCli } from './helpers/cli-spawn.ts';
@@ -24,7 +24,7 @@ import {
   renderBrainFirstBlock,
   renderBrainFirstSnippet,
 } from '../src/core/setup/brain-first.ts';
-import { harnessWiringCheck } from '../src/commands/doctor/checks/harness-wiring.ts';
+import { harnessWiringCheck, instructionBlockViews, withInstructionBlocks, type InstructionBlockView } from '../src/commands/doctor/checks/harness-wiring.ts';
 import { installHarnessConnection } from '../src/core/harness/install.ts';
 import type { HarnessCredentials } from '../src/core/harness/credentials.ts';
 
@@ -63,14 +63,15 @@ const read = (p: string) => readFileSync(p, 'utf8');
 const blocks = (text: string) => text.split('\n').filter((l) => l === BRAIN_FIRST_BEGIN).length;
 const ledger = (b: Box) => JSON.parse(read(join(b.home, '.gbrain', 'agent-instructions.json'))).entries as any[];
 
-interface Lane { harness: string; file: (b: Box) => string; args?: string[]; prepare?: (b: Box) => void; existing: string }
+/** refusesCreate: a missing file is never created (Hermes uses a non-empty SOUL.md instead of its default identity). */
+interface Lane { harness: string; file: (b: Box) => string; args?: string[]; prepare?: (b: Box) => void; existing: string; refusesCreate?: boolean }
 
 const LANES: Lane[] = [
   { harness: 'claude-code', file: (b) => join(b.home, '.claude', 'CLAUDE.md'), args: ['--instructions-only'], existing: '# My rules\n\nAlways answer in French.\n' },
   { harness: 'codex', file: (b) => join(b.home, '.codex', 'AGENTS.md'), args: ['--instructions-only'], existing: '# Codex house rules\n- run the tests\n' },
   { harness: 'opencode', file: (b) => join(b.home, '.config', 'opencode', 'AGENTS.md'), existing: 'Prefer small diffs.\n' },
   { harness: 'openclaw', file: (b) => join(b.home, '.openclaw', 'workspace', 'AGENTS.md'), existing: '# AGENTS.md\n\n## Tools\nUse the calendar skill.\n' },
-  { harness: 'hermes', file: (b) => join(b.home, '.hermes', 'SOUL.md'), existing: 'You are Hermes, a careful assistant named alice-example.\n' },
+  { harness: 'hermes', file: (b) => join(b.home, '.hermes', 'SOUL.md'), existing: 'You are Hermes, a careful assistant named alice-example.\n', refusesCreate: true },
   { harness: 'cursor', file: (b) => join(b.project, '.cursor', 'rules', 'gbrain-brain-first.mdc'), existing: '---\ndescription: team rule\nalwaysApply: true\n---\nUse tabs.\n' },
 ];
 
@@ -148,6 +149,11 @@ for (const lane of LANES) {
 
       const created = box();
       const write = await run(created);
+      if (lane.refusesCreate) {
+        expect(write.doc.instructions.action).toBe('skip');
+        expect(existsSync(lane.file(created))).toBe(false);
+        return;
+      }
       expect(write.doc.instructions.detail).toContain('new file');
       expect(existsSync(lane.file(created))).toBe(true);
       await run(created, ['--remove']);
@@ -158,7 +164,7 @@ for (const lane of LANES) {
       const b = box();
       const r = await run(b, ['--dry-run']);
       expect(r.exitCode).toBe(0);
-      expect(r.doc.instructions).toMatchObject({ action: 'write', state_before: 'no_file' });
+      expect(r.doc.instructions).toMatchObject({ action: lane.refusesCreate ? 'skip' : 'write', state_before: 'no_file' });
       expect(existsSync(lane.file(b))).toBe(false);
       expect(existsSync(join(b.home, '.gbrain', 'agent-instructions.json'))).toBe(false);
     });
@@ -173,6 +179,24 @@ describe('brain-first block: placement rules', () => {
     const r = await setup(b, ['codex', '--instructions-only']);
     expect(r.doc.instructions.path).toBe(join(b.home, '.codex', 'AGENTS.override.md'));
     expect(existsSync(join(b.home, '.codex', 'AGENTS.md'))).toBe(false);
+  });
+
+  test('codex: an empty AGENTS.override.md is skipped, as Codex skips it, so the block lands in AGENTS.md', async () => {
+    const b = box();
+    mkdirSync(join(b.home, '.codex'), { recursive: true });
+    writeFileSync(join(b.home, '.codex', 'AGENTS.override.md'), '\n');
+    const r = await setup(b, ['codex', '--instructions-only']);
+    expect(r.doc.instructions.path).toBe(join(b.home, '.codex', 'AGENTS.md'));
+    expect(read(join(b.home, '.codex', 'AGENTS.override.md'))).toBe('\n');
+  });
+
+  test('openclaw: OPENCLAW_CONFIG_PATH is read, a sole agent\'s own workspace wins, single-quoted JSON5 parses', async () => {
+    const b = box();
+    const cfg = join(b.root, 'custom', 'openclaw.json');
+    mkdirSync(dirname(cfg), { recursive: true });
+    writeFileSync(cfg, "{ agents: { defaults: { workspace: '~/default-ws' }, list: [{ id: 'main', workspace: '~/main-ws' }] } }\n");
+    const r = await setup(b, ['openclaw'], { OPENCLAW_CONFIG_PATH: cfg });
+    expect(r.doc.instructions.path).toBe(join(b.home, 'main-ws', 'AGENTS.md'));
   });
 
   test('claude-code --scope project writes CLAUDE.local.md and keeps it out of git', async () => {
@@ -230,6 +254,63 @@ describe('brain-first block: placement rules', () => {
     const bot = await setup(b, ['grok-bot', '--instructions-only', '--gbrain-bin', '/opt/example/bin/gbrain']);
     expect(bot.exitCode).toBe(0);
     expect(bot.doc.instructions.snippet).toBe(renderBrainFirstSnippet('grok-bot', { kind: 'cli', launcher: '/opt/example/bin/gbrain' }, 'delete this block'));
+  });
+});
+
+describe('brain-first block: hardening', () => {
+  test('a CRLF or BOM file keeps one block: upgraded in place, then removed by the opt-out', async () => {
+    const b = box();
+    const path = join(b.home, '.claude', 'CLAUDE.md');
+    mkdirSync(dirname(path), { recursive: true });
+    const stale = renderBrainFirstSnippet('claude-code', { kind: 'mcp', server: 'gbrain' }).replace('finish the whole task', 'stop');
+    writeFileSync(path, `\uFEFFrules\r\n${stale.replace(/\n/g, '\r\n')}tail\r\n`);
+    const up = await setup(b, ['claude-code', '--instructions-only']);
+    expect(up.doc.instructions).toMatchObject({ action: 'write', state_before: 'stale' });
+    expect(read(path).split('\n').filter((l) => l.replace(/\r$/, '') === BRAIN_FIRST_BEGIN)).toHaveLength(1);
+    expect(read(path).startsWith('\uFEFFrules\r\n')).toBe(true);
+    expect(read(path).endsWith('tail\r\n')).toBe(true);
+    const off = await setup(b, ['claude-code', '--instructions-only', '--no-instructions']);
+    expect(off.doc.instructions.action).toBe('remove');
+    expect(read(path)).toBe('\uFEFFrules\r\ntail\r\n');
+  });
+
+  test('a dangling symlink is followed and never deleted on removal', async () => {
+    const b = box();
+    const real = join(b.root, 'dotfiles', 'CLAUDE.md');
+    mkdirSync(dirname(real), { recursive: true });
+    mkdirSync(join(b.home, '.claude'), { recursive: true });
+    symlinkSync(real, join(b.home, '.claude', 'CLAUDE.md'));
+    await setup(b, ['claude-code', '--instructions-only']);
+    expect(blocks(read(real))).toBe(1);
+    expect(ledger(b)[0].created_file).toBe(false);
+    await setup(b, ['claude-code', '--instructions-only', '--remove']);
+    expect(lstatSync(join(b.home, '.claude', 'CLAUDE.md')).isSymbolicLink()).toBe(true);
+    expect(read(real)).toBe('');
+  });
+
+  test('an opt-out survives the Codex target moving to a non-empty AGENTS.override.md; doctor follows the move', async () => {
+    const b = box();
+    await setup(b, ['codex', '--instructions-only']);
+    writeFileSync(join(b.home, '.codex', 'AGENTS.override.md'), 'override rules\n');
+    await withEnv({ ...b.env, CODEX_HOME: join(b.home, '.codex') }, async () => {
+      expect(instructionBlockViews([])).toEqual([expect.objectContaining({ harness: 'codex', path: join(b.home, '.codex', 'AGENTS.override.md'), state: 'missing' })]);
+    });
+    await setup(b, ['codex', '--instructions-only', '--no-instructions']);
+    writeFileSync(join(b.home, '.codex', 'AGENTS.override.md'), 'new override\n');
+    rmSync(join(b.home, '.codex', 'AGENTS.md'), { force: true });
+    writeFileSync(join(b.home, '.codex', 'AGENTS.override.md'), 'newer override\n');
+    const again = await setup(b, ['codex', '--instructions-only']);
+    expect(again.doc.instructions.decision.value).toBe('declined');
+    expect(read(join(b.home, '.codex', 'AGENTS.override.md'))).toBe('newer override\n');
+  });
+
+  test('doctor\'s repair names the recorded connection and surface; a project file is the user\'s to run in place', () => {
+    const views: InstructionBlockView[] = [{ harness: 'codex', path: '/x/.codex/AGENTS.md', state: 'stale', from: 'ledger', access: { kind: 'mcp', server: 'work-brain', surface: 'verbs' } }];
+    const c = withInstructionBlocks({ name: 'harness_wiring', status: 'ok', message: 'wired.' }, views);
+    expect(c.fix?.argv).toEqual(['gbrain', 'setup', 'codex', '--instructions-only', '--name', 'work-brain', '--surface', 'verbs']);
+    const project = withInstructionBlocks({ name: 'harness_wiring', status: 'ok', message: 'wired.' }, [{ harness: 'cursor', path: '/repo/.cursor/rules/gbrain-brain-first.mdc', state: 'missing', from: 'ledger' }]);
+    expect(project.fix?.argv).toBeUndefined();
+    expect(project.fix?.user_message).toContain('From /repo, run: gbrain setup cursor --instructions-only');
   });
 });
 
@@ -305,6 +386,35 @@ describe('brain-first block: full setup and the installer lanes', () => {
       });
     });
   }
+
+  test('removing one connection leaves the block another connection last wrote', async () => {
+    const b = box();
+    await withEnv(b.env, async () => {
+      const configPath = join(b.home, '.claude.json');
+      const instructionPath = join(b.home, '.claude', 'CLAUDE.md');
+      await installHarnessConnection(credentials, { harness: 'claude-code', configPath, name: 'alpha' });
+      await installHarnessConnection({ ...credentials, client_id: 'client-beta' }, { harness: 'claude-code', configPath, name: 'beta' });
+      expect(read(instructionPath)).toContain('`beta` MCP server');
+      const removed = await installHarnessConnection(credentials, { harness: 'claude-code', configPath, name: 'alpha', remove: true });
+      expect((removed as any).instructions.action).toBe('skip');
+      expect(read(instructionPath)).toContain('`beta` MCP server');
+    });
+  });
+
+  test('thin-client opt-out: GBRAIN_AGENT_INSTRUCTIONS=0 writes no block, and --no-instructions is kept on the next install', async () => {
+    const b = box();
+    const envRoot = join(b.root, 'thin-env');
+    await withEnv({ ...b.env, GBRAIN_AGENT_INSTRUCTIONS: '0' }, async () => {
+      await installHarnessConnection(credentials, { harness: 'openclaw', root: envRoot });
+    });
+    expect(read(join(envRoot, 'GBRAIN-INSTRUCTIONS.md'))).not.toContain(BRAIN_FIRST_BEGIN);
+    const root = join(b.root, 'thin-flag');
+    await withEnv(b.env, async () => {
+      await installHarnessConnection(credentials, { harness: 'openclaw', root, instructions: false });
+      await installHarnessConnection(credentials, { harness: 'openclaw', root });
+    });
+    expect(read(join(root, 'GBRAIN-INSTRUCTIONS.md'))).not.toContain(BRAIN_FIRST_BEGIN);
+  });
 
   test('thin-client install (OpenClaw) puts the CLI-flavored block first in GBRAIN-INSTRUCTIONS.md', async () => {
     const b = box();

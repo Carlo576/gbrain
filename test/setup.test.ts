@@ -434,6 +434,11 @@ describe('gbrain setup: consent and refusals', () => {
   for (const [harness, guide] of [['openclaw', 'docs/mcp/OPENCLAW.md'], ['hermes', 'docs/mcp/HERMES.md']] as const) {
     test(`${harness}: setup writes only the brain-first block and names its guide for the MCP step`, async () => {
       const b = box();
+      if (harness === 'hermes') {
+        // Hermes seeds SOUL.md on first run; setup never creates one (it would replace the default identity).
+        mkdirSync(join(b.home, '.hermes'), { recursive: true });
+        writeFileSync(join(b.home, '.hermes', 'SOUL.md'), 'You are Hermes.\n');
+      }
       const r = await setup(b, [harness, '--json'], { OPENCLAW_STATE_DIR: undefined, OPENCLAW_WORKSPACE_DIR: undefined, OPENCLAW_PROFILE: undefined, HERMES_HOME: undefined });
       expect(r.exitCode).toBe(0);
       expect(r.doc).toMatchObject({ harness, instructions_only: true, mcp: { setup: 'manual', docs: guide }, instructions: { action: 'write' } });

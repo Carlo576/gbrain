@@ -45,7 +45,9 @@ sources one by one, read the best hit, fill gaps with other tools, apply your ow
 access rules, then finish the task. Text outside the markers is never touched, a
 re-run upgrades the block in place, `--dry-run` previews it,
 `--no-instructions` opts out (and is remembered) and `--remove` takes it out.
-`gbrain doctor` warns when the block is missing or out of date.
+`gbrain doctor` warns when the block is missing or out of date. Setup never
+creates `SOUL.md`: Hermes uses a non-empty one instead of its default identity,
+so start Hermes once (it seeds the file) or write your identity there first.
 
 ## Direct config (equally supported)
 

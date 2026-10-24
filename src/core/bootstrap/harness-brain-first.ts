@@ -4,8 +4,7 @@
  * the managed block in its own instruction file; removal strips only the
  * blocks this lane recorded.
  */
-import { existsSync } from 'node:fs';
-import { brainFirstTargetAt, describeBrainFirstOutcome, installerBrainFirst, readBrainFirstLedger, removeBrainFirst } from '../setup/brain-first.ts';
+import { brainFirstTargetAt, codexInstructionFile, describeBrainFirstOutcome, installerBrainFirst, readBrainFirstLedger, removeBrainFirst } from '../setup/brain-first.ts';
 
 const WRITER = 'gbrain bootstrap harness';
 
@@ -22,7 +21,7 @@ export function writeHarnessBrainFirst(opts: { hosts: readonly BrainFirstHost[];
   const { paths } = opts;
   for (const host of opts.hosts) {
     const path = host === 'claude-code' ? paths.claudeMemoryPath
-      : host === 'codex' ? (existsSync(paths.codexAgentsOverride) ? paths.codexAgentsOverride : paths.codexAgentsPath)
+      : host === 'codex' ? codexInstructionFile(paths.codexAgentsOverride, paths.codexAgentsPath)
         : paths.opencodeAgentsPath;
     const o = installerBrainFirst({ target: brainFirstTargetAt(host, path), access: { kind: 'mcp', server: opts.server },
       writer: WRITER, instructions: opts.optOut ? false : undefined });
@@ -30,8 +29,8 @@ export function writeHarnessBrainFirst(opts: { hosts: readonly BrainFirstHost[];
   }
 }
 
-export function removeHarnessBrainFirst(log: (line: string) => void): void {
+export function removeHarnessBrainFirst(server: string, log: (line: string) => void): void {
   for (const e of readBrainFirstLedger().filter((entry) => entry.writer === WRITER)) {
-    log(describeBrainFirstOutcome(removeBrainFirst({ harness: e.harness, path: e.path, dryRun: false }), false).trim());
+    log(describeBrainFirstOutcome(removeBrainFirst({ harness: e.harness, path: e.path, dryRun: false, server }), false).trim());
   }
 }

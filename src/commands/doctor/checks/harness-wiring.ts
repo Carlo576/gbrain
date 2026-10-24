@@ -26,7 +26,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { gbrainPath, loadConfig } from '../../../core/config.ts';
 import { peekLock } from '../../../core/pglite-lock.ts';
 import { harnessWiringEntry, httpStatusServerEntry, type ReadinessHarness } from '../../../core/readiness.ts';
@@ -40,7 +40,7 @@ import type { Check } from '../../doctor.ts';
 import { checkError, doctorVerify, infoCheck } from '../check-fix.ts';
 import type { DoctorContext, DoctorEntry } from '../context.ts';
 import { VERSION } from '../../../version.ts';
-import { brainFirstTarget, inspectBrainFirst, isBrainFirstHarness, readBrainFirstLedger, renderBrainFirstBlock } from '../../../core/setup/brain-first.ts';
+import { brainFirstTarget, inspectBrainFirst, isBrainFirstHarness, readBrainFirstLedger, renderBrainFirstBlock, type BrainFirstAccess } from '../../../core/setup/brain-first.ts';
 
 export const HARNESS_SMOKE_TIMEOUT_MS = 15_000;
 export const HARNESS_HTTP_PROBE_TIMEOUT_MS = 3_000;
@@ -348,6 +348,8 @@ export interface InstructionBlockView {
   state: 'current' | 'stale' | 'missing' | 'damaged' | 'opted_out';
   /** Where the record came from: the brain-first ledger, or the harness's default file for a registration with no record. */
   from: 'ledger' | 'default_path';
+  /** The access the recorded block names, so the repair rewrites that block and not a default one. */
+  access?: BrainFirstAccess;
 }
 
 /**
@@ -358,9 +360,14 @@ export interface InstructionBlockView {
 export function instructionBlockViews(regs: HarnessRegistration[]): InstructionBlockView[] {
   const state = (s: ReturnType<typeof inspectBrainFirst>['state']): InstructionBlockView['state'] =>
     s === 'current' ? 'current' : s === 'stale' ? 'stale' : s === 'damaged' ? 'damaged' : 'missing';
-  const views: InstructionBlockView[] = readBrainFirstLedger().map((e) => e.status === 'declined'
-    ? { harness: e.harness, path: e.path, state: 'opted_out', from: 'ledger' }
-    : { harness: e.harness, path: e.path, state: state(inspectBrainFirst(e.path, renderBrainFirstBlock(e.harness, e.access)).state), from: 'ledger' });
+  const views: InstructionBlockView[] = readBrainFirstLedger().map((e) => {
+    // Codex reads one global file: once a non-empty AGENTS.override.md appears, a block in AGENTS.md is no longer loaded.
+    const live = e.harness === 'codex' ? brainFirstTarget('codex') : undefined;
+    const path = live && !('error' in live) && dirname(live.path) === dirname(e.path) ? live.path : e.path;
+    return e.status === 'declined'
+      ? { harness: e.harness, path, state: 'opted_out', from: 'ledger' }
+      : { harness: e.harness, path, state: state(inspectBrainFirst(path, renderBrainFirstBlock(e.harness, e.access)).state), from: 'ledger', access: e.access };
+  });
   for (const r of regs) {
     if (views.some((v) => v.harness === r.harness) || !isBrainFirstHarness(r.harness)) continue;
     const target = brainFirstTarget(r.harness);
@@ -398,9 +405,26 @@ export function withInstructionBlocks(check: Check, views: InstructionBlockView[
     ? { consent: [], actor: 'user', requires_exclusive: false, verify: doctorVerify(NAME),
       why: `The brain-first markers in ${first.path} were hand-edited; gbrain will not guess which lines are its own.`,
       user_message: `The gbrain instruction block in ${first.path} has damaged markers. Please delete the block (both marker lines included), then I'll write a fresh one.` }
-    : { argv: ['gbrain', 'setup', first.harness, '--instructions-only'], consent: ['persistent_install'], actor: 'agent', requires_exclusive: false, verify: doctorVerify(NAME),
-      why: `Writes or upgrades only the marked brain-first block in ${first.path}; text outside the markers is left as it is. \`--no-instructions\` opts out instead.` };
+    : repairArgv(first);
   return { name: check.name, status: 'warn', message, details, fix };
+}
+
+/** The setup command that rewrites exactly this block: same file, same connection name and surface. A project file needs its own directory, so the user runs it there. */
+function repairArgv(v: InstructionBlockView): Action {
+  const access = v.access;
+  const argv = ['gbrain', 'setup', v.harness, '--instructions-only',
+    ...(access?.kind === 'mcp' && access.server !== 'gbrain' ? ['--name', access.server] : []),
+    ...(access?.kind === 'mcp' && access.surface ? ['--surface', access.surface] : []),
+    ...(v.harness === 'openclaw' ? ['--workspace', dirname(v.path)] : []),
+    ...(v.harness === 'claude-code' && basename(v.path) === 'CLAUDE.local.md' ? ['--scope', 'project'] : [])];
+  const why = `Writes or upgrades only the marked brain-first block in ${v.path}; text outside the markers is left as it is. \`--no-instructions\` opts out instead.`;
+  const project = v.harness === 'cursor' || basename(v.path) === 'CLAUDE.local.md';
+  if (project) {
+    const dir = v.harness === 'cursor' ? dirname(dirname(dirname(v.path))) : dirname(v.path);
+    return { consent: [], actor: 'user', requires_exclusive: false, verify: doctorVerify(NAME), why,
+      user_message: `The gbrain instruction block in ${v.path} needs a refresh. From ${dir}, run: ${argv.join(' ')}` };
+  }
+  return { argv, consent: ['persistent_install'], actor: 'agent', requires_exclusive: false, verify: doctorVerify(NAME), why };
 }
 
 /** Registration read (full run) or registration read + smoke (`--only harness_wiring`), plus the brain-first block. */

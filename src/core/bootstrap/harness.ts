@@ -2261,7 +2261,7 @@ export async function removeHarness(flags: HarnessFlags, rawDeps: HarnessDeps): 
     d.log('current token was supplied via --token — not revoked (not ours to revoke).');
   }
 
-  removeHarnessBrainFirst(d.log);
+  removeHarnessBrainFirst(flags.name, d.log);
 
   if (remaining.length === 0 && tokenDone && skillsDone) {
     deleteHarnessReceipt(d.gbrainHome);

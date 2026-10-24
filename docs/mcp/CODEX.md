@@ -191,7 +191,7 @@ brain nobody told them about, so finish the install with:
 gbrain setup codex --instructions-only
 ```
 
-It writes one short marked block into `$CODEX_HOME/AGENTS.md` (or `AGENTS.override.md` when that exists, since Codex
+It writes one short marked block into `$CODEX_HOME/AGENTS.md` (or a non-empty `AGENTS.override.md`, since Codex
 then reads only the override): search the brain before reading
 sources one by one, read the best hit, fill gaps with other tools, apply your own
 access rules, then finish the task. Text outside the markers is never touched, a
