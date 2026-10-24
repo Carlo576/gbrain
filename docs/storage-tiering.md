@@ -53,7 +53,7 @@ storage:
 When storage configuration is present, `gbrain sync` automatically manages `.gitignore` entries on every successful sync:
 
 - Adds missing `db_only` directory patterns to `.gitignore`.
-- A file under a `db_only` directory that git already tracked before the declaration stays tracked and shows as modified once the database updates it; untrack it with `git rm --cached <path>`.
+- A file under a `db_only` directory that git already tracked before the declaration stays tracked and shows as modified once the database updates it; untrack it with `git rm --cached <path>`. A managed sync never soft-deletes a live page under a declared `db_only` directory because its file left Git (untracked, ignored or gone): the database copy is canonical (#7324).
 - Idempotent — re-running adds no duplicate entries.
 - Stable comment header so the managed block is grep-able.
 - Skipped on `--dry-run` (don't mutate disk in preview mode).
@@ -215,6 +215,14 @@ machine) never makes a page database-only by itself: detaching is always an
 explicit choice. `--detach` is refused (`invalid_params`) when there is
 nothing to detach (the page is not soft-deleted, its file is in place, or the
 restore re-creates it).
+
+A page under a declared `db_only` directory is canonical in the database, so
+its `--detach` restore publishes database-only even on a managed checkout with
+`sync.write_through` on (#7324): it keeps its page id, content and history,
+forgets its recorded file, writes no file and leaves an ignored cache file
+untouched. Its recorded file must still be gone from the syncable tree. A plain
+restore of such a page keeps its recorded file and its cache file as before;
+sync no longer deletes it either way.
 
 Doctor `missing_recorded_files` warns about live pages whose recorded file is
 not among the files `gbrain sync --full` enumerates (for example a page

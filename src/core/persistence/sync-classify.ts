@@ -64,6 +64,8 @@ export interface SyncPathState {
   fullObligation?: boolean;
   /** Under a `storage.keep_db` prefix, on a source that is not mirror-read-only. */
   keepDb: boolean;
+  /** #7324: a page under a declared `storage.db_only` dir: its database row is canonical, so an absent file is no deletion evidence. */
+  dbOnly?: boolean;
   /** Open work on the page or path (a queued/running/recovering request, a pending Git effect). */
   openWork: boolean;
   /**
@@ -151,6 +153,7 @@ function afterHold(s: SyncPathState): Matched {
   if (live && s.level === null) {
     if (s.mode === 'committed' && s.present) return { cls: 'kept', settled: true, action: 'none' };
     if (!s.present) {
+      if (s.dbOnly) return { cls: 'kept', settled: true, action: 'none' };
       if (s.originEvidence && s.originEvidence !== 'committed') return { cls: 'delete_drift', settled: false, action: 'hold', side: 'deleted', state: 'file_gone',
         uncommitted: s.originEvidence === 'unknown' ? 'origin_unknown' : s.originEvidence };
       return proof ? { cls: 'delete', settled: false, action: 'delete' } : { cls: 'delete_drift', settled: false, action: 'hold', side: 'deleted', state: 'file_gone' };
