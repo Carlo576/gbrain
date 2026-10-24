@@ -19,8 +19,9 @@
  *
  * Resolution: stdio GBRAIN_SURFACE > --surface flag > config `mcp_surface` >
  * 'full' (resolveStdioSurface); `serve --http` ignores GBRAIN_SURFACE. Why
- * default full: a bare `serve` keeps existing advanced tooling; the
- * registrations gbrain writes pin `starter` (src/core/mcp-registration.ts).
+ * default full: a bare `serve` keeps existing advanced tooling, and the
+ * registrations gbrain writes pin `REGISTRATION_SURFACE` (`full`,
+ * src/core/mcp-registration.ts) unless the user passes `--surface`.
  *
  * WP4 (D2 CEILING): on the OAuth HTTP transport the server-resolved surface is
  * a CEILING, not the final answer — each request resolves
