@@ -1,7 +1,7 @@
 /**
  * Incremental conversation facts on a segmented page (wave-b spec 8.2 "Conversation facts", PR 4 lane 4b), shared by
- * the PGLite arm (test/large-pages/conversation-facts-incremental.test.ts) and the Postgres arm
- * (test/e2e/conversation-facts-incremental-postgres.test.ts). A fake extractor counts calls by window text; no model
+ * the PGLite arm (test/large-pages/conversation-facts-incremental-core.test.ts) and the Postgres arm
+ * (test/e2e/conversation-facts-incremental-core-postgres.test.ts). A fake extractor counts calls by window text; no model
  * is called. Spend is metered (meterPaidCall, the facts ledger); the cap case's fake extractor calls the gateway, whose
  * fake transport reports token usage on a priced model, so its windows cost what that usage costs.
  *

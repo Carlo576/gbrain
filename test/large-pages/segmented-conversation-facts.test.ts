@@ -3,7 +3,7 @@
  * segmented page through ranged reads. PR 4 lane 4b (spec 8.2) replaced the
  * page's single parser input with per-occurrence windows
  * (core/facts/conversation-incremental.ts; its append, retirement and spend
- * cases live in conversation-facts-incremental.test.ts).
+ * cases live in conversation-facts-incremental-*.test.ts).
  *
  * 1. Protects:
  *    - a segmented conversation within the window cap gives the parser the

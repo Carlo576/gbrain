@@ -1,7 +1,7 @@
 /**
  * Paid page derivations under a model with no price (PR 4 lane 4b round 5, item 10), shared by the PGLite arm
- * (test/large-pages/conversation-facts-incremental.test.ts) and the Postgres arm
- * (test/e2e/conversation-facts-incremental-postgres.test.ts). No default changes and no price is invented: an unpriced
+ * (test/large-pages/conversation-facts-incremental-core.test.ts) and the Postgres arm
+ * (test/e2e/conversation-facts-incremental-core-postgres.test.ts). No default changes and no price is invented: an unpriced
  * model reserves its ceiling estimate, so the per-page cap stops it after about one window. Fake extractors only.
  *
  * 1. Protects: when the facts, conversation facts, atoms or synopsis step stops (or books its reservation) because the

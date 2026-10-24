@@ -1,7 +1,7 @@
 /**
  * Conversation facts deletion invariant on a segmented page (wave-b spec 8.2; PR 4 lane 4b round 5), shared by the PGLite
- * arm (test/large-pages/conversation-facts-incremental.test.ts) and the Postgres arm
- * (test/e2e/conversation-facts-incremental-postgres.test.ts). Fake extractors only; appends go through the remote
+ * arms (test/large-pages/conversation-facts-incremental-{deletion,held,grammar,grammar-flag,grammar-choice}.test.ts) and
+ * the Postgres arms (test/e2e/conversation-facts-incremental-<same>-postgres.test.ts). Fake extractors only; appends go through the remote
  * append_page operation (remote=true).
  *
  * 1. Protects: a partial run only adds and replaces facts per window key, and a row claims exactly the facts it holds:
@@ -55,7 +55,60 @@ const sparseTranscript = (count: number, notes: number) => Array.from({ length: 
   ...Array.from({ length: notes }, (_, j) => `note ${j} of item ${t} on the roadmap review`)].join('\n')).join('\n\n');
 const references = (count: number) => Array.from({ length: count }, (_, i) => `Reference ${i}: the roadmap review moved to next quarter and the budget stays flat.`).join('\n\n');
 
-export function defineConversationFactsInvariantCases(opts: { getBrain: () => AppendBrain }): void {
+/** Three runs (two plain, one --force) on a page whose grammar is no longer detected: what each reported and left. */
+const lostGrammarRuns = async (brain: AppendBrain, slug: string) => {
+  const out: Array<Record<string, unknown>> = [];
+  for (const force of [false, false, true]) {
+    const { calls, result } = await extract(brain.engine, slug, { force });
+    const rows = await derivations(brain.engine, slug);
+    out.push({ calls: calls.length, failed: result.pages_failed, held: result.pages_detection_ambiguous ?? 0, nonExtractable: result.pages_marked_non_extractable,
+      facts: (await factsOf(brain.engine, slug)).length, windows: rows.keys.length, mismatches: (await claimMismatches(brain.engine, slug)).length });
+  }
+  return out;
+};
+const undetected = async (brain: AppendBrain, slug: string) => {
+  const page = (await brain.engine.getPage(slug, { sourceId: 'default' }))!;
+  return parser.parseConversation((await brain.body(slug)).truth, { page }).matched_pattern_id ?? null;
+};
+/** A held run: no call, no failure, nothing added or removed. */
+const heldRun = (facts: number, windows: number) => ({ calls: 0, failed: 0, held: 1, nonExtractable: 0, facts, windows, mismatches: 0 });
+/** Every conversation_facts row of the page, as it stands. */
+const rowState = async (brain: AppendBrain, slug: string) => JSON.stringify((await derivations(brain.engine, slug)).rows.map(row => [row.occurrenceId, row.output, row.state, row.receipt]));
+/** What doctor reports: the held pages with each format's count, and whether extraction_input_truncated (the spend-cap remedy) names anything. */
+const heldPages = async (brain: AppendBrain) => {
+  const checks = await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[];
+  const held = checks.find(c => c.name === 'conversation_detection_ambiguous')!;
+  return { status: held.status, samples: ((held.details as { samples?: Array<{ page: string; grammars: Record<string, number> }> } | undefined)?.samples ?? []),
+    fix: held.fix?.argv ?? null, truncated: JSON.stringify(checks.find(c => c.name === 'extraction_input_truncated')?.details ?? {}) };
+};
+
+/**
+ * A page whose rows record two formats, with none detected over it (round-8 review P1 and P2): a bold-name transcript
+ * extracted in full, then a plain-role one extracted one window (its rows record plain-role, the rest bold-name), then
+ * reference prose, the plain-role transcript and a section quoting `quotes` short bold-name turns under a new title.
+ */
+const mixedFormats = async (brain: AppendBrain, slug: string, quotes: number) => {
+  await caps(brain.engine, 'off');
+  const old = Array.from({ length: 100 }, (_, i) => `**${i % 2 ? 'Bob Example' : 'Alice Example'}:** old turn ${i} ${'detail '.repeat(1600)}`).join('\n');
+  await brain.seed(slug, chatPage('Old transcript', old));
+  await extract(brain.engine, slug);
+  const current = Array.from({ length: 200 }, (_, i) => `${i % 2 ? 'Assistant' : 'User'}: current turn ${i} ${'present '.repeat(700)}`).join('\n');
+  await brain.seed(slug, chatPage('Current transcript', current));
+  await extract(brain.engine, slug, { segmentLimit: 1 });
+  expect(await recordedGrammars(brain, slug)).toEqual(['bold-name-no-time', 'plain-role-no-time']);
+  const quoted = Array.from({ length: quotes }, (_, i) => `**${i % 2 ? 'Bob Example' : 'Alice Example'}:** quoted historical turn ${i}.`).join('\n');
+  const prose = Array.from({ length: 12_000 }, (_, i) => `Reference paragraph ${i} explains the migration.`).join('\n');
+  await brain.seed(slug, chatPage('Combined transcript archive', `${prose}\n${current}\n## Quoted historical transcript\n${quoted}`));
+  expect(await undetected(brain, slug)).toBeNull();
+  return { prose, current, quoted };
+};
+const recordedGrammars = async (brain: AppendBrain, slug: string) =>
+  [...new Set((await derivations(brain.engine, slug)).rows.map(row => (row.output as { pattern?: string | null }).pattern ?? null))].sort();
+/** The plain-role turns the run's windows carry. */
+const turnsIn = (calls: string[]) => new Set(calls.flatMap(text => [...text.matchAll(/current turn (\d+) /g)].map(m => m[1]))).size;
+
+/** Deletion only by exact-key replacement or a settled collection: F1, F2, F6, F9 and N2. */
+export function defineConversationFactsDeletionCases(opts: { getBrain: () => AppendBrain }): void {
   test('F1: two interrupted runs after an append lose no fact and leave every row claiming exactly the facts it holds', async () => {
     const brain = opts.getBrain();
     const slug = `notes/interrupted-moves-${randomUUID().slice(0, 8)}`;
@@ -141,49 +194,46 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
       .toEqual({ calls: 1, facts: before.length + 1, lost: 0, cleaned: 0 });
   }, 600_000);
 
-  test('F3: the grammar is the whole page\'s, not its head\'s; the detection read is counted once, and a run on a pinned grammar reads none', async () => {
+  test('N2: an append_page that commits right after the old version check (before the publication locks the page) leaves the run unsettled with its facts kept; the next run settles it', async () => {
     const brain = opts.getBrain();
-    const slug = `notes/preamble-${randomUUID().slice(0, 8)}`;
+    const slug = `notes/concurrent-append-${randomUUID().slice(0, 8)}`;
     await caps(brain.engine, 'off');
-    const preamble = Array.from({ length: 4000 }, (_, i) => (i % 4 === 3 ? 'User: a line of the preamble' : `Notes line ${i} about the roadmap review.`)).join('\n');
-    await brain.seed(slug, chatPage('Preamble', `${preamble}\n\n${chatDays(4200, 100, 35)}`));
-    const page = (await brain.engine.getPage(slug, { sourceId: 'default' }))!;
-    const truth = (await brain.body(slug)).truth;
-    expect(parser.parseConversation(truth.slice(0, 64 * 1024), { page }).matched_pattern_id).toBe('plain-role-no-time');
-    expect(parser.parseConversation(truth, { page }).matched_pattern_id).toBe('bold-paren-time-12h');
-    const expected = splitIntoSegments(parser.parseConversation(truth, { page }).messages, { pageTitle: 'Preamble' }).map(seg => renderSegmentForExtraction('Preamble', seg));
-    const detected = conversationDetectionWork.bytes;
-    const { calls } = await extract(brain.engine, slug, { segmentLimit: 5 });
-    const read = conversationDetectionWork.bytes - detected;
-    const rest = await extract(brain.engine, slug);
-    const all = [...calls, ...rest.calls];
-    expect({ read, again: conversationDetectionWork.bytes - detected - read, same: [...all].sort().join('\n') === [...expected].sort().join('\n') })
-      .toEqual({ read: Buffer.byteLength(truth), again: 0, same: true });
-  }, 600_000);
-
-  test('a page that reads as a transcript yet parses no message changes nothing and leaves a no_messages receipt doctor lists', async () => {
-    const brain = opts.getBrain();
-    const slug = `notes/parser-fault-${randomUUID().slice(0, 8)}`;
-    await caps(brain.engine, 'off');
-    await brain.seed(slug, chatPage('Parser fault', chatDays(4300, 100, 36)));
+    await brain.seed(slug, chatPage('Concurrent append', chatDays(4400, 100, 37)));
     await extract(brain.engine, slug);
+    // Two new days: one or two new windows, fewer than a checkpoint, so the only publication after them is the final one.
+    expect(await brain.call('append_page', { slug, text: chatDays(4500, 2, 37), request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
     const before = (await factsOf(brain.engine, slug)).map(f => f.id);
-    await brain.seed(slug, chatPage('Parser fault', Array.from({ length: 8000 }, (_, i) => `Paragraph ${i} of the notes: the roadmap review moved to next quarter and the budget stays flat.`).join('\n\n')));
-    // A detector fault: it reports a transcript format the page's text does not hold.
-    const spy = spyOn(parser, 'createPatternDetector').mockImplementation(() => ({ push() {}, finish: () => 'bold-paren-time-12h' }));
+    let armed = false;
+    let injected = 0;
+    const transaction = brain.engine.transaction;
+    // The outermost transaction the publication opens (a transaction engine inherits the spy; its nested calls are skipped).
+    const spy = spyOn(brain.engine, 'transaction').mockImplementation((async function (this: BrainEngine, ...args: Parameters<BrainEngine['transaction']>) {
+      if (armed && this === brain.engine && (new Error().stack ?? '').includes('maintenanceTransaction')) {
+        armed = false;
+        injected++;
+        expect(await brain.call('append_page', { slug, text: chatDays(4502, 1, 37), request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
+      }
+      return transaction.apply(this, args);
+    }) as typeof brain.engine.transaction);
+    let run: Awaited<ReturnType<typeof extract>>;
     try {
-      const { calls, result } = await extract(brain.engine, slug);
-      expect({ calls: calls.length, failed: result.pages_failed, nonExtractable: result.pages_marked_non_extractable, cleaned: result.orphan_facts_cleaned,
-        facts: (await factsOf(brain.engine, slug)).map(f => f.id) }).toEqual({ calls: 0, failed: 1, nonExtractable: 0, cleaned: 0, facts: before });
+      run = await extract(brain.engine, slug, { failOn: () => { armed = true; return false; } });
     } finally {
       spy.mockRestore();
     }
-    const check = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
-    const groups = (check.details as { groups: Array<{ pipeline: string; kind: string; samples: string[]; remedy: string | null }> }).groups;
-    const group = groups.find(g => g.pipeline === 'conversation_facts' && g.kind === 'no_messages');
-    expect({ listed: group?.samples.includes(`default:${slug}`), fault: group?.remedy?.includes('parser fault') }).toEqual({ listed: true, fault: true });
+    const kept = await factsOf(brain.engine, slug);
+    expect({ injected, calls: run.calls.length > 0, failed: run.result.pages_failed, processed: run.result.pages_processed, cleaned: run.result.orphan_facts_cleaned,
+      lost: before.filter(id => !kept.some(f => f.id === id)).length, reason: run.result.failed_pages[0]?.error ?? null })
+      .toEqual({ injected: 1, calls: true, failed: 1, processed: 0, cleaned: 0, lost: 0, reason: 'the page changed during extraction; left unfinished for replay' });
+    const next = await extract(brain.engine, slug);
+    const rows = await derivations(brain.engine, slug);
+    expect({ calls: next.calls.length > 0, processed: next.result.pages_processed, mismatches: await claimMismatches(brain.engine, slug), states: [...new Set(rows.states)],
+      facts: (await factsOf(brain.engine, slug)).length }).toEqual({ calls: true, processed: 1, mismatches: [], states: ['done'], facts: rows.keys.length });
   }, 600_000);
+}
 
+/** A transcript whose format the whole page no longer shows is held while a message still parses: N1, R4 and the held-page reuse. */
+export function defineConversationFactsHeldCases(opts: { getBrain: () => AppendBrain }): void {
   test('N1: a transcript whose format the whole page no longer shows (references added, title changed) is held: no call, every fact and row kept, --force too, and doctor lists it with its format\'s count', async () => {
     const brain = opts.getBrain();
     const slug = `notes/grammar-lost-${randomUUID().slice(0, 8)}`;
@@ -207,33 +257,6 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
     expect({ runs, status: doctor.status, listed: doctor.samples.find(s => s.page === `default:${slug}`)?.grammars, truncated: doctor.truncated.includes(slug) })
       .toEqual({ runs: [run, run], status: 'warn', listed: { 'bold-name-no-time': 3000 }, truncated: false });
   }, 600_000);
-
-  /** Three runs (two plain, one --force) on a page whose grammar is no longer detected: what each reported and left. */
-  const lostGrammarRuns = async (brain: AppendBrain, slug: string) => {
-    const out: Array<Record<string, unknown>> = [];
-    for (const force of [false, false, true]) {
-      const { calls, result } = await extract(brain.engine, slug, { force });
-      const rows = await derivations(brain.engine, slug);
-      out.push({ calls: calls.length, failed: result.pages_failed, held: result.pages_detection_ambiguous ?? 0, nonExtractable: result.pages_marked_non_extractable,
-        facts: (await factsOf(brain.engine, slug)).length, windows: rows.keys.length, mismatches: (await claimMismatches(brain.engine, slug)).length });
-    }
-    return out;
-  };
-  const undetected = async (brain: AppendBrain, slug: string) => {
-    const page = (await brain.engine.getPage(slug, { sourceId: 'default' }))!;
-    return parser.parseConversation((await brain.body(slug)).truth, { page }).matched_pattern_id ?? null;
-  };
-  /** A held run: no call, no failure, nothing added or removed. */
-  const heldRun = (facts: number, windows: number) => ({ calls: 0, failed: 0, held: 1, nonExtractable: 0, facts, windows, mismatches: 0 });
-  /** Every conversation_facts row of the page, as it stands. */
-  const rowState = async (brain: AppendBrain, slug: string) => JSON.stringify((await derivations(brain.engine, slug)).rows.map(row => [row.occurrenceId, row.output, row.state, row.receipt]));
-  /** What doctor reports: the held pages with each format's count, and whether extraction_input_truncated (the spend-cap remedy) names anything. */
-  const heldPages = async (brain: AppendBrain) => {
-    const checks = await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[];
-    const held = checks.find(c => c.name === 'conversation_detection_ambiguous')!;
-    return { status: held.status, samples: ((held.details as { samples?: Array<{ page: string; grammars: Record<string, number> }> } | undefined)?.samples ?? []),
-      fix: held.fix?.argv ?? null, truncated: JSON.stringify(checks.find(c => c.name === 'extraction_input_truncated')?.details ?? {}) };
-  };
 
   test('R4 (case A): a transcript rewritten to prose that keeps one or three quoted message lines is held every run, --force too: its facts wait for the operator\'s call', async () => {
     const brain = opts.getBrain();
@@ -300,31 +323,52 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
     const held = [heldRun(facts, windows), heldRun(facts, windows), heldRun(facts, windows)];
     expect({ added, heading }).toEqual({ added: held, heading: held });
   }, 600_000);
+}
 
-  /**
-   * A page whose rows record two formats, with none detected over it (round-8 review P1 and P2): a bold-name transcript
-   * extracted in full, then a plain-role one extracted one window (its rows record plain-role, the rest bold-name), then
-   * reference prose, the plain-role transcript and a section quoting `quotes` short bold-name turns under a new title.
-   */
-  const mixedFormats = async (brain: AppendBrain, slug: string, quotes: number) => {
+/** Which grammar a run reads: the whole page (F3), no_messages, two recorded formats (G1), p7 and pages with no format (R3). */
+export function defineConversationFactsGrammarCases(opts: { getBrain: () => AppendBrain }): void {
+  test('F3: the grammar is the whole page\'s, not its head\'s; the detection read is counted once, and a run on a pinned grammar reads none', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/preamble-${randomUUID().slice(0, 8)}`;
     await caps(brain.engine, 'off');
-    const old = Array.from({ length: 100 }, (_, i) => `**${i % 2 ? 'Bob Example' : 'Alice Example'}:** old turn ${i} ${'detail '.repeat(1600)}`).join('\n');
-    await brain.seed(slug, chatPage('Old transcript', old));
+    const preamble = Array.from({ length: 4000 }, (_, i) => (i % 4 === 3 ? 'User: a line of the preamble' : `Notes line ${i} about the roadmap review.`)).join('\n');
+    await brain.seed(slug, chatPage('Preamble', `${preamble}\n\n${chatDays(4200, 100, 35)}`));
+    const page = (await brain.engine.getPage(slug, { sourceId: 'default' }))!;
+    const truth = (await brain.body(slug)).truth;
+    expect(parser.parseConversation(truth.slice(0, 64 * 1024), { page }).matched_pattern_id).toBe('plain-role-no-time');
+    expect(parser.parseConversation(truth, { page }).matched_pattern_id).toBe('bold-paren-time-12h');
+    const expected = splitIntoSegments(parser.parseConversation(truth, { page }).messages, { pageTitle: 'Preamble' }).map(seg => renderSegmentForExtraction('Preamble', seg));
+    const detected = conversationDetectionWork.bytes;
+    const { calls } = await extract(brain.engine, slug, { segmentLimit: 5 });
+    const read = conversationDetectionWork.bytes - detected;
+    const rest = await extract(brain.engine, slug);
+    const all = [...calls, ...rest.calls];
+    expect({ read, again: conversationDetectionWork.bytes - detected - read, same: [...all].sort().join('\n') === [...expected].sort().join('\n') })
+      .toEqual({ read: Buffer.byteLength(truth), again: 0, same: true });
+  }, 600_000);
+
+  test('a page that reads as a transcript yet parses no message changes nothing and leaves a no_messages receipt doctor lists', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/parser-fault-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    await brain.seed(slug, chatPage('Parser fault', chatDays(4300, 100, 36)));
     await extract(brain.engine, slug);
-    const current = Array.from({ length: 200 }, (_, i) => `${i % 2 ? 'Assistant' : 'User'}: current turn ${i} ${'present '.repeat(700)}`).join('\n');
-    await brain.seed(slug, chatPage('Current transcript', current));
-    await extract(brain.engine, slug, { segmentLimit: 1 });
-    expect(await recordedGrammars(brain, slug)).toEqual(['bold-name-no-time', 'plain-role-no-time']);
-    const quoted = Array.from({ length: quotes }, (_, i) => `**${i % 2 ? 'Bob Example' : 'Alice Example'}:** quoted historical turn ${i}.`).join('\n');
-    const prose = Array.from({ length: 12_000 }, (_, i) => `Reference paragraph ${i} explains the migration.`).join('\n');
-    await brain.seed(slug, chatPage('Combined transcript archive', `${prose}\n${current}\n## Quoted historical transcript\n${quoted}`));
-    expect(await undetected(brain, slug)).toBeNull();
-    return { prose, current, quoted };
-  };
-  const recordedGrammars = async (brain: AppendBrain, slug: string) =>
-    [...new Set((await derivations(brain.engine, slug)).rows.map(row => (row.output as { pattern?: string | null }).pattern ?? null))].sort();
-  /** The plain-role turns the run's windows carry. */
-  const turnsIn = (calls: string[]) => new Set(calls.flatMap(text => [...text.matchAll(/current turn (\d+) /g)].map(m => m[1]))).size;
+    const before = (await factsOf(brain.engine, slug)).map(f => f.id);
+    await brain.seed(slug, chatPage('Parser fault', Array.from({ length: 8000 }, (_, i) => `Paragraph ${i} of the notes: the roadmap review moved to next quarter and the budget stays flat.`).join('\n\n')));
+    // A detector fault: it reports a transcript format the page's text does not hold.
+    const spy = spyOn(parser, 'createPatternDetector').mockImplementation(() => ({ push() {}, finish: () => 'bold-paren-time-12h' }));
+    try {
+      const { calls, result } = await extract(brain.engine, slug);
+      expect({ calls: calls.length, failed: result.pages_failed, nonExtractable: result.pages_marked_non_extractable, cleaned: result.orphan_facts_cleaned,
+        facts: (await factsOf(brain.engine, slug)).map(f => f.id) }).toEqual({ calls: 0, failed: 1, nonExtractable: 0, cleaned: 0, facts: before });
+    } finally {
+      spy.mockRestore();
+    }
+    const check = (await extractionInputTruncatedEntry.run({ engine: brain.engine } as unknown as DoctorContext) as Check[]).find(c => c.name === 'extraction_input_truncated')!;
+    const groups = (check.details as { groups: Array<{ pipeline: string; kind: string; samples: string[]; remedy: string | null }> }).groups;
+    const group = groups.find(g => g.pipeline === 'conversation_facts' && g.kind === 'no_messages');
+    expect({ listed: group?.samples.includes(`default:${slug}`), fault: group?.remedy?.includes('parser fault') }).toEqual({ listed: true, fault: true });
+  }, 600_000);
 
   test('G1 (round-8 P1, P2): with two recorded formats and none detected, a current transcript beside 2, 250 or 600 quoted turns of the old format is held: no call, every fact and row kept, --force too, never a failed page, and doctor lists it with each format\'s count instead of a spend cap', async () => {
     const brain = opts.getBrain();
@@ -373,6 +417,47 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
       .toEqual({ runs: [run, run, run], listed: { 'plain-role-no-time': 100, 'bold-name-no-time': 100 } });
   }, 600_000);
 
+  test('R3 (cases C, C2): a page turned to pure prose whose facts have no recorded grammar (rows without one, or no rows at all) is non-extractable and its facts are collected, --force too', async () => {
+    const brain = opts.getBrain();
+    const out: Record<string, unknown> = {};
+    for (const shape of ['rows without a grammar', 'no rows'] as const) {
+      const slug = `notes/no-grammar-${randomUUID().slice(0, 8)}`;
+      await caps(brain.engine, 'off');
+      await brain.seed(slug, chatPage('Was a chat', chatDays(4700, 100, 39)));
+      await extract(brain.engine, slug);
+      const { pageId } = await derivations(brain.engine, slug);
+      if (shape === 'no rows') await brain.engine.executeRaw("DELETE FROM page_segment_derivations WHERE page_id = $1 AND pipeline = 'conversation_facts'", [pageId]);
+      else await brain.engine.executeRaw("UPDATE page_segment_derivations SET output = output - 'pattern' WHERE page_id = $1 AND pipeline = 'conversation_facts'", [pageId]);
+      const before = (await factsOf(brain.engine, slug)).length;
+      await brain.seed(slug, chatPage('Was a chat', references(9000)));
+      expect(await undetected(brain, slug)).toBeNull();
+      out[shape] = { before: before > 100, runs: await lostGrammarRuns(brain, slug) };
+    }
+    const collected = { calls: 0, failed: 0, held: 0, nonExtractable: 1, facts: 0, windows: 0, mismatches: 0 };
+    const settled = { ...collected, nonExtractable: 0 };
+    expect(out).toEqual({ 'rows without a grammar': { before: true, runs: [collected, settled, collected] }, 'no rows': { before: true, runs: [collected, settled, collected] } });
+  }, 600_000);
+
+  test('R3 (legacy): facts the inline extractor left on a small transcript are collected once the page is segmented prose, --force too', async () => {
+    const brain = opts.getBrain();
+    const slug = `notes/former-conversation-${randomUUID().slice(0, 8)}`;
+    await caps(brain.engine, 'off');
+    await brain.seed(slug, chatPage('Former conversation', 'user: The fixture door code was 8844.\nassistant: Noted the fixture door code.\n'));
+    await extract(brain.engine, slug);
+    expect((await factsOf(brain.engine, slug)).length).toBe(1);
+    await brain.seed(slug, chatPage('Former conversation', 'Ordinary reference prose with no speaker labels or message lines.\n'.repeat(18_000)));
+    expect((await brain.body(slug)).storage).toBe('segmented');
+    const runs = [];
+    for (const force of [false, true]) {
+      const { result } = await extract(brain.engine, slug, { force });
+      runs.push({ failed: result.pages_failed, nonExtractable: result.pages_marked_non_extractable, facts: (await factsOf(brain.engine, slug)).length });
+    }
+    expect(runs).toEqual([{ failed: 0, nonExtractable: 1, facts: 0 }, { failed: 0, nonExtractable: 1, facts: 0 }]);
+  }, 600_000);
+}
+
+/** The operator's --grammar on a held page: --dry-run, the run, and the one-page rule. */
+export function defineConversationFactsGrammarFlagCases(opts: { getBrain: () => AppendBrain }): void {
   test('--grammar on a held page: --dry-run previews what a run under the format extracts and removes and changes nothing; the run does exactly that, later plain runs follow the choice until the page changes, and none settles a page as no transcript', async () => {
     const brain = opts.getBrain();
     const slug = `notes/operator-format-${randomUUID().slice(0, 8)}`;
@@ -463,7 +548,10 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
       single: { error: null, preview: true },
     });
   }, 600_000);
+}
 
+/** How long an operator's format choice lasts: one page version, and a detected format after it streams from the head. */
+export function defineConversationFactsGrammarChoiceCases(opts: { getBrain: () => AppendBrain }): void {
   test('a choice holds only for the page version it was made for: after an append the chosen rows do not pin their format, so a page still undetected is held with every fact kept', async () => {
     const brain = opts.getBrain();
     const slug = `notes/choice-version-${randomUUID().slice(0, 8)}`;
@@ -516,80 +604,5 @@ export function defineConversationFactsInvariantCases(opts: { getBrain: () => Ap
       grammars: [...new Set(rows.rows.map(r => (r.output as { pattern?: string | null }).pattern ?? null))], chosenRows: rows.rows.filter(r => (r.output as { chosen?: boolean }).chosen).length,
       mismatches: await claimMismatches(brain.engine, slug) })
       .toEqual({ failed: 0, held: 0, facts: fresh.length, same: true, stale: 0, forcedCalls: 0, forcedSame: true, grammars: ['plain-role-no-time'], chosenRows: 0, mismatches: [] });
-  }, 600_000);
-
-  test('R3 (cases C, C2): a page turned to pure prose whose facts have no recorded grammar (rows without one, or no rows at all) is non-extractable and its facts are collected, --force too', async () => {
-    const brain = opts.getBrain();
-    const out: Record<string, unknown> = {};
-    for (const shape of ['rows without a grammar', 'no rows'] as const) {
-      const slug = `notes/no-grammar-${randomUUID().slice(0, 8)}`;
-      await caps(brain.engine, 'off');
-      await brain.seed(slug, chatPage('Was a chat', chatDays(4700, 100, 39)));
-      await extract(brain.engine, slug);
-      const { pageId } = await derivations(brain.engine, slug);
-      if (shape === 'no rows') await brain.engine.executeRaw("DELETE FROM page_segment_derivations WHERE page_id = $1 AND pipeline = 'conversation_facts'", [pageId]);
-      else await brain.engine.executeRaw("UPDATE page_segment_derivations SET output = output - 'pattern' WHERE page_id = $1 AND pipeline = 'conversation_facts'", [pageId]);
-      const before = (await factsOf(brain.engine, slug)).length;
-      await brain.seed(slug, chatPage('Was a chat', references(9000)));
-      expect(await undetected(brain, slug)).toBeNull();
-      out[shape] = { before: before > 100, runs: await lostGrammarRuns(brain, slug) };
-    }
-    const collected = { calls: 0, failed: 0, held: 0, nonExtractable: 1, facts: 0, windows: 0, mismatches: 0 };
-    const settled = { ...collected, nonExtractable: 0 };
-    expect(out).toEqual({ 'rows without a grammar': { before: true, runs: [collected, settled, collected] }, 'no rows': { before: true, runs: [collected, settled, collected] } });
-  }, 600_000);
-
-  test('R3 (legacy): facts the inline extractor left on a small transcript are collected once the page is segmented prose, --force too', async () => {
-    const brain = opts.getBrain();
-    const slug = `notes/former-conversation-${randomUUID().slice(0, 8)}`;
-    await caps(brain.engine, 'off');
-    await brain.seed(slug, chatPage('Former conversation', 'user: The fixture door code was 8844.\nassistant: Noted the fixture door code.\n'));
-    await extract(brain.engine, slug);
-    expect((await factsOf(brain.engine, slug)).length).toBe(1);
-    await brain.seed(slug, chatPage('Former conversation', 'Ordinary reference prose with no speaker labels or message lines.\n'.repeat(18_000)));
-    expect((await brain.body(slug)).storage).toBe('segmented');
-    const runs = [];
-    for (const force of [false, true]) {
-      const { result } = await extract(brain.engine, slug, { force });
-      runs.push({ failed: result.pages_failed, nonExtractable: result.pages_marked_non_extractable, facts: (await factsOf(brain.engine, slug)).length });
-    }
-    expect(runs).toEqual([{ failed: 0, nonExtractable: 1, facts: 0 }, { failed: 0, nonExtractable: 1, facts: 0 }]);
-  }, 600_000);
-
-  test('N2: an append_page that commits right after the old version check (before the publication locks the page) leaves the run unsettled with its facts kept; the next run settles it', async () => {
-    const brain = opts.getBrain();
-    const slug = `notes/concurrent-append-${randomUUID().slice(0, 8)}`;
-    await caps(brain.engine, 'off');
-    await brain.seed(slug, chatPage('Concurrent append', chatDays(4400, 100, 37)));
-    await extract(brain.engine, slug);
-    // Two new days: one or two new windows, fewer than a checkpoint, so the only publication after them is the final one.
-    expect(await brain.call('append_page', { slug, text: chatDays(4500, 2, 37), request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
-    const before = (await factsOf(brain.engine, slug)).map(f => f.id);
-    let armed = false;
-    let injected = 0;
-    const transaction = brain.engine.transaction;
-    // The outermost transaction the publication opens (a transaction engine inherits the spy; its nested calls are skipped).
-    const spy = spyOn(brain.engine, 'transaction').mockImplementation((async function (this: BrainEngine, ...args: Parameters<BrainEngine['transaction']>) {
-      if (armed && this === brain.engine && (new Error().stack ?? '').includes('maintenanceTransaction')) {
-        armed = false;
-        injected++;
-        expect(await brain.call('append_page', { slug, text: chatDays(4502, 1, 37), request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
-      }
-      return transaction.apply(this, args);
-    }) as typeof brain.engine.transaction);
-    let run: Awaited<ReturnType<typeof extract>>;
-    try {
-      run = await extract(brain.engine, slug, { failOn: () => { armed = true; return false; } });
-    } finally {
-      spy.mockRestore();
-    }
-    const kept = await factsOf(brain.engine, slug);
-    expect({ injected, calls: run.calls.length > 0, failed: run.result.pages_failed, processed: run.result.pages_processed, cleaned: run.result.orphan_facts_cleaned,
-      lost: before.filter(id => !kept.some(f => f.id === id)).length, reason: run.result.failed_pages[0]?.error ?? null })
-      .toEqual({ injected: 1, calls: true, failed: 1, processed: 0, cleaned: 0, lost: 0, reason: 'the page changed during extraction; left unfinished for replay' });
-    const next = await extract(brain.engine, slug);
-    const rows = await derivations(brain.engine, slug);
-    expect({ calls: next.calls.length > 0, processed: next.result.pages_processed, mismatches: await claimMismatches(brain.engine, slug), states: [...new Set(rows.states)],
-      facts: (await factsOf(brain.engine, slug)).length }).toEqual({ calls: true, processed: 1, mismatches: [], states: ['done'], facts: rows.keys.length });
   }, 600_000);
 }
