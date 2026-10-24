@@ -84,9 +84,9 @@ function installOf(command: string): { root: string | null; version: string | nu
 /** The pid a service manager runs for a unit or label now; null when it is not running or cannot be read. */
 function servicePid(platform: string, unit: string, launchdLabel: string): number | null {
   const r = platform === 'darwin' ? spawnSync('launchctl', ['list', launchdLabel], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] })
-    : spawnSync('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', unit], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] });
+    : spawnSync('systemctl', ['--user', 'show', '-p', 'MainPID', unit], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] });
   if (r.status !== 0 || typeof r.stdout !== 'string') return null;
-  const pid = Number(platform === 'darwin' ? /"PID"\s*=\s*(\d+)/.exec(r.stdout)?.[1] : r.stdout.trim());
+  const pid = Number((platform === 'darwin' ? /"PID"\s*=\s*(\d+)/ : /^MainPID=(\d+)/m).exec(r.stdout)?.[1]);
   return Number.isInteger(pid) && pid > 1 ? pid : null;
 }
 
