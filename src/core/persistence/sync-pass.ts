@@ -1248,7 +1248,7 @@ export async function passIdleProbe(engine: Pick<BrainEngine, 'executeRaw'>, inp
         AND 'r:'||request_id::text IN (SELECT id FROM stamp))
         + (SELECT count(*) FROM persistence_effects e JOIN persistence_requests r ON r.id = e.request_id
             WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text IN (SELECT id FROM stamp)) AS still_open,
-      EXISTS (SELECT 1 FROM persistence_effects e WHERE e.kind = 'git' AND e.state <> 'committed' AND e.request_id IN (SELECT id::uuid FROM pass,
+      EXISTS (SELECT 1 FROM persistence_effects e WHERE e.kind = 'git' AND e.state <> 'committed' AND NOT (e.data ? 'settled') AND e.request_id IN (SELECT id::uuid FROM pass,
         jsonb_array_elements_text(CASE WHEN jsonb_typeof(value->'obligations'->'converged'->'writeback')='array' THEN value->'obligations'->'converged'->'writeback' ELSE '[]'::jsonb END) AS w(id))) AS writeback_open`,
     [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, input.openAtStamp ? [...input.openAtStamp] : null, input.sourceId, input.incarnation]);
   return { passRow: probe?.pass_row ?? null, newer: probe?.newer === true, pending: probe?.pending === true, stillOpen: Number(probe?.still_open ?? 0), writebackOpen: probe?.writeback_open === true };
