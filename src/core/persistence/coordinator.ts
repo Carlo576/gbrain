@@ -527,7 +527,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         `This host does not hold source ${row.source_id}'s canonical worktree, or the file of ${row.slug} resolves outside it, so request ${row.request_id} wrote no file. Inspect the owner; the write publishes only on the host that owns the source.`,
         { fix: ownerStatusFix(row.source_id) });
       const { record, bytes } = pageRecoveryRecord(row, prepared.file, binding);
-      if (await sourceCanonicalGit(engine, row.source_id)) record.door = await doorMarker(binding.local_path!);
+      if (binding.canonical_git === true) record.door = await doorMarker(binding.local_path!);
       // G2: a strict write replayed after its door commit landed finds its own bytes, committed (git-door.ts).
       if (prepared.file.expectedBeforeHash !== undefined && record.beforeHash !== prepared.file.expectedBeforeHash && !await replayAfterDoorCommit(record)) {
         // A coordinated writer (a withdrawal mirror) also advanced the page:

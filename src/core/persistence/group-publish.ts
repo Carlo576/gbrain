@@ -284,7 +284,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
       files.set(i, member);
     }
     // G2 (git-door.ts): a strict source's members are committed together before the transaction commits.
-    strict = files.size > 0 && await sourceCanonicalGit(engine, head.source_id);
+    strict = files.size > 0 && binding.canonical_git === true;
     if (strict) { const door = await doorMarker(binding.local_path); for (const member of files.values()) member.record.door = door; }
     if (files.size) {
       await prepareRecoveries(engine, [...files.values()], transaction, limits);
