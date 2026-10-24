@@ -154,6 +154,7 @@ const FIELDS_PARAM = {
   type: 'string' as const,
   enum: ['lean', 'full'],
   description: "lean (remote default) or full.",
+  fullSurfaceOnly: true,
 };
 
 /** Evidence delivery params shared by `search` and `query`. */
@@ -165,6 +166,7 @@ const RETURN_UNIT_PARAM = {
 const RETURN_WINDOW_PARAM = {
   type: 'number' as const,
   description: 'Window radius 1-3.',
+  fullSurfaceOnly: true,
 };
 
 /**
@@ -593,7 +595,7 @@ function normalizeTypesParam(ctx: OperationContext, tool: 'search' | 'query', ra
 const TYPES_PARAM_DESCRIPTION = "Page types, e.g. ['person'].";
 
 const SOURCE_ID_PARAM_DESCRIPTION = "One source, or '__all__'.";
-const SALIENCE_PARAM = { type: 'string' as const, enum: ['off', 'on', 'strong'], description: 'Boost emotional pages.' };
+const SALIENCE_PARAM = { type: 'string' as const, enum: ['off', 'on', 'strong'], description: 'Boost emotional pages.', fullSurfaceOnly: true };
 
 /**
  * Ranking explanation params, declared on `query` only and advertised on the
@@ -669,9 +671,9 @@ function finishExplainTarget(
   const { fix: _fix, ...wire } = diag;
   return wire as ExplainTargetDiagnosis;
 }
-const RECENCY_PARAM = { type: 'string' as const, enum: ['off', 'on', 'strong'], description: "Boost recent pages." };
+const RECENCY_PARAM = { type: 'string' as const, enum: ['off', 'on', 'strong'], description: "Boost recent pages.", fullSurfaceOnly: true };
 
-const SNIPPET_CHARS_PARAM_DESCRIPTION = 'Chars per row (0 = full).';
+const SNIPPET_CHARS_PARAM = { type: 'number' as const, description: 'Chars per row (0 = full).', fullSurfaceOnly: true };
 
 /** The query op's image branch embed; a brain that opted out of embedding refuses before the image reaches a provider. */
 async function embedSearchImage(ctx: OperationContext, data: string, mime: string): Promise<Float32Array> {
@@ -715,7 +717,7 @@ const search: Operation = {
     offset: { type: 'number', description: 'Rows to skip.' },
     match: { type: 'string', enum: ['hybrid', 'keyword'], description: SEARCH_MATCH_DESCRIPTION },
     cursor: { type: 'string', description: 'From next.' },
-    mode: { type: 'string', description: 'Local callers only.' },
+    mode: { type: 'string', description: 'Local callers only.', fullSurfaceOnly: true },
     // #4398: per-call source scope, mirroring `query` — MCP clients passed it
     // here, got 'unknown parameter ignored', and read UNSCOPED results.
     source_id: { type: 'string', description: SOURCE_ID_PARAM_DESCRIPTION },
@@ -723,10 +725,10 @@ const search: Operation = {
     types: { type: 'array', items: { type: 'string' }, description: TYPES_PARAM_DESCRIPTION },
     where: WHERE_PARAM,
     // #3800: subagent token economy — per-call snippet cap.
-    snippet_chars: { type: 'number', description: SNIPPET_CHARS_PARAM_DESCRIPTION },
+    snippet_chars: SNIPPET_CHARS_PARAM,
     return_unit: RETURN_UNIT_PARAM,
     return_window: RETURN_WINDOW_PARAM,
-    token_budget: { type: 'number', description: 'Default 6000.' },
+    token_budget: { type: 'number', description: 'Default 6000.', fullSurfaceOnly: true },
     // #4415: explicit ranking-axis overrides (the same knobs `query` has had
     // since v0.29.1). The auto-detect banks are English regex, so on a
     // non-English brain the recency/salience stages never fire — these flags
@@ -872,8 +874,8 @@ const query: Operation = {
     /** v0.27.1: image-similarity search. Path resolved on the CLI side
      *  before the op fires (the op receives raw bytes neither side; the
      *  CLI loads the file, base64-encodes, and passes through `image`). */
-    image: { type: 'string', description: 'Base64 image.' },
-    image_mime: { type: 'string', description: 'MIME type of image.' },
+    image: { type: 'string', description: 'Base64 image.', fullSurfaceOnly: true },
+    image_mime: { type: 'string', description: 'MIME type of image.', fullSurfaceOnly: true },
     // #4356 — the text/hybrid path no longer hard-defaults this to 20; an
     // omitted OR falsy (0) `limit` resolves from the active search mode's
     // searchLimit (10/25/50 for conservative/balanced/tokenmax by default,
@@ -896,20 +898,20 @@ const query: Operation = {
     types: { type: 'array', items: { type: 'string' }, description: TYPES_PARAM_DESCRIPTION },
     where: WHERE_PARAM,
     // #3800: subagent token economy — per-call snippet cap.
-    snippet_chars: { type: 'number', description: SNIPPET_CHARS_PARAM_DESCRIPTION },
+    snippet_chars: SNIPPET_CHARS_PARAM,
     return_unit: RETURN_UNIT_PARAM,
     return_window: RETURN_WINDOW_PARAM,
-    token_budget: { type: 'number', description: 'Evidence token cap.' },
+    token_budget: { type: 'number', description: 'Evidence token cap.', fullSurfaceOnly: true },
     expand: { type: 'boolean', description: 'Default off; one LLM call, rarely helps.' },
-    detail: { type: 'string', description: 'low (compiled truth), medium (default) or high (all chunks).' },
+    detail: { type: 'string', description: 'low (compiled truth), medium (default) or high (all chunks).', fullSurfaceOnly: true },
     fields: FIELDS_PARAM,
-    mode: { type: 'string', description: 'Local callers only.' },
+    mode: { type: 'string', description: 'Local callers only.', fullSurfaceOnly: true },
     // v0.20.0 Cathedral II Layer 10 C1/C2: language + symbol-kind filters.
-    lang: { type: 'string', description: 'Code language.' },
-    symbol_kind: { type: 'string', description: 'Code symbol type.' },
+    lang: { type: 'string', description: 'Code language.', fullSurfaceOnly: true },
+    symbol_kind: { type: 'string', description: 'Code symbol type.', fullSurfaceOnly: true },
     // v0.20.0 Cathedral II Layer 7 (A2) / Layer 10 C3: two-pass structural expansion.
-    near_symbol: { type: 'string', description: 'Anchor code symbol.' },
-    walk_depth: { type: 'number', description: 'Code walk depth 1-2.' },
+    near_symbol: { type: 'string', description: 'Anchor code symbol.', fullSurfaceOnly: true },
+    walk_depth: { type: 'number', description: 'Code walk depth 1-2.', fullSurfaceOnly: true },
     // v0.29.1 — orthogonal recency + salience axes. YOU (the agent) decide.
     salience: SALIENCE_PARAM,
     recency: RECENCY_PARAM,
@@ -917,10 +919,10 @@ const query: Operation = {
     until: { type: 'string', description: 'On/before.' },
     source_id: { type: 'string', description: SOURCE_ID_PARAM_DESCRIPTION },
     cross_modal: { type: 'string', enum: ['text', 'image', 'both', 'auto'], description: 'Default auto.' },
-    embedding_column: { type: 'string', description: 'Registered embedding column.' },
-    adaptive_return: { type: 'boolean', description: 'true for one answer (fewer rows, never empty); omit for breadth.' },
-    autocut: { type: 'boolean', description: 'Default on (never empty); false: full top-K for breadth.' },
-    relational: { type: 'boolean', description: 'Relationship-graph arm (default on).' },
+    embedding_column: { type: 'string', description: 'Registered embedding column.', fullSurfaceOnly: true },
+    adaptive_return: { type: 'boolean', description: 'true for one answer (fewer rows, never empty); omit for breadth.', fullSurfaceOnly: true },
+    autocut: { type: 'boolean', description: 'Default on (never empty); false: full top-K for breadth.', fullSurfaceOnly: true },
+    relational: { type: 'boolean', description: 'Relationship-graph arm (default on).', fullSurfaceOnly: true },
     min_trust: MIN_TRUST_PARAM,
     ...EXPLAIN_PARAMS,
   },
