@@ -224,7 +224,12 @@ describe('brain-first block: placement rules', () => {
     const r = await setup(b, ['chatgpt', '--instructions-only']);
     expect(r.exitCode).toBe(0);
     expect(r.doc.instructions.action).toBe('print');
-    expect(r.doc.instructions.snippet).toBe(renderBrainFirstSnippet('chatgpt', { kind: 'mcp', server: 'gbrain' }));
+    // Nothing on disk to remove, so the opt-out is deleting the pasted block.
+    expect(r.doc.instructions.snippet).toBe(renderBrainFirstSnippet('chatgpt', { kind: 'mcp', server: 'gbrain' }, 'delete this block'));
+    // A thin-CLI client gets the CLI-flavored block with the launcher it calls.
+    const bot = await setup(b, ['grok-bot', '--instructions-only', '--gbrain-bin', '/opt/example/bin/gbrain']);
+    expect(bot.exitCode).toBe(0);
+    expect(bot.doc.instructions.snippet).toBe(renderBrainFirstSnippet('grok-bot', { kind: 'cli', launcher: '/opt/example/bin/gbrain' }, 'delete this block'));
   });
 });
 

@@ -690,7 +690,8 @@ async function runInstructionsOnly(flags: SetupFlags, out: Out): Promise<number>
   const access: BrainFirstAccess = { kind: 'mcp', server: flags.name, ...(surface ? { surface } : {}) };
   const mcp = { setup: flags.instructionsOnly ? 'unchanged' as const : 'manual' as const, docs: adapter.guide };
   if (!isBrainFirstHarness(harness)) {
-    const snippet = renderBrainFirstSnippet(harness, access);
+    const pasted: BrainFirstAccess = adapter.connection === 'thin-cli' ? { kind: 'cli', launcher: flags.gbrainBin ?? 'gbrain' } : access;
+    const snippet = renderBrainFirstSnippet(harness, pasted, 'delete this block');
     if (out.json) {
       await writeJsonDocument(`${JSON.stringify({ harness, dry_run: flags.dryRun, remove: flags.remove, instructions_only: true,
         instructions: { action: 'print', snippet, where: `${adapter.label}'s custom or system instructions` }, mcp }, null, 2)}\n`, (t) => process.stdout.write(t));
@@ -698,7 +699,9 @@ async function runInstructionsOnly(flags: SetupFlags, out: Out): Promise<number>
     }
     console.log(`${adapter.label} has no instruction file gbrain can write. Paste this block into its custom or system instructions (keep the markers so a later paste replaces it):\n`);
     console.log(snippet);
-    console.log(`Connect its MCP server with ${adapter.guide}.`);
+    console.log(adapter.connection === 'thin-cli'
+      ? `The thin-CLI install in ${adapter.guide} already puts this block at the top of GBRAIN-INSTRUCTIONS.md; pass --gbrain-bin <absolute launcher> to print it with that launcher.`
+      : `Connect its MCP server with ${adapter.guide}.`);
     return 0;
   }
   const projectDir = harness === 'cursor' || (harness === 'claude-code' && flags.scope === 'project') ? realpathSync(process.cwd()) : undefined;
