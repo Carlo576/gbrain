@@ -40,6 +40,7 @@ import type { Check } from '../../doctor.ts';
 import { checkError, doctorVerify, infoCheck } from '../check-fix.ts';
 import type { DoctorContext, DoctorEntry } from '../context.ts';
 import { VERSION } from '../../../version.ts';
+import { brainFirstTarget, inspectBrainFirst, isBrainFirstHarness, readBrainFirstLedger, renderBrainFirstBlock } from '../../../core/setup/brain-first.ts';
 
 export const HARNESS_SMOKE_TIMEOUT_MS = 15_000;
 export const HARNESS_HTTP_PROBE_TIMEOUT_MS = 3_000;
@@ -341,8 +342,74 @@ async function smoke(r: HarnessRegistration): Promise<Check> {
     ...(fix ? { fix } : { fix_unavailable_reason: 'no_safe_automatic_fix' as const }) };
 }
 
-/** Registration read (full run) or registration read + smoke (`--only harness_wiring`). */
+export interface InstructionBlockView {
+  harness: string;
+  path: string;
+  state: 'current' | 'stale' | 'missing' | 'damaged' | 'opted_out';
+  /** Where the record came from: the brain-first ledger, or the harness's default file for a registration with no record. */
+  from: 'ledger' | 'default_path';
+}
+
+/**
+ * The brain-first instruction block for every surface gbrain wrote or was
+ * told to skip (the ledger), plus each registered harness with no record,
+ * checked at that harness's default instruction file. Read-only.
+ */
+export function instructionBlockViews(regs: HarnessRegistration[]): InstructionBlockView[] {
+  const state = (s: ReturnType<typeof inspectBrainFirst>['state']): InstructionBlockView['state'] =>
+    s === 'current' ? 'current' : s === 'stale' ? 'stale' : s === 'damaged' ? 'damaged' : 'missing';
+  const views: InstructionBlockView[] = readBrainFirstLedger().map((e) => e.status === 'declined'
+    ? { harness: e.harness, path: e.path, state: 'opted_out', from: 'ledger' }
+    : { harness: e.harness, path: e.path, state: state(inspectBrainFirst(e.path, renderBrainFirstBlock(e.harness, e.access)).state), from: 'ledger' });
+  for (const r of regs) {
+    if (views.some((v) => v.harness === r.harness) || !isBrainFirstHarness(r.harness)) continue;
+    const target = brainFirstTarget(r.harness);
+    if ('error' in target) continue;
+    views.push({ harness: r.harness, path: target.path, state: state(inspectBrainFirst(target.path).state), from: 'default_path' });
+  }
+  return views;
+}
+
+const INSTRUCTION_PROBLEM: Record<'stale' | 'missing' | 'damaged', string> = {
+  stale: 'is out of date', missing: 'is missing', damaged: 'has damaged markers',
+};
+
+/**
+ * Fold the brain-first block into the wiring verdict: without it agents rarely
+ * reach for the brain at all, so a missing, stale or damaged block turns an
+ * `ok` wiring into a warn whose fix rewrites only the block. An opt-out is
+ * reported, never warned on. No views: the check is returned unchanged.
+ */
+export function withInstructionBlocks(check: Check, views: InstructionBlockView[]): Check {
+  if (views.length === 0) return check;
+  const details = { ...(check.details ?? {}), instructions: views };
+  const bad = views.filter((v): v is InstructionBlockView & { state: 'stale' | 'missing' | 'damaged' } => v.state === 'stale' || v.state === 'missing' || v.state === 'damaged');
+  if (bad.length === 0) {
+    const current = views.filter((v) => v.state === 'current').map((v) => v.harness);
+    const optedOut = views.filter((v) => v.state === 'opted_out').map((v) => v.harness);
+    const note = [current.length ? `brain-first instructions current for ${current.join(', ')}` : '', optedOut.length ? `opted out for ${optedOut.join(', ')}` : ''].filter(Boolean).join('; ');
+    return { ...check, message: `${check.message} ${note.charAt(0).toUpperCase()}${note.slice(1)}.`, details };
+  }
+  const first = bad[0]!;
+  const problems = bad.map((v) => `the ${v.harness} block in ${v.path} ${INSTRUCTION_PROBLEM[v.state]}`).join('; ');
+  const message = `${check.message} Brain-first instructions: ${problems}, so sessions are not told to check gbrain first.`;
+  if (check.status !== 'ok') return { ...check, message, details };
+  const fix: Action = first.state === 'damaged'
+    ? { consent: [], actor: 'user', requires_exclusive: false, verify: doctorVerify(NAME),
+      why: `The brain-first markers in ${first.path} were hand-edited; gbrain will not guess which lines are its own.`,
+      user_message: `The gbrain instruction block in ${first.path} has damaged markers. Please delete the block (both marker lines included), then I'll write a fresh one.` }
+    : { argv: ['gbrain', 'setup', first.harness, '--instructions-only'], consent: ['persistent_install'], actor: 'agent', requires_exclusive: false, verify: doctorVerify(NAME),
+      why: `Writes or upgrades only the marked brain-first block in ${first.path}; text outside the markers is left as it is. \`--no-instructions\` opts out instead.` };
+  return { name: check.name, status: 'warn', message, details, fix };
+}
+
+/** Registration read (full run) or registration read + smoke (`--only harness_wiring`), plus the brain-first block. */
 export async function harnessWiringCheck(opts: { smoke: boolean }): Promise<Check> {
+  const regs = readHarnessRegistrations();
+  return withInstructionBlocks(await registrationCheck(opts, regs), instructionBlockViews(regs));
+}
+
+async function registrationCheck(opts: { smoke: boolean }, regs: HarnessRegistration[]): Promise<Check> {
   // A shared HTTP server that answers in status-only mode outranks every registration verdict.
   const statusServer = (await verifiedStatusMarkers())[0];
   if (statusServer) {
@@ -350,7 +417,6 @@ export async function harnessWiringCheck(opts: { smoke: boolean }): Promise<Chec
     return { name: NAME, status: 'warn', message: entry.why, ...(entry.fix ? { fix: entry.fix } : { fix_unavailable_reason: 'no_safe_automatic_fix' as const }),
       details: { reason: entry.reason, transport: 'http', port: statusServer.port, pid: statusServer.pid, status_reason: statusServer.reason } };
   }
-  const regs = readHarnessRegistrations();
   if (regs.length === 0) {
     const detected = detectedHarnesses();
     const plugins = enabledPluginLanes('gbrain').filter((lane) => detected.includes(lane.harness));

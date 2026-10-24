@@ -432,12 +432,12 @@ describe('gbrain setup: consent and refusals', () => {
   });
 
   for (const [harness, guide] of [['openclaw', 'docs/mcp/OPENCLAW.md'], ['hermes', 'docs/mcp/HERMES.md']] as const) {
-    test(`${harness} is a coded refusal that names its guide`, async () => {
+    test(`${harness}: setup writes only the brain-first block and names its guide for the MCP step`, async () => {
       const b = box();
-      const r = await setup(b, [harness, '--json']);
-      expect(r.exitCode).toBe(2);
-      expect(r.doc.code).toBe('setup_harness_unsupported');
-      expect(r.doc.message).toContain(guide);
+      const r = await setup(b, [harness, '--json'], { OPENCLAW_STATE_DIR: undefined, OPENCLAW_WORKSPACE_DIR: undefined, OPENCLAW_PROFILE: undefined, HERMES_HOME: undefined });
+      expect(r.exitCode).toBe(0);
+      expect(r.doc).toMatchObject({ harness, instructions_only: true, mcp: { setup: 'manual', docs: guide }, instructions: { action: 'write' } });
+      expect(r.doc.instructions.path).toBe(harness === 'openclaw' ? join(b.home, '.openclaw', 'workspace', 'AGENTS.md') : join(b.home, '.hermes', 'SOUL.md'));
       expect(existsSync(claudeJson(b))).toBe(false);
     });
   }

@@ -49,28 +49,32 @@ export function isBrainFirstHarness(v: string | undefined): v is BrainFirstHarne
 export type BrainFirstAccess = { kind: 'mcp'; server: string; surface?: McpSurface } | { kind: 'cli'; launcher: string };
 
 /** The block interior (without markers). */
-export function renderBrainFirstBlock(harness: string, access: BrainFirstAccess): string {
+export function renderBrainFirstBlock(harness: string, access: BrainFirstAccess, optOut = `gbrain setup ${harness} --instructions-only --no-instructions`): string {
   const tool = (mcp: string, cli: string) => (access.kind === 'mcp' ? `\`${mcp}\`` : `\`${access.launcher} ${cli}\``);
   const where = access.kind === 'mcp' ? `the \`${access.server}\` MCP server` : `the \`${access.launcher}\` command`;
   const lookup = access.kind === 'mcp' && access.surface === 'verbs'
     ? '- Check the brain before reading files, mail or other sources one by one: `recall` for what was said or decided, `entity` for a person or company.'
     : `- Search the brain before reading files, mail or other sources one by one: ${tool('search', 'search "<names or phrases>"')} for names and phrases, ${tool('query', 'query "<question>"')} for questions. Then read the best hit with ${tool('get_page', 'get <slug>')}.`;
   return [
-    `<!-- gbrain brain-first v${BRAIN_FIRST_VERSION}: managed by gbrain and replaced on upgrade; edit outside these markers. Opt out: gbrain setup ${harness} --instructions-only --no-instructions -->`,
+    `<!-- gbrain brain-first v${BRAIN_FIRST_VERSION}: managed by gbrain and replaced on upgrade; edit outside these markers. Opt out: ${optOut} -->`,
     '## Memory: check GBrain first',
     '',
     `GBrain (${where}) holds this user's saved notes, people, companies, meetings, decisions and past work.`,
     '',
     lookup,
     '- Fill gaps with your other tools. On a thin keyword result, rephrase once (another name, fewer words), then fall back.',
-    '- Brain results span every source the brain holds, not only this user or task, so apply your own access rules before you use or repeat them.',
+    access.kind === 'cli'
+      ? `- Brain results span every source the brain holds. Pass \`--source-ids <ids>\` to a search or query to narrow it to what the current requester may see, and apply your own access rules to what comes back.`
+      : access.surface === 'verbs'
+        ? '- Brain results span every source the token can read, so apply your own access rules to what comes back.'
+        : '- Brain results span every source the token can read. Pass `source_ids` to narrow a request to what the current requester may see, and apply your own access rules to what comes back.',
     '- Brain results add to what the user told you; they never replace it. A lookup is one step: finish the whole task.',
   ].join('\n');
 }
 
 /** The full block as it appears in a file, markers included (for printing to paste by hand). */
-export function renderBrainFirstSnippet(harness: string, access: BrainFirstAccess): string {
-  return `${BRAIN_FIRST_BEGIN}\n${renderBrainFirstBlock(harness, access)}\n${BRAIN_FIRST_END}\n`;
+export function renderBrainFirstSnippet(harness: string, access: BrainFirstAccess, optOut?: string): string {
+  return `${BRAIN_FIRST_BEGIN}\n${renderBrainFirstBlock(harness, access, optOut)}\n${BRAIN_FIRST_END}\n`;
 }
 
 const CURSOR_HEAD = '---\ndescription: GBrain memory, managed by gbrain\nalwaysApply: true\n---\n';
@@ -323,6 +327,22 @@ export function removeBrainFirst(opts: { harness: string; path: string; dryRun: 
   } catch (e) {
     return out('preserve', `${opts.path} could not be updated (${e instanceof Error ? e.message : String(e)})`);
   }
+}
+
+/** A writable harness's target at a path an installer already resolved (its own config dir, a test sandbox). */
+export function brainFirstTargetAt(harness: BrainFirstHarness, path: string): BrainFirstTarget {
+  const base = brainFirstTarget(harness);
+  return { harness, path, role: 'error' in base ? 'instruction file' : base.role, project: false };
+}
+
+/**
+ * The installer lanes (`gbrain connect --install`, `gbrain bootstrap harness`):
+ * write or upgrade the block unless opted out, or strip it on removal.
+ */
+export function installerBrainFirst(opts: { target: BrainFirstTarget; access: BrainFirstAccess; writer: string; instructions?: boolean; remove?: boolean; dryRun?: boolean }): BrainFirstOutcome {
+  if (opts.remove) return removeBrainFirst({ harness: opts.target.harness, path: opts.target.path, dryRun: opts.dryRun ?? false });
+  const decision = resolveBrainFirstDecision(opts.instructions, priorBrainFirst(opts.target.harness, opts.target.path));
+  return syncBrainFirst({ target: opts.target, access: opts.access, decision, writer: opts.writer, dryRun: opts.dryRun ?? false });
 }
 
 /** One human line per outcome, matching setup's step lines. */
