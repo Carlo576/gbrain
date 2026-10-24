@@ -71,6 +71,23 @@ Leave `GBRAIN_SOURCE` unset in the MCP env unless you deliberately want
 single-source retrieval: a pin scopes every tool (search, `get_brain_identity`
 counts, …) to that one source, and nothing warns on reads.
 
+## Brain-first instructions
+
+Registering the server only makes the tools available. Agents seldom call a
+brain nobody told them about, so finish either option with:
+
+```bash
+gbrain setup openclaw   # --dry-run previews; --workspace <dir> picks the agent
+```
+
+It writes one short marked block into the workspace `AGENTS.md` (from
+`OPENCLAW_CONFIG_PATH` or `~/.openclaw/openclaw.json`: a sole agent's
+workspace, else `agents.defaults.workspace`, else `~/.openclaw/workspace`; with
+several agents, pass `--workspace`). Text outside the markers is never touched,
+a re-run upgrades the block in place, `--no-instructions` opts out and is
+remembered, and `--remove` takes it out. A thin-client install puts the same
+block at the top of `GBRAIN-INSTRUCTIONS.md`.
+
 ## Verify
 
 `openclaw mcp list` should show `gbrain`. Then start an agent turn and ask it
