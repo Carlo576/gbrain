@@ -62,7 +62,7 @@ export function renderBrainFirstBlock(harness: string, access: BrainFirstAccess,
     `GBrain (${where}) holds this user's saved notes, people, companies, meetings, decisions and past work.`,
     '',
     lookup,
-    '- Fill gaps with your other tools. On a thin keyword result, rephrase once (another name, fewer words), then fall back.',
+    '- Fill gaps with your other tools. On an empty or thin result, first retry with one or two short terms (a name, one key word).',
     access.kind === 'cli'
       ? `- Brain results span every source the brain holds. Pass \`--source-ids <ids>\` to a search or query to narrow it to what the current requester may see, and apply your own access rules to what comes back.`
       : access.surface === 'verbs'
