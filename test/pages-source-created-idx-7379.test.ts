@@ -6,7 +6,11 @@
  * probe was a sequential scan of pages: a few thousand attempts over a large
  * brain hit statement_timeout, dry run included. Protects: initSchema leaves a
  * valid partial index on pages (source_id, created_at) WHERE deleted_at IS NULL,
- * and the planner answers the real re-arm probe from it. PGLite always,
+ * and the real re-arm probe reads pages through it. The plan is read at an SSD
+ * random_page_cost (1.1, as managed Postgres ships) on an analyzed but not
+ * vacuumed table: at the default cost the choice rides the visibility map,
+ * which VACUUM cannot set while another snapshot is open (a busy CI database),
+ * so the plan flipped between this index and a Seq Scan. PGLite always,
  * Postgres when DATABASE_URL is set (testBackends).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -66,17 +70,21 @@ describe('#7379 pages (source_id, created_at) index for the relink re-arm probe'
 
     test(`[${backend}] the conversation re-arm probe reads pages through that index`, async () => {
       const engine = engineFor();
-      // Page rows as wide as real ones and a vacuumed table: without the index
-      // the planner reads pages with a per-probe Seq Scan (the reported plan).
+      // Page rows as wide as real ones, created in insertion order; without the
+      // index the probe reads pages with a per-probe Seq Scan (the reported plan).
       await engine.executeRaw(
         `INSERT INTO pages (source_id, slug, type, title, compiled_truth, created_at)
-         SELECT 'default', 'notes/idx-probe-' || g, 'note', 'Probe ' || g, repeat('x', 1500), now() - (g || ' minutes')::interval
+         SELECT 'default', 'notes/idx-probe-' || g, 'note', 'Probe ' || g, repeat('x', 1500), now() - ((501 - g) || ' minutes')::interval
            FROM generate_series(1, 500) g`);
-      await engine.executeRaw('VACUUM ANALYZE pages');
-      const plan = (await engine.executeRaw<{ 'QUERY PLAN': string }>(`EXPLAIN SELECT f.id FROM facts f WHERE ${conversationTriedSql}`))
-        .map(r => r['QUERY PLAN']).join('\n');
-      expect(plan).toMatch(/Index (Only )?Scan using pages_source_created_idx on pages np/);
-      expect(plan).not.toContain('Seq Scan on pages np');
+      await engine.executeRaw('ANALYZE pages');
+      const plan = await engine.transaction(async tx => {
+        await tx.executeRaw('SET LOCAL random_page_cost = 1.1');
+        return (await tx.executeRaw<{ 'QUERY PLAN': string }>(`EXPLAIN SELECT f.id FROM facts f WHERE ${conversationTriedSql}`))
+          .map(r => r['QUERY PLAN']).join('\n');
+      });
+      const probe = plan.slice(plan.indexOf('SubPlan'));
+      expect(probe).toMatch(/Index (Only )?Scan using pages_source_created_idx on pages np/);
+      expect(probe).not.toContain('Seq Scan on pages np');
     });
   }
 });
