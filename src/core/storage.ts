@@ -1,3 +1,7 @@
+import { closeSync, openSync, readSync } from 'fs';
+import type { FileHandle } from 'fs/promises';
+import { createHash } from 'crypto';
+
 /**
  * StorageBackend — pluggable interface for binary file storage.
  *
@@ -7,6 +11,8 @@
 
 export interface StorageBackend {
   upload(path: string, data: Buffer, mime?: string): Promise<void>;
+  /** Upload a file from disk with memory bounded independently of its size (#7427). */
+  uploadFile(path: string, filePath: string, mime?: string): Promise<void>;
   download(path: string): Promise<Buffer>;
   delete(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
@@ -49,4 +55,30 @@ export async function createStorage(config: StorageConfig): Promise<StorageBacke
     default:
       throw new Error(`Unknown storage backend: ${config.backend}`);
   }
+}
+
+/** SHA-256 of a file read in fixed-size chunks, so large originals are never held in memory. */
+export function hashStorageFile(filePath: string): string {
+  const fd = openSync(filePath, 'r');
+  try {
+    const hash = createHash('sha256');
+    const chunk = Buffer.allocUnsafe(1024 * 1024);
+    let length: number;
+    while ((length = readSync(fd, chunk, 0, chunk.length, null)) > 0) {
+      hash.update(chunk.subarray(0, length));
+    }
+    return hash.digest('hex');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Read exactly `length` bytes at `position` into the start of `buffer`. */
+export async function readFileRange(file: FileHandle, buffer: Buffer, length: number, position: number): Promise<Buffer> {
+  for (let filled = 0; filled < length;) {
+    const { bytesRead } = await file.read(buffer, filled, length - filled, position + filled);
+    if (!bytesRead) throw new Error('File shrank during upload');
+    filled += bytesRead;
+  }
+  return buffer.subarray(0, length);
 }
