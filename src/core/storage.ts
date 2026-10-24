@@ -1,4 +1,4 @@
-import { closeSync, openSync, readSync } from 'fs';
+import { closeSync, openSync, readSync, statSync, type Stats } from 'fs';
 import type { FileHandle } from 'fs/promises';
 import { createHash } from 'crypto';
 
@@ -70,6 +70,18 @@ export function hashStorageFile(filePath: string): string {
     return hash.digest('hex');
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Upload a file whose hash the caller already computed, then refuse when the file changed since `before` was taken,
+ * so a row is never recorded under a hash the stored bytes may not match.
+ */
+export async function uploadUnchangedFile(storage: StorageBackend, path: string, filePath: string, before: Stats, mime?: string): Promise<void> {
+  await storage.uploadFile(path, filePath, mime);
+  const after = statSync(filePath);
+  if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+    throw new Error(`${filePath} changed during the upload, so its hash may not match the stored bytes; nothing was recorded. Upload it again once it stops changing.`);
   }
 }
 

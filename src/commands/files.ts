@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync, lstatSync, existsSync, writeFileSy
 import { join, relative, extname, basename, dirname, resolve } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
-import { hashStorageFile, type StorageBackend, type StorageConfig } from '../core/storage.ts';
+import { hashStorageFile, uploadUnchangedFile, type StorageBackend, type StorageConfig } from '../core/storage.ts';
 import { sqlQueryForEngine, executeRawJsonb, FILES_METADATA_MERGE_SQL } from '../core/sql-query.ts';
 import { humanSize } from '../core/file-resolver.ts';
 import { createProgress } from '../core/progress.ts';
@@ -202,7 +202,7 @@ async function uploadFile(engine: BrainEngine, args: string[]) {
 
   const method = stat.size >= SIZE_THRESHOLD ? 'TUS resumable' : 'standard';
   console.log(`Uploading ${humanSize(stat.size)} via ${method}...`);
-  await storage.uploadFile(storagePath, filePath, mimeType || undefined);
+  await uploadUnchangedFile(storage, storagePath, filePath, stat, mimeType || undefined);
 
   // files.metadata is JSONB — bind a real object via executeRawJsonb instead
   // of casting a string into ::jsonb (the #2339 double-encode class).
@@ -347,7 +347,7 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
 
   const method = stat.size >= SIZE_THRESHOLD ? 'TUS resumable' : 'standard';
   console.error(`Uploading ${humanSize(stat.size)} via ${method}...`);
-  await storage.uploadFile(storagePath, filePath, mimeType || undefined);
+  await uploadUnchangedFile(storage, storagePath, filePath, stat, mimeType || undefined);
 
   // Create .redirect.yaml pointer in the brain repo
   let pointerPath: string | null = null;
@@ -449,11 +449,11 @@ async function syncFiles(engine: BrainEngine, dir?: string) {
 
     progress.tick(1);
 
+    const stat = statSync(filePath);
     const hash = fileHash(filePath);
     const filename = basename(filePath);
     const storagePath = relativePath.replace(/\\/g, '/');
     const mimeType = getMimeType(filePath);
-    const stat = statSync(filePath);
 
     const sql = sqlQueryForEngine(engine);
     const existing = await sql`SELECT id FROM files WHERE content_hash = ${hash} AND storage_path = ${storagePath}`;
@@ -467,7 +467,7 @@ async function syncFiles(engine: BrainEngine, dir?: string) {
     const pageSlug = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : null;
 
     // Actually put the bytes in storage before recording them as stored.
-    await storage.uploadFile(storagePath, filePath, mimeType || undefined);
+    await uploadUnchangedFile(storage, storagePath, filePath, stat, mimeType || undefined);
 
     // files.metadata is JSONB — bind a real object via executeRawJsonb instead
     // of casting a string into ::jsonb (the #2339 double-encode class).

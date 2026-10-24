@@ -1,4 +1,5 @@
-import { copyFileSync, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, readdirSync, realpathSync } from 'fs';
+import { createReadStream, createWriteStream, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, readdirSync, realpathSync } from 'fs';
+import { pipeline } from 'stream/promises';
 import { join, dirname, resolve } from 'path';
 import type { StorageBackend } from '../storage.ts';
 
@@ -31,7 +32,7 @@ export class LocalStorage implements StorageBackend {
   async uploadFile(path: string, filePath: string, _mime?: string): Promise<void> {
     const full = this.contained(path);
     mkdirSync(dirname(full), { recursive: true });
-    copyFileSync(filePath, full);
+    await pipeline(createReadStream(filePath), createWriteStream(full));
   }
 
   async download(path: string): Promise<Buffer> {

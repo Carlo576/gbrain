@@ -62,7 +62,7 @@ const file_upload: Operation = {
 
     const { statSync } = await import('fs');
     const { basename, extname } = await import('path');
-    const { hashStorageFile } = await import('../storage.ts');
+    const { hashStorageFile, uploadUnchangedFile } = await import('../storage.ts');
 
     const filePath = p.path as string;
     const pageSlug = (p.page_slug as string) || null;
@@ -127,7 +127,7 @@ const file_upload: Operation = {
     }
 
     try {
-      await storage.uploadFile(storagePath, filePath, mimeType || undefined);
+      await uploadUnchangedFile(storage, storagePath, filePath, stat, mimeType || undefined);
     } catch (uploadErr) {
       throw opError('storage_error', `Upload failed: ${uploadErr instanceof Error ? uploadErr.message : String(uploadErr)}`,
         'Nothing was recorded. Check the storage backend (credentials, bucket, disk) with `gbrain doctor --json`, then upload again; the upload is keyed by content hash, so repeating it is safe.');

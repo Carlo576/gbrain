@@ -249,6 +249,23 @@ describe('local uploadFile (#7427)', () => {
     expect(sha256Of(join(storageDir, 'media/local-src.bin'))).toBe(sha256Of(src));
     rmSync(storageDir, { recursive: true, force: true });
   });
+
+  test('a stored object gets the mode a plain write gives, not the source file\'s mode', async () => {
+    const src = join(workDir, 'local-private.bin');
+    writePatterned(src, MiB + 5);
+    fs.chmodSync(src, 0o600);
+    const storageDir = mkdtempSync(join(tmpdir(), 'gb-7427-local-mode-'));
+    const reference = join(storageDir, 'reference.bin');
+    writeFileSync(reference, 'x');
+    const storage = new LocalStorage(storageDir);
+    await storage.uploadFile('media/new.bin', src);
+    expect(fs.statSync(join(storageDir, 'media/new.bin')).mode & 0o777).toBe(fs.statSync(reference).mode & 0o777);
+    fs.chmodSync(join(storageDir, 'media/new.bin'), 0o644);
+    await storage.uploadFile('media/new.bin', src);
+    expect(fs.statSync(join(storageDir, 'media/new.bin')).mode & 0o777).toBe(0o644);
+    expect(sha256Of(join(storageDir, 'media/new.bin'))).toBe(sha256Of(src));
+    rmSync(storageDir, { recursive: true, force: true });
+  });
 });
 
 describe('upload callers hash and upload from disk (#7427)', () => {
@@ -278,6 +295,35 @@ describe('upload callers hash and upload from disk (#7427)', () => {
       'SELECT content_hash FROM files WHERE storage_path = $1', [out.storage_path],
     );
     expect(rows[0].content_hash).toBe(sha256Of(src));
+    rmSync(storageDir, { recursive: true, force: true });
+  });
+
+  test('a file that changes during the upload is refused and nothing is recorded', async () => {
+    const storageDir = mkdtempSync(join(tmpdir(), 'gb-7427-changed-'));
+    const src = join(workDir, 'op-changing.mp4');
+    writePatterned(src, MiB + 7);
+    const ctx = {
+      engine,
+      config: { engine: 'pglite', storage: { backend: 'local', bucket: 'b', localPath: storageDir } },
+      logger: { info() {}, warn() {}, error() {} },
+      dryRun: false,
+      remote: false,
+      sourceId: 'default',
+    } as never;
+    const original = LocalStorage.prototype.uploadFile;
+    const spy = spyOn(LocalStorage.prototype, 'uploadFile').mockImplementation(async function (this: LocalStorage, path: string, filePath: string, mime?: string) {
+      fs.appendFileSync(filePath, 'edited while uploading');
+      return original.call(this, path, filePath, mime);
+    });
+    try {
+      await expect(operationsByName['file_upload'].handler(ctx, { path: src, page_slug: 'media/changing-example' }))
+        .rejects.toThrow(/changed during the upload/);
+    } finally {
+      spy.mockRestore();
+    }
+    const rows = await engine.executeRaw<{ n: number }>(
+      "SELECT count(*)::int AS n FROM files WHERE storage_path = 'media/changing-example/op-changing.mp4'");
+    expect(Number(rows[0].n)).toBe(0);
     rmSync(storageDir, { recursive: true, force: true });
   });
 
