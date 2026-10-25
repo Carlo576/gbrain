@@ -56,7 +56,7 @@ export function hostedHookScript(sourceId: string): string {
     '# The branches of this repository move only through the gbrain door. Door commits are local ref updates and the',
     '# push to the user remote is outgoing, so neither passes this hook; every incoming push is refused.',
     `echo "gbrain: this repository holds source ${sourceId}; only the gbrain writer moves its branches, so this push was refused and nothing changed." >&2`,
-    `echo "gbrain: write pages through gbrain instead (gbrain put --source ${sourceId}, or put_page over MCP), then fetch from here." >&2`,
+    `echo "gbrain: write pages with gbrain put --source ${sourceId} or put_page over MCP, then fetch from here." >&2`,
     'exit 1', ''].join('\n');
 }
 
