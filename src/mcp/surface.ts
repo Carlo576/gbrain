@@ -373,6 +373,28 @@ export async function resolveAdvertisedSurface(engine: BrainEngine | null, confi
 }
 
 /**
+ * `oauth_clients.surface_set_by` for a surface an install default wrote (the
+ * `gbrain agent register` presets and the harness grant profiles), not an
+ * operator: the client calls that surface but lists only the memory verbs and
+ * `request_tools`, like a stdio registration with `--advertise verbs`.
+ */
+export const INSTALL_SURFACE_SET_BY = 'install';
+
+/**
+ * The advertised surface for one HTTP client. A client without its own
+ * surface gets the server's (`--advertise`, `mcp.advertised_surface`); one
+ * whose surface an install default wrote lists the verbs; one that chose its
+ * surface (an operator rescope, `request_tools {surface}`) lists it in full.
+ */
+export async function clientAdvertisedSurface(
+  auth: { surface?: unknown; surfaceSetBy?: string | null },
+  engine: BrainEngine | null, config: GBrainConfig | null | undefined, flag: McpSurface | null = null,
+): Promise<McpSurface | null> {
+  if (auth.surface) return auth.surfaceSetBy === INSTALL_SURFACE_SET_BY ? 'verbs' : null;
+  return resolveAdvertisedSurface(engine, config, flag);
+}
+
+/**
  * The tools to list: the callable set narrowed to the advertised surface
  * (never wider). A narrowed list always keeps request_tools when it is
  * callable: it is how an agent reaches the unlisted tools (the verbs surface
