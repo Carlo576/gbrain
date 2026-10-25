@@ -10,6 +10,60 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.441.0] - 2026-10-25
+
+**On a managed brain, the links you add with `add_link` and the timeline bullets `extract_entities` writes now live in the page's Markdown, committed to Git, and the database edges are derived from them. A manual edge survives a rebuild from Git, and every write that touches the database directly is now classified, so a new one can't slip in unnoticed.**
+
+Git is the source of truth for a managed brain, and the database is rebuilt from it. Until now three writers changed the database without writing the page: `add_link` and `remove_link` stored manual edges only as database rows, and `extract_entities` added its timeline row and backlink straight to the tables. A rebuild from Git lost all of them. They now go through the same page-mutation door as `put_page`: the page's Markdown changes first, Git commits it, and the database row follows from the file.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `add_link` on a managed brain | a database-only edge, lost on a rebuild from Git | a row in the page's `## Links` table (between `<!--- gbrain:links:begin -->` and `end` markers, one row per target, type and source), committed; the edge is projected from that row |
+| `add_link` again on an existing row without `context` or dates | overwrote them with empty values | keeps the stored ones |
+| `remove_link` on an edge the page's own text creates (a link, wikilink or frontmatter field) | deleted the edge until the next re-import brought it back | keeps it and returns `derived_from_text`, with a message to edit the page text instead |
+| `extract_entities` on a managed brain | timeline row and backlink written to the database only | the timeline bullet is added to the entity page's Markdown through the door; the backlink is the link inside that bullet |
+| A new direct database write in the code | nothing caught it | `test/coordinated-write-census.test.ts` fails until it is classified in `docs/architecture/coordinated-writes.tsv` |
+
+### What to watch for after you upgrade
+
+- Manual edges recorded before this release stay in the database as they were; nothing moves them into Markdown on upgrade.
+- Deleting a whole `## Links` section by hand leaves its edges in the database until `remove_link` runs for them.
+- Unmanaged brains are unchanged. Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/links-fence.ts` and `src/core/links-fence-projection.ts`: parse, render and edit the `## Links` table; its rows are projected as edges with `origin_field = links_fence`, and the body link extractor skips the table so its rows aren't counted twice.
+- `src/core/persistence/manual-links.ts` and `src/core/ops/links.ts`: `add_link` and `remove_link` on a managed brain are page mutations that edit the table.
+- `src/core/enrichment-service.ts`: `extract_entities` submits an `add_timeline_entry` mutation, and `add_timeline_entry` publications now derive the page's links (`page-prepare.ts`).
+- `docs/architecture/coordinated-writes.tsv` and `test/coordinated-write-census.test.ts`: every `withCoordinatedWrite` and `coordinatedDatabaseWrite` call site is classified (door, projection, operational, metadata, removal, generated or facts lane).
+- Tests on PGLite and Postgres cover the table round trip, re-import, the remote-mention publication edge and consolidate-ties as a projection repair.
+
+## [0.60.440.0] - 2026-10-25
+
+**Applying a held file-drift repair on a brain whose canonical checkout is behind or diverged no longer refuses most pages as "Reconciliation preview is stale: policy_digest" when nothing about your settings changed. One preview, then one apply, lands the whole window.**
+
+When you preview a repair, gbrain fingerprints the settings that decide what the repair writes (your config, the content-safety limits, the operator junk list), and the apply refuses any page whose fingerprint has changed since. But other gbrain processes on the same machine can do the actual write for the apply, such as `gbrain serve` or the jobs worker. Each of them folded its own API keys, database URLs and model choices into that fingerprint. When the apply's own writer was busy pushing to a diverged checkout, those other processes picked up its pages, and every page they handled read as stale. You had to repeat preview and apply until nothing was left.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain serve` or the jobs worker writes an apply's page, and its environment has different API keys, database URLs or model settings | the page is refused `changed_since_preview` (`policy_digest`); each preview/apply round landed only part of the window | the page lands; the fingerprint covers only what the repair reads |
+| A setting the repair does read changes between preview and apply (the config file's or database's `content_sanity` keys, `GBRAIN_PAGE_WARN_BYTES` / `GBRAIN_PAGE_BLOCK_BYTES` / `GBRAIN_NO_SANITY`, `~/.gbrain/junk-substrings.txt`, the source's config) | refused as stale | still refused as stale |
+
+### What to watch for after you upgrade
+
+- Previews made before the upgrade carry the old fingerprint, so their applies refuse as stale once. Preview again and apply the new hash.
+- Memory growth during a long held apply (#7506) is not addressed by this release.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `reconcilePolicyDigest` (`src/core/persistence/reconcile-state.ts`) builds its config from the config file plus the content-sanity overrides the environment sets (what the import gate resolves), then merges the database config plane. The operator literals, `GBRAIN_NO_SANITY` and the source row stay in the digest.
+- `test/repair-file-drift-consumer-env-7506.test.ts` (PGLite and Postgres): a diverged canonical checkout whose real keep-checkout publish parks on `integrate_conflict`; an apply under different credentials lands every item; a content-sanity override still refuses; the digest moves with each reconcile input and not with credentials; and the apply's heap stays flat per item.
+
 ## [0.60.439.0] - 2026-10-24
 
 **`gbrain sources git-gap <source>` shows, read-only, how far a source's database is from what Git has committed: which pages match their committed file, which hold content Git lacks, which Git has moved past, and which are database-only by declaration. Doctor reports the totals as `db_ahead_of_git`. Nothing changes and nothing is written.**
