@@ -10,27 +10,198 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.446.0] - 2026-10-25
+
+**A source configured `canonical: git` is now indexed from its commits alone, and Git wins. Its sync pass imports every committed blob over what the database holds, and `gbrain sources reindex <id> --from-git` previews that replacement before applying it. A new doctor check, `git_index_lag`, reports how far the index trails HEAD.**
+
+Strict mode stays off by default. Only sources whose config sets `canonical: git` change, and nothing rewrites data on upgrade.
+
+### What changed
+
+| Situation, on a `canonical: git` source | Before | Now |
+|---|---|---|
+| The database holds a version sync never saw (`db_ahead`) | kept the database version | imports the committed blob |
+| A commit moved a page the database also changed (drift) | held `file_drift` | imports the committed blob |
+| A file has an uncommitted edit | held `worktree_dirty` | indexes the committed bytes and leaves the edit on disk |
+| A commit removed a file but an untracked copy stays on disk | kept the page | deletes the page |
+| `gbrain sync --working-tree` | read the working tree | refused with `managed_sync_flag_refused` before anything runs |
+| Re-deriving the index from Git | no verb | `gbrain sources reindex <id> --from-git` previews every page Git replaces, bound to HEAD by a hash; `--apply --expect <hash>` runs the full pass |
+| How far the index trails HEAD | not reported | doctor `git_index_lag` counts commits and seconds behind and warns past `GBRAIN_DOCTOR_GIT_INDEX_LAG_WARN_SECONDS` (default 900) |
+
+### Itemized changes
+
+- `src/core/persistence/sync-classify.ts`: `classifySyncPath(state, { strict })` returns Git's verdict where a mixed source keeps or holds. `sync-pass.ts` and `sync-pass-run.ts` force committed mode for a strict source, skip the dirtiness probe, and carry `strict` in the classified key and the selection fingerprint (`canonical: 'git'`).
+- `src/core/persistence/sync-run.ts` and `sync-prepare.ts`: a strict entry freezes its pinned blob and publication skips the raw-hash compare for it.
+- `src/core/persistence/sync-tree-reuse.ts`: the tree listing a pass keeps for the next records the canonical mode, and a listing kept under the other mode is dropped, so it never carries across a flip in either direction.
+- `src/commands/sources-reindex.ts` (new), `src/commands/doctor/checks/git-index-lag.ts` (new), `src/core/persistence/managed-sync-flags.ts`, `src/core/error-registry.ts`.
+- `docs/designs/GIT_CANONICAL_MEMORY.md`: the indexer, the re-derive verb and the lag check, and the door commit as the one deliberate place the working tree reaches Git on a strict source.
+- Tests: `test/git-canonical-indexer-g3.test.ts` (PGLite and Postgres: mixed control, strict import and delete, the `--working-tree` refusal, reindex, `git_index_lag`, a canonical flip across passes on one HEAD, and a sync pass between a door commit and its replay), `test/sync-classify-strict-g3.test.ts`.
+
 ## [0.60.445.0] - 2026-10-25
 
-**A strict (`canonical: git`) source now commits each write to Git with plumbing, without rewriting the checkout's index. On a 150k-file checkout the door costs about 230 ms per write instead of about 830 ms. Strict mode is still off by default, and nothing turns it on.**
+**A source configured `canonical: git` is now written only through the managed door. On a brain whose writes aren't managed, a direct import into that source is refused before anything is written. On a managed brain, maintenance writers commit once per run instead of once per page, and a quote the dream model invented or a page marked private never reaches git history.**
 
-Before this release the door used a porcelain `git commit --only`. That refreshes and rewrites the whole index on every write, so its cost grows with the size of the checkout. The door now writes the commit directly: it hashes the published files, rebuilds only the trees along the changed paths from HEAD, writes the commit, and moves the branch with a compare-and-swap. It then updates the index for exactly the published paths and leaves every other entry alone.
+Strict mode stays off by default. Only sources whose config sets `canonical: git` change, and nothing rewrites data on upgrade.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| A strict write's Git commit | `commit --only`, which refreshes the whole index | a plumbing commit; the index changes only for the published paths |
-| The branch moves during the commit (a commit made in the checkout) | the porcelain commit took the new HEAD as its parent | the commit is rebuilt once on the new HEAD; a second move refuses and the write rolls back |
-| Door overhead, 150k files (p50 / p95) | 825 / 925 ms | 229 / 260 ms |
-
-A strict write on a detached HEAD or an unborn branch is refused with `git_detached_head` or `git_branch_unborn`, and the write rolls back. Commit message, trailers, author and tree are the same as the porcelain path produced. An ignored new target still refuses with `git_target_ignored`. A batch still commits once.
+| `gbrain import` (markdown, code or an image), the streamed large-page import, or `extract_entities` writing entity pages, into a `canonical: git` source on a brain whose writes aren't managed | wrote the database directly | refused with `strict_requires_managed` before any write |
+| A dream patterns or concept republish batch, the entity stubs and timeline bullets of one `extract_entities` call, one atom generation (new atoms, activation, retirements), on a managed brain | one git commit per page | one transaction and one git commit per run; each page keeps its own request, receipt and failure |
+| A dream synthesis page on a `canonical: git` source | written, then checked and stamped in a second write | checked against its transcript and stamped with provenance before the first write, so an invented quote never reaches git history |
+| A connector page marked private, or a private calendar event, on a `canonical: git` source | committed like any page | stored database-only, never committed |
+| `brainstorm --save` on a managed brain | wrote the page directly | reports the page accepted and pending (exit 10) with its receipt |
+| `ingest_capture` on a managed brain | wrote the page directly | goes through the door with `expected_revision`; an untrusted capture keeps the page's hidden fact rows |
 
 ### Itemized changes
 
-- `src/core/persistence/git-door.ts`: the plumbing commit (`hash-object -w`, a tree rebuild from HEAD, `commit-tree`, `update-ref` compare-and-swap, a targeted `update-index`). Door commits on one checkout run one at a time in this process.
-- `src/core/persistence/effect-git.ts`: `commitMessage`, the git session helpers and the ignored-target refusal are shared with the door.
-- `test/git-door-plumbing-gbra133.test.ts`: index isolation, modes, removals, the compare-and-swap retry and refusal, refusals, sort order checked by `fsck --strict`, and parity with the porcelain path.
+- `src/core/persistence/maintenance.ts`: `assertUnmanagedCanonicalWriter` is the single strict-source guard for unmanaged brains, called from `importFromContent`, `importCodeFile`, `importImageFile`, the streamed import and `enrichEntity`. `strict_requires_managed` is registered in `src/core/error-registry.ts`.
+- `src/core/persistence/journal.ts` and `group-publish.ts`: new publication group keys `maintenance:<batch>` and `generation:<activationId>`, and `add_timeline_entry` joins its `put_pages` batch. `GROUP_KEY_SQL` and `publicationGroupKey` are tested equal per kind. Every group is independent. A member that writes a page or file an earlier member wrote ends the group before it; it and the rest go back to the queue and are prepared again, so a group with k shared targets takes up to k+1 passes.
+- `src/core/cycle/patterns.ts` and `src/core/minions/tools/staged-put-page.ts`: a trusted local patterns child stages its `put_page` calls in the job's tool ledger (`stage_writes`) and the phase publishes them as one maintenance batch. A crash republishes from the ledger without another model call. Remote, MCP and delegated jobs can't stage.
+- `src/core/cycle/synthesize-child-verify.ts`: synthesis outputs are verified and stamped in the child before `put_page`; a trusted dream child writes through a `put_pages` batch tool whose slugs are fenced per page. A world concept its provenance covers publishes once, at world (`concept-writes.ts`).
+- `src/core/persistence/connector-sync.ts`, `src/core/minions/handlers/ingest-capture.ts`, `src/commands/brainstorm.ts`: the private-page, capture and brainstorm paths above.
+- Tests: per-writer measurements on PGLite and Postgres (pages at HEAD with exact bytes, a clean tree, at most one commit per publication group, no private content or invented quote in history), `test/git-door-g6-*`, `test/g6-*-strict`, `test/patterns-staged-writes`, `test/strict-source-unmanaged-import`.
+
+## [0.60.444.0] - 2026-10-25
+
+**The repair and doctor steps that commit a fix now print one `gbrain git commit-push` command instead of a bare `git add` and `git commit`, and `gbrain git commit-push` commits locally in a checkout that has no Git remote.**
+
+Repair steps used to tell you to run `git add` and `git commit` yourself. That skipped the writer lock and the merge with remote commits. The frontmatter step named no paths at all, so it also committed whatever else was staged. Every printed step now runs the one commit door, which takes the writer lock and commits only the paths it names.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Commit step printed by `repair frontmatter`, `repair content`, `repair file-drift`, the slug-conflict repair and the legacy fence repair (`sources status`, doctor `fence_integrity`) | `git add` plus `git commit`; the frontmatter step named no paths | `gbrain git commit-push --path <root> -m <subject> [-m <trailer>] -- <paths>` |
+| `gbrain git commit-push` with more than one `-m` | not supported | each `-m` adds a paragraph, as with `git commit` |
+| Paths after `--` with `--path <dir>` below the checkout top | read relative to the checkout top | relative to `<dir>`, as the help said |
+| A checkout with no Git remote (none configured and the branch names none) | refused `git_unavailable` and committed nothing | commits the named paths locally (`committed_local`, `no_remote: true`, exit 0) and says nothing was pushed |
+
+In a checkout with no remote, `--push-only`, `--pending`, `--branch`, `--resolve`, `--expect-remote` and `--require-clean` refuse with `commit_paths_invalid`. A branch that names a missing remote still refuses with `git_unavailable`.
+
+### Itemized changes
+
+- `src/core/git/commit-push.ts` and `src/commands/git.ts`: `-m` can repeat; `--path` sets the base for relative paths; a checkout with no remote gets a local commit through `commitPathsOnly`.
+- `src/core/repair/*`, `src/core/fence-repair/uncommitted.ts` and `src/commands/doctor/checks/fence-integrity.ts`: the printed commit step is the commit-push command.
+- `test/sync-tree-reuse-gbra133.test.ts` (#7358): the collectability check now runs one full collection from a timer callback, after the test's own frames have returned. JSC scans the machine stack conservatively, so a collection made in the test's own frame could keep an earlier pass alive through a stale pointer (about 1 run in 280). The assertion is unchanged, and a forced probe covers both cases.
+- `test/managed-sync-row-parity.test.ts`: rows are read after the consumer-stop barrier, so an embedding effect still claimed when the sync returns can't show up as a `claim_owner` difference. A forced probe holds the effect mid-claim.
+
+## [0.60.443.0] - 2026-10-25
+
+**Three fixes for runs that kept failing or spending without end. An atom drain no longer reports a page whose write didn't commit as a provider failure to retry forever; the page is held after three drains with its receipt and a retry command. `extract-conversation-facts` no longer pays for a model call on every run only to fail with `idempotency_conflict`. The ChatGPT and Claude connectors stop on a 403 instead of refreshing and retrying, keep the session cookie on its origin during a token refresh, honour `auto_sync=false` for queued jobs and `--all`, and bound every `--full` run.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain dream --drain` meets an atom batch whose write didn't commit | `atom_drain_provider_failure` / `transient` / exit 11 every window, the record reads "The write did not commit." and has no request id | a write failure: each record carries the write's `request_id` and its refusal `code`; after three drains the page is held, leaves the backlog, and doctor `extract_atoms_held_failed` lists it with `receipt_command` and `retry_command` |
+| An item's model output has two atoms with the same title | the atom write failed (`generation_live_conflict` on a managed brain) and the page stuck | the atom publishes once, the first kept |
+| A conversation-facts batch whose receipt lost its stored intent (a redacted `purged_content` refusal, a purge, receipt compaction) | every run paid a model call, failed `idempotency_conflict` (or got the old failure back) and inserted 0 facts | the batch publishes under its pages' next attempt after one more model call; the next run makes none |
+| A connector request returns 403 or a redirect | some 403s refreshed the token and retried; a redirect was retried as a server error | the run ends (`auth_required`), nothing is followed |
+| ChatGPT token refresh | a raw request with redirects followed and failures swallowed; `connectors auth` probed anyway | goes through the shared client (same origin, no redirects, paced, counted) and stops with `forbidden`, `rate_limited` or `auth_required`; `connectors auth` saves nothing after a failed refresh unless `--force` |
+| `auto_sync=false` | only autopilot's enqueue honoured it; a queued job and `connectors sync --all` still synced | the `connector-sync` job rechecks it and skips (`auto_sync_off`), `--all` skips the provider and names it; an explicit `connectors sync <provider>` still runs |
+| `connectors sync --full` | no overall bound | at most 10,000 requests per run (Claude: 5,000 per organization, 10 organizations), over-long pages truncated, plus `--max-requests N` and `--deadline 90s|30m|2h`; a run that hits a bound ends `partial` and keeps its watermark |
+
+### What to watch for after you upgrade
+
+- Atom pages already stuck on a write that didn't commit are struck on each drain and held after the third. Their atoms come back only through the doctor's `retry_command`, which runs one paid extraction.
+- A host cron that runs `gbrain connectors sync --all` stops syncing any provider whose `connectors.<p>.auto_sync` isn't on. Turn it on, or name the provider.
+- A very large `--full` connector sync now stops at its request ceiling or deadline as `partial`; run it again to continue.
+
+### Itemized changes
+
+- `src/core/persistence/atom-maintenance.ts`, `src/core/cycle/extract-atoms-drain.ts`, `src/core/cycle/extract-atoms.ts`: write-failure classification, strikes and hold for atom batches that didn't commit; repeated atom titles publish once (#7514). Test: `test/extract-atoms-commit-failure-hold.test.ts`.
+- `src/core/facts/conversation-publication.ts`: a conversation-facts batch moves to its members' next attempt when its request id is held by another write or by a receipt that lost its intent (#7516). Tests: `test/conversation-facts-redacted-batch-7516.test.ts` and its Postgres arm.
+- `src/core/connectors/{client,sync,types}.ts`, `providers/{chatgpt,claude}.ts`, `src/commands/connectors/{auth,sync,index}.ts`, `src/core/minions/handlers/connector-sync.ts`: terminal 403 and redirect, guarded refresh, `auto_sync` enforcement, request ceiling and deadline (#7515). Test: `test/connectors-hardening-7515.test.ts`. Guide: "Request bounds" in `docs/guides/chat-connectors.md`.
+
+## [0.60.442.0] - 2026-10-25
+
+**Deleting facts on a large brain no longer scans the whole facts table once per deleted row. A new partial index on `facts(superseded_by)` lets the `ON DELETE SET NULL` foreign key find the rows that point at a deleted fact directly.**
+
+`facts.superseded_by` references `facts(id)` with `ON DELETE SET NULL` (v167), but nothing indexed it. Every deleted fact made Postgres run `UPDATE facts SET superseded_by = NULL WHERE superseded_by = <id>` as a sequential scan, so clearing a page's conversation facts or purging facts slowed down as the brain grew. On a synthetic brain of 200,000 facts, deleting 2,000 unreferenced facts took about 54 s before this release and about 20 ms after it.
+
+### What to watch for after you upgrade
+
+- The migration builds the index online on Postgres (`CREATE INDEX CONCURRENTLY`, outside a transaction; an invalid leftover from an interrupted build is dropped and rebuilt, then the table is analyzed), so writes keep flowing while it builds. PGLite builds it directly.
+- No data changes. The index only covers rows whose `superseded_by` is set.
+
+### Itemized changes
+
+- `src/core/schema-migrations/v271-facts-superseded-by-index.ts`: `idx_facts_superseded_by ON facts (superseded_by) WHERE superseded_by IS NOT NULL`.
+- `test/facts-superseded-by-index.test.ts` (PGLite, and Postgres with `DATABASE_URL`): with 20,000 seeded facts, the plans for the `superseded_by = <id>` lookup and the foreign key's set-null update use the index; dropping it brings back the sequential scan, and re-running the migration restores the index scan.
+
+## [0.60.441.0] - 2026-10-25
+
+**On a managed brain, the links you add with `add_link` and the timeline bullets `extract_entities` writes now live in the page's Markdown, committed to Git, and the database edges are derived from them. A manual edge survives a rebuild from Git, and every write that touches the database directly is now classified, so a new one can't slip in unnoticed.**
+
+Git is the source of truth for a managed brain, and the database is rebuilt from it. Until now three writers changed the database without writing the page: `add_link` and `remove_link` stored manual edges only as database rows, and `extract_entities` added its timeline row and backlink straight to the tables. A rebuild from Git lost all of them. They now go through the same page-mutation door as `put_page`: the page's Markdown changes first, Git commits it, and the database row follows from the file.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `add_link` on a managed brain | a database-only edge, lost on a rebuild from Git | a row in the page's `## Links` table (between `<!--- gbrain:links:begin -->` and `end` markers, one row per target, type and source), committed; the edge is projected from that row |
+| `add_link` again on an existing row without `context` or dates | overwrote them with empty values | keeps the stored ones |
+| `remove_link` on an edge the page's own text creates (a link, wikilink or frontmatter field) | deleted the edge until the next re-import brought it back | keeps it and returns `derived_from_text`, with a message to edit the page text instead |
+| `extract_entities` on a managed brain | timeline row and backlink written to the database only | the timeline bullet is added to the entity page's Markdown through the door; the backlink is the link inside that bullet |
+| A new direct database write in the code | nothing caught it | `test/coordinated-write-census.test.ts` fails until it is classified in `docs/architecture/coordinated-writes.tsv` |
+
+### What to watch for after you upgrade
+
+- Manual edges recorded before this release stay in the database as they were; nothing moves them into Markdown on upgrade.
+- Deleting a whole `## Links` section by hand leaves its edges in the database until `remove_link` runs for them.
+- Unmanaged brains are unchanged. Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/links-fence.ts` and `src/core/links-fence-projection.ts`: parse, render and edit the `## Links` table; its rows are projected as edges with `origin_field = links_fence`, and the body link extractor skips the table so its rows aren't counted twice.
+- `src/core/persistence/manual-links.ts` and `src/core/ops/links.ts`: `add_link` and `remove_link` on a managed brain are page mutations that edit the table.
+- `src/core/enrichment-service.ts`: `extract_entities` submits an `add_timeline_entry` mutation, and `add_timeline_entry` publications now derive the page's links (`page-prepare.ts`).
+- `docs/architecture/coordinated-writes.tsv` and `test/coordinated-write-census.test.ts`: every `withCoordinatedWrite` and `coordinatedDatabaseWrite` call site is classified (door, projection, operational, metadata, removal, generated or facts lane).
+- Tests on PGLite and Postgres cover the table round trip, re-import, the remote-mention publication edge and consolidate-ties as a projection repair.
+
+## [0.60.440.0] - 2026-10-25
+
+**Applying a held file-drift repair on a brain whose canonical checkout is behind or diverged no longer refuses most pages as "Reconciliation preview is stale: policy_digest" when nothing about your settings changed. One preview, then one apply, lands the whole window.**
+
+When you preview a repair, gbrain fingerprints the settings that decide what the repair writes (your config, the content-safety limits, the operator junk list), and the apply refuses any page whose fingerprint has changed since. But other gbrain processes on the same machine can do the actual write for the apply, such as `gbrain serve` or the jobs worker. Each of them folded its own API keys, database URLs and model choices into that fingerprint. When the apply's own writer was busy pushing to a diverged checkout, those other processes picked up its pages, and every page they handled read as stale. You had to repeat preview and apply until nothing was left.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain serve` or the jobs worker writes an apply's page, and its environment has different API keys, database URLs or model settings | the page is refused `changed_since_preview` (`policy_digest`); each preview/apply round landed only part of the window | the page lands; the fingerprint covers only what the repair reads |
+| A setting the repair does read changes between preview and apply (the config file's or database's `content_sanity` keys, `GBRAIN_PAGE_WARN_BYTES` / `GBRAIN_PAGE_BLOCK_BYTES` / `GBRAIN_NO_SANITY`, `~/.gbrain/junk-substrings.txt`, the source's config) | refused as stale | still refused as stale |
+
+### What to watch for after you upgrade
+
+- Previews made before the upgrade carry the old fingerprint, so their applies refuse as stale once. Preview again and apply the new hash.
+- Memory growth during a long held apply (#7506) is not addressed by this release.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `reconcilePolicyDigest` (`src/core/persistence/reconcile-state.ts`) builds its config from the config file plus the content-sanity overrides the environment sets (what the import gate resolves), then merges the database config plane. The operator literals, `GBRAIN_NO_SANITY` and the source row stay in the digest.
+- `test/repair-file-drift-consumer-env-7506.test.ts` (PGLite and Postgres): a diverged canonical checkout whose real keep-checkout publish parks on `integrate_conflict`; an apply under different credentials lands every item; a content-sanity override still refuses; the digest moves with each reconcile input and not with credentials; and the apply's heap stays flat per item.
+
+## [0.60.439.0] - 2026-10-24
+
+**`gbrain sources git-gap <source>` shows, read-only, how far a source's database is from what Git has committed: which pages match their committed file, which hold content Git lacks, which Git has moved past, and which are database-only by declaration. Doctor reports the totals as `db_ahead_of_git`. Nothing changes and nothing is written.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Seeing whether a source's database matches Git | no command; only sync holds and drift findings hinted at it | `gbrain sources git-gap <source> [--sample n] [--json]` compares every live page with the committed blob at HEAD (hardened plumbing, no filters) and reports each page as equal, database ahead, Git ahead, declared database-only (by class: private, alias-private, lineage-private, `db_only` prefix, derive-phase folder, Git-ignored, mirror, database-only reason), undeclared database-only, working-tree only or unparseable, with the working tree reported separately |
+| Content with no Git home | invisible | the census counts unfenced facts, facts whose fence page has no file, links that are neither file syntax nor a deterministic derivation, timeline entries on pages without a file, plus Git sync holds and parked targets |
+| `gbrain doctor` | no view of the gap | `db_ahead_of_git` lists the totals per source with a checkout (no slugs or paths), within its own budget (`GBRAIN_DOCTOR_GIT_GAP_TIMEOUT_MS`, 10 s); it is always ok in this release |
+| The design | `docs/designs/DATABASE_CANONICAL_MEMORY.md` | `docs/designs/GIT_CANONICAL_MEMORY.md` (Git stays the source of truth; the database is derived from it); the database-canonical design is marked superseded |
+
+### What to watch for after you upgrade
+
+- The census is trusted local CLI only and reads in short read-only transactions; on a large source it takes a while.
+- No migration, no config key and no behavior change.
 
 ## [0.60.438.0] - 2026-10-24
 
