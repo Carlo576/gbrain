@@ -238,7 +238,7 @@ export function derivationScopeLockSql(sourceId: string): string {
 }
 
 /**
- * Per-segment derivation watermarks (migration v265): one row per page, pipeline and manifest occurrence, recording
+ * Per-segment derivation watermarks (migration v273): one row per page, pipeline and manifest occurrence, recording
  * the segment text and the context (`context_hash`: entry state plus the page-level inputs the pipeline reads) it was
  * derived from, the pipeline version, the outcome and a bounded per-segment output. A pipeline's work on a page is the
  * live occurrences without a settled row whose segment sha, context hash and version match, found from metadata alone.

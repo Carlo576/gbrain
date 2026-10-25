@@ -23,7 +23,9 @@
  * (`--since`, `--segment-limit`) and the page's newest extractor row id (so
  * every committed batch, an approved repair or `--force` after a commit
  * starts the next generation). A batch's request id is the digest of its
- * members' (generation, attempt) pairs. Before a page's model work the run
+ * members' (generation, attempt) pairs; an id another write already holds,
+ * or a receipt that lost its intent without committing, moves the batch to
+ * its members' next attempt (#7516). Before a page's model work the run
  * consults the writer's unsettled and failed batch requests (loaded once per
  * run; compacted ones drop out):
  *   - a member of a still-unsettled batch (a crash after admission) waits for
@@ -58,11 +60,12 @@ import type { FactEmbeddingSignature } from './extract.ts';
 import { ALL_FACT_KINDS } from '../engine.ts';
 import { isTerminal } from '../persistence/model.ts';
 import { opError, OperationError } from '../ops/contract.ts';
+import { ensureWellFormed } from '../text-safe.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { authorizeStoredRequest, authorizeWrite } from '../persistence/authority.ts';
 import { digest, jsonBytes } from '../persistence/digest.ts';
 import { receiptReservation } from '../persistence/receipt-bytes.ts';
-import { getWriteRequestById } from '../persistence/journal.ts';
+import { getWriteRequestById, intentDigest } from '../persistence/journal.ts';
 import { journalLimitKey, oneYearCapacity, readJournalLimits } from '../persistence/limits.ts';
 import { principalKey } from '../persistence/model.ts';
 import { PERSISTENCE_IPC_MAX_BYTES } from '../persistence/ipc.ts';
@@ -82,6 +85,7 @@ import { recordTaintEdges } from '../trust/taint.ts';
 import { applyGateDecision, derivedGateConfig, derivedGateInput } from '../trust/derived-gate.ts';
 import { decideFactWrite, recordFlaggedRow } from '../write-gate-store.ts';
 import { sourceWindowKey, type SourceWindow } from '../page-body/derivations.ts';
+import { findCaptureDuplicate } from './capture-dedup.ts';
 
 export const CONVERSATION_FACTS_INTENT = 'managed_maintenance_conversation_facts';
 export const CONVERSATION_FACTS_PROTOCOL = 1;
@@ -165,6 +169,8 @@ export interface ConversationPageResult {
   reason?: string;
   deleted: number;
   facts_inserted: number;
+  /** #7438: extracted claims left out because they match a purge tombstone. */
+  facts_skipped_purged?: number;
   page_outcome: 'complete' | 'non_extractable' | null;
   newest_end: string | null;
 }
@@ -195,6 +201,27 @@ export async function conversationGeneration(engine: BrainEngine, authority: Mai
 function batchRequestId(sourceIncarnation: string, pages: ReadonlyArray<Pick<ConversationPageEntry, 'generation' | 'attempt'>>): string {
   const h = digest(['conversation-facts-batch-v1', sourceIncarnation, pages.map(p => `${p.generation}:${p.attempt}`).sort()]);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+/**
+ * #7516: the batch at the first attempt, from its members' own upward, whose request id is unspent: unused, or used by
+ * this very batch (a replay) whose receipt still holds its intent or committed. A receipt without its intent (a
+ * purged_content refusal the journal redacts, retention compaction) takes its members' attempt history with it, so
+ * startManagedPage can derive an attempt whose id admission would refuse as idempotency_conflict or answer with the
+ * compacted failure, on every run. Each step raises every member's attempt by one, and the journal's rows are finite.
+ */
+async function unspentBatch(engine: BrainEngine, authority: MaintenanceAuthority, pages: ConversationPageEntry[]): Promise<{ intent: ConversationFactsIntent; requestId: string }> {
+  const { principal, sourceId, sourceIncarnation } = authority.writer;
+  for (let raise = 0; ; raise++) {
+    const members = pages.map(entry => ({ ...entry, attempt: entry.attempt + raise }));
+    const intent: ConversationFactsIntent = { kind: CONVERSATION_FACTS_INTENT, protocol: CONVERSATION_FACTS_PROTOCOL, expected_revision: null, pages: members };
+    const requestId = batchRequestId(sourceIncarnation, members);
+    const [spent] = await engine.executeRaw<{ request_id: string }>(`SELECT request_id::text AS request_id FROM persistence_requests
+      WHERE principal_kind=$1 AND principal_id=$2 AND request_id=$3::uuid AND (digest<>$4 OR (compacted AND state<>'committed'))`,
+    [principal.kind, principal.id, requestId, intentDigest({ operation: 'submit_job', sourceId, slug: ANCHOR_SLUG, callerIntent: intent })]);
+    if (!spent) return { intent, requestId };
+    log(`batch request ${spent.request_id} already belongs to another or a compacted write; publishing the batch at its members' next attempt`);
+  }
 }
 
 /** What this writer's unsettled and failed batch requests say about one generation. */
@@ -355,14 +382,14 @@ export async function buildConversationPage(engine: BrainEngine, config: GBrainC
  * pending after the job's wait throws `write_pending`.
  */
 export async function submitConversationPages(engine: BrainEngine, authority: MaintenanceAuthority, pages: ConversationPageEntry[]): Promise<Record<string, unknown>> {
-  const intent: ConversationFactsIntent = { kind: CONVERSATION_FACTS_INTENT, protocol: CONVERSATION_FACTS_PROTOCOL, expected_revision: null, pages };
+  const { intent, requestId } = await unspentBatch(engine, authority, pages);
   const limit = await conversationIntentByteLimit(engine);
   const bytes = jsonBytes(intent);
   if (bytes > limit) {
     throw opError('request_too_large', 'The frozen fact batch exceeds the request size limit; the pages\' prior facts were kept.',
       `The batch of ${pages.map(p => p.slug).join(', ')} is ${bytes} bytes, over the ${limit}-byte limit for one request, so nothing was submitted. Narrow the run with --segment-limit, or raise persistence.limits.principal_intent_bytes (the user's call).`);
   }
-  return submitDatabaseMaintenanceIntent(engine, authority, ANCHOR_SLUG, intent, batchRequestId(authority.writer.sourceIncarnation, pages));
+  return submitDatabaseMaintenanceIntent(engine, authority, ANCHOR_SLUG, intent, requestId);
 }
 
 function invalid(row: WriteRequest, cause: string): OperationError {
@@ -468,9 +495,12 @@ async function stampSourceWindows(tx: BrainEngine, ids: readonly number[], windo
  * prior facts stay: the outcome replaces the page's prior outcome rows, so
  * the page is not paid for again, a `window` run's facts are added beside
  * the prior ones, and a partial run's facts are not published over them.
+ * #7043: a fact an active row of the source already states is not stored
+ * again (the capture lane's fingerprint, entity and visibility rule with no
+ * time bound); the page's own rows a replacement clears do not count.
  */
 export async function publishConversationFacts(tx: BrainEngine, sourceId: string, slug: string, rows: UnnumberedFact[],
-  opts: { scope: ConversationScope; requestId?: string; segments?: ConversationSegmentsPublication }): Promise<{ deleted: number; facts_inserted: number }> {
+  opts: { scope: ConversationScope; requestId?: string; segments?: ConversationSegmentsPublication }): Promise<{ deleted: number; facts_inserted: number; duplicates_skipped: number; purged_skipped: number }> {
   const derivation = await conversationDerivation(tx, sourceId, slug);
   const cfg = await derivedGateConfig(tx);
   const gated = rows.map((row, index) => ({ row, index, decision: OUTCOME_SOURCES.has(row.source) ? null : decideFactWrite(row,
@@ -481,8 +511,17 @@ export async function publishConversationFacts(tx: BrainEngine, sourceId: string
     AND f.source LIKE '${CONVERSATION_FACTS_SOURCE_PREFIX}%' AND f.expired_at IS NULL AND NOT (f.source = ANY($3::text[]))`, [sourceId, slug, [...AUDIT_ROW_SOURCES]]);
   const segments = opts.segments;
   const retire = !segments && (!Number(active?.n ?? 0) || (opts.scope === 'full' && kept.length === rows.length && kept.some(({ row }) => !OUTCOME_SOURCES.has(row.source))));
-  const published = retire || opts.scope === 'window' || segments ? kept : kept.filter(({ row }) => OUTCOME_SOURCES.has(row.source));
-  const { deleted, ids } = await withWriteTrust(tx, derivation.trust, async () => {
+  // A segmented page's windowed publication clears or keeps its own rows window by window, so the page's own rows never count as duplicates.
+  const scope = { engine: tx, sourceId, lane: CONVERSATION_FACTS_SOURCE_PREFIX, sessionId: null, anchor: null, ...(retire || segments ? { replacingPage: slug } : {}) };
+  const published: typeof kept = [];
+  let duplicates = 0;
+  for (const entry of retire || opts.scope === 'window' || segments ? kept : kept.filter(({ row }) => OUTCOME_SOURCES.has(row.source))) {
+    const { row } = entry;
+    if (OUTCOME_SOURCES.has(row.source) || !await findCaptureDuplicate(scope, { fact: row.fact, entitySlug: row.entity_slug ?? null,
+      visibility: row.visibility ?? 'private', attributedTo: row.attributed_to ?? null })) published.push(entry);
+    else duplicates++;
+  }
+  const { deleted, ids, purged } = await withWriteTrust(tx, derivation.trust, async () => {
     if (retire) return replaceConversationFacts(tx, sourceId, slug, published.map(({ row }) => row));
     let retiredWindows = 0;
     if (segments) {
@@ -494,14 +533,15 @@ export async function publishConversationFacts(tx: BrainEngine, sourceId: string
       WHERE source_id=$1 AND source_markdown_slug=$2 AND source = ANY($3::text[]) RETURNING id`, [sourceId, slug, [...AUDIT_ROW_SOURCES]]) : [];
     return { deleted: retiredWindows + outcomes.length, ...await insertConversationFacts(tx, sourceId, slug, published.map(({ row }) => row)) };
   });
-  if (segments) await stampSourceWindows(tx, ids, published.map(({ index }) => segments.windows[index] ?? null));
+  const stored = published.filter((_, i) => !purged.has(i));
+  if (segments) await stampSourceWindows(tx, ids, stored.map(({ index }) => segments.windows[index] ?? null));
   for (const [i, id] of ids.entries()) {
     await recordTaintEdges(tx, { table: 'facts', id, sourceId }, derivation.inputs);
-    const decision = published[i]?.decision;
-    if (decision && ids.length === published.length) await recordFlaggedRow(tx, decision, { table: 'facts', id, sourceId });
+    const decision = stored[i]?.decision;
+    if (decision && ids.length === stored.length) await recordFlaggedRow(tx, decision, { table: 'facts', id, sourceId });
   }
-  if (published.some(({ row }) => row.source === TERMINAL_AUDIT_SOURCE)) await recordReextractMemo(tx, sourceId, slug); // #6764
-  return { deleted, facts_inserted: published.filter(({ row }) => !OUTCOME_SOURCES.has(row.source)).length };
+  if (stored.some(({ row }) => row.source === TERMINAL_AUDIT_SOURCE)) await recordReextractMemo(tx, sourceId, slug); // #6764
+  return { deleted, facts_inserted: stored.filter(({ row }) => !OUTCOME_SOURCES.has(row.source)).length, duplicates_skipped: duplicates, purged_skipped: purged.size };
 }
 
 /**
@@ -511,15 +551,26 @@ export async function publishConversationFacts(tx: BrainEngine, sourceId: string
  * the prior batch may be retired.
  */
 export async function replaceConversationFacts(tx: BrainEngine, sourceId: string, slug: string,
-  rows: UnnumberedFact[]): Promise<{ deleted: number; inserted: number; ids: number[] }> {
+  rows: UnnumberedFact[]): Promise<{ deleted: number; inserted: number; ids: number[]; purged: Set<number> }> {
   const deleted = await clearConversationFacts(tx, sourceId, slug);
   return { deleted, ...await insertConversationFacts(tx, sourceId, slug, rows) };
 }
 
-/** Inserts `rows` numbered above every fact row of the page; a lost insert throws, rolling the publication back. */
-async function insertConversationFacts(tx: BrainEngine, sourceId: string, slug: string, rows: UnnumberedFact[]): Promise<{ inserted: number; ids: number[] }> {
-  if (!rows.length) return { inserted: 0, ids: [] };
+/**
+ * Inserts `rows` numbered above every fact row of the page; a lost insert throws, rolling the publication back.
+ * #7438: a row whose claim matches a purge tombstone (under the entity it carries after relink inheritance) is left
+ * out and its index returned in `purged`; the facts insert guard would otherwise refuse the whole statement.
+ */
+async function insertConversationFacts(tx: BrainEngine, sourceId: string, slug: string, rows: UnnumberedFact[]): Promise<{ inserted: number; ids: number[]; purged: Set<number> }> {
+  if (!rows.length) return { inserted: 0, ids: [], purged: new Set() };
   rows = await inheritRelinkedEntities(tx, sourceId, slug, rows);
+  const matches = await tx.executeRaw<{ ord: number | string }>(`SELECT n.ord FROM unnest($2::text[], $3::text[], $4::text[]) WITH ORDINALITY AS n(fact, visibility, subject, ord)
+    WHERE EXISTS (SELECT 1 FROM fact_purges p WHERE p.source_id=$1 AND p.visibility=n.visibility AND p.subject IN ('*', n.subject)
+      AND p.fact_hash=gbrain_fact_fingerprint(n.fact))`,
+  [sourceId, rows.map(row => ensureWellFormed(row.fact)), rows.map(row => row.visibility ?? 'private'), rows.map(row => row.entity_slug ? ensureWellFormed(row.entity_slug) : null)]);
+  const purged = new Set(matches.map(match => Number(match.ord) - 1));
+  rows = rows.filter((_, i) => !purged.has(i));
+  if (!rows.length) return { inserted: 0, ids: [], purged };
   const [top] = await tx.executeRaw<{ n: number | string | null }>(
     'SELECT max(row_num) AS n FROM facts WHERE source_id=$1 AND source_markdown_slug=$2', [sourceId, slug]);
   const start = top?.n == null ? 0 : Number(top.n) + 1;
@@ -528,7 +579,7 @@ async function insertConversationFacts(tx: BrainEngine, sourceId: string, slug: 
     throw opError('storage_error', 'A conversation fact insert was lost; the page\'s prior facts were kept.',
       `Only ${inserted} of ${rows.length} fact rows of ${slug} in source ${sourceId} were inserted, so the replacement rolled back. Run the extraction for the page again; report this if it repeats.`);
   }
-  return { inserted, ids };
+  return { inserted, ids, purged };
 }
 
 /** Context marker `gbrain repair conversation-labels` appends to the rows it retires. */
@@ -626,9 +677,9 @@ async function applyEntry(tx: BrainEngine, row: WriteRequest, entry: Conversatio
   }));
   // Entries frozen before #7013 carry no scope: a --since run counts as a window, an entry without its outcome as partial.
   const scope = entry.scope ?? (!entry.complete ? 'partial' : entry.selectors?.since ? 'window' : 'full');
-  const { deleted, facts_inserted } = await publishConversationFacts(tx, row.source_id, entry.slug, rows, { scope, requestId: row.id });
+  const { deleted, facts_inserted, purged_skipped } = await publishConversationFacts(tx, row.source_id, entry.slug, rows, { scope, requestId: row.id });
   const outcome = entry.rows.find(fact => OUTCOME_SOURCES.has(fact.source));
-  return { ...base, status: 'committed', deleted, facts_inserted,
+  return { ...base, status: 'committed', deleted, facts_inserted, ...(purged_skipped ? { facts_skipped_purged: purged_skipped } : {}),
     page_outcome: outcome ? (outcome.source === TERMINAL_AUDIT_SOURCE ? 'complete' : 'non_extractable') : null, newest_end: entry.newest_end,
     vectors_dropped: vectors ? 0 : entry.rows.filter(fact => fact.embedding).length };
 }
@@ -687,7 +738,7 @@ const RUN_STOPPING = new WeakSet<object>();
 /** The run counters a managed batch publication books into. */
 export interface ManagedRunCounters {
   pages_processed: number; pages_marked_non_extractable: number; pages_skipped_too_large: number; pages_failed: number;
-  orphan_facts_cleaned: number; facts_inserted: number; pages_pending?: number; pages_blocked?: number;
+  orphan_facts_cleaned: number; facts_inserted: number; facts_skipped_purged?: number; pages_pending?: number; pages_blocked?: number;
   /** Pages the run listed more than once and extracted once (#6500). */
   pages_skipped_duplicate_listing?: number;
 }
@@ -843,10 +894,18 @@ async function enqueueEntry(state: ManagedRunState, entry: ConversationPageEntry
   if (m.batch.length >= batchCaps.pages || factPages >= batchCaps.factPages || m.bytes >= cap) await flushManagedBatch(state);
 }
 
+/** #7438: counts and logs a page's extracted claims left out because they match a purge tombstone. */
+export function notePurgedSkips(counters: { facts_skipped_purged?: number }, slug: string, skipped: number): void {
+  if (!skipped) return;
+  counters.facts_skipped_purged = (counters.facts_skipped_purged ?? 0) + skipped;
+  log(`${slug}: left out ${skipped} extracted fact(s) that match a purge tombstone (#7438)`);
+}
+
 /** Books one member's committed-batch result into the run's counters. */
 function bookPage(state: ManagedRunState, result: ConversationPageResult): void {
   state.result.orphan_facts_cleaned += Number(result.deleted ?? 0);
   state.result.facts_inserted += Number(result.facts_inserted ?? 0);
+  notePurgedSkips(state.result, result.slug, result.facts_skipped_purged ?? 0);
   if (result.status === 'skipped') {
     state.result.pages_failed++;
     log(`${result.slug} changed during extraction (${result.reason}); its prior facts were kept and it stays unfinished for the next run`);

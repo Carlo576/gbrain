@@ -61,39 +61,88 @@ watch, cursor and rollup forms of `recall`, and a page large enough that
 
 ## When it is not used
 
-The CLI falls back to its normal path, silently, when:
+The CLI falls back to its normal path when (silently, except for an identity
+refusal, which always prints a notice):
 
 - no serve has the socket open, or the serve died and left a stale socket;
 - the serve does not accept the request within about a second (a wedged serve
   never stalls the CLI);
-- the answer takes longer than 30 seconds, or than the call's `--timeout` when
-  that is shorter, the serve's own read deadline passes, or the serve dies in
-  the middle of the request: the CLI then runs the call itself, once, with its
-  usual timeout and exit codes (it can only be a read, so running it again is
-  safe). A warm read that runs past 30 seconds therefore runs a second time
-  cold, so a slow LLM-backed query (`query`, `recall --question`) can cost
-  twice; pass a shorter `--timeout` or set `GBRAIN_CLI_SOCKET=0` for those;
+- the serve dies in the middle of the request: the CLI then runs the call
+  itself, once, with its usual timeout and exit codes (it can only be a read,
+  so running it again is safe);
 - the serve answers with a frame the CLI cannot fully read or render (nothing
   is printed from it);
-- the serve was started for a different brain or environment: the CLI sends a
-  token built from the brain (host or mount), the database target (without
-  the password), the config home, the config file (path and content), the
-  gbrain version and a digest of the environment that changes answers or
-  where query text is sent (every `GBRAIN_*` setting except
-  `GBRAIN_CLI_SOCKET`, `GBRAIN_DEBUG`, `GBRAIN_SQL_TRACE` and
-  `GBRAIN_SOURCE`, which every request carries and the serve resolves for that
-  call; which provider API keys are set, never their values; and the values of
-  the provider routing settings: base URLs, endpoints, deployments, API
-  versions, org, project and group ids), and the serve answers only an
-  identical one. Editing
-  `config.json`, changing those variables or upgrading gbrain while a serve
-  runs sends CLI calls to the normal path until the serve restarts with the
-  same settings;
+- the serve was started for a different brain or environment. The CLI sends
+  its identity and the serve compares it part by part with its own: the brain
+  (host or mount), the gbrain version, the config home, the config file (path
+  and content), the database target and the read-behavior environment. The
+  database target is the host, database, user and `options` parameter, never
+  the password or driver-only parameters such as `prepare=`, `sslmode` or
+  `application_name`. The port must match too, except on a Supabase Supavisor
+  pooler host (`*.pooler.supabase.com`), where the same host and user name the
+  same database, so a serve on the session lane (5432) answers CLI calls made
+  on the transaction lane (6543). On any other host another port is another
+  server and is refused. The read-behavior environment is an explicit list of
+  the `GBRAIN_*` settings that can change an answer or where query text goes
+  (`READ_BEHAVIOR_ENV` in `src/core/cli-socket/identity.ts`: models,
+  embeddings, search tuning, visibility, timeouts, schema pack, AI call log,
+  contributor capture and the like), which provider API keys are set (never
+  their values, for every provider), and the values of the provider routing
+  settings (base URLs, endpoints, deployments, API versions, org, project and
+  group ids) of every provider either side can call. A provider neither side
+  can call (one of its required variables is unset in the environment and the
+  config file, and none of its keys is set) cannot reach an answer, so its
+  routing settings may differ: an Azure API version exported in a shell that
+  has no Azure endpoint no longer refuses the call. The identity decides which
+  answer a call may reuse, never who may connect (see Security).
+  Connection sizing and driver settings (`GBRAIN_POOL_SIZE`,
+  `GBRAIN_DIRECT_POOL_SIZE`, `GBRAIN_PREPARE`, ...), the database URL
+  variables and `GBRAIN_SOURCE` (which every request carries and the serve
+  resolves for that call) may differ. `GBRAIN_HOME` and `GBRAIN_BRAIN_ID`
+  count by the config home and brain they resolve to, so a serve that exports
+  `GBRAIN_HOME` matches a CLI that reaches the same home through `HOME`. Editing `config.json`, changing a listed
+  variable or upgrading gbrain while a serve runs sends CLI calls to the normal
+  path until the serve restarts with the same settings. The refusal names the
+  part that differed, never its value: `refused (identity_mismatch): database
+  port`, `env GBRAIN_MODEL`, `provider key VOYAGE_API_KEY`, `config
+  contents`, and the serve logs each distinct one once. Every refused call
+  also prints a `socket_identity_mismatch` notice naming the part (an
+  `[AGENT]` block on a non-TTY stdout, stderr under `--json` or on a TTY),
+  and the serve counts refusals by part for `gbrain doctor --only
+  cli_socket_refusals`, which warns while any happened in the last 24 hours;
 - the CLI targets a mount brain (`--brain <mount>` and the other mount tiers).
 
+A warm call that takes longer than 30 seconds, or than its `--timeout` when
+that is shorter, does not start over on the cold path. The serve cancels the
+request's remaining work (its open read transactions are cancelled and their
+connections discarded, and its later statements are refused) and the CLI
+prints a retryable `timeout` error and exits 124: the envelope on stdout under
+`--json`, the human line on stderr, and without `--json` an `[AGENT]` block on
+stdout as well, so a caller that discards stderr still sees why. The CLI does
+the same when the serve never answers in time. A client that disconnects
+before its answer (killed by its own `timeout`) cancels the request the same
+way, and the serve logs it.
+
+While warm CLI calls flow, the serve's idle maintenance sweep does not start:
+a socket request counts as activity, as MCP stdin data does. The serve logs
+`idle sweep: started` and `idle sweep: finished in <n> ms` around each sweep.
+
 `GBRAIN_DEBUG=1` prints one `[cli-socket] cold path: <reason>` line on stderr
-whenever a call falls back. `GBRAIN_CLI_SOCKET=0` makes a CLI call skip the
+whenever a call falls back, including when no socket exists (`no socket at
+<path>`, with how to start one), and one `[cli-socket] warm: <command>
+answered by the serve socket at <path>` line when the serve answers. `GBRAIN_CLI_SOCKET=0` makes a CLI call skip the
 socket entirely, for comparisons and benchmarks.
+
+<a id="caller-timeouts"></a>
+## Caller timeouts
+
+A call that falls back to the cold path pays the full start (3–6 s on a
+pooled Postgres brain) before it reads anything. Give gbrain calls from scripts
+and agent runtimes a timeout of at least 10 s, and set it in every layer that
+has one: a language runtime's exec timeout (Node's `child_process`, Python's
+`subprocess`, a harness tool timeout) can end the call before a longer shell
+`timeout` ever applies, and the kill reads as an empty result. Scheduled
+callers go through one wrapper ([cron-schedule.md](cron-schedule.md#calling-gbrain-unattended)).
 
 ## Security
 
@@ -114,8 +163,12 @@ socket entirely, for comparisons and benchmarks.
   socket and says why, and the CLI never connects.
 - One serve per `GBRAIN_HOME` holds the socket; requests and responses are
   size-bounded and each connection carries exactly one request. At most 8
-  requests run at once; a request that timed out keeps its slot until its work
-  actually finishes, so slow requests cannot pile up.
+  requests run at once; a request that timed out keeps its slot until its
+  cancelled work actually finishes, so slow requests cannot pile up.
+- The identity comparison is not an access check: who may connect is decided
+  only by the file permissions and the peer uid above, and narrowing which
+  provider settings must match never lets a call use a credential or a
+  provider its own environment does not configure.
 - Postgres brains only. A PGLite brain's CLI calls already reach its running
   serve through the persistence socket.
 

@@ -440,7 +440,7 @@
   "test/trust-owner-actions.test.ts": 8299,
   "test/unbound-source-6536.test.ts": 4693,
   "test/unindexed-files.test.ts": 14440,
-  "test/v265-validate-timeouts.test.ts": 4893,
+  "test/v273-validate-timeouts.test.ts": 4893,
   "test/vector-manifest-probe-bound.test.ts": 25173,
   "test/visibility-fail-closed-derived-writes.test.ts": 10699,
   "test/withdrawal-overlay-concurrency.test.ts": 7148,

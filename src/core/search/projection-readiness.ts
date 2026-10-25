@@ -1,7 +1,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type { PageReadScope } from '../types.ts';
-import { pageReadFilter } from './read-policy-sql.ts';
 import { projectionClassSql } from '../page-state/projection-class.ts';
+import { coverageScopeFilters } from './retrieval-coverage.ts';
 
 export interface ProjectionReadinessScope extends PageReadScope {
   pageKind?: string;
@@ -83,30 +83,22 @@ async function probeUncached(
   scope: ProjectionReadinessScope,
 ): Promise<ProjectionReadiness> {
   const params: unknown[] = [];
-  const filters = [pageReadFilter('p', scope, params, true)];
-  if (scope.sourceIds?.length === 0) filters.push('FALSE');
-  if (scope.pageKind) {
-    params.push(scope.pageKind);
-    filters.push(`p.page_kind = $${params.length}`);
-  }
-  if (scope.types) {
-    params.push(scope.types);
-    filters.push(`p.type = ANY($${params.length}::text[])`);
-  }
-  for (const prefix of scope.excludeSlugPrefixes ?? []) {
-    params.push(prefix);
-    filters.push(`LEFT(p.slug, LENGTH($${params.length}::text)) <> $${params.length}`);
-  }
+  const filters = coverageScopeFilters(scope, params);
   try {
     // One bound statement: unsealed pages that need work, then those unsealed by design (the class fragment doctor counts).
-    const unsealed = `SELECT 1 FROM pages p JOIN sources s ON s.id = p.source_id
+    // The planner has no statistics for a column-to-column comparison, so it believes most pages are unsealed and an
+    // EXISTS chose a sequential scan of pages that expected to stop at once; on a sealed brain it read every page
+    // (~600 ms at 600k pages, on every cold call). Ordering by idx_pages_projection_pending's columns under LIMIT 1
+    // makes that partial index the cheap first row, so the probe reads only the unsealed pages.
+    const unsealed = (cond: string) => `(SELECT true FROM pages p JOIN sources s ON s.id = p.source_id
         WHERE p.deleted_at IS NULL
           AND p.text_projection_revision IS DISTINCT FROM p.knowledge_revision
-          AND ${filters.join(' AND ')}`;
+          AND ${filters.join(' AND ')} AND ${cond}
+        ORDER BY p.source_id, p.page_kind, p.slug LIMIT 1) IS NOT NULL`;
     const cls = projectionClassSql('p', 's');
     const rows = await engine.executeRaw<{ pending: boolean; by_design: boolean }>(
-      `SELECT EXISTS (${unsealed} AND ${cls} NOT IN ('protected','archived')) AS pending,
-        EXISTS (${unsealed} AND ${cls} IN ('protected','archived')) AS by_design`,
+      `SELECT ${unsealed(`${cls} NOT IN ('protected','archived')`)} AS pending,
+        ${unsealed(`${cls} IN ('protected','archived')`)} AS by_design`,
       params,
     );
     if (typeof rows[0]?.pending !== 'boolean') throw new Error('Invalid readiness result');
@@ -124,3 +116,4 @@ async function probeUncached(
     };
   }
 }
+

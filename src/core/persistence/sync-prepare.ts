@@ -16,6 +16,7 @@ import { importFromContent, importCodeFile, verifyPageReadable } from '../import
 import { screenImportContent, screenNormalized, type ContentRefusal, type ImportScreenResult, type ImportSanityConfig } from '../import-screen.ts';
 import { ContentSanityBlockError } from '../content-sanity.ts';
 import { parseMarkdown, resolveParsedSubtype, serializePageToMarkdown, type ParseOpts } from '../markdown.ts';
+import { keepGrandfatherStamp } from './align-stored.ts';
 import { resolveSlugForPath, slugifyPath, isCodeFilePath, isImageFilePath } from '../sync.ts';
 import { prepareManagedSyncImage } from './sync-image.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from '../source-config-sql.ts';
@@ -48,16 +49,16 @@ import { companyBrainPolicyFingerprint } from '../company-brain/policy.ts';
 import { isUnboundSourcePage, UNBOUND_COLLISION_MESSAGE } from './unbound-source.ts';
 import { checkpointRetryCommand, findIncompleteSyncReceipt, findOpenPassWork, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { CURSOR_CHANGED_REFUSAL_MESSAGE, SYNC_CURSOR_FENCE_ORIGIN } from './sync-knock-on.ts';
-import { checkpointCursorReplaced } from './sync-checkpoint-replaced.ts';
+import { checkpointCursorReplaced, SYNC_PASS_SUPERSEDED } from './sync-checkpoint-replaced.ts';
 import { recordPassTail, recordSyncTail } from './sync-tail-record.ts';
 import { readPassRow, writePassRow, OPEN_AT_STAMP_CAP, type ManagedSyncPassValue } from './sync-pass-row.ts';
 import { admissionAllows, readSyncAdmission } from './sync-admission.ts';
-import { syncLockId } from '../db-lock.ts';
+import { fenceLockRow, syncLockId } from '../db-lock.ts';
 import { readConvergedWatermark } from './sync-pass-batch.ts';
 import { foldPassCheckpoint, type PassFold } from './sync-pass-fold.ts';
 import { frontmatterSlugConflictMessage } from './verb-errors.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
-import { addFencesNormalized, clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, type FencesTally, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
+import { addFencesNormalized, clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, settledDeletionHolds, type DeletionCandidate, type FencesTally, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
 import { clearSyncSlice, writeSyncSlice, type SyncSliceState } from './sync-slices.ts';
 import { CHECKPOINT_MOVED_MESSAGE, emptySyncScope, pinnedSlugModeMismatch, slugModeMismatchCause } from './sync-slug-mode.ts';
 import { readPagePurgeTombstones } from './page-purge.ts';
@@ -85,6 +86,10 @@ export interface SyncIntent extends Record<string, unknown> {
   lineEndingOnly?: boolean;
   /** #5565: the deleted file is no page's origin; publication only re-proves that and commits a no-op. */
   unownedDeletion?: boolean;
+  /** GBRA-133: a held committed deletion `sync.apply_held_deletions` proved: the deleting commit and the blob the page equals. */
+  heldDeletion?: { commit: string; blob_oid: string };
+  /** G3: a strict source's import or deletion, frozen from its commit alone: publication does not compare the working tree. */
+  committedOnly?: true;
   working?: boolean;
   renameFrom?: SyncRename;
   processingOptions?: SyncProcessingOptions;
@@ -132,6 +137,8 @@ export interface PassStamp {
   closesEpisode: boolean;
   /** `sources retry-held` paths this pass re-screened (compare-and-delete) and held paths that left the source. */
   retryTaken: string[]; releasedHolds: string[];
+  /** GBRA-133: deleted-side holds whose file is gone; the stamp releases those whose page is no longer live. */
+  deletionCandidates?: DeletionCandidate[];
   selectionFp: string; parserFp: string; pack: string | null;
   /** The pass ran a full round (resets `passes_since_full`). */
   full: boolean;
@@ -501,7 +508,7 @@ export const PASS_LEASE_LOST_MESSAGE = 'The sync pass that admitted this checkpo
 
 /**
  * #6712 PR 4b (design v3.2 §3.3; v3 §3.3): a converged pass's stamp. Clause 1: the drain lease that admitted it is live
- * (`FOR SHARE` on the lock row with the pass's token) and the pass row still names this pass. Clause 2: no recovery row and no
+ * (`fenceLockRow`: `FOR KEY SHARE` on the lock row with the pass's token) and the pass row still names this pass. Clause 2: no recovery row and no
  * other open managed-sync request of the worktree (`findOpenPassWork`). Then, at the configured selection only,
  * `last_commit`, `last_sync_at` and the slug-root pin under `WHERE id AND incarnation` (and `chunker_version`); the tail
  * obligation, hold release, the retry compare-and-delete, and the pass row's converged state (`request_hwm`,
@@ -509,9 +516,9 @@ export const PASS_LEASE_LOST_MESSAGE = 'The sync pass that admitted this checkpo
  */
 async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIntent, root: string, releaseHold: (tx: BrainEngine, path: string | null) => Promise<void>): Promise<Record<string, unknown>> {
   const stamp = p.stamp!;
-  const lease = await tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE', [syncLockId(row.source_id), stamp.leaseToken]);
+  const lease = await fenceLockRow(tx, syncLockId(row.source_id), stamp.leaseToken);
   const pass = lease.length ? await readPassRow(tx, row.source_id, stamp.incarnation) : null;
-  if (!pass || pass.value.lease_token !== stamp.leaseToken || pass.value.telemetry.pass_id !== p.passId) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,
+  if (!pass || pass.value.lease_token !== stamp.leaseToken || pass.value.telemetry.pass_id !== p.passId) throw syncPublicationRefusal(SYNC_PASS_SUPERSEDED, PASS_LEASE_LOST_MESSAGE, row, p,
     `The pass that admitted checkpoint ${row.request_id} of ${row.source_id} lost the source's drain lease, or another pass started since, so nothing was stamped.`);
   const open = await findOpenPassWork(tx, row.worktree_id!, row.request_id);
   if (open) throw opError('recovery_required', `An unfinished sync request (request ${open}) still blocks the sync checkpoint.`,
@@ -545,7 +552,7 @@ export async function publishPassStamp(tx: BrainEngine, row: WriteRequest, p: Sy
   }
   await recordPassTail(tx, row.source_id, p.passId!, { changed: read.changed, extract: stamp.extract, ...(stamp.since ? { since: stamp.since } : {}) });
   await recordPassFenceTrend(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, passId: p.passId!, since: pass.value.obligations.converged?.request_hwm ?? null });
-  for (const path of stamp.releasedHolds) await releaseHold(tx, path);
+  for (const path of [...stamp.releasedHolds, ...await settledDeletionHolds(tx, row.source_id, stamp.deletionCandidates)]) await releaseHold(tx, path);
   if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
   const watermark = read.watermark ?? await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP,
     { prior: pass.value.obligations.converged?.writeback });
@@ -559,7 +566,7 @@ export async function publishPassStamp(tx: BrainEngine, row: WriteRequest, p: Sy
   Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, faults: {}, stuck_since: null });
   value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: stamp.configured ? null : 'selection_scoped', ended_at: at, remaining: 0,
     duration_ms: Date.parse(at) - Date.parse(value.telemetry.started_at) };
-  if (!await writePassRow(tx, value)) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,
+  if (!await writePassRow(tx, value)) throw syncPublicationRefusal(SYNC_PASS_SUPERSEDED, PASS_LEASE_LOST_MESSAGE, row, p,
     `Another pass of ${row.source_id} started while checkpoint ${row.request_id} published, so nothing was stamped.`);
   return { status: 'synced', source_id: row.source_id, pass_id: p.passId, configured: stamp.configured };
 }
@@ -731,7 +738,7 @@ async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _c
       },
       async () => {
         // GBRA-133 S-22: a deletion whose name became a directory has no file to compare.
-        if (p.path !== null && !p.body_ref && (p.kind === 'managed_sync_delete' && directoryAt(root, p.path) ? null : syncRawHash(root, p.path)) !== p.rawHash) throw syncPublicationRefusal('source_changed', 'The imported file changed after sync admission.', row, p,
+        if (p.path !== null && !p.body_ref && !p.committedOnly && (p.kind === 'managed_sync_delete' && directoryAt(root, p.path) ? null : syncRawHash(root, p.path)) !== p.rawHash) throw syncPublicationRefusal('source_changed', 'The imported file changed after sync admission.', row, p,
           `The file of ${row.slug} changed on disk after this sync was admitted; review the change and commit it.`);
       },
       async () => {
@@ -851,7 +858,7 @@ async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _c
   let prepared: PreparedContentImport | undefined;
   enterClaimStep(clock, 'import_content', undefined, 'db');
   // #6188: the import reuses this screen's fence verdict for the same bytes (one fence scan per file at prepare).
-  const importOptions = { ...source, noEmbed: true, remote: row.authority.remote, preserveGateMarkers: true, activePack, coordinated: true, fences: 'coordinated' as const, writeGate: await ownerGateInput(engine, row, parsedInput.frontmatter, p.sourcePath),
+  const importOptions = { ...source, noEmbed: true, remote: row.authority.remote, preserveGateMarkers: true, activePack, coordinated: true, fences: 'coordinated' as const, boundedChunkWrites: true as const, writeGate: await ownerGateInput(engine, row, parsedInput.frontmatter, p.sourcePath),
     ...(importContent === p.content && screen.status === 'importable' ? { fenceScreen: screen.fences ?? null } : {}),
     filename: basename(p.sourcePath).replace(/\.mdx?$/i, ''), sourcePath: p.sourcePath, allowEmptyOverwrite: true,
     segmentedOwner: { kind: 'sync' as const, principalKind: row.principal_kind, principalId: row.principal_id, baseRevision: base?.revision ?? null } };
@@ -873,6 +880,7 @@ async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _c
   }
   const parsed = parseMarkdown(p.content, `${row.slug}.md`, { activePack });
   resolveParsedSubtype(parsed, base?.page);
+  keepGrandfatherStamp(parsed.frontmatter, base?.page);
   const tags = [...new Set([...(base?.tags ?? []), ...ready.parsedPage.tags])].sort();
   const renderedPage = { ...(base ? withoutBody(base.page) : { id: 0, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage } as Page;
   if (renamed && parsedInput.typeExplicit !== true) renderedPage.type = parsedInput.type;
@@ -943,7 +951,7 @@ async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _c
           if (applied.noop) return;
           if (installed?.segmented) { if (installed.segmented.complete && live) await sealSegmentedPage(tx, Number(live.page.id)); }
           else if (installed?.chunkerSeal !== undefined) await sealImportedPage(tx, row.slug, row.source_id, live, installed.chunkerSeal, installed.pageId);
-          else if (live) await sealPageTextProjection(tx, row.slug, row.source_id, live);
+          else if (live && !installed?.projectionPending) await sealPageTextProjection(tx, row.slug, row.source_id, live);
         },
         () => releaseHold(tx),
         async () => { if (final) await recordSyncImportProvenance(tx, { ...importProvenance, page_id: Number(final.page.id), revision: final.revision,

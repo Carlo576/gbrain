@@ -4,7 +4,7 @@
 <!-- Regenerate: bun run scripts/generate-tool-catalog.ts -->
 <!-- Freshness-guarded by scripts/check-tool-catalog-fresh.sh (bun run verify). -->
 
-Every non-localOnly operation on the MCP surface: 158 tools across 25 areas. **Starter** marks membership in the ~40-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
+Every non-localOnly operation on the MCP surface: 162 tools across 25 areas. **Starter** marks membership in the ~40-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
 
 ## admin
 
@@ -53,7 +53,7 @@ Every non-localOnly operation on the MCP surface: 158 tools across 25 areas. **S
 
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
-| `request_tools` | More tools: no arguments lists your catalog; {tools: [names]} returns schemas; {surface} widens it (per client or stdio session). | read | yes |  |
+| `request_tools` | More tools and params: no arguments lists your catalog; {tools: [names]} returns full schemas, every optional param included; {surface} widens it (per client or stdio session). | read | yes |  |
 
 ## entities
 
@@ -112,6 +112,7 @@ Every non-localOnly operation on the MCP surface: 158 tools across 25 areas. **S
 | `send_job_message` | Send a sidechannel message to a running job's inbox (for jobs that read steering messages). | admin |  |  |
 | `submit_agent` | Submit an agent job (agent scope; tools and budget bound to your client). | agent | yes |  |
 | `submit_job` | Submit a background job. | admin |  |  |
+| `wait_job` | Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. | admin |  |  |
 
 ## links
 
@@ -122,6 +123,7 @@ Every non-localOnly operation on the MCP surface: 158 tools across 25 areas. **S
 | `get_backlinks` | Links to a page, ≤500/call; group:"page" by referrer, newest first. | read | yes |  |
 | `get_links` | List a page's outgoing links (typed edges to other pages). | read |  |  |
 | `list_link_sources` | Link provenances (e.g. | read | yes |  |
+| `rank_entities` | Rank pages by graph connections: the most-linked people, companies or other entities. | read |  |  |
 | `remove_link` | Remove a link between two pages (optionally only one link_type or link_source). | write |  |  |
 | `traverse_graph` | Walk the link graph from a page. | read | yes |  |
 | `wanted_pages` | Link targets that have no page yet, most-referenced first: each was written as a link but its page does not exist, so no edge exists. | read |  |  |
@@ -147,13 +149,13 @@ Every non-localOnly operation on the MCP surface: 158 tools across 25 areas. **S
 
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
-| `context_pack` | MEMORY VERB (v1): core memory, budget-packed cards, open threads and hot facts for up to 8 entities, zero LLM. | read | yes |  |
-| `delta` | MEMORY VERB (v1): pages, facts, thread events changed since a cursor, zero LLM. | read | yes |  |
-| `entity` | MEMORY VERB (v1): person/company/account card, zero LLM. | read | yes |  |
-| `forget` | MEMORY VERB (v1): expire a remembered fact by its fact_id (never a page slug). | write | yes |  |
-| `recall` | MEMORY VERB (v1): read facts by entity, since or session_id; `query` also searches pages. | read | yes |  |
-| `remember` | MEMORY VERB (v1): save facts with provenance. | write | yes |  |
-| `synthesize` | [EXPENSIVE / SLOW: LLM calls, costs money] MEMORY VERB (v1): answer a broad question across pages with citations. | read | yes |  |
+| `context_pack` | Core memory, budget-packed cards, open threads and hot facts for up to 8 entities, zero LLM. | read | yes |  |
+| `delta` | Pages, facts, thread events changed since a cursor, zero LLM. | read | yes |  |
+| `entity` | Person/company/account card, zero LLM. | read | yes |  |
+| `forget` | Expire a remembered fact by its fact_id (never a page slug). | write | yes |  |
+| `recall` | Read facts by entity, since or session_id; `query` also searches pages. | read | yes |  |
+| `remember` | Save facts with provenance; set `entity` (the subject) or recall misses it. | write | yes |  |
+| `synthesize` | [EXPENSIVE / SLOW: LLM calls] Cited answer to a broad question across pages. | read | yes |  |
 
 ## ontology
 
@@ -178,7 +180,7 @@ Every non-localOnly operation on the MCP surface: 158 tools across 25 areas. **S
 | `edit_page` | Change part of a page: prefer this over put_page for small changes. | write | yes |  |
 | `fetch` | Fetch the full text of one search result by its opaque, source-qualified `id` (OpenAI deep-research contract: the search/fetch pair). | read |  |  |
 | `get_chunks` | Return a page's indexed content chunks (the units search ranks), in chunk_index order, 50 at a time by default. | read |  |  |
-| `get_page` | Read a page by slug. | read | yes |  |
+| `get_page` | Read a page; `section` or `grep` reads one part. | read | yes |  |
 | `get_page_upload` | An upload's state and next_part, to resume after a lost reply. | write |  |  |
 | `get_raw_data` | Retrieve raw data for a page. | read |  |  |
 | `get_versions` | Page version history, newest snapshot first: metadata only (id, snapshot_at, title, type, tags, frontmatter) for the newest 20 versions by default. | read |  |  |
@@ -195,6 +197,7 @@ Every non-localOnly operation on the MCP surface: 158 tools across 25 areas. **S
 | `revert_version` | Restore a page to an earlier version from its history (a new revision; history is kept). | write |  |  |
 | `unpurge_page` | Owner-only (`gbrain pages unpurge <slug>`). | admin |  |  |
 | `upload_page_part` | Send the next part of an upload: part equals next_part, the whole call within part_max_frame_bytes, cut between code points. | write |  |  |
+| `whois` | Exact identity lookup: entity pages whose email, title or declared alias equals an email address or name, ignoring case, accents and quotes. | read |  |  |
 
 ## questions
 
@@ -230,6 +233,7 @@ Every non-localOnly operation on the MCP surface: 158 tools across 25 areas. **S
 | `rate_answer` | Rate how useful an answer's retrieved evidence was, so this brain ranks better next time (zero LLM calls). | write |  |  |
 | `search` | Cheap hybrid search, no LLM expansion, top 20: exact tokens, names, field values. | read | yes |  |
 | `search_by_image` | Image-as-query retrieval. | read |  |  |
+| `search_exact` | Find every page containing a literal phrase or identifier, exhaustively: use instead of grep. | read |  |  |
 | `search_modes` | Read-only search-mode dashboard: active mode, EVERY mode-bundle knob resolved with attribution (mode default vs config override), the three frozen bundles, and a reranker_readiness verdict (whether the resolved reranker will actually run; remote callers get the verdict without the host key inventory). | read |  |  |
 | `search_stats` | Search observability over a window: cache hit rate, intent/mode mix, budget drops, rank-1 score drift, graph-signals failure counts. | admin |  |  |
 | `search_tune` | Read-only tuning recommendations derived from the last 7 days of search telemetry: what should change, why, and the paste-ready config command per recommendation — relay them to the user. | admin |  |  |

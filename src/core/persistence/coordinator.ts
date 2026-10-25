@@ -16,7 +16,7 @@ import { acquireWorktree, getWorktreeBinding, guardOwnership, type WorktreeBindi
 import { chargePreparationAttempt, clearResolvedRecovery, completeWrite, getWriteRequestById, lockCounters, markRecovering, prepareRecovery, releaseUnpublishedClaim } from './journal.ts';
 import type { WaitingOn } from './claim-phase.ts';
 import { PREPARATION_BUDGET_KEYS, preparationKind } from './preparation-budget.ts';
-import { chargeTransientInterruption, transientInterruption, type TransientInterruption } from './transient-retry.ts';
+import { chargeTransientInterruption, chargedInterruptionDetail, transientInterruption, type TransientInterruption } from './transient-retry.ts';
 import { readWriteSwitchSnapshot } from './switches.ts';
 import { isSharedReadFailure } from './bounded-reads.ts';
 import { isTerminal, principalKey, requestPrincipal, recoveryFiles, type FileRecoveryRecord, type RecoveryRecord, type WriteRequest } from './model.ts';
@@ -38,13 +38,13 @@ import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, recoveryStagingFil
 import { assertManagedFilesystemWrite } from './filesystem-guard.ts';
 import { beforeStagePath, fileContentBytes, fileContentHash, hashDescriptor, hashFile, isStreamedContent, LARGE_FILE_MIN_BYTES, stageBeforeCopy, stageStreamedContent, type StreamedFileContent } from './large-file.ts';
 import { declarePublication, publicationTransaction } from './publication-deadline.ts';
-import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
+import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, isPersistenceDeclaration, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertBundleRecoveryBinding, bundleFileHash, prepareBundleRecovery, publishStagedBundleFile, stageBundleFile, type MutationFile } from './bundle-files.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { classifyMirrorPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { PENDING_IMPORT, SYNC_HELD } from './pending-import.ts';
 import { CANONICAL_FILE_MISSING, databaseRefusal, ownerExceptionFailure, withAttempt, type PublicationFailure, type PublicationFailureDetail, type PublicationStage } from './publication-failure.ts';
-import { SYNC_CURSOR_REPLACED } from './sync-checkpoint-replaced.ts';
+import { SYNC_CURSOR_REPLACED, SYNC_PASS_SUPERSEDED } from './sync-checkpoint-replaced.ts';
 import { fenceFailureDetail } from '../fence-repair/refusal.ts';
 import { withdrawalFailureDetail } from '../facts/withdrawal.ts';
 import { faultPoint, withFaultPoints } from './fault-points.ts';
@@ -52,6 +52,9 @@ import { recordPublicationFenceTrend } from '../fence-repair/census-store.ts';
 import { segmentWriteScope } from '../page-body/ingest.ts';
 import { publicationBeliefOptions, withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
+import { classifyPgAccessError } from '../pg-access-classify.ts';
+import { commitThroughDoor, doorCommitLanded, doorMarker, replayAfterDoorCommit, sourceCanonicalGit, strictChanged } from './git-door.ts';
+import { assertNoPrivateCommit, declareStrictPublication } from './git-declared.ts';
 
 interface PreparedMutationBase {
   sourceExclusive?: boolean;
@@ -64,7 +67,7 @@ interface PreparedMutationBase {
   contentUnchanged?: boolean;
   deferEmbedding?: boolean;
   /** Why a page write bound to a worktree publishes no file (receipt `write_through.skipped`). */
-  databaseOnlyReason?: 'db_only' | 'unbound_source' | 'mirror_read_only' | 'sync_excluded' | 'shared_origin' | 'origin_twin';
+  databaseOnlyReason?: 'db_only' | 'unbound_source' | 'mirror_read_only' | 'sync_excluded' | 'shared_origin' | 'origin_twin' | 'detached';
   /** #6517: the receipt's `write_through.warning` for a database-only publication, set by `validate` under the publication guards. */
   databaseOnlyWarning?: string;
   /**
@@ -213,12 +216,19 @@ function requestError(error: unknown): PublicationFailure {
   if (code === 'revision_backfill_pending' && error instanceof Error) return { code, message: error.message };
   return ownerExceptionFailure(error);
 }
-function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','revision_backfill_pending','source_changed','page_identity_changed',SYNC_CURSOR_REPLACED].includes(code); }
+function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','revision_backfill_pending','source_changed','page_identity_changed',SYNC_CURSOR_REPLACED,SYNC_PASS_SUPERSEDED].includes(code); }
 /** The terminal state of an unpublished failure: `admission_paused` (#6712 PR 4b, a destructive write `sync.admission` paused at publication) is `cancelled`. */
 function failureState(code: string): 'conflict' | 'failed' | 'cancelled' { return code === 'admission_paused' ? 'cancelled' : conflictCode(code) ? 'conflict' : 'failed'; }
 export function transientDatabaseFailure(error: unknown): boolean {
   return ['40001','40P01','55P03','57014','53300','57P01','57P02','57P03','08000','08003','08006','08001','08004',
-    'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code));
+    'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code)) || connectionCapFailure(error);
+}
+/**
+ * GBRA-133: a pooler's client cap (Supavisor `EMAXCONNSESSION`, "too many clients already") is the same contention as
+ * SQLSTATE 53300 whatever code the pooler sends with it, so a write that meets it is released, never failed terminally.
+ */
+export function connectionCapFailure(error: unknown): boolean {
+  return classifyPgAccessError(error).reason === 'pool_exhausted';
 }
 /**
  * Flip lane C: the shared-read failures (`sharedReadFailure`) already charged. A group's memoized read the database cancelled
@@ -343,7 +353,7 @@ export async function releaseChargedInterruption(engine: BrainEngine, row: Write
     return null;
   }).then(outcome => ({ outcome }), () => null);
   if (!done) return null;
-  await faultPoint('persistence:interruption_charged', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation });
+  await faultPoint('persistence:interruption_charged', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation, ...chargedInterruptionDetail(charge.interruption, error) });
   return done.outcome ?? (await getWriteRequestById(engine, row.id))!;
 }
 
@@ -518,7 +528,9 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         `This host does not hold source ${row.source_id}'s canonical worktree, or the file of ${row.slug} resolves outside it, so request ${row.request_id} wrote no file. Inspect the owner; the write publishes only on the host that owns the source.`,
         { fix: ownerStatusFix(row.source_id) });
       const { record, bytes } = pageRecoveryRecord(row, prepared.file, binding);
-      if (prepared.file.expectedBeforeHash !== undefined && record.beforeHash !== prepared.file.expectedBeforeHash) {
+      if (binding.canonical_git === true) record.door = await doorMarker(binding.local_path!);
+      // G2: a strict write replayed after its door commit landed finds its own bytes, committed (git-door.ts).
+      if (prepared.file.expectedBeforeHash !== undefined && record.beforeHash !== prepared.file.expectedBeforeHash && !await replayAfterDoorCommit(record)) {
         // A coordinated writer (a withdrawal mirror) also advanced the page:
         // reprepare against it. Bytes changed at an unchanged revision are an
         // uncoordinated edit.
@@ -571,6 +583,11 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         throw new OperationError('source_changed', 'The source became a read-only mirror after this write was prepared; nothing was written to its checkout.',
           'Retry the write with a new request_id; it is now stored database-only.');
       }
+      const door = recovery?.version === 1 ? recovery : null;
+      // A write prepared strict rechecks its flag under the source lock; one prepared without it publishes as before (only conversion sets the flag).
+      if (door?.door && !await sourceCanonicalGit(tx, row.source_id, true)) throw strictChanged(row.source_id);
+      // G7a (git-declared.ts): a strict publication never writes or commits a private page's bytes.
+      if (!skill) await assertNoPrivateCommit(tx, row, prepared, snapshot, binding);
       if (recovery) {
         const records = recoveryFiles(recovery);
         for (const record of records) if ((skill ? bundleFileHash(record) : fileHash(record.path)) !== record.beforeHash) {
@@ -602,15 +619,19 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       if (!skill) await classifyUnboundPage(tx, row);
       if (prepared.databaseOnlyReason === 'mirror_read_only') await classifyMirrorPage(tx, row);
       const final = skill ? null : await publicationPostimage(tx, row, prepared);
+      // G7a: a strict file-less write must be declared; its class is stamped before the door commit, in this transaction.
+      if (!skill) await declareStrictPublication(tx, row, prepared, snapshot, final, binding);
       decoratePublicationOutcome(row, prepared, outcome, final, files.length, skill);
       await recordPublicationFenceTrend(tx, row, outcome);
-      await timePublicationStep('effects', row.slug, () => queuePublicationEffects(tx, row, final, outcome, prepared));
+      // G2: a strict source's file is committed before its row; its Git effect only pushes.
+      if (door?.door) Object.assign(outcome.persistence as object, { git_state: 'committed', git_commit: await commitThroughDoor(door.door.root, [{ path: door.path, note: prepared.file?.commit }], lock ?? undefined) });
+      await timePublicationStep('effects', row.slug, () => queuePublicationEffects(tx, row, final, outcome, prepared, { pushOnly: !!door?.door }));
       if (prepared.afterEffects) await withCoordinatedWrite(tx, [row.source_id], () => prepared.afterEffects!(tx, outcome), publicationAttribution(row, prepared.trust));
       await hooks.boundary?.('before_commit', row);
       const committed = await completeWrite(tx, current, 'committed', outcome, undefined, current);
       transactionBodyCompleted = true;
       return committed;
-    });
+    }, { pipelineFirst: isPersistenceDeclaration });
     await hooks.boundary?.('after_commit', done);
     if (beliefReport.appended && done.state === 'committed') await markBeliefCommits(engine, [row.id]).catch(() => undefined);
     if (recovery) {
@@ -628,7 +649,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       // A charged interruption under the limit is retried after its backoff whatever error it surfaced as (a publication the
       // ceiling cancelled can reject with a bare AbortError); past the limit it is the terminal failure.
       const charged = transactionBodyCompleted ? null : await chargedInterruption(engine, row, error);
-      if (!transactionBodyCompleted && transientInterruption(error)) await faultPoint('persistence:recovery_interruption_charged', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation });
+      if (!transactionBodyCompleted && transientInterruption(error)) await faultPoint('persistence:recovery_interruption_charged', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation, ...chargedInterruptionDetail(transientInterruption(error), error) });
       const terminal = charged ? charged.failure
         : !transactionBodyCompleted && !mayReprepare(row, requestError(error)) && !transientDatabaseFailure(error) ? requestError(error) : null;
       const failure = terminal ? withAttempt(terminal, published ? 'after_file_publication' : 'publication') : undefined;
@@ -713,7 +734,10 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
           hooks.fileBoundary?.('before_restore', current, index);
           const actual = current.recovery.version === 2 ? bundleFileHash(record) : fileHash(record.path);
           if (actual !== record.beforeHash && actual !== record.afterHash) throw unexpectedRecoveryBytes('Canonical recovery bytes changed during restoration.', current, 'changed while recovery was restoring it and');
-          if (record.staging?.before) {
+          // G2: a strict publication whose commit landed keeps the committed file; Git holds it.
+          if (current.recovery.version === 1 && await doorCommitLanded(record)) {
+            if (record.staging?.before) await withFilesystemPublication([record.root], async () => cleanupRecoveryStaging(record, { priorIntact: true }));
+          } else if (record.staging?.before) {
             await withFilesystemPublication([record.root], async () => {
               if (actual === record.afterHash && actual !== record.beforeHash) restoreBeforeStage(record, phase => hooks.fileBoundary?.(`restoration_${phase}`, current, index));
               else cleanupRecoveryStaging(record, { priorIntact: actual === record.beforeHash });

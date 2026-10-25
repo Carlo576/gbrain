@@ -33,8 +33,9 @@ import type { ScopedReadRunner } from './cjk-search.ts';
 import { compileRowNormalizer } from './normalize.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import { atomRetirementPurgeHold } from '../persistence/atom-retirement-hold.ts';
+import { derivedRetirementPurgeHold } from '../persistence/derived-retirement-hold.ts';
 import { createPageVersion } from '../page-state/versions.ts';
-import { renderFragment, sqlFragment, trustedSql } from './fragment.ts';
+import { renderFragment, sqlFragment, trustedSql, type SqlFragment } from './fragment.ts';
 import { frontmatterWhereFragment } from '../search/frontmatter-where.ts';
 import { quoteIdentifier, resolveWriteColumnFromConfigRows } from '../search/embedding-column.ts';
 import { pickCanonicalOrigin } from '../persistence/origin-guard.ts';
@@ -323,7 +324,8 @@ export async function purgeDeletedPages(
           AND deleted_at < now() - (${hours} || ' hours')::interval
           AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text
             AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)
-          AND ${trustedSql(atomRetirementPurgeHold('pages'))}${excluded}
+          AND ${trustedSql(atomRetirementPurgeHold('pages'))}
+          AND ${trustedSql(derivedRetirementPurgeHold('pages'))}${excluded}
         ORDER BY deleted_at ASC, slug ASC
       `);
       const pages = rows.map((r) => ({
@@ -345,7 +347,9 @@ export async function purgeDeletedPages(
           AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text
             AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)
           -- #7013: a restorable re-extraction retirement waits out its hold (atomRetirementPurgeHold).
-          AND ${trustedSql(atomRetirementPurgeHold('pages'))}${excluded}
+          AND ${trustedSql(atomRetirementPurgeHold('pages'))}
+          -- GBRA-161: every derived retirement waits out its hold (derivedRetirementPurgeHold).
+          AND ${trustedSql(derivedRetirementPurgeHold('pages'))}${excluded}
         RETURNING slug, source_id
       `);
       if (rows.length) await tx.run(sqlFragment`DELETE FROM page_body_stagings s USING unnest(${rows.map(r => r.source_id)}::text[], ${rows.map(r => r.slug)}::text[]) AS d(source_id, slug)
@@ -392,10 +396,12 @@ export async function updatePageContextualRetrievalState(
   sourceId: string,
   mode: string,
   corpusGeneration: string | null,
+  memo: <T>(key: string, read: () => Promise<T>) => Promise<T> = (_key, read) => read(),
 ): Promise<void> {
     if (mode === 'none') {
-      const { rows: config } = await exec.run<{ key: string; value: string }>(sqlFragment`
-        SELECT key,value FROM config WHERE key IN ('search_embedding_column','embedding_columns')`);
+      // GBRA-156: the same read, under the same memo key, as the chunk write of this page transaction (chunks.ts).
+      const config = await memo('config:embedding-write', async () => (await exec.run<{ key: string; value: string }>(
+        sqlFragment`SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns', 'embedding_model')`)).rows);
       const column = resolveWriteColumnFromConfigRows({
         searchEmbeddingColumn: config.find(row => row.key === 'search_embedding_column')?.value ?? null,
         embeddingColumnsJson: config.find(row => row.key === 'embedding_columns')?.value ?? null,
@@ -782,6 +788,11 @@ function stalePagesWhere(opts?: { sourceId?: string; versionTs?: string; attenda
     : opts?.held === 'only' ? sqlFragment` AND ${linkExtractionHeld(opts.versionTs)}` : sqlFragment``;
   // A quarantined page is hidden from search; it is neither re-extracted nor counted as stale.
   return sqlFragment`deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))} AND ${version}${source}${attendance}${held}`;
+}
+
+/** The pages (unaliased `pages` rows) link extraction still owes work: stale, not attendance-blocked, not held (rank_entities' remote coverage). */
+export function staleForExtractionSql(versionTs: string): SqlFragment {
+  return stalePagesWhere({ versionTs, attendance: 'exclude', held: 'exclude' });
 }
 
 /**

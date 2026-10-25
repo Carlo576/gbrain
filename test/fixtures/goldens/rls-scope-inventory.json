@@ -3737,6 +3737,7 @@
         "readPageSnapshotsBatch": "direct",
         "readSegmentDerivations": "none",
         "readSegmentTexts": "none",
+        "readTransaction": "none",
         "reconnect": "none",
         "refreshPageBody": "none",
         "registerBeforeDisconnect": "none",

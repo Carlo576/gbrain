@@ -1,5 +1,5 @@
 /**
- * Per-segment derivation rows and facts.source_window on Postgres (Wave B PR 4 interface, migration v265): the shared
+ * Per-segment derivation rows and facts.source_window on Postgres (Wave B PR 4 interface, migration v273): the shared
  * cases, including the JSONB double-encoding checks PGLite can't catch. PGLite arm: test/engine-sql-segment-derivations.test.ts.
  */
 import { afterAll, beforeAll, describe } from 'bun:test';

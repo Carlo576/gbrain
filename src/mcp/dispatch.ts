@@ -25,6 +25,7 @@ import { logVerbUsage, recordsFiring, type RecordsFiring } from '../core/verbs/u
 import { searchCountLine } from '../core/search/keyword-paging.ts';
 import { dateLabelLine } from '../core/search/date-labels.ts';
 import { hiddenTakesNotice, localTranscriptsNotice, recallInteropNotices, wantsTranscriptHint } from '../core/interop-notices.ts';
+import { unreadableSourcesNotice } from '../core/unreadable-sources-notice.ts';
 import { hiddenToolHint, hiddenToolNext, hiddenToolRoute, type ToolConnection } from './hidden-tool-hint.ts';
 import { opAllowedForBoundClient } from '../core/ops/context.ts';
 import { takePostUpgradeMcpNotice } from '../core/post-upgrade-notice.ts';
@@ -47,8 +48,10 @@ import { maybeRefreshBackupStatusInProcess } from '../core/backup/coverage.ts';
 import { operationScopesAllowed } from '../core/scope.ts';
 import { enforceReadTrustFloor } from '../core/eligibility/registry.ts';
 import { invalidateHotMemoryForEngine } from '../core/facts/meta-hook.ts';
+import { withSearchConnectionBudget } from '../core/search/connection-budget.ts';
+import { isEngineDegraded } from '../core/degraded-marker.ts';
 import { admittedPendingReceipt, type WriteReceipt } from '../core/persistence/types.ts';
-import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
+import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withRequestIdentityMemo, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
 import { frameOverCap, resultTooLargeError } from '../core/egress-budget.ts';
 
 // WP3: normalization + validation moved to validate-params.ts (direct unit
@@ -872,10 +875,18 @@ export async function dispatchToolCall(
 ): Promise<ToolResult> {
   // #6721: a read op answers every config read from one snapshot of the table
   // (config-snapshot.ts); a write reads config live, so it sees its own writes.
-  const run = () => dispatchResolvedCall(engine, name, params, opts);
+  // GBRA-156: and reads the brain identity and each local writer's credential once for its pre-submission checks.
+  const run = () => withRequestIdentityMemo(() => dispatchResolvedCall(engine, name, params, opts));
+  if (name === 'search' || name === 'query') return withSearchConnectionBudget(() => withRequestConfigSnapshot(engine, run));
   return operations.find(o => o.name === name)?.mutating === false
     ? withRequestConfigSnapshot(engine, run)
     : withoutRequestConfigSnapshot(run);
+}
+
+/** The response-meta hook's keys, or its failure message; never rejects (a hook failure degrades to no keys). */
+async function runMetaHook(hook: NonNullable<DispatchOpts['metaHook']>, name: string, ctx: OperationContext): Promise<{ meta?: Record<string, unknown>; failure?: string }> {
+  try { return { meta: await hook(name, ctx) }; }
+  catch (metaErr) { return { failure: metaErr instanceof Error ? metaErr.message : String(metaErr) }; }
 }
 
 async function dispatchResolvedCall(
@@ -1063,6 +1074,8 @@ async function dispatchResolvedCall(
     enforceBoundClientOpAllowList(ctx.auth, op);
     // #5575 CEO-18: a floored connection only reaches read ops that enforce its floor.
     enforceReadTrustFloor(ctx.auth, op);
+    // GBRA-156: a read op does not change what the hook reads, so it runs beside the handler (a degraded engine's reconnect stays the handler's).
+    const earlyMeta = opts.metaHook && op.mutating === false && !isEngineDegraded(engine) ? runMetaHook(opts.metaHook, name, ctx) : undefined;
     const sharedStdio = ctx.transport === 'stdio' && !ctx.auth &&
       (op.requiredScopes?.length || ['list_skills', 'get_skill', 'get_skill_asset', 'list_brain_skillpack'].includes(name));
     let registration: Awaited<ReturnType<typeof readLocalWriter>> | undefined;
@@ -1116,6 +1129,8 @@ async function dispatchResolvedCall(
     const rerankDegradedCalls = recordRerankDegradation(responseMeta, opts);
     notices.push(...recallInteropNotices(name, result, responseMeta, safeParams,
       { config: ctx.config, transport: dispatchRenderContext(opts).transport, binding: ctx.explicitReadBinding, rerankDegradedCalls }));
+    const unreadable = await unreadableSourcesNotice(name, safeParams, result, ctx);
+    if (unreadable) notices.push(unreadable);
     notices.push(...await hiddenContentNotices(engine, name, result, ctx, opts));
     // Monthly backup-coverage: one AGGREGATE notice per process (counts only —
     // never a local path or source id). The refresher runs on the stdio
@@ -1154,13 +1169,9 @@ async function dispatchResolvedCall(
     // helper crash degrades to no hook keys rather than flipping the whole
     // tool call to error.
     if (opts.metaHook) {
-      try {
-        const meta = await opts.metaHook(name, ctx);
-        if (meta && Object.keys(meta).length > 0) out._meta = { ...(out._meta ?? {}), ...meta };
-      } catch (metaErr) {
-        const msg = metaErr instanceof Error ? metaErr.message : String(metaErr);
-        ctx.logger.warn(`[mcp] _meta hook failed for ${name}: ${msg}; degrading to no hook keys`);
-      }
+      const { meta, failure } = await (earlyMeta ?? runMetaHook(opts.metaHook, name, ctx));
+      if (meta && Object.keys(meta).length > 0) out._meta = { ...(out._meta ?? {}), ...meta };
+      if (failure !== undefined) ctx.logger.warn(`[mcp] _meta hook failed for ${name}: ${failure}; degrading to no hook keys`);
     }
     // Large pages: the egress backstop measures the final frame; a read over the connection's cap is refused whole, never cut.
     const over = op.mutating ? null : await frameOverCap(out, { remote: ctx.remote, transport: ctx.transport, engine, config: ctx.config });

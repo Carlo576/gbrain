@@ -275,6 +275,12 @@ export async function preparePageAdmission(ctx: OperationContext,
     throw new OperationError('invalid_params', 'fence_repair is reserved for the trusted fence repair.',
       'Drop fence_repair and submit the page without it; gbrain repair fences records its own receipt on the brain host. To fix a malformed facts or takes fence, correct it in content (or write facts with remember and takes with takes_add); a held file is repaired by the brain host operator with gbrain repair fences, so ask the user to run it.');
   }
+  // G6: the hidden-row merge of an untrusted capture's body (page-prepare.ts) is opted into only by the trusted local ingest_capture
+  // handler, whose caller never saw the page's non-world rows; a remote put_page has it already, through its authority.
+  if (Object.hasOwn(input.params, 'keep_hidden_rows') && (input.operation !== 'put_page' || ctx.remote !== false || input.params.keep_hidden_rows !== true)) {
+    throw new OperationError('invalid_params', 'keep_hidden_rows is reserved for trusted local ingestion.',
+      'Drop keep_hidden_rows and submit the page without it; a remote put_page already keeps the rows its caller could not read.');
+  }
   // A body over the page ceiling can never be admitted: refuse it as a caller error before the journal
   // reserves intent bytes, so an oversized write never reads as retryable queue_capacity.
   const body = input.params.content;
@@ -370,8 +376,8 @@ export async function preparePageAdmission(ctx: OperationContext,
     await assertTimelineNotOmitted(ctx.engine, { intent, remote: ctx.remote !== false, writer: typeof p.expected_revision === 'string' ? 'editing' : 'preserving',
       slug, sourceId, content: intent.content, prior: snapshot });
   }
-  const slugAdvisory = input.operation === 'put_page' && input.managedFileImport !== true
-    ? suffixedSlugAdmission(ctx, slug, !!snapshot && !snapshot.page.deleted_at) : null;
+  const slugAdvisory = (input.operation === 'put_page' || input.operation === 'capture') && input.managedFileImport !== true
+    ? suffixedSlugAdmission(ctx, slug, !!snapshot && !snapshot.page.deleted_at, input.operation) : null;
   // #5616: typed edit refusals before admission; publication repeats them on the locked snapshot.
   if (input.operation === 'edit_page') {
     const { applyPageEdits, assertEditRevision, assertSegmentedEditFences, parseEditWithin, parsePageEdits } = await import('./page-edit.ts');

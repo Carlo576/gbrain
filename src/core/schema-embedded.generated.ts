@@ -578,6 +578,7 @@ CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_page_id);
 CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_page_id);
 CREATE INDEX IF NOT EXISTS idx_links_source ON links(link_source);
 CREATE INDEX IF NOT EXISTS idx_links_origin ON links(origin_page_id);
+CREATE INDEX IF NOT EXISTS idx_links_supersedes_to ON links (to_page_id) WHERE link_type = 'supersedes';
 
 -- Wanted pages (migration wanted_links): authored links whose target page does
 -- not exist. A live target updated after checked_at makes the origin stale for
@@ -1173,6 +1174,8 @@ CREATE INDEX IF NOT EXISTS idx_file_migration_ledger_status
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
 
 CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
+-- GBRA-156 (v267): the title arm's title-only predicate reads the weight-A slice (the title alone).
+CREATE INDEX IF NOT EXISTS idx_pages_title_search ON pages USING GIN (ts_filter(search_vector, '{a}'));
 
 -- Function to rebuild search_vector for a page
 -- #2704: compiled_truth (unbounded whole-page body) deliberately NOT
@@ -1947,6 +1950,83 @@ CREATE TABLE IF NOT EXISTS extract_atoms_page_state (
 CREATE INDEX IF NOT EXISTS extract_atoms_page_state_tombstoned_idx
   ON extract_atoms_page_state (source_incarnation, content_hash, page_id) WHERE tombstoned;
 CREATE INDEX IF NOT EXISTS extract_atoms_page_state_page_idx ON extract_atoms_page_state (page_id);
+
+-- GBRA-161: the generation ledger (src/core/generations/, docs/architecture/generations.md).
+CREATE TABLE IF NOT EXISTS derived_generations (
+  id BIGSERIAL PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  owner_key TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK (state IN ('live','held','superseded')),
+  run_id TEXT,
+  operation_id TEXT NOT NULL,
+  hold_id TEXT,
+  input_pin TEXT,
+  input_size BIGINT,
+  completeness JSONB NOT NULL DEFAULT '{}',
+  item_set_hash TEXT NOT NULL,
+  held_reason TEXT CHECK (held_reason IS NULL OR held_reason IN ('shrunk','oversize','valve','no_proof','fence_absent','attempts_exhausted','segmented_unsupported','tie')),
+  held_context JSONB,
+  proposal JSONB,
+  proposal_bytes INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  superseded_by BIGINT,
+  restore_of BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  locator TEXT,
+  activation_id TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS derived_generations_one_live ON derived_generations (source_id, kind, owner_key) WHERE state = 'live';
+CREATE UNIQUE INDEX IF NOT EXISTS derived_generations_one_hold ON derived_generations (source_id, kind, owner_key) WHERE state = 'held';
+CREATE INDEX IF NOT EXISTS derived_generations_operation ON derived_generations (operation_id);
+CREATE INDEX IF NOT EXISTS derived_generations_state_created ON derived_generations (state, created_at);
+CREATE TABLE IF NOT EXISTS derived_generation_items (
+  generation_id BIGINT NOT NULL REFERENCES derived_generations(id) ON DELETE CASCADE,
+  item_key TEXT NOT NULL,
+  identity_hash TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('published','retired','revived','kept','adopted')),
+  preimage JSONB,
+  preimage_bytes INTEGER,
+  pending BOOLEAN NOT NULL DEFAULT false,
+  PRIMARY KEY (generation_id, item_key)
+);
+CREATE INDEX IF NOT EXISTS derived_generation_items_key ON derived_generation_items (item_key);
+CREATE INDEX IF NOT EXISTS derived_generation_items_pending ON derived_generation_items (generation_id) WHERE pending;
+CREATE TABLE IF NOT EXISTS derived_generation_valve (
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  window_key TEXT NOT NULL,
+  retired INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_id, kind, window_key)
+);
+CREATE TABLE IF NOT EXISTS derived_generation_attempts (
+  hold_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  owner_key TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  codes JSONB NOT NULL DEFAULT '[]',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS derived_generation_attempts_key ON derived_generation_attempts (source_id, kind, owner_key);
+CREATE TABLE IF NOT EXISTS derived_generation_activations (
+  id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  owner_key TEXT NOT NULL,
+  expected_generation INTEGER NOT NULL,
+  input_pin TEXT,
+  item_set_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','activated')),
+  generation_id BIGINT REFERENCES derived_generations(id) ON DELETE SET NULL,
+  members JSONB NOT NULL DEFAULT '[]',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS derived_generation_activations_key ON derived_generation_activations (source_id, kind, owner_key, state);
 -- (migration v246) Per-page embedding spend ledger for large pages
 -- (page-embedding-budget.ts): held pages wait for approval, capped pages are
 -- partially embedded up to embed.max_usd_per_page.
@@ -2131,7 +2211,7 @@ CREATE TABLE IF NOT EXISTS page_body_staging_texts (
 CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_texts (source_id, sha256);
 -- END GENERATED from src/core/page-body/schema.ts (PAGE_BODY_SCHEMA_SQL)
 
--- Wave B per-segment derivation watermarks (migration v265; src/core/page-body/derivations.ts).
+-- Wave B per-segment derivation watermarks (migration v273; src/core/page-body/derivations.ts).
 -- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_SEGMENT_DERIVATIONS_SQL). Edit that file, then run: bun run build:schema
 CREATE TABLE IF NOT EXISTS page_segment_derivations (
   page_id          INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
@@ -2432,6 +2512,14 @@ BEGIN
         WHEN NOT (allowed ? target_source) THEN 'different_source' ELSE 'old_source_outside' END,
         'target_source',target_source,'old_source',old_source,'allowed',allowed)::text;
   END IF;
+  -- G7a (git-canonical-schema.ts): a git-canonical source takes rows only from a writer that declares the git protocol.
+  IF COALESCE(current_setting('gbrain.git_protocol',true),'') <> '1'
+    AND EXISTS (SELECT 1 FROM git_canonical_brain WHERE singleton=1 AND strict_sources>0)
+    AND EXISTS (SELECT 1 FROM sources WHERE id IN (target_source, old_source) AND config->>'canonical'='git') THEN
+    RAISE EXCEPTION USING ERRCODE='P0001', MESSAGE='git_protocol_required: this source is git-canonical and the writer does not declare the git protocol',
+      TABLE=TG_TABLE_NAME, SCHEMA=TG_TABLE_SCHEMA, CONSTRAINT='git_canonical_fence:mutation',
+      DETAIL=jsonb_build_object('op',TG_OP,'target_source',target_source,'old_source',old_source)::text;
+  END IF;
   IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
 END \$fn\$;
 
@@ -2447,6 +2535,40 @@ BEGIN
 END \$body\$;
 ;
 -- END GENERATED from src/core/persistence/schema.ts (PERSISTENCE_SCHEMA_STATEMENTS)
+
+-- BEGIN GENERATED from src/core/persistence/git-canonical-schema.ts (GIT_CANONICAL_SCHEMA_SQL). Edit that file, then run: bun run build:schema
+CREATE TABLE IF NOT EXISTS git_canonical_brain (
+  singleton INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+  strict_sources INTEGER NOT NULL DEFAULT 0 CHECK (strict_sources >= 0)
+);
+CREATE OR REPLACE FUNCTION gbrain_count_git_canonical_sources() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS \$fn\$
+BEGIN
+  INSERT INTO git_canonical_brain(singleton, strict_sources)
+    VALUES (1, (SELECT count(*) FROM sources WHERE config->>'canonical' = 'git'))
+    ON CONFLICT (singleton) DO UPDATE SET strict_sources = EXCLUDED.strict_sources;
+  RETURN NULL;
+END \$fn\$;
+DROP TRIGGER IF EXISTS git_canonical_sources_count_insert ON sources;
+CREATE TRIGGER git_canonical_sources_count_insert AFTER INSERT ON sources
+  FOR EACH ROW WHEN (NEW.config->>'canonical' = 'git') EXECUTE FUNCTION gbrain_count_git_canonical_sources();
+DROP TRIGGER IF EXISTS git_canonical_sources_count_update ON sources;
+CREATE TRIGGER git_canonical_sources_count_update AFTER UPDATE ON sources
+  FOR EACH ROW WHEN (OLD.config->>'canonical' IS DISTINCT FROM NEW.config->>'canonical') EXECUTE FUNCTION gbrain_count_git_canonical_sources();
+DROP TRIGGER IF EXISTS git_canonical_sources_count_delete ON sources;
+CREATE TRIGGER git_canonical_sources_count_delete AFTER DELETE ON sources
+  FOR EACH ROW WHEN (OLD.config->>'canonical' = 'git') EXECUTE FUNCTION gbrain_count_git_canonical_sources();
+INSERT INTO git_canonical_brain(singleton, strict_sources)
+  VALUES (1, (SELECT count(*) FROM sources WHERE config->>'canonical' = 'git'))
+  ON CONFLICT (singleton) DO UPDATE SET strict_sources = EXCLUDED.strict_sources;
+DO \$rls\$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper))
+    AND EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema() AND c.relname = 'git_canonical_brain' AND c.relkind = 'r' AND NOT c.relrowsecurity) THEN
+    ALTER TABLE git_canonical_brain ENABLE ROW LEVEL SECURITY;
+  END IF;
+END \$rls\$;
+-- END GENERATED from src/core/persistence/git-canonical-schema.ts (GIT_CANONICAL_SCHEMA_SQL)
 -- Verified text projection work (migration 153).
 -- BEGIN GENERATED from src/core/page-state/projection-schema.ts (PAGE_PROJECTION_SCHEMA_SQL). Edit that file, then run: bun run build:schema
 DROP TRIGGER IF EXISTS trg_pages_search_vector ON pages;

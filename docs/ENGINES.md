@@ -205,6 +205,44 @@ took 103 s on 16 vCPU with 12 GB and 8 workers. Measured, not shipped:
 (m 16, ef_construction 64, `vector`). Measurements and method:
 [`docs/eval/hnsw-scale-bench.md`](eval/hnsw-scale-bench.md).
 
+### Vector index prewarm
+
+<a id="vector-index-prewarm"></a>
+
+After a Postgres restart or a cache eviction, the first searches walk HNSW
+pages nobody has read yet: on a brain whose index is bigger than the cache,
+an unseen query reads 2,000 to 4,500 index pages and spends 1.2 to 2.7 s in
+the vector stage. `gbrain embeddings prewarm` loads every HNSW index of the
+brain into `shared_buffers` once with `pg_prewarm(<index>, 'buffer')`, so
+those pages are already cached. It is opt-in and local to the brain host: a
+CLI-only command (no MCP tool, refused by thin clients), and
+`gbrain config set serve.vector_prewarm true` runs it once in the
+background each time `gbrain serve` starts (off by default; a refusal is
+logged and the serve carries on).
+
+`shared_buffers` decides whether it runs. The indexes must total at most
+half of it, read with `current_setting('shared_buffers')`; past that the
+prewarm would evict the heap and keyword-index pages every other read needs.
+`effective_cache_size` is printed but never decides: it is a planner hint
+the operator sets, not memory the server holds. The check reads only catalog
+rows and file sizes, so a refusal reads no index page.
+
+| Command | Does |
+|---|---|
+| `gbrain embeddings prewarm --dry-run --json` | Index sizes, `shared_buffers`, `effective_cache_size`, the budget and the fit; reads nothing |
+| `gbrain embeddings prewarm` | Prewarms when the indexes fit and `pg_prewarm` exists |
+| `gbrain config set serve.vector_prewarm true` | Prewarms at each serve start (restart the serve) |
+
+Refusals, each with a fix: `vector_prewarm_wont_fit` (raise
+`shared_buffers` to at least twice the index size and restart Postgres; a
+managed database sizes it with the instance), `vector_prewarm_extension_missing`
+(`CREATE EXTENSION IF NOT EXISTS pg_prewarm;` as a role that may create
+extensions) and `vector_prewarm_unsupported_engine` (PGLite has no server
+cache to fill). Prewarmed pages stay cached until Postgres restarts or other
+reads evict them; pg_prewarm's own `autoprewarm` worker
+(`shared_preload_libraries = 'pg_prewarm'`) can reload them after a restart
+without gbrain.
+
 ### Opt-in RLS source-scope binding (`GBRAIN_RLS_SCOPE_BINDING`)
 
 Defense-in-depth layer for Postgres deployments that want the database itself
@@ -785,10 +823,35 @@ Size the pooler for every process at once:
 
 ```
 long-running processes x GBRAIN_POOL_SIZE
-  + processes with GBRAIN_DIRECT_DATABASE_URL x GBRAIN_DIRECT_POOL_SIZE (default 3)
-  + one-shot commands running at the same time x their pool
+  + processes whose direct route lands on this pooler x their direct pool (see below)
+  + one-shot commands running at the same time x their pool (a full `gbrain sync` is one too)
+  + parallel import workers x 2 (an unmanaged sync of more than 100 files, `--workers N`, or the sync a serve runs)
   <= the pooler's client limit (Supabase Supavisor: the project's pool_size)
 ```
+
+The direct route lands on the pooler when `GBRAIN_DIRECT_DATABASE_URL` names it,
+and also when gbrain derives it from a Supabase pooler URL whose user does not
+name the project (`postgres.<ref>`): the derived route keeps the pooler host on
+port 5432, its session port, even when the main URL uses transaction mode
+(6543). Two long-running processes at the
+defaults (10 + 3 each) already pass a client limit of 25, so a scheduled
+`gbrain sync` next to a `gbrain serve` on the same session port can exhaust it.
+`GBRAIN_MAX_CONNECTIONS` caps a sync's worker fan-out to fit a budget.
+
+<a id="direct-pool-by-command"></a>The direct pool's size follows the command.
+`gbrain serve`, `gbrain jobs`, `gbrain autopilot` and `gbrain sync --watch`
+open up to 3 direct connections. A command that exits but owns writes or takes
+a lease (`sync`, `put`, `import`, `dream`, `cycle`, `sources`, `mcp`,
+`migrate-graduation`) and the diagnostics that report the route (`doctor`,
+`engine`) open 1. Every other command routes nothing through the direct pool:
+its statements use the ordinary pool, as with `GBRAIN_DISABLE_DIRECT_POOL=1`.
+Two exceptions keep the direct route for it: applying pending schema
+migrations (one connection, for the session advisory lock and the 30-minute
+statement timeout), and taking a lease such as an embed or extract lock
+(the command then opens 1, so the lease heartbeat keeps its own connection).
+`GBRAIN_DIRECT_POOL_SIZE` still sets the size wherever a direct pool opens.
+`GBRAIN_DIRECT_POOL_BY_COMMAND=0` restores the earlier behavior: every command
+may open the full 3-connection direct pool.
 
 When the sum does not fit, run fewer long-running processes (for example one
 shared `gbrain serve --http` instead of one stdio `serve` per agent session),

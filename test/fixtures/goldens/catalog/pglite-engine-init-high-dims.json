@@ -60,6 +60,21 @@
       "decision_receipts.decision_receipts_pkey": "p PRIMARY KEY (id)",
       "derivation_inputs.derivation_inputs_pkey": "p PRIMARY KEY (derived_table, derived_id, input_table, input_id)",
       "derivation_inputs.derivation_inputs_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
+      "derived_generation_activations.derived_generation_activations_generation_id_fkey": "f FOREIGN KEY (generation_id) REFERENCES derived_generations(id) ON DELETE SET NULL",
+      "derived_generation_activations.derived_generation_activations_pkey": "p PRIMARY KEY (id)",
+      "derived_generation_activations.derived_generation_activations_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
+      "derived_generation_activations.derived_generation_activations_state_check": "c CHECK ((state = ANY (ARRAY['pending'::text, 'activated'::text])))",
+      "derived_generation_attempts.derived_generation_attempts_pkey": "p PRIMARY KEY (hold_id)",
+      "derived_generation_attempts.derived_generation_attempts_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
+      "derived_generation_items.derived_generation_items_action_check": "c CHECK ((action = ANY (ARRAY['published'::text, 'retired'::text, 'revived'::text, 'kept'::text, 'adopted'::text])))",
+      "derived_generation_items.derived_generation_items_generation_id_fkey": "f FOREIGN KEY (generation_id) REFERENCES derived_generations(id) ON DELETE CASCADE",
+      "derived_generation_items.derived_generation_items_pkey": "p PRIMARY KEY (generation_id, item_key)",
+      "derived_generation_valve.derived_generation_valve_pkey": "p PRIMARY KEY (source_id, kind, window_key)",
+      "derived_generation_valve.derived_generation_valve_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
+      "derived_generations.derived_generations_held_reason_check": "c CHECK (((held_reason IS NULL) OR (held_reason = ANY (ARRAY['shrunk'::text, 'oversize'::text, 'valve'::text, 'no_proof'::text, 'fence_absent'::text, 'attempts_exhausted'::text, 'segmented_unsupported'::text, 'tie'::text]))))",
+      "derived_generations.derived_generations_pkey": "p PRIMARY KEY (id)",
+      "derived_generations.derived_generations_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
+      "derived_generations.derived_generations_state_check": "c CHECK ((state = ANY (ARRAY['live'::text, 'held'::text, 'superseded'::text])))",
       "dream_synthesis_completions.dream_synthesis_completions_pkey": "p PRIMARY KEY (source_id, idempotency_key)",
       "dream_verdicts.dream_verdicts_pkey": "p PRIMARY KEY (file_path, content_hash)",
       "drift_decisions.drift_decisions_pkey": "p PRIMARY KEY (id)",
@@ -110,6 +125,9 @@
       "files.files_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "files.files_storage_path_key": "u UNIQUE (storage_path)",
       "gbrain_cycle_locks.gbrain_cycle_locks_pkey": "p PRIMARY KEY (id)",
+      "git_canonical_brain.git_canonical_brain_pkey": "p PRIMARY KEY (singleton)",
+      "git_canonical_brain.git_canonical_brain_singleton_check": "c CHECK ((singleton = 1))",
+      "git_canonical_brain.git_canonical_brain_strict_sources_check": "c CHECK ((strict_sources >= 0))",
       "ingest_log.ingest_log_pkey": "p PRIMARY KEY (id)",
       "link_edge_proposals.link_edge_proposals_a_to_page_id_fkey": "f FOREIGN KEY (a_to_page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "link_edge_proposals.link_edge_proposals_b_to_page_id_fkey": "f FOREIGN KEY (b_to_page_id) REFERENCES pages(id) ON DELETE CASCADE",
@@ -525,6 +543,7 @@
       "gbrain_advance_tag_revision()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=7807b26b4933148aa63c67fca824a60d3492396728205d04e16c48c81174cbd5",
       "gbrain_bump_trust_generation()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=4708a89d166ac0999a8922ad8ee8f69fea3213c59e0782d96220f93b0c001a62",
       "gbrain_clear_atom_page_state()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=7db0ef05d1220a579e64428b2dd7cf5183191da186fbe64b6496433a7a713d11",
+      "gbrain_count_git_canonical_sources()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=ef162804d8f0946d3df6209096567f0ca4255e02fceeee0adc8e52c47806d6a0",
       "gbrain_count_modifications()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=9518c925621def19cafb2918da4d41e602ce94619af872eafa3c11b46c66296f",
       "gbrain_fact_fingerprint(claim text)": "RETURNS text kind=f lang=sql volatility=i secdef=false config=[] body_sha256=ff99709590deb4c83f0e16d30b3988ca2598018f5fd6f30d132acf31b1010174",
       "gbrain_fact_fingerprint_v1(claim text)": "RETURNS text kind=f lang=sql volatility=i secdef=false config=[] body_sha256=aa955a02d3c695f237e1771f0ffded2fa8e5c7b795c42b87f7fd239ae35e213c",
@@ -545,7 +564,7 @@
       "gbrain_refuse_purged_page()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=8aaaf7c22fc9acb4b1e84fe75f11ae6c889949b78de1ef6bdba1db54ef43844e",
       "gbrain_refuse_purged_take()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=4a291b0448ab7a31926aa482b5222e0595d31a6bfad81b851b13e4bf581a0d83",
       "gbrain_refuse_purging_derivation()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=0d0afb3e61857f1668f2e7996da1c6aaf269aecaa1bf3763ce90df90e2d66fd3",
-      "gbrain_require_managed_writer()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=f29ded3a50b998bbe342052444996675f57ddf2de3fd786b2373015d35e6d859",
+      "gbrain_require_managed_writer()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=ae9883e69ac3121bc07689f68518c1d97a02a2788a64e496a26f12720300fe8a",
       "gbrain_require_persistence_protocol(required integer)": "RETURNS void kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=af07b7fac60dec0a4fe568217931ac449d32f73b3a53a047b3b02a5f59cb5058",
       "gbrain_snapshot_version_trust()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=7452350236ed4c68a6cd1f4d78a1381a4ef44cc70e8a032141f01bba4a704702",
       "gbrain_stamp_revision_attribution()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=d446ed1145d8bb9c93cb0ca4aa076a5dc7a5fe07b3e79518adaf1b17b0a51216",
@@ -644,6 +663,21 @@
       "derivation_inputs": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
+      "derived_generation_activations": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "derived_generation_attempts": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "derived_generation_items": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "derived_generation_valve": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "derived_generations": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
       "dream_synthesis_completions": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
@@ -696,6 +730,9 @@
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "gbrain_cycle_locks": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "git_canonical_brain": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "ingest_log": [
@@ -1097,6 +1134,19 @@
       "decision_receipts_pkey": "CREATE UNIQUE INDEX decision_receipts_pkey ON public.decision_receipts USING btree (id)",
       "decision_receipts_slot_created_idx": "CREATE INDEX decision_receipts_slot_created_idx ON public.decision_receipts USING btree (slot, created_at)",
       "derivation_inputs_pkey": "CREATE UNIQUE INDEX derivation_inputs_pkey ON public.derivation_inputs USING btree (derived_table, derived_id, input_table, input_id)",
+      "derived_generation_activations_key": "CREATE INDEX derived_generation_activations_key ON public.derived_generation_activations USING btree (source_id, kind, owner_key, state)",
+      "derived_generation_activations_pkey": "CREATE UNIQUE INDEX derived_generation_activations_pkey ON public.derived_generation_activations USING btree (id)",
+      "derived_generation_attempts_key": "CREATE INDEX derived_generation_attempts_key ON public.derived_generation_attempts USING btree (source_id, kind, owner_key)",
+      "derived_generation_attempts_pkey": "CREATE UNIQUE INDEX derived_generation_attempts_pkey ON public.derived_generation_attempts USING btree (hold_id)",
+      "derived_generation_items_key": "CREATE INDEX derived_generation_items_key ON public.derived_generation_items USING btree (item_key)",
+      "derived_generation_items_pending": "CREATE INDEX derived_generation_items_pending ON public.derived_generation_items USING btree (generation_id) WHERE pending",
+      "derived_generation_items_pkey": "CREATE UNIQUE INDEX derived_generation_items_pkey ON public.derived_generation_items USING btree (generation_id, item_key)",
+      "derived_generation_valve_pkey": "CREATE UNIQUE INDEX derived_generation_valve_pkey ON public.derived_generation_valve USING btree (source_id, kind, window_key)",
+      "derived_generations_one_hold": "CREATE UNIQUE INDEX derived_generations_one_hold ON public.derived_generations USING btree (source_id, kind, owner_key) WHERE (state = 'held'::text)",
+      "derived_generations_one_live": "CREATE UNIQUE INDEX derived_generations_one_live ON public.derived_generations USING btree (source_id, kind, owner_key) WHERE (state = 'live'::text)",
+      "derived_generations_operation": "CREATE INDEX derived_generations_operation ON public.derived_generations USING btree (operation_id)",
+      "derived_generations_pkey": "CREATE UNIQUE INDEX derived_generations_pkey ON public.derived_generations USING btree (id)",
+      "derived_generations_state_created": "CREATE INDEX derived_generations_state_created ON public.derived_generations USING btree (state, created_at)",
       "dream_synthesis_completions_pkey": "CREATE UNIQUE INDEX dream_synthesis_completions_pkey ON public.dream_synthesis_completions USING btree (source_id, idempotency_key)",
       "dream_verdicts_expires_idx": "CREATE INDEX dream_verdicts_expires_idx ON public.dream_verdicts USING btree (expires_at)",
       "dream_verdicts_pkey": "CREATE UNIQUE INDEX dream_verdicts_pkey ON public.dream_verdicts USING btree (file_path, content_hash)",
@@ -1131,6 +1181,7 @@
       "files_pkey": "CREATE UNIQUE INDEX files_pkey ON public.files USING btree (id)",
       "files_storage_path_key": "CREATE UNIQUE INDEX files_storage_path_key ON public.files USING btree (storage_path)",
       "gbrain_cycle_locks_pkey": "CREATE UNIQUE INDEX gbrain_cycle_locks_pkey ON public.gbrain_cycle_locks USING btree (id)",
+      "git_canonical_brain_pkey": "CREATE UNIQUE INDEX git_canonical_brain_pkey ON public.git_canonical_brain USING btree (singleton)",
       "idx_access_tokens_hash": "CREATE INDEX idx_access_tokens_hash ON public.access_tokens USING btree (token_hash) WHERE (revoked_at IS NULL)",
       "idx_budget_reservations_expires": "CREATE INDEX idx_budget_reservations_expires ON public.budget_reservations USING btree (expires_at) WHERE (status = 'held'::text)",
       "idx_chat_usage_log_created": "CREATE INDEX idx_chat_usage_log_created ON public.chat_usage_log USING btree (created_at)",
@@ -1171,6 +1222,7 @@
       "idx_facts_session": "CREATE INDEX idx_facts_session ON public.facts USING btree (source_id, source_session, created_at DESC) WHERE (expired_at IS NULL)",
       "idx_facts_since": "CREATE INDEX idx_facts_since ON public.facts USING btree (source_id, created_at DESC) WHERE (expired_at IS NULL)",
       "idx_facts_since_event_time": "CREATE INDEX idx_facts_since_event_time ON public.facts USING btree (source_id, COALESCE(valid_from, created_at) DESC) WHERE (expired_at IS NULL)",
+      "idx_facts_superseded_by": "CREATE INDEX idx_facts_superseded_by ON public.facts USING btree (superseded_by) WHERE (superseded_by IS NOT NULL)",
       "idx_facts_unconsolidated": "CREATE INDEX idx_facts_unconsolidated ON public.facts USING btree (source_id, entity_slug) WHERE ((consolidated_at IS NULL) AND (expired_at IS NULL))",
       "idx_facts_unembedded": "CREATE INDEX idx_facts_unembedded ON public.facts USING btree (source_id) WHERE ((expired_at IS NULL) AND ((embedding IS NULL) OR (embedded_text_hash IS DISTINCT FROM md5(fact))))",
       "idx_facts_unlinked_active": "CREATE INDEX idx_facts_unlinked_active ON public.facts USING btree (source_id, id) WHERE ((entity_slug IS NULL) AND (expired_at IS NULL))",
@@ -1183,6 +1235,7 @@
       "idx_links_from": "CREATE INDEX idx_links_from ON public.links USING btree (from_page_id)",
       "idx_links_origin": "CREATE INDEX idx_links_origin ON public.links USING btree (origin_page_id)",
       "idx_links_source": "CREATE INDEX idx_links_source ON public.links USING btree (link_source)",
+      "idx_links_supersedes_to": "CREATE INDEX idx_links_supersedes_to ON public.links USING btree (to_page_id) WHERE (link_type = 'supersedes'::text)",
       "idx_links_to": "CREATE INDEX idx_links_to ON public.links USING btree (to_page_id)",
       "idx_mcp_log_agent_time": "CREATE INDEX idx_mcp_log_agent_time ON public.mcp_request_log USING btree (agent_name, created_at DESC)",
       "idx_mcp_log_time_agent": "CREATE INDEX idx_mcp_log_time_agent ON public.mcp_request_log USING btree (created_at, token_name)",
@@ -1220,6 +1273,7 @@
       "idx_pages_slug_trgm": "CREATE INDEX idx_pages_slug_trgm ON public.pages USING gin (slug gin_trgm_ops)",
       "idx_pages_source_id": "CREATE INDEX idx_pages_source_id ON public.pages USING btree (source_id)",
       "idx_pages_source_title_lower": "CREATE INDEX idx_pages_source_title_lower ON public.pages USING btree (source_id, lower(title))",
+      "idx_pages_title_search": "CREATE INDEX idx_pages_title_search ON public.pages USING gin (ts_filter(search_vector, '{a}'::\"char\"[]))",
       "idx_pages_trgm": "CREATE INDEX idx_pages_trgm ON public.pages USING gin (title gin_trgm_ops)",
       "idx_pages_type": "CREATE INDEX idx_pages_type ON public.pages USING btree (type)",
       "idx_pages_updated_at_desc": "CREATE INDEX idx_pages_updated_at_desc ON public.pages USING btree (updated_at DESC)",
@@ -1349,6 +1403,7 @@
       "pages_pkey": "CREATE UNIQUE INDEX pages_pkey ON public.pages USING btree (id)",
       "pages_safe_chunk_pending_idx": "CREATE INDEX pages_safe_chunk_pending_idx ON public.pages USING btree (source_id) WHERE (chunker_version < 4)",
       "pages_segmented_body_bytes_idx": "CREATE INDEX pages_segmented_body_bytes_idx ON public.pages USING btree (body_bytes) WHERE (body_storage = 'segmented'::text)",
+      "pages_source_created_idx": "CREATE INDEX pages_source_created_idx ON public.pages USING btree (source_id, created_at) WHERE (deleted_at IS NULL)",
       "pages_source_path_idx": "CREATE INDEX pages_source_path_idx ON public.pages USING btree (source_path) WHERE (source_path IS NOT NULL)",
       "pages_source_path_name_idx": "CREATE INDEX pages_source_path_name_idx ON public.pages USING btree (source_id, regexp_replace(replace(btrim(source_path), chr(92), '/'::text), '^.*/'::text, ''::text)) WHERE (source_path IS NOT NULL)",
       "pages_source_slug_key": "CREATE UNIQUE INDEX pages_source_slug_key ON public.pages USING btree (source_id, slug)",
@@ -1506,6 +1561,7 @@
       "decide_proposals_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=decide_proposals.id",
       "decide_review_proposals_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=decide_review_proposals.id",
       "decision_receipts_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=decision_receipts.id",
+      "derived_generations_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=derived_generations.id",
       "drift_decisions_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=drift_decisions.id",
       "entity_identities_id_seq": "bigint start=1 min=1 max=9223372036854775807 increment=1 cycle=false cache=1 owned_by=entity_identities.id",
       "eval_candidates_id_seq": "integer start=1 min=1 max=2147483647 increment=1 cycle=false cache=1 owned_by=eval_candidates.id",
@@ -2057,6 +2113,86 @@
         ],
         "flags": "relkind=r rls=true force_rls=false"
       },
+      "derived_generation_activations": {
+        "columns": [
+          "1 id text/text NOT NULL",
+          "2 source_id text/text NOT NULL",
+          "3 kind text/text NOT NULL",
+          "4 owner_key text/text NOT NULL",
+          "5 expected_generation integer/int4 NOT NULL",
+          "6 input_pin text/text NULL",
+          "7 item_set_hash text/text NOT NULL",
+          "8 state text/text NOT NULL",
+          "9 generation_id bigint/int8 NULL",
+          "10 members jsonb/jsonb NOT NULL DEFAULT '[]'::jsonb",
+          "11 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "12 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "derived_generation_attempts": {
+        "columns": [
+          "1 hold_id text/text NOT NULL",
+          "2 source_id text/text NOT NULL",
+          "3 kind text/text NOT NULL",
+          "4 owner_key text/text NOT NULL",
+          "5 attempts integer/int4 NOT NULL DEFAULT 0",
+          "6 codes jsonb/jsonb NOT NULL DEFAULT '[]'::jsonb",
+          "7 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "derived_generation_items": {
+        "columns": [
+          "1 generation_id bigint/int8 NOT NULL",
+          "2 item_key text/text NOT NULL",
+          "3 identity_hash text/text NOT NULL",
+          "4 action text/text NOT NULL",
+          "5 preimage jsonb/jsonb NULL",
+          "6 preimage_bytes integer/int4 NULL",
+          "7 pending boolean/bool NOT NULL DEFAULT false"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "derived_generation_valve": {
+        "columns": [
+          "1 source_id text/text NOT NULL",
+          "2 kind text/text NOT NULL",
+          "3 window_key text/text NOT NULL",
+          "4 retired integer/int4 NOT NULL DEFAULT 0",
+          "5 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "derived_generations": {
+        "columns": [
+          "1 id bigint/int8 NOT NULL DEFAULT nextval('derived_generations_id_seq'::regclass)",
+          "2 source_id text/text NOT NULL",
+          "3 kind text/text NOT NULL",
+          "4 owner_key text/text NOT NULL",
+          "5 generation integer/int4 NOT NULL DEFAULT 0",
+          "6 state text/text NOT NULL",
+          "7 run_id text/text NULL",
+          "8 operation_id text/text NOT NULL",
+          "9 hold_id text/text NULL",
+          "10 input_pin text/text NULL",
+          "11 input_size bigint/int8 NULL",
+          "12 completeness jsonb/jsonb NOT NULL DEFAULT '{}'::jsonb",
+          "13 item_set_hash text/text NOT NULL",
+          "14 held_reason text/text NULL",
+          "15 held_context jsonb/jsonb NULL",
+          "16 proposal jsonb/jsonb NULL",
+          "17 proposal_bytes integer/int4 NULL",
+          "18 attempts integer/int4 NOT NULL DEFAULT 0",
+          "19 superseded_by bigint/int8 NULL",
+          "20 restore_of bigint/int8 NULL",
+          "21 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "22 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "23 locator text/text NULL",
+          "24 activation_id text/text NULL"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
       "dream_synthesis_completions": {
         "columns": [
           "1 source_id text/text NOT NULL",
@@ -2352,6 +2488,13 @@
           "7 acquisition_token uuid/uuid NOT NULL DEFAULT gen_random_uuid()"
         ],
         "flags": "relkind=r rls=false force_rls=false"
+      },
+      "git_canonical_brain": {
+        "columns": [
+          "1 singleton integer/int4 NOT NULL DEFAULT 1",
+          "2 strict_sources integer/int4 NOT NULL DEFAULT 0"
+        ],
+        "flags": "relkind=r rls=true force_rls=false"
       },
       "ingest_log": {
         "columns": [
@@ -3215,7 +3358,8 @@
           "15 error_code text/text NULL",
           "16 outcome jsonb/jsonb NULL",
           "17 recovery jsonb/jsonb NULL",
-          "18 recovery_bytes bigint/int8 NOT NULL DEFAULT 0"
+          "18 recovery_bytes bigint/int8 NOT NULL DEFAULT 0",
+          "19 claim_owner jsonb/jsonb NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
@@ -4211,6 +4355,9 @@
       "shared_skill_packs.gbrain_skill_publication": "CREATE TRIGGER gbrain_skill_publication BEFORE INSERT OR DELETE OR UPDATE ON public.shared_skill_packs FOR EACH ROW EXECUTE FUNCTION gbrain_guard_skill_publication()",
       "shared_skill_revisions.gbrain_skill_publication": "CREATE TRIGGER gbrain_skill_publication BEFORE INSERT OR DELETE OR UPDATE ON public.shared_skill_revisions FOR EACH ROW EXECUTE FUNCTION gbrain_guard_skill_publication()",
       "slug_aliases.managed_writer_guard": "CREATE TRIGGER managed_writer_guard BEFORE INSERT OR DELETE OR UPDATE ON public.slug_aliases FOR EACH ROW EXECUTE FUNCTION gbrain_require_managed_writer()",
+      "sources.git_canonical_sources_count_delete": "CREATE TRIGGER git_canonical_sources_count_delete AFTER DELETE ON public.sources FOR EACH ROW WHEN (((old.config ->> 'canonical'::text) = 'git'::text)) EXECUTE FUNCTION gbrain_count_git_canonical_sources()",
+      "sources.git_canonical_sources_count_insert": "CREATE TRIGGER git_canonical_sources_count_insert AFTER INSERT ON public.sources FOR EACH ROW WHEN (((new.config ->> 'canonical'::text) = 'git'::text)) EXECUTE FUNCTION gbrain_count_git_canonical_sources()",
+      "sources.git_canonical_sources_count_update": "CREATE TRIGGER git_canonical_sources_count_update AFTER UPDATE ON public.sources FOR EACH ROW WHEN (((old.config ->> 'canonical'::text) IS DISTINCT FROM (new.config ->> 'canonical'::text))) EXECUTE FUNCTION gbrain_count_git_canonical_sources()",
       "sources.managed_writer_guard": "CREATE TRIGGER managed_writer_guard BEFORE INSERT OR DELETE OR UPDATE ON public.sources FOR EACH ROW EXECUTE FUNCTION gbrain_require_managed_writer()",
       "tags.managed_writer_guard": "CREATE TRIGGER managed_writer_guard BEFORE INSERT OR DELETE OR UPDATE ON public.tags FOR EACH ROW EXECUTE FUNCTION gbrain_require_managed_writer()",
       "tags.tags_knowledge_revision": "CREATE TRIGGER tags_knowledge_revision AFTER INSERT OR DELETE OR UPDATE ON public.tags FOR EACH ROW EXECUTE FUNCTION gbrain_advance_tag_revision()",

@@ -1,7 +1,7 @@
 /**
  * Per-segment derivation watermarks (Wave B PR 4, wave-b spec 8.1-8.6): the shared types and pure helpers every
  * incremental pipeline codes against. Rows live in page_segment_derivations (DDL in page-body/schema.ts, migration
- * v265); the engine reads and writes them through readSegmentDerivations / upsertSegmentDerivations /
+ * v273); the engine reads and writes them through readSegmentDerivations / upsertSegmentDerivations /
  * retireSegmentDerivations (SQL in engine-sql/page-body.ts).
  *
  * A row says: pipeline `kind` at `version` ran on occurrence `occurrenceId` of a page while the occurrence held the

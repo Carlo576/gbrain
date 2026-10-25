@@ -46,6 +46,7 @@ import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
 import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
 import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
+import { readDryRunWriterState } from './sync-dry-run-writer.ts';
 import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, originConflictHold, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, unreadableFileHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
 import { frozenImageIntent, sameImageBytes } from './sync-image.ts';
 import { fenceReceiptLocation } from '../fence-repair/refusal.ts';
@@ -90,7 +91,7 @@ export interface ManagedSyncWriteDiagnostic {
   write_request: WriteReceipt;
   line_endings?: 'crlf_lf_only';
   ledger_recorded?: boolean;
-  detail?: string;
+  detail?: string; /** GBRA-133 PR 3a: a pass checkpoint the pass's end superseded (sync-checkpoint-replaced.ts). */ disposition?: 'superseded';
   docs?: string;
 }
 
@@ -374,7 +375,10 @@ async function freezeEntryOnce(engine: BrainEngine, cursor: Cursor, key: string,
       return { hold: await originFaultHold(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, entry, observed: snapshot, message: occupant.originFault.message }), overtaken: true };
     }
     let bytes: Buffer | null = null;
-    try { bytes = entry.action === 'delete' && directoryAt(cursor.root, entry.path) ? null : readSyncFile(cursor.root, entry.path); } // GBRA-133 S-22: a directory is no file
+    // G3: a strict source's entry reads its commit alone (a deletion has no bytes); only a blob over the read bound takes the streamed path below.
+    const committed = entry.committedOnly === true && !entry.working ? entry.action === 'delete' ? null : pinnedBlob(cursor, entry.path) : undefined;
+    try { bytes = committed !== undefined && (committed === null || committed.size <= SYNC_READ_BOUND) ? committed && pinnedImageBytes(cursor, entry)
+      : entry.action === 'delete' && directoryAt(cursor.root, entry.path) ? null : readSyncFile(cursor.root, entry.path); } // GBRA-133 S-22: a directory is no file
     catch (error) {
       if (!isSyncReadBound(error)) { const held = holdsOn ? unreadableFileHold(entry, entry.slug!, entry.pageId ?? null, error, () => pinnedBlob(cursor, entry.path)) : null; if (held) return { hold: held }; throw error; } // GBRA-130 A-7
       // Wave B: with segmented storage on, a Markdown file over the read bound is frozen by reference and streamed by its owner.
@@ -462,7 +466,7 @@ async function freezeEntryOnce(engine: BrainEngine, cursor: Cursor, key: string,
     // #6712 PR 1: an import whose page moved since its file was last imported runs only as a proven no-op (sync-prescreen.ts).
     if (entry.drift && !occupantRebound && content !== null && snapshot && !(image ? sameImageBytes(imageBytes, snapshot.page)
       : await sameContentAtOrigin(engine, cursor, entry, key, snapshot, content, rawHash, lineEndingOnly, run.signal) || await sameContentAtOrigin(engine, cursor, entry, key, snapshot, driftBaselineContent(cursor.gitRoot, entry), null, false, run.signal, true))) {
-      if (!holdsOn) throw syncRunRefusal('file_drift', 'An import would overwrite a database version of the page that sync never saw.', retry, `Page ${slug} in source ${cursor.sourceId} changed in the database since ${entry.path} was last imported, and the file differs from it, so the run stopped before admitting it (sync.holds=fail).`);
+      if (!holdsOn) throw syncRunRefusal('file_drift', 'An import would overwrite a database version of the page that sync never saw.', retry, `Page ${slug} in source ${cursor.sourceId} ${entry.drift === 'unknown' ? `differs from ${entry.path} and has no import record to tell whether the file or the database changed` : `changed in the database since ${entry.path} was last imported, and the file differs from it`}, so the run stopped before admitting it (sync.holds=fail).`);
       const proof = await pageChangeProof(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, pageId, expectedRevision: null }); assertActive();
       return { hold: fileDriftHold(entry, slug, pageId, frozenIntent, { sides: entry.drift, revision: snapshot.revision, proof, sharedOrigin: await sharedOriginSurvivor(engine, cursor.sourceId, entry.sourcePath) }) };
     }
@@ -479,7 +483,8 @@ async function freezeEntryOnce(engine: BrainEngine, cursor: Cursor, key: string,
   const passLevel = cursor.passId ? (entry as PassEntry | undefined)?.level ?? (entry ? null : cursor.target) : undefined;
   return remember(frozenSnapshot, { requestId: cursor.passId ? passRequestId(cursor.passId, entry?.path ?? slug, passLevel!) : randomUUID(), slug, pageId, ...(occupantRebound ? { rebound: true as const } : {}), intent: { kind: !entry ? 'managed_sync_checkpoint' : entry.action === 'import' ? 'managed_sync_import' : 'managed_sync_delete',
     expected_revision: revision, sourcePath: entry?.sourcePath ?? null, path: entry?.path ?? null, rawHash, content, lineEndingOnly, ...(bodyRef ? { body_ref: bodyRef } : {}),
-    ...(entry?.unownedDeletion ? { unownedDeletion: true } : {}),
+    ...(entry?.unownedDeletion ? { unownedDeletion: true } : {}), ...(entry?.heldDeletion ? { heldDeletion: entry.heldDeletion } : {}),
+    ...(entry?.committedOnly ? { committedOnly: true } : {}),
     ...(entry?.renameFrom ? { renameFrom: entry.renameFrom } : {}),
     ...(run.observedAt ? { holdObservedAt: run.observedAt } : {}), ...(blob ? { blobOid: blob.oid } : {}), ...(entry && run.embedDeferred ? { embedDeferred: true } : {}),
     ...(!entry && cursor.releasedHolds?.length ? { releasedHolds: cursor.releasedHolds } : {}),
@@ -548,7 +553,7 @@ async function adoptCursor(engine: BrainEngine, key: string, cursor: Cursor, inp
 async function managedDryRun(engine: BrainEngine, value: Cursor, base: Cursor, run: { company: boolean; processingOptions: SyncProcessingOptions;
   syncOptions: SyncCursorOptions; repoPath?: string; remote: boolean }): Promise<SyncResult> {
   const screen = run.company ? null : await loadSyncScreenRun(engine, value.sourceId, value.processingOptions ?? run.processingOptions, run.remote);
-  return { ...result(base, 'dry_run'), ...await dryRunScreen(engine, value, screen,
+  return { ...result(base, 'dry_run'), writer: await readDryRunWriterState(engine, value.sourceId), ...await dryRunScreen(engine, value, screen,
     checkpointRetryCommand({ sourceId: value.sourceId, processingOptions: value.processingOptions, syncOptions: value.syncOptions ?? run.syncOptions, repoPath: run.repoPath })) };
 }
 
@@ -783,8 +788,8 @@ async function settleFailedRequest(engine: BrainEngine, input: { cursor: Cursor;
   if (converted === 'pending') return { result: result(cursor, 'partial', input.signal?.aborted ? 'timeout' : 'writer_pending') };
   if (converted && 'tripped' in converted) return { result: breakerResult(converted.tripped, pending, done, remote) };
   if (converted) { input.assertActive(); return { cursor: converted }; }
-  // #6513: a checkpoint another run superseded records nothing; this run goes on with the winning cursor as it stands.
-  if (checkpointSuperseded(pending, done)) return { cursor: await currentCursor(engine, key, cursor) };
+  // #6513: a checkpoint another run superseded records nothing; this run goes on with the winning cursor (GBRA-133 PR 3a: a pass's ends; the next pass stamps).
+  if (checkpointSuperseded(pending, done)) return pending.intent.passId ? { result: result(cursor, 'partial', 'writer_pending') } : { cursor: await currentCursor(engine, key, cursor) };
   const rootCause = await syncRootCause(engine, cursor, pending, done);
   const { failure, ledgerRecorded } = await recordManagedSyncFailure(engine, { source_id: cursor.sourceId, source_incarnation: cursor.incarnation, path: pending.intent.path ?? '<checkpoint>',
     code: done.error_code ?? (done.state === 'cancelled' ? 'cancelled' : 'storage_error'), message: done.error_message ?? 'The accepted sync request did not commit.',
@@ -1268,7 +1273,7 @@ async function performManagedPass(engine: BrainEngine, opts: SyncOpts, slice?: {
   const state: HoldRunState = {};
   // #6729: every managed entry point (CLI, drain, owner slice, worktree refresh) records the renames whose identity it did not keep.
   const synced = await noteIdentityDowngrades(engine, opts.sourceId ?? 'default', await runManagedSync(engine, opts, slice, state), serr);
-  if (!state.sourceId || !state.incarnation || synced.status === 'dry_run') return synced;
+  if (!state.sourceId || !state.incarnation || synced.status === 'dry_run' || currentDrainLease(state.sourceId)?.idleClear) return synced;
   const cursor = state.cursor?.() ?? null;
   try {
     const report = await buildHoldReport(engine, { sourceId: state.sourceId, incarnation: state.incarnation, runId: cursor?.runId ?? '', remote: state.remote === true,
@@ -1511,7 +1516,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         const freezeAt: FreezeAt = base => async index => { if (base.entries[index]?.prescreened && !prescreen.missed.has(index)) return null; const frozen = await freezeEntry(engine, { ...base, index }, key, assertActive, frozenRun).catch(() => null); return frozen && 'requestId' in frozen ? frozen : null; }; // GBRA-133 S-64: a follower's throw is raised by the single path, naming its own entry
         if (bulk.settings.enabled && (bulk.foregroundFirst || !foregroundQueued) && !prior && !cursor.group && !pending.rebound && indexOf(cursor, pending) === cursor.index && groupableIntent(pending.intent)) cursor = await formGroup(engine, cursor, pending, key, bulk, config, freezeAt, assertActive);
         if (cursor.group?.[0]?.requestId === pending.requestId && cursor.pending?.requestId === pending.requestId) {
-          const step = await groupStep(engine, cursor, key, bulk, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: 5000, ...whileHeld }, drainStartedAt, opts.onProgress,
+          const step = await groupStep(engine, cursor, key, bulk, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: 5000, signal, ...whileHeld }, drainStartedAt, opts.onProgress,
             opts.drainStartedAt ? next => admitAhead(engine, next, key, bulk, config, freezeAt, assertActive) : undefined);
           if ('result' in step) return step.result;
           cursor = step.cursor;
@@ -1525,8 +1530,8 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         assertSyncDispatchActive(); stampDrainStep('await_receipt', signal);
         // #5762: a checkpoint's validation runs under the coordinator's 5 s statement timeout, so its wait outlasts that
         // budget; a timed-out checkpoint then reports its terminal refusal and hint in this run instead of the next.
-        // #5984: a drain re-enters anyway, so it waits longer per page instead of paying a full re-entry; its stop signal bounds the wait.
-        const waited = await awaitWrite(engine, row, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: pending.intent.kind === 'managed_sync_checkpoint' ? 8000 : 5000, ...whileHeld });
+        // #5984: a drain re-enters anyway, so it waits longer per page instead of paying a full re-entry; the stop signal bounds every wait (awaitWrite).
+        const waited = await awaitWrite(engine, row, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: pending.intent.kind === 'managed_sync_checkpoint' ? 8000 : 5000, signal, ...whileHeld });
         const done = waited.row;
         assertSyncDispatchActive();
         if (!isTerminalWriteState(done.state)) {

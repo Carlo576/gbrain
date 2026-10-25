@@ -47,6 +47,16 @@ moving again; ask me only about the ones gbrain will not decide by itself."*
    `terminal_failures_read`, `checkpoint_blockers_read` and `cursors_read` say
    `not_read` with the `--detail` command as `fix`. Never read a `not_read`
    field as "none"; run the fix when the step needs it.
+   `last_commit` is the commit the source's sync applied through, and `live`
+   names the process holding its drain lease (a serve pass, a sync job, a CLI
+   sync), with its heartbeat, `progress` and `stalled`; null means nothing is
+   syncing it now. Holds are bounded: `holds_summary` counts every hold by
+   code and by state (`needs_human`, `actionable`, `held`), and `holds` lists
+   the first 20, needs-human first. When it leaves rows out, `holds_page`
+   names `next_command`; `--detail` pages 100 at a time, `--hold-state
+   needs_human` lists only the holds a person decides. A `last_error` with
+   `superseded` (`by`, `age_seconds`) is history: a later attempt got past
+   the phase it failed in, so it drives neither `state` nor `next`.
 2. If `needs_human` is false and nothing committed in the last ten minutes,
    run `unblock --apply`: it performs the safe action for every hold that has
    one, refuses the rest by name, and prints the sync to run. For a content
@@ -122,7 +132,7 @@ Every hold and error has three fields, from one table
 |---|---|---|---|---|
 | `worktree_dirty` | page | retry_when_clean | no | 3 failed attempts over 24 h with no edit in the last 24 h: the uncommitted edit is abandoned |
 | `concurrent_write` | page | reconcile | yes | always: the file and the database page diverge |
-| `file_drift` | page | reconcile | yes | always: the page changed in the database since its file was last imported |
+| `file_drift` | page | reconcile | yes | always: importing the file would replace a database version of the page that sync cannot trace to an import of it |
 | `preparation_stalled` | page | retry, upgrade | no | 3 failed attempts over 24 h, or writer status names a step that never finishes |
 | `write_interrupted` | page | retry | no | 3 failed attempts over 24 h: gbrain sources writer status --source <source> --json (read-only) names the load on the write owner |
 | `invalid_fence` | page | repair | no | the fence repair preview offers no plan (a manual reason) |
@@ -180,6 +190,7 @@ Every hold and error has three fields, from one table
 | `owner_unavailable` | systemic | none | yes | always |
 | `writer_coordinator_required` | systemic | none | yes | always |
 | `permission_denied` | systemic | none | yes | always |
+| `connection_inherited_read_only` | systemic | none | yes | always: only the database operator clears read-only server state |
 | `write_quota_exhausted` | systemic | none | yes | always |
 | `write_quota_insufficient` | systemic | none | yes | always |
 | `plan_stale` | systemic | none | yes | always |
@@ -363,6 +374,7 @@ run converges on the next plain sync with no flag.
 | Status `reason` | `state` | What it means | `next` |
 |---|---|---|---|
 | `pass_unfinished` | resumable | The newest pass is open or stopped at a deadline. | The plain sync (`resume_argv`); safe to loop. |
+| `pass_abandoned` | blocked | Two passes in a row never ended: the drain stopped them for making no progress, or their process was killed. The newest open pass counts once its row has not moved for 5 minutes. | `gbrain doctor --json` and a report with the gbrain version and the newest run's `drain.stall`; another plain sync is likely to stop the same way. |
 | `not_converged` | resumable | The pass used its four rounds while another writer kept changing the level. Everything it admitted stands. | The plain sync; after three such passes in a row `next` is `gbrain doctor --json` and a report, because another sync will not change it. |
 | `settle_mismatch` | resumable | A path keeps settling without reading settled. The next pass re-admits it once; after three passes at one level it is a `settle_mismatch` hold that needs a person. | The plain sync, then report the hold. |
 | `deletes_withheld` | blocked | The pass's deletes crossed the mass-delete threshold (#2828) or an absolute cap (#7130: `sync.max_deletes`, default 500; `sync.max_delete_ratio`, default 0.01 above 50 deletes; per source `<key>.source.<id>`). The record's `trip` names which. It wrote one withheld record and synced everything else; no per-page hold is written. | Ask the user: restore the checkout if it is wrong; when the deletion is intended, raise the cap for that source (`gbrain config set sync.max_deletes.source.<id> <n>`) or run `GBRAIN_ALLOW_MASS_RECONCILE=1 gbrain sync --source <id>` on the brain host. `gbrain sync --source <id> --dry-run --json` lists the set and its hash. |

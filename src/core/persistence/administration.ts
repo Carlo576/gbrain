@@ -21,6 +21,13 @@ import { listWriterVersions } from './writer-versions.ts';
 import { readFix, trustedCliRequired } from '../ops/op-fix.ts';
 import type { Action } from '../agent-output.ts';
 
+async function writerStatusCheckouts(bindings: Array<{ source_id: string; local_path: string | null }>) {
+  const { readCheckoutState } = await import('./checkout-state.ts');
+  const roots = new Map<string, string[]>();
+  for (const { source_id, local_path } of bindings) if (local_path) roots.set(local_path, [...roots.get(local_path) ?? [], source_id]);
+  return [...roots].map(([root, source_ids]) => ({ source_ids, ...readCheckoutState(root) }));
+}
+
 export const invalid = (message: string, suggestion: string, fix?: Action) =>
   opError('invalid_params', message, suggestion, fix ? { fix } : {});
 const sourcesListFix = (why: string) => readFix(why, { argv: ['gbrain', 'sources', 'list', '--json'] });
@@ -188,7 +195,14 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
     return runGitDurabilityAdministration(engine, params);
   }
   if (operation === 'writer_retry_effects') {
-    keys(params, ['source_id', 'request_id', 'dry_run', 'admin_intent', 'expected_state', 'parked_pushes']);
+    keys(params, ['source_id', 'request_id', 'dry_run', 'admin_intent', 'expected_state', 'parked_pushes', 'parked_code']);
+    if (params.parked_code !== undefined) {
+      if (typeof params.parked_code !== 'string' || !/^[a-z][a-z0-9_]*$/.test(params.parked_code) || params.parked_pushes !== undefined || params.request_id !== undefined
+        || params.admin_intent !== undefined || params.expected_state !== undefined) throw invalid(
+        '--parked-code retries every Git effect of the source parked on one error code; it takes no --request-id, --parked-pushes or admin intent.',
+        'Run gbrain sources writer retry-effects <source> --parked-code <code> [--dry-run]; doctor parked_effects lists each parked code with its command.');
+      return (await import('./git-durability-administration.ts')).retrySourceParkedCode(engine, source(params.source_id), params.parked_code, params.dry_run === true);
+    }
     if (params.parked_pushes === true) {
       if (params.request_id !== undefined || params.admin_intent !== undefined || params.expected_state !== undefined) throw invalid(
         '--parked-pushes retries every parked push of the source; it takes no --request-id or admin intent.',
@@ -280,10 +294,15 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
       local_markers: await cleanupRetiredManagedMarkers(engine),
       host_id: existingLocalHostId(), local_host_id: existingLocalHostId(), bindings, admin_state: adminState,
       admin_lock: { locked: adminLock.locked, set_at: adminLock.set_at, host_id: adminLock.host_id }, blocking_effects: blockingEffects,
+      // GBRA-133: effects that have waited on a busy canonical worktree for over 10 minutes.
+      stalled_catchups: await (await import('./effect-catchup.ts')).readStalledCatchups(engine, params.source_id ? [params.source_id as string] : undefined),
+      parked_groups: await (await import('./parked-groups.ts')).readParkedGroups(engine, params.source_id ? [params.source_id as string] : undefined),
       writer_versions: writerVersions, onboarding, shared_skills: sharedSkills, ...(native ? { native_lock: native } : {}),
       // #6317 (B3): every process holding a consumer on this host, from the heartbeat rows (kind, pid, nonce, mode, age, wedge report).
       host: { host_id: existingLocalHostId(), ...await (await import('./consumer-diagnostics.ts')).hostConsumersReport(engine, existingLocalHostId()) },
       worktree_refreshes: await (await import('./worktree-refresh.ts')).activeWorktreeRefreshes(engine, params.source_id as string | undefined),
+      // Q1: each canonical checkout on this host against its last fetched upstream: commits it holds that the upstream lacks, and its porcelain.
+      checkouts: await writerStatusCheckouts(bindings as Array<{ source_id: string; local_path: string | null }>),
       // #6317 (B4): per managed source, whether sync data moves (shares the reader of sources status, doctor and writer movement).
       movement: await writerStatusMovement(engine, params.source_id === undefined ? undefined : source(params.source_id)) };
   }

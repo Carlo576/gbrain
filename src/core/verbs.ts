@@ -65,7 +65,7 @@ const remember: Operation = {
   name: 'remember',
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'MEMORY VERB (v1): save facts with provenance. Set `entity` (the subject) or recall misses it. Branch on `status` (inserted|duplicate|superseded); write_pending: poll get_write_request.',
+  description: 'Save facts with provenance; set `entity` (the subject) or recall misses it. Branch on `status`; write_pending: poll get_write_request.',
   params: {
     ...AGENT_CONTENT_PARAMS,
     fact: { type: 'string', description: 'One claim.' },
@@ -86,6 +86,7 @@ const remember: Operation = {
     valid_from: {
       type: 'string',
       description: 'When true (ISO).',
+      fullSurfaceOnly: true,
     },
     entity: {
       type: 'string',
@@ -94,6 +95,7 @@ const remember: Operation = {
     infer_entity: {
       type: 'boolean',
       description: 'Default true.',
+      fullSurfaceOnly: true,
     },
     kind: {
       type: 'string', description: 'Default fact.',
@@ -103,6 +105,7 @@ const remember: Operation = {
       type: 'string',
       enum: ['world', 'private'],
       description: 'world (default) or private (local CLI).',
+      fullSurfaceOnly: true,
     },
     replaces: { type: 'string', description: 'fact_id this fact replaces (same entity, or none).', fullSurfaceOnly: true },
   },
@@ -220,12 +223,13 @@ const entity: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: 'retrieval',
-  description: 'MEMORY VERB (v1): person/company/account card, zero LLM. Previews are not evidence: fetch the page before stating status or dates. Miss: found:false with near matches (create_safety). Facts: recall.',
+  description: 'Person/company/account card, zero LLM. Previews are not evidence: fetch the page before stating status or dates. Miss: found:false with near matches (create_safety). Facts: recall.',
   params: {
     name: { type: 'string', description: 'Name, alias or slug.' },
     names: { type: 'array', items: { type: 'string' }, description: 'Or up to 50 names/codes at once: compact rows.' },
     source_id: { type: 'string', description: 'Read only this source. Default: your source first, then every source you can read.', fullSurfaceOnly: true },
     prefer_source_id: { type: 'string', description: 'Source to try first (thin clients send .gbrain-source here); never narrows.', fullSurfaceOnly: true },
+    variants: { type: 'boolean', description: 'false: exact names only. Default true: with no exact match, one unambiguous name variant (card.match says which).', fullSurfaceOnly: true },
   },
   scope: 'read',
   verb: true,
@@ -247,7 +251,7 @@ const entity: Operation = {
           `Pass either name: "Alice Example" for one full card, or names: ["Alice Example", "WGCO"] (up to ${ENTITY_NAMES_MAX}) for compact rows.`);
       }
       const t0 = Date.now();
-      const out = await lookupEntityNames(ctx.engine, walk.home, names, { remote: ctx.remote !== false, sources: walk.sources, surfaceCeiling: ctx.surfaceCeiling,
+      const out = await lookupEntityNames(ctx.engine, walk.home, names, { remote: ctx.remote !== false, sources: walk.sources, surfaceCeiling: ctx.surfaceCeiling, variants: p.variants !== false,
         emitNotice: n => ctx.emitNotice?.(n) });
       ambientMiss(out.results.map(r => ({ name: r.name, ...(r.found ? { foundIn: r.source_id } : {}) })));
       return { protocol_version: 1, latency_ms: Date.now() - t0, ...out };
@@ -263,7 +267,7 @@ const entity: Operation = {
     const t0 = Date.now();
     const { buildEntityCard } = await import('./verbs/entity-card.ts');
     const result = await buildEntityCard(ctx.engine, walk.home, name, {
-      remote: ctx.remote !== false, includeReferences: true, surfaceCeiling: ctx.surfaceCeiling, sources: walk.sources,
+      remote: ctx.remote !== false, includeReferences: true, surfaceCeiling: ctx.surfaceCeiling, sources: walk.sources, variants: p.variants !== false,
       omitQuarantined: ctx.remote !== false, // #5575: like get_page, a remote reader never gets a quarantined page's card
       emitNotice: n => ctx.emitNotice?.(n),
     });
@@ -285,6 +289,8 @@ const entity: Operation = {
       ...(result.card ? { card: result.card } : {}),
       ...(result.suggestions !== undefined ? { suggestions: result.suggestions } : {}),
       ...(!result.card && result.coverage ? { coverage: result.coverage } : {}),
+      ...(result.text_mentions ? { text_mentions: result.text_mentions } : {}),
+      ...(result.ambiguous ? { ambiguous: true } : {}),
     };
   },
   cliHints: { name: 'entity', positional: ['name'] },
@@ -309,7 +315,7 @@ const synthesize: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: 'retrieval',
-  description: '[EXPENSIVE / SLOW: LLM calls, costs money] MEMORY VERB (v1): answer a broad question across pages with citations. For lookups use recall or entity.',
+  description: '[EXPENSIVE / SLOW: LLM calls] Cited answer to a broad question across pages. Lookups: recall or entity.',
   params: {
     question: { type: 'string', description: 'The question.', required: true },
     since: { type: 'string', description: 'Window start (ISO 8601).' },
@@ -444,7 +450,7 @@ const forget: Operation = {
   name: 'forget',
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'MEMORY VERB (v1): expire a remembered fact by its fact_id (never a page slug). Idempotent; the audit trail is kept.',
+  description: 'Expire a remembered fact by its fact_id (never a page slug). Idempotent; the audit trail is kept.',
   params: {
     request_id: WRITE_REQUEST_PARAM,
     id: { type: 'string', required: true, description: 'fact_id from remember or recall.' },
