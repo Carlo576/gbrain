@@ -9,8 +9,14 @@
  * PGLite here; Postgres in test/e2e/g6-brainstorm-strict-postgres.test.ts.
  */
 import { describe, expect, test } from 'bun:test';
-import { buildIdeaSlug, persistSavedIdea } from '../src/commands/brainstorm.ts';
+import { buildIdeaSlug, formatSaveOutcome, persistSavedIdea } from '../src/commands/brainstorm.ts';
+import { PENDING_WRITE_EXIT_CODE } from '../src/core/exit-codes.ts';
+import type { WriteRequest } from '../src/core/persistence/model.ts';
+import { waitForWrite } from '../src/core/persistence/service.ts';
+import { WRITE_WAIT_ENV } from '../src/core/persistence/write-wait.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { serializeMarkdown } from '../src/core/markdown.ts';
+import { git } from './helpers/git-publication.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 import { describeMeasure, expectDoorOnly, head, initStrictCheckout, measureBatch, strictSource } from './helpers/strict-door-census.ts';
@@ -37,5 +43,40 @@ for (const backend of testBackends()) describe(`[${backend}] G6: brainstorm and 
     console.log(describeMeasure(`brainstorm/${backend}`, m));
     expect(outcomes.map(o => o.dbSaved)).toEqual(slugs.map(() => true));
     expectDoorOnly(m, expect);
+  }, { databaseUrl, setup: ({ root }) => initStrictCheckout(root) }), 120_000);
+
+  test('a --resume save overwrites the same idea page through the door, bound to the revision it read', () => managedBrain(async ({ engine, root }) => {
+    await strictSource(engine);
+    const slug = buildIdeaSlug(runs[0]!.question, 'brainstorm', 'g6resume');
+    const first = await persistSavedIdea(engine, { slug, content: saved('brainstorm', runs[0]!.question), provenanceVia: 'brainstorm' });
+    const base = head(root);
+    const resumed = serializeMarkdown({ mode: 'brainstorm', question: runs[0]!.question, source_kind: 'brainstorm' }, `# ${runs[0]!.question}\n\nRe-scored idea body.`, '',
+      { type: 'note', title: `Brainstorm: ${runs[0]!.question}`, tags: [] });
+    const second = await persistSavedIdea(engine, { slug, content: resumed, provenanceVia: 'brainstorm' });
+    expect([first.dbSaved, second.dbSaved, second.writeThrough.written]).toEqual([true, true, true]);
+    expect(second.writeThrough.path).toBe(`${root}/${slug}.md`);
+    const m = await measureBatch(engine, 'default', root, base, [slug]);
+    console.log(describeMeasure(`brainstorm-resume/${backend}`, m));
+    expect(m.commits).toHaveLength(1);
+    expectDoorOnly(m, expect);
+    expect(git(root, 'show', `HEAD:${slug}.md`)).toContain('Re-scored idea body.');
+  }, { databaseUrl, setup: ({ root }) => initStrictCheckout(root) }), 120_000);
+
+  test('a save still pending when the CLI write wait ends reports accepted and pending, exit 10, and later commits', () => managedBrain(async ({ engine, root }) => {
+    await strictSource(engine);
+    const slug = buildIdeaSlug(runs[1]!.question, 'brainstorm', 'g6pending');
+    const outcome = await withEnv({ [WRITE_WAIT_ENV]: '0' }, () => persistSavedIdea(engine, { slug, content: saved('brainstorm', runs[1]!.question), provenanceVia: 'brainstorm' }));
+    console.log(`[G6 brainstorm-pending/${backend}] ${JSON.stringify(outcome)}`);
+    expect(outcome.pending?.requestId).toBeString();
+    expect(outcome.dbError).toBeUndefined();
+    const msg = formatSaveOutcome(outcome, { profileLabel: 'brainstorm', slug });
+    expect(msg.exitCode).toBe(PENDING_WRITE_EXIT_CODE);
+    expect(msg.stdout).toContain('accepted and still pending');
+    expect(msg.stdout).toContain(outcome.pending!.requestId);
+    expect(msg.stderr.join('\n')).not.toContain('NOT persisted');
+    expect(formatSaveOutcome({ ...outcome, pending: { ...outcome.pending!, acceptPending: true } }, { profileLabel: 'brainstorm', slug }).exitCode).toBe(0);
+    const [row] = await engine.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE request_id=$1', [outcome.pending!.requestId]);
+    expect((await waitForWrite(engine, row!, { engine: engine.kind } as never, 30_000)).state).toBe('committed');
+    expect(git(root, 'show', `HEAD:${slug}.md`)).toContain('Idea body.');
   }, { databaseUrl, setup: ({ root }) => initStrictCheckout(root) }), 120_000);
 });
