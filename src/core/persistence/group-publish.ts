@@ -104,20 +104,21 @@ export function groupable(row: WriteRequest, prepared: PreparedMutation): boolea
 }
 
 /**
- * G6: whether two members of a page group write the same page or the same file (a generation that deletes and writes
- * one path, a batch naming a page twice). Such a group never shares a transaction: its members publish one at a time,
- * in order, so the second sees the first's result. Compared case-insensitively, as a case-insensitive checkout would.
+ * G6: the index of the first member that writes a page or file an earlier member of the group writes (a generation
+ * that deletes and rewrites one path, a batch naming a page twice), or null. Its preparation read the state before the
+ * earlier write, so the group ends before it (executeClaimedGroup). Compared case-insensitively, as a case-insensitive
+ * checkout would. The generation activation journals under a pseudo slug and writes no page, so only its file counts.
  */
-export function sharesTarget(rows: WriteRequest[], prepared: PreparedMutation[]): boolean {
+export function firstSharedTarget(rows: WriteRequest[], prepared: Array<PreparedMutation | undefined>): number | null {
   const seen = new Set<string>();
   for (const [i, row] of rows.entries()) {
-    const file = prepared[i]!.file;
-    for (const target of [`page:${row.slug.toLowerCase()}`, ...(file ? [`file:${file.path.toLowerCase()}`] : [])]) {
-      if (seen.has(target)) return true;
-      seen.add(target);
-    }
+    const file = prepared[i]?.file;
+    const page = row.intent?.kind === 'managed_generation_activate' ? [] : [`page:${row.slug.toLowerCase()}`];
+    const targets = [...page, ...(file ? [`file:${file.path.toLowerCase()}`] : [])];
+    if (targets.some(target => seen.has(target))) return i;
+    for (const target of targets) seen.add(target);
   }
-  return false;
+  return null;
 }
 
 const flattened = new Map<string, string>();
@@ -253,7 +254,6 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
   const culpritOf = (error: unknown) => error instanceof OperationError && memberOf.has(error) ? { culprit: { index: memberOf.get(error)!, error } } : {};
   if (!head?.worktree_id || rows.some((row, i) => row.worktree_id !== head.worktree_id || row.source_id !== head.source_id || !groupable(row, prepared[i]!)
     || rows.length > 1 && singleWrite(row))) return none;
-  if (!syncGroup(publicationGroupKey(head)) && sharesTarget(rows, prepared)) return none;
   const binding = await getWorktreeBinding(engine, head.source_id, hostId);
   if (!binding || binding.owner_host_id !== hostId || !binding.local_path) return none;
   // #5984 lanes: lane groups share this process's native lock; a foreground page write (Phase 4.5) joins their
@@ -795,6 +795,13 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
       run.publication!.onOverdue?.();
     } }) : publish();
     const live = rows.map((row, i) => ({ row, i })).filter(({ row }) => !released.has(row.id));
+    // G6: a member writing a page or file an earlier member writes is prepared again after that write publishes: the group
+    // ends before it, and it and the members after it go back to the queue in order.
+    const shared = ordered ? null : firstSharedTarget(live.map(({ row }) => row), live.map(({ i }) => { const p = prepared[i]; return p && 'ok' in p ? p.ok : undefined; }));
+    for (const { row } of shared === null ? [] : live.splice(shared)) {
+      held.delete(row.id); released.add(row.id);
+      await releaseUnpublishedClaim(engine, row, 'group_member_waiting');
+    }
     if (!live.length) return progressed;
     const liveRows = live.map(({ row }) => row);
     if (run.publication) await holdClaimForPublication(lease, () => renewGroupClaims(engine, liveRows, publicationLeaseMs(run.publication!.ceilingMs), undefined,

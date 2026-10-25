@@ -6,13 +6,15 @@
  *     with their activation) and an extract_entities batch (put_page and add_timeline_entry) each publish in one
  *     transaction: one shared published_at (now() is the transaction start) and one commit.
  *   - Failure semantics: every G6 group is independent. One member forced to fail never cancels the others.
- *   - Distinct targets: a group whose members share a page or file never shares a transaction; the batch writers refuse it.
+ *   - Distinct targets: the batch writers refuse a batch naming a page twice. A claimed group whose member writes a page or
+ *     file an earlier member writes ends before it: the prefix publishes as one group, and that member and the rest go
+ *     back to the queue and are prepared again, so every member settles as it would ungrouped.
  *   - Contiguity: a single write interleaved in a batch splits it into two groups, still fewer commits than members.
  * Runs on PGLite, and on Postgres through test/e2e/git-door-g6-publication-groups-postgres.test.ts. Synthetic content only.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { configureGateway, resetGateway, type ChatResult } from '../src/core/ai/gateway.ts';
@@ -21,7 +23,7 @@ import { enrichEntities } from '../src/core/enrichment-service.ts';
 import { OperationError, type OperationContext } from '../src/core/ops/contract.ts';
 import { operations } from '../src/core/operations.ts';
 import { GROUP_KEY_SQL, publicationGroupKey } from '../src/core/persistence/journal.ts';
-import { sharesTarget } from '../src/core/persistence/group-publish.ts';
+import { firstSharedTarget } from '../src/core/persistence/group-publish.ts';
 import type { PreparedMutation } from '../src/core/persistence/coordinator.ts';
 import type { WriteRequest } from '../src/core/persistence/model.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
@@ -91,14 +93,17 @@ beforeAll(() => configureGateway({ embedding_model: 'openai:text-embedding-3-lar
 afterAll(() => { installFaultHook(undefined); resetGateway(); });
 
 describe('G6 publication groups: shared targets never share a transaction', () => {
-  const row = (slug: string) => ({ slug }) as WriteRequest;
+  const row = (slug: string, kind?: string) => ({ slug, intent: kind ? { kind } : null }) as WriteRequest;
   const file = (path: string) => ({ file: { path } }) as unknown as PreparedMutation;
   const none = {} as PreparedMutation;
-  test('two members on one page, or one file in two spellings, share a target; distinct pages and files do not', () => {
-    expect(sharesTarget([row('atoms/a'), row('atoms/b')], [file('/r/atoms/a.md'), file('/r/atoms/b.md')])).toBe(false);
-    expect(sharesTarget([row('atoms/a'), row('Atoms/A')], [none, none])).toBe(true);
-    expect(sharesTarget([row('atoms/a'), row('atoms/b')], [file('/r/atoms/a.md'), file('/r/Atoms/A.md')])).toBe(true);
-    expect(sharesTarget([row('__generation_activate__'), row('atoms/a')], [none, file('/r/atoms/a.md')])).toBe(false);
+  test('the first member on a page or file an earlier member writes (in any spelling) is found; distinct pages and files share none', () => {
+    expect(firstSharedTarget([row('atoms/a'), row('atoms/b')], [file('/r/atoms/a.md'), file('/r/atoms/b.md')])).toBeNull();
+    expect(firstSharedTarget([row('atoms/a'), row('atoms/b'), row('Atoms/A'), row('atoms/b')], [none, none, none, none])).toBe(2);
+    expect(firstSharedTarget([row('atoms/a'), row('atoms/b')], [file('/r/atoms/a.md'), file('/r/Atoms/A.md')])).toBe(1);
+    expect(firstSharedTarget([row('atoms/a'), row('atoms/b')], [undefined, none])).toBeNull();
+    // The activation journals under a pseudo slug and writes no page: two of them share no page target.
+    const activate = row('__generation_activate__', 'managed_generation_activate');
+    expect(firstSharedTarget([activate, row('atoms/a'), activate], [none, file('/r/atoms/a.md'), none])).toBeNull();
   });
 });
 
@@ -263,6 +268,47 @@ for (const backend of testBackends()) {
       await extract(engine, ctx, 'Alice Example revised the Acme Example plan. ', ['Pilot before launch', 'Keep the checklist short']);
       expect(await liveAtoms(engine)).not.toContain(retired);
     }, { databaseUrl, setup }), 240_000);
+
+    test('shared target: a member writing a page an earlier group member wrote is prepared again after it, and settles as it would ungrouped', () => managedBrain(async ({ engine, ctx, root }) => {
+      await strictSource(engine);
+      await seedNotes(ctx);
+      const [after, since] = [await lastSequence(engine), await headCommit(root)];
+      const [A, B, C] = ['notes/new-a', 'notes/new-b', 'notes/new-c'];
+      const create = (slug: string, tag: string) => ({ operation: 'put_page' as const, params: { slug, request_id: randomUUID(),
+        content: note(slug, `Alice Example wrote it (${tag}) for source-a.`) } });
+      // Hold the worktree so both batches queue before anything publishes.
+      const holder = await acquireWorktree((await getWorktreeBinding(engine, 'default'))!, 5000);
+      expect(holder).not.toBeNull();
+      try {
+        await submitPageMutations({ ...ctx, writeWaitMs: 0 }, [create(A, 'first'), create(B, 'first')]).catch(() => undefined);
+        await submitPageMutations({ ...ctx, writeWaitMs: 0 }, [create(A, 'second'), create(C, 'second')]).catch(() => undefined);
+        await disposePersistenceConsumer(engine);
+      } finally { await holder!.release(); }
+      await engine.executeRaw("UPDATE persistence_requests SET state='queued',execution_token=NULL,claim_expires_at=NULL,blocked_reason=NULL WHERE state='running' AND recovery IS NULL");
+      // One batch id for all four, so one claim takes page A twice: A, B, A again, C. Every member prepares while A has no page.
+      await engine.transaction(async tx => {
+        await declareDurablePersistence(tx);
+        await tx.executeRaw(`UPDATE persistence_requests SET intent=jsonb_set(intent,'{page_batch,id}',(SELECT intent->'page_batch'->'id' FROM persistence_requests
+          WHERE sequence>$1::bigint ORDER BY sequence LIMIT 1)) WHERE sequence>$1::bigint`, [after]);
+      });
+      const queued = await published(engine, after);
+      expect(queued.map(row => [row.slug, row.state, row.error_code])).toEqual([A, B, A, C].map(slug => [slug, 'queued', null]));
+      expect(new Set(queued.map(row => row.grp)).size).toBe(1);
+      const rows = await waitForWrites(engine, await engine.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE sequence>$1::bigint ORDER BY sequence', [after]),
+        { engine: engine.kind }, 30_000);
+      // As ungrouped: the second create of A finds A written and refuses an overwrite without a revision; A keeps the first write.
+      expect(rows.map(row => [row.slug, row.state, row.error_code ?? null])).toEqual([[A, 'committed', null], [B, 'committed', null],
+        [A, 'conflict', 'revision_required'], [C, 'committed', null]]);
+      expect((await engine.readPageSnapshot(A!, { sourceId: 'default' }))!.page.compiled_truth).toContain('(first)');
+      await settleManagedGitEffects(engine);
+      expect(readFileSync(join(root, `${A}.md`), 'utf8')).toContain('(first)');
+      const done = await published(engine, after);
+      expect(done.filter(row => ['queued', 'running'].includes(row.state))).toEqual([]);
+      // A and B published as one group; C, claimed again with the second A, published after them.
+      expect(done[0]!.published).toBe(done[1]!.published);
+      expect(done[3]!.published).not.toBe(done[0]!.published);
+      expect(await commitsTouching(engine, root, since, [A!, B!, C!])).toBe(2);
+    }, { databaseUrl, setup }), 120_000);
 
     test('contiguity: a single write interleaved in a batch splits it into two groups, still fewer commits than writes', () => managedBrain(async ({ engine, ctx, root }) => {
       await strictSource(engine);
