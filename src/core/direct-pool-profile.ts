@@ -1,7 +1,8 @@
 /**
  * How much of the direct (session) lane this process may hold. The CLI sets it
  * once per command; every other caller (embedders, tests) stays resident.
- * - resident: daemons (serve, jobs, autopilot, sync --watch) keep the full pool.
+ * - resident: daemons (serve, jobs, autopilot, sync --watch) keep the full pool; a stdio
+ *   `serve --access read-only` is one_shot instead (#7599), since harnesses run one per session.
  * - short_lived: a command that owns a consumer or takes a lease gets one connection.
  * - one_shot: a command that takes no lease routes nothing through the direct
  *   pool; schema DDL still uses one connection for its session advisory lock
@@ -20,6 +21,7 @@ const SHORT_LIVED_COMMANDS = new Set(['sync', 'mcp', 'dream', 'cycle', 'sources'
 let processProfile: DirectPoolProfile = 'resident';
 
 export function directPoolProfileForCommand(command: string, args: readonly string[]): DirectPoolProfile {
+  if (command === 'serve' && args.includes('--access') && args[args.indexOf('--access') + 1] === 'read-only') return 'one_shot';
   if (RESIDENT_COMMANDS.has(command) || (command === 'sync' && args.includes('--watch'))) return 'resident';
   return SHORT_LIVED_COMMANDS.has(command) ? 'short_lived' : 'one_shot';
 }
