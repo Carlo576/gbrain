@@ -28,7 +28,7 @@ import { sanitizeRemoteBody } from '../remote-body.ts';
 import { getContentFlag } from '../quarantine.ts';
 import { fileHeldField, readHeldPages } from '../persistence/held-reads.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
-import { resolveExcludePrivatePages, isPrivatePage, findPrivateOnlySlugs } from '../search/private-visibility.ts';
+import { resolveExcludePrivatePages, isPrivatePage, findPrivateOnlySlugs, isPrivatePageForCaller } from '../search/private-visibility.ts';
 import { LIST_PAGES_DESCRIPTION, CAPTURE_DESCRIPTION } from '../operations-descriptions.ts';
 import { listPagesPagination, listingTruncatedNotice } from './list-pages-pagination.ts';
 import { OperationError, opError, type Operation, type OperationContext } from './contract.ts';
@@ -143,7 +143,7 @@ const get_page: Operation = {
 
     let snapshot = await ctx.engine.readPageSnapshot(slug, { includeDeleted, excludePrivate, ...sourceOpts, resolveAlias: true });
     let page = snapshot?.page ?? null;
-    if (page && excludePrivate && isPrivatePage(page)) page = null;
+    if (page && excludePrivate && isPrivatePageForCaller(page)) page = null;
     let resolved_slug: string | undefined = page && page.slug !== slug ? page.slug : undefined;
 
     if (!page && fuzzy) {
@@ -157,7 +157,7 @@ const get_page: Operation = {
           ? await tx.readPageSnapshot(candidates[0], { includeDeleted, excludePrivate, ...sourceOpts }) : null };
       });
       if (fallback.candidates.length > 1) return { error: 'ambiguous_slug', candidates: fallback.candidates };
-      if (fallback.snapshot && !(excludePrivate && isPrivatePage(fallback.snapshot.page))) {
+      if (fallback.snapshot && !(excludePrivate && isPrivatePageForCaller(fallback.snapshot.page))) {
         snapshot = fallback.snapshot;
         page = snapshot.page;
         resolved_slug = page.slug;
@@ -296,7 +296,7 @@ const fetch_page: Operation = {
       throw error;
     }
     const page = snapshot?.page;
-    if (!page || (excludePrivate && isPrivatePage(page))) throw missing();
+    if (!page || (excludePrivate && isPrivatePageForCaller(page))) throw missing();
     const readable = await pageTrustForRead(ctx, page, p.min_trust); // #5575: below the read floor reads as missing
     if (!readable) throw missing();
     bumpLastRetrievedAt(ctx.engine, [page.id]);
