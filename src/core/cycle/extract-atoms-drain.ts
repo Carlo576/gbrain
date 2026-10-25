@@ -550,34 +550,36 @@ export async function runExtractAtomsDrainForSource(
         // + pages_processed both 0 means every attempted `chat()` call threw —
         // items that succeed with 0 atoms still count as processed, so this
         // does not fire on "provider fine, nothing extractable").
-        const failures = Array.isArray(d.failures) ? d.failures : [];
+        const reported: unknown[] = Array.isArray(d.failures) ? d.failures : [];
+        // #7514: a write that did not commit (its record names the request id) never reached a provider, so
+        // `failures` is the provider side only: a write failure neither makes nor classes a provider failure.
+        const written = (f: unknown): f is { request_id: string; code?: unknown; strikes?: unknown } =>
+          f != null && typeof f === 'object' && typeof (f as { request_id?: unknown }).request_id === 'string';
+        const failures = reported.filter(f => !written(f));
         const itemsSucceeded =
           Number(d.transcripts_processed ?? 0) + Number(d.pages_processed ?? 0);
         // #4730: carry EVERY per-item failure up as a typed {source, reason}
         // record (the pure loop bounds + sanitizes them) instead of the
         // #4539 collapse to count + one representative error — a mixed
         // three-failure batch used to be unrecoverable from `--json`.
-        const typedFailures = failures
-          .filter(
-            (f): f is { source: string; error: string; request_id?: unknown; code?: unknown; strikes?: unknown } =>
-              f != null &&
-              typeof f === 'object' &&
-              typeof (f as { source?: unknown }).source === 'string' &&
-              typeof (f as { error?: unknown }).error === 'string',
-          )
-          .map(({ source, error, request_id, code, strikes }) => ({ source, reason: error,
-            ...(typeof request_id === 'string' ? { request_id, code: typeof code === 'string' ? code : undefined, strikes } : {}) }));
-        // #7514: a write that did not commit never reached a provider, so it neither makes nor classes a provider failure.
-        const writeFailures = typedFailures.filter(f => f.request_id !== undefined);
-        const providerFailures = typedFailures.filter(f => f.request_id === undefined);
+        const typed = reported.filter(
+          (f): f is { source: string; error: string } =>
+            f != null &&
+            typeof f === 'object' &&
+            typeof (f as { source?: unknown }).source === 'string' &&
+            typeof (f as { error?: unknown }).error === 'string',
+        );
+        const typedFailures: Array<{ source: string; reason: string; request_id?: string; code?: string }> = typed
+          .map(({ source, error }) => ({ source, reason: error }))
+          .map((f, i) => { const w = typed[i]; return written(w) ? { ...f, request_id: w.request_id, ...(typeof w.code === 'string' ? { code: w.code } : {}) } : f; });
         return {
           extracted: Number(d.atoms_extracted ?? 0),
           skipped: Number(d.duplicates_skipped ?? 0),
-          providerFailure: failures.length > writeFailures.length && itemsSucceeded === 0,
-          providerFailureClass: batchProviderFailureClass(d.aborted_global_error, providerFailures),
-          failureCount: failures.length,
+          providerFailure: failures.length > 0 && itemsSucceeded === 0,
+          providerFailureClass: batchProviderFailureClass(d.aborted_global_error, typedFailures.filter(f => f.request_id === undefined)),
+          failureCount: reported.length,
           failures: typedFailures,
-          writeStrikes: writeFailures.filter(f => typeof f.strikes === 'number').length,
+          writeStrikes: reported.filter(f => written(f) && typeof f.strikes === 'number').length,
           budgetSkipped: Number(d.pages_skipped_budget ?? 0) + Number(d.transcripts_skipped_budget ?? 0),
           budget: { spentUsd: Number(d.estimated_spend_usd ?? 0), capUsd: Number(d.budget_usd ?? 0) },
           inputTruncated: Number(d.input_truncated ?? 0),
