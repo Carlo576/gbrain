@@ -6,9 +6,14 @@
  *    never reads its pages, and its searches answer empty. The stored default
  *    stays non-federated; the command now says what that means on stderr,
  *    with the two commands that change it.
+ *    When the sources such a connection reads (the default source and the
+ *    federated ones) hold no page, the add also prints the federate command
+ *    as its next step on stdout, and as `next` under --json.
  * 2. Fails when: the default add prints no warning, the warning lacks the
  *    federate or grant command, a --federated or explicit --no-federated add
- *    warns, or the stored default flips to federated.
+ *    warns, the stored default flips to federated, the next step is missing
+ *    while the no-grant floor holds no page, or it is printed while the floor
+ *    holds pages.
  * 3. Existing coverage: the stdout `federated: false` line only.
  * 4. No production seam: the real command on PGLite, console spies only.
  */
@@ -75,5 +80,30 @@ describe('sources add federation warning', () => {
     const { stdout, stderr } = await add(['source-c', '--no-federated']);
     expect(stdout).toContain('federated: false');
     expect(stderr).not.toContain('is not federated');
+    expect(stdout).not.toContain('next:');
+  });
+});
+
+describe('sources add next step when the no-grant floor holds no page', () => {
+  test('a default add on a brain whose default and federated sources hold no page prints the federate command on stdout', async () => {
+    const { stdout } = await add(['source-d']);
+    expect(stdout).toContain('next: gbrain sources federate source-d');
+  });
+
+  test('--json carries the same step as next, with the human lines on stderr', async () => {
+    const { stdout, stderr } = await add(['source-e', '--json']);
+    const out = JSON.parse(stdout);
+    expect(out).toMatchObject({ id: 'source-e', federated: false, next: { command: 'gbrain sources federate source-e', argv: ['gbrain', 'sources', 'federate', 'source-e'] } });
+    expect(stderr).toContain('Created source "source-e"');
+  });
+
+  test('once the floor holds a page, the add warns but prints no next step', async () => {
+    await engine.putPage('notes/floor-page', { type: 'note', title: 'Floor', compiled_truth: 'A page in the default source.', timeline: '' });
+    const human = await add(['source-f']);
+    expect(human.stderr).toContain('source "source-f" is not federated');
+    expect(human.stdout).not.toContain('next:');
+    const json = JSON.parse((await add(['source-g', '--json'])).stdout);
+    expect(json).toMatchObject({ id: 'source-g', federated: false });
+    expect(json.next).toBeUndefined();
   });
 });

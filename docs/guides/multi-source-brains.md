@@ -115,6 +115,34 @@ behave as you'd expect — every page appears in search.
 
 Flip later with `gbrain sources federate <id>` / `unfederate <id>`.
 
+### An unscoped connection whose sources hold no pages
+
+A remote token minted without `--sources`, or an agent stdio connection with
+no binding, has no source grant: it reads the `default` source plus every
+federated source. Because a new source is not federated, a brain whose pages
+all live in such sources would answer that connection's every search with an
+empty result that reads like a clean miss.
+
+So an unscoped `search`, `query`, `recall` or `list_pages` from such a
+connection is refused with `sources_not_readable` when the sources it reads
+hold no page at all while other sources on the brain hold pages. The refusal
+never names a source the connection cannot read. Its fix is host-side: the
+user picks the source these connections should read and the brain host runs
+`gbrain sources federate <source>`, or grants the connection its sources
+(`gbrain auth rescope --token <name> --sources <ids>`).
+
+Nothing else changes. A read whose sources hold pages but match nothing
+answers empty, as does a brain where no source holds a page. A token granted
+sources, an OAuth client, a bound connection and a read that names
+`source_id` or `source_ids` are never refused: the refusal only ever stops a
+call, never widens what it reads. Federating a source never shows its
+`visibility: private` pages to a remote connection.
+
+`gbrain sources add` warns on stderr when a new source is not federated, and
+when the sources an unscoped connection reads hold no page it also prints the
+next step on stdout (`next: gbrain sources federate <id>`), and as `next`
+(`command`, `argv`, `why`) under `--json`.
+
 ### Explicit reads from a bound agent connection
 
 An agent connection started with `GBRAIN_SOURCE=<id>` (or inside a
@@ -286,7 +314,7 @@ recorded mode (preview it first without `--apply`; see
 
 
 ```
-gbrain sources add <id> --path <p> [--name <n>] [--federated|--no-federated] [--force]
+gbrain sources add <id> --path <p> [--name <n>] [--federated|--no-federated] [--force] [--json]
                                Register a source. id: [a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?
                                --path must be a git repo (or a subdirectory of one) — see
                                "The git requirement for --path sources" below. --force
