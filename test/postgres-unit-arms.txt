@@ -79,9 +79,11 @@ test/file-drift-soft-delete-hold-release-gbra133.test.ts
 test/forecast-journal.test.ts
 test/frontmatter-reserved-keys-6454.test.ts
 test/get-chunks-paging.test.ts
+test/git-canonical-conversion-g8a.test.ts
 test/git-canonical-declared-g7a.test.ts
 test/git-canonical-indexer-g3.test.ts
 test/git-door-plumbing-gbra133.test.ts
+test/git-door-remote-g7b.test.ts
 test/git-door-strict-gbra133.test.ts
 test/git-gap-census.test.ts
 test/google-connector-facts-fence-7292.test.ts
@@ -100,6 +102,7 @@ test/harness-skills-epoch.test.ts
 test/held-read-signals.test.ts
 test/hermes-clarify-transcripts-7396.test.ts
 test/hold-action-chain-6712.test.ts
+test/hosted-repo-g7b2.test.ts
 test/import-file-result-callback-gbra130.test.ts
 test/import-frontmatter-key-order-5158.test.ts
 test/import-inline-chunk-keep.test.ts
