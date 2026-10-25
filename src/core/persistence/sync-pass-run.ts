@@ -31,7 +31,6 @@ import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
 import { faultPoint } from './fault-points.ts';
-import { sourceStrict } from './git-door.ts';
 import { passFoldBase, passIdleProbe, readShadowLevel, workingIdleChange, type PassLevelCache, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
 import { ownWritebackCommit, type PassFold } from './sync-pass-fold.ts';
 import { openPassRequests, settleCarried } from './sync-pass-carried.ts';
@@ -388,7 +387,7 @@ async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNull
   const head = headLine!.trim();
   const detached = refLine?.trim() === 'HEAD';
   // G3: a strict source's pass reads its commit alone, a detached HEAD's too (sync-pass.ts).
-  const strict = sourceStrict(context);
+  const strict = context.source.config?.canonical === 'git';
   const mode: SyncSelection['mode'] = !strict && (detached || (opts.workingTree ?? configuredWorking === 'true')) ? 'working' : 'committed';
   const selection = passSelection(patterns, opts, context, mode);
   const configured = !remote && !opts.exclude?.length && !opts.includeHidden?.length && opts.srcSubpath === undefined

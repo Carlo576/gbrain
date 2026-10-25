@@ -46,7 +46,6 @@ import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, type SyncSelection } from
 import { faultPoint } from './fault-points.ts';
 import { filterYielding, loopYield, progressYield, sortYielding, turnYield, whileActive, type LoopYield } from './sync-yield.ts';
 import { countsMatch, proveConfirm, readLevelMark, type ConfirmProof, type LevelMark } from './sync-pass-confirm.ts';
-import { sourceStrict } from './git-door.ts';
 import { domainCache, levelDomain, narrowedWalk, walkAttestations, type LevelDomainCache } from './sync-pass-narrow.ts';
 
 export { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP };
@@ -671,7 +670,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const eligibleTree = async (): Promise<{ tree: Map<string, GitTreeEntry>; colon: string[] }> => {
     if (cache?.tree?.key === treeKey) return cache.tree;
     if (cache) cache.tree = undefined;
-    const { tree, colon, reuse } = await eligibleListing(gitRoot, head, scope, { key: [sourceId, incarnation], allowed: input.pass?.levelReuse === true, step, eligible,
+    const { tree, colon, reuse } = await eligibleListing(gitRoot, head, scope, { key: [sourceId, incarnation], canonical: strict ? 'git' : 'mixed', allowed: input.pass?.levelReuse === true, step, eligible,
       prime: listing => levelMetafiles.primeTree(listing) });
     treeReuse = reuse;
     if (cache) cache.tree = { key: treeKey, tree, colon };
@@ -928,9 +927,9 @@ function scopedPageOrigin(recorded: string, slug: string, originScope: SyncOrigi
 
 /** The level's settings, one round trip each and all in flight together; null for a company-brain source. */
 /** `T`'s eligible entries and its ':' paths (#5032: refused, never part of the level), walked from the listing the last pass may have kept (sync-tree-reuse.ts). */
-async function eligibleListing(gitRoot: string, head: string, scope: string, opts: { key: string[]; allowed: boolean; step: LoopYield; eligible: (path: string) => boolean;
+async function eligibleListing(gitRoot: string, head: string, scope: string, opts: { key: string[]; canonical: string; allowed: boolean; step: LoopYield; eligible: (path: string) => boolean;
   prime: (listing: Map<string, GitTreeEntry>) => Map<string, GitTreeEntry> }): Promise<{ tree: Map<string, GitTreeEntry>; colon: string[]; reuse: TreeReuse }> {
-  const listed = await readTreeLevelReusing(gitRoot, head, scope, { key: opts.key, allowed: opts.allowed, shared: opts.step });
+  const listed = await readTreeLevelReusing(gitRoot, head, scope, { key: opts.key, canonical: opts.canonical, allowed: opts.allowed, shared: opts.step });
   const tree = new Map<string, GitTreeEntry>(), colon: string[] = [];
   for (const [path, entry] of opts.prime(listed.tree)) {
     if (isWindowsColonTarget(path)) colon.push(path);
@@ -956,7 +955,7 @@ async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContex
   const settled = <T>(read: PromiseSettledResult<T>): T => { if (read.status === 'rejected') throw read.reason; return read.value; };
   if (settled(company)) return null;
   return { slugMode: settled(slugModeRead), exclude: settled(excludeRead), pack: settled(packRead), mirror: settled(mirrorRead), workingConfig: settled(workingRead),
-    metafilePages: settled(metafilePagesRead), strict: sourceStrict(context), strategy: input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown',
+    metafilePages: settled(metafilePagesRead), strict: context.source.config?.canonical === 'git', strategy: input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown',
     includeHidden: [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))],
     keepDbPrefixes: (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })() };
 }
