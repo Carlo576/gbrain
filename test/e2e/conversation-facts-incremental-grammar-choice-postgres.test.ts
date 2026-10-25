@@ -12,7 +12,8 @@ import { hasDatabase } from './helpers.ts';
 
 (hasDatabase() ? describe : describe.skip)('conversation facts incremental, grammar-choice [postgres]', () => {
   let brain: AppendBrain;
-  beforeAll(async () => { brain = await openAppendBrain('postgres'); }, 120_000);
-  afterAll(async () => { await brain.close(); }, 120_000);
-  defineConversationFactsGrammarChoiceCases({ getBrain: () => brain });
+  let fresh: AppendBrain;
+  beforeAll(async () => { brain = await openAppendBrain('postgres'); fresh = await openAppendBrain('postgres'); }, 120_000);
+  afterAll(async () => { await brain.close(); await fresh.close(); }, 120_000);
+  defineConversationFactsGrammarChoiceCases({ getBrain: () => brain, getFresh: () => fresh });
 });

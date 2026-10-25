@@ -87,7 +87,7 @@ export async function acquirePageEmbeddingLease(engine: BrainEngine, pageId: num
   const take = async () => (await engine.executeRaw(
     `INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at, last_refreshed_at, acquisition_token)
      VALUES ($1, $2, $3, now(), now() + make_interval(mins => $4::int), now(), $5::uuid)
-     ON CONFLICT (id) DO UPDATE SET holder_pid = EXCLUDED.holder_pid, holder_host = EXCLUDED.holder_host, acquired_at = now(),
+     ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id, holder_pid = EXCLUDED.holder_pid, holder_host = EXCLUDED.holder_host, acquired_at = now(),
        ttl_expires_at = EXCLUDED.ttl_expires_at, last_refreshed_at = now(), acquisition_token = EXCLUDED.acquisition_token
      WHERE gbrain_cycle_locks.ttl_expires_at < now()
      RETURNING id`, [id, process.pid, hostname(), PAGE_EMBEDDING_LEASE_TTL_MINUTES, token])).length > 0;

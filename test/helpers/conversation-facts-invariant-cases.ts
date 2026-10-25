@@ -265,7 +265,9 @@ export function defineConversationFactsHeldCases(opts: { getBrain: () => AppendB
     for (const quoted of [1, 3]) {
       const slug = `notes/quoted-line-${randomUUID().slice(0, 8)}`;
       await caps(brain.engine, 'off');
-      await brain.seed(slug, chatPage('Was a chat', chatDays(4600, 100, 38)));
+      // Each pass seeds its own transcript: a source never stores a claim twice (#7043), so a repeat of the first pass's
+      // transcript would extract no new facts.
+      await brain.seed(slug, chatPage('Was a chat', chatDays(4600, 100, 380 + quoted)));
       await extract(brain.engine, slug);
       const facts = (await factsOf(brain.engine, slug)).length;
       expect(facts).toBeGreaterThan(100);
@@ -551,7 +553,7 @@ export function defineConversationFactsGrammarFlagCases(opts: { getBrain: () => 
 }
 
 /** How long an operator's format choice lasts: one page version, and a detected format after it streams from the head. */
-export function defineConversationFactsGrammarChoiceCases(opts: { getBrain: () => AppendBrain }): void {
+export function defineConversationFactsGrammarChoiceCases(opts: { getBrain: () => AppendBrain; getFresh: () => AppendBrain }): void {
   test('a choice holds only for the page version it was made for: after an append the chosen rows do not pin their format, so a page still undetected is held with every fact kept', async () => {
     const brain = opts.getBrain();
     const slug = `notes/choice-version-${randomUUID().slice(0, 8)}`;
@@ -593,9 +595,14 @@ export function defineConversationFactsGrammarChoiceCases(opts: { getBrain: () =
     const run = await extract(brain.engine, slug);
     const after = await factsOf(brain.engine, slug);
     const freshSlug = `notes/choice-switch-fresh-${randomUUID().slice(0, 8)}`;
-    await brain.seed(freshSlug, chatPage('Constant title', body));
-    await extract(brain.engine, freshSlug);
-    const fresh = await factsOf(brain.engine, freshSlug);
+    // The fresh extraction runs on its own brain: in this one the switched page's facts already state every claim, and a
+    // source never stores a claim twice (#7043).
+    const freshBrain = opts.getFresh();
+    await caps(freshBrain.engine, 'off');
+    for (const key of ['facts.extraction_model', 'facts.default_visibility']) await freshBrain.engine.setConfig(key, (await brain.engine.getConfig(key)) ?? '');
+    await freshBrain.seed(freshSlug, chatPage('Constant title', body));
+    await extract(freshBrain.engine, freshSlug);
+    const fresh = await factsOf(freshBrain.engine, freshSlug);
     const shas = (facts: typeof after) => facts.map(f => f.key.split(':')[2]).sort();
     const forced = await extract(brain.engine, slug, { force: true });
     const rows = await derivations(brain.engine, slug);

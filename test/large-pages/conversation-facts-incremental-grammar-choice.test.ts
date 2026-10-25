@@ -9,10 +9,11 @@ import { openAppendBrain, type AppendBrain } from '../helpers/append-brain.ts';
 import { defineConversationFactsGrammarChoiceCases } from '../helpers/conversation-facts-invariant-cases.ts';
 
 let brain: AppendBrain;
+let fresh: AppendBrain;
 
-beforeAll(async () => { brain = await openAppendBrain('pglite'); }, 120_000);
-afterAll(async () => { await brain.close(); }, 120_000);
+beforeAll(async () => { brain = await openAppendBrain('pglite'); fresh = await openAppendBrain('pglite'); }, 120_000);
+afterAll(async () => { await brain.close(); await fresh.close(); }, 120_000);
 
 describe('conversation facts incremental, grammar-choice [pglite]', () => {
-  defineConversationFactsGrammarChoiceCases({ getBrain: () => brain });
+  defineConversationFactsGrammarChoiceCases({ getBrain: () => brain, getFresh: () => fresh });
 });
