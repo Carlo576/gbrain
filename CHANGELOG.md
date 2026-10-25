@@ -18,12 +18,15 @@ identifiers and attribution are available in the pre-removal Git revision
 
 | Situation | Before | Now |
 |---|---|---|
+| The first searches after a Postgres restart on a brain whose HNSW index is not cached | each new query read 2,000 to 4,500 uncached index pages (vector stage 1.4 s median, 3.0 s p95 on a 600k-page soak brain with an 11 GB index) | an operator can run `gbrain embeddings prewarm` (or set `serve.vector_prewarm true` to run it at each serve start, off by default) to load the HNSW indexes into `shared_buffers` with `pg_prewarm` first: 50 s for 11 GB, then a 41 ms median vector stage (1.9 s p95) on the same queries |
+| `gbrain embeddings prewarm` when the indexes exceed half of `shared_buffers`, or `pg_prewarm` is missing | - | it refuses before reading any index page (`vector_prewarm_wont_fit` with the `shared_buffers` size it needs, `vector_prewarm_extension_missing`); `--dry-run --json` shows the fit. `effective_cache_size` is reported, never used |
 | The readiness probe on a brain with no pending text projections | the planner, with no statistics for the revision comparison, expected most pages to be pending and scanned all of `pages` (199k buffers, ~600 ms at 600k pages) | each arm orders by `idx_pages_projection_pending`'s columns under `LIMIT 1`, so it reads only that partial index (under 1 ms) |
 
 ### What to watch for after you upgrade
 
 - Answers are unchanged: the probe returns the same `ready`, `projection_pending`, `by_design` or `unknown` status, and output, defaults and notices are the same.
 - Nothing is rewritten on upgrade, and there is no schema migration (the index arrived with migration 161).
+- Vector prewarm is opt-in: nothing runs unless you call it or set `serve.vector_prewarm`. It is a local operator command (no MCP tool; thin clients and PGLite brains are refused), it needs `CREATE EXTENSION pg_prewarm` once, and prewarmed pages stay cached only until Postgres restarts or other reads evict them. See docs/ENGINES.md#vector-index-prewarm.
 
 ## [0.60.438.0] - 2026-10-24
 
