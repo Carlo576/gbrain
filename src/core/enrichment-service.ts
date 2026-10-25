@@ -34,6 +34,7 @@ import { isJunkEntityName } from './entity-name-quality.ts';
 import { followRetirement } from './entities/resolve.ts';
 import { maintenanceTransaction } from './persistence/attribution.ts';
 import { managedPersistenceEnabled } from './persistence/ownership.ts';
+import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
 import { deriveTrust, derivedMaintenanceTransaction, lowerDerivedPage, lowerDerivedPageIn, lowerToDerivedTier } from './trust/taint.ts';
 import { derivedGateConfig, derivedGateInput, recordTimelineFlag, timelineRowAllowed } from './trust/derived-gate.ts';
 import { assessTimelineForGate } from './write-gate.ts';
@@ -194,7 +195,10 @@ export async function enrichEntity(
   const derivation = await deriveTrust(engine, [{ table: 'pages', sourceId, slug: request.sourceSlug }], { channel: 'derive:enrichment' });
   const ctx = opts?.ctx;
   // #6262: a managed brain refuses direct writes, so each one goes through the coordinator under the caller's authority.
-  const managed = ctx !== undefined && await managedPersistenceEnabled(engine);
+  const managedBrain = await managedPersistenceEnabled(engine);
+  const managed = ctx !== undefined && managedBrain;
+  // G6: the direct branch below writes the database first (and falls back to a raw page write), so a git-canonical source refuses here.
+  if (!managedBrain) await assertUnmanagedCanonicalWriter(engine, 'extract_entities', { sourceId });
   const coordinated = async <T>(lockSlugs: string[], write: (tx: BrainEngine) => Promise<T>) => {
     const { coordinatedDatabaseWrite } = await import('./persistence/database-write.ts');
     return coordinatedDatabaseWrite(ctx!, 'extract_entities', slug, lockSlugs, write, derivation.trust);

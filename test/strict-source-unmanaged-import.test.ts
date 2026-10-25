@@ -16,6 +16,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importCodeFile, importFromContent, importImageFile } from '../src/core/import-file.ts';
 import { importStreamedMarkdownFile } from '../src/core/page-body/streamed-import.ts';
+import { enrichEntity } from '../src/core/enrichment-service.ts';
 import type { PageBodyPolicy } from '../src/core/page-body/limits.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -51,6 +52,10 @@ for (const backend of backends) test(`[${backend}] an unmanaged brain refuses a 
   expect(await refusal(importStreamedMarkdownFile(engine, join(import.meta.dir, 'no-such-dir', 'large.md'), 'notes/large.md', { noEmbed: true, sourceId: 'source-a' },
     { size: 1, mtimeMs: 0, birthtime: now, mtime: now }, {} as PageBodyPolicy)))
     .toEqual('strict_requires_managed');
+  // extract_entities' unmanaged branch used to fall back to a direct page write when the import refused.
+  expect(await refusal(enrichEntity(engine, { entityName: 'Alice Example', entityType: 'person', context: 'met at the offsite', sourceSlug: 'notes/offsite' }, { sourceId: 'source-a' })))
+    .toEqual('strict_requires_managed');
+  expect(await pageCount(engine, 'source-a', 'people/alice-example')).toBe(0);
   expect(await pageCount(engine, 'source-a', 'notes/alice-example')).toBe(0);
   expect(await pageCount(engine, 'source-a', 'acme-example-ts')).toBe(0);
   expect((await importFromContent(engine, 'notes/alice-example', page('Alice'), { noEmbed: true })).status).toBe('imported');
