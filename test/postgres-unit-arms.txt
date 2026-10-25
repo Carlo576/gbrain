@@ -419,6 +419,7 @@ test/repair-receipt-compaction.test.ts
 test/repair-rename-identity-6729.test.ts
 test/retrieval-coverage-notices.test.ts
 test/schema-missing-tables.test.ts
+test/schema-replay-deadlock-6143.test.ts
 test/scripts/test-stress-postgres.test.ts
 test/search-read-keyword-bound.test.ts
 test/search/page-rank-cut.test.ts

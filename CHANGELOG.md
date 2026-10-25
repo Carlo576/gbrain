@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.451.0] - 2026-10-25
+
+**A schema replay that loses a deadlock to a live reader now retries instead of failing (#6143), and four CI flakes are fixed at their cause: a darwin-x64 heartbeat left pending, test state leaking between files, an entity perf gate timed on wall clock, and a stress shard sized too small. No assertion or bound is loosened.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `PostgresEngine.initSchema` (`init --migrate-only`, upgrade paths) chosen as a deadlock victim (40P01) by a reader holding `sources` and waiting on `pages` | the whole base-schema replay rolled back and the command failed with `deadlock detected` | the replay reruns, up to 3 attempts with 250/500 ms backoff and a stderr line; every other error behaves as before |
+| A failed `gbrain orphans` / `find_orphans` (a policy read throws) | its 1 s progress interval kept running for the life of the process | the policy is read before the reporter starts, so nothing is left behind |
+| A darwin-x64 native-locks cell whose runner cannot reach the GitHub API as it ends | `diag/native-heartbeat/darwin-x64/<bun>` stayed `pending` and held the PR unstable | a Linux `heartbeat-finalize` job posts the terminal state, naming the cell's real conclusion and its last heartbeat; contexts the cell finished itself are left alone |
+| The `entity names with records` perf gate | wall-clock medians of 10 interleaved calls, so off-CPU time read as cost (one 51.8% read against the 50% ceiling) | the median of 20 alternating pairs of thread-CPU ratios; the ceiling stays 50% |
+| Stress gate shards holding `entity-card-perf.slow.test.ts` | estimated at 120 s per iteration, so 10 iterations (about 246 s each) overran the 35-minute shard | the measured 246 s weight splits them across two shards |
+
+### Itemized changes
+
+- `src/core/postgres-engine/schema-lock-timeout.ts`: `retrySchemaReplayOnDeadlock`, used by `initSchema`. Forced probe `test/schema-replay-deadlock-6143.test.ts` (a Postgres unit arm): 3 of 3 deadlocks before, 3 of 3 clean after.
+- `.github/workflows/native-locks.yml`, `scripts/native/heartbeat-finalize.ts`: the watcher job (`actions: read`, `statuses: write`, no-op on forks). `scripts/native/heartbeat.sh` logs each failed post's curl exit code and HTTP status, never a token or body.
+- Test leaks fixed: output capture in `cli-socket` and `cli-socket-context` tests, overlapping `withEnv` frames, console bindings after the stderr redirect, and a `process.exit` stub. New isolation lint R9 requires any test that installs a process-global hook to undo it.
+- `test/entity-card-perf.slow.test.ts`: the records gate reads thread CPU in alternating pairs. Forced probe (400 ms off-CPU on 70% of the references calls): old gate 100%/164% red, new gate 22%/26% green.
+- `scripts/stress/iteration-weights.json`: the measured stress weight for `entity-card-perf.slow.test.ts`.
+- `test/e2e/persistence-idle-pool.test.ts`: the drain checks count client backends only, so an autovacuum worker on the scratch database no longer reads as a pooled connection. Forced probe (aggressive autovacuum): 4 backends red before, green after.
+
 ## [0.60.450.0] - 2026-10-25
 
 **A git-canonical source now has declared database-only classes: private, alias-private and lineage-private pages, pages under a `storage.db_only` directory, never-filed derive-phase pages and paths Git ignores keep no file in Git on purpose, and any other write that would land in the database alone is refused. A page turning private is published as the Git commit that removes its file. The mode stays off by default and nothing turns it on yet.**
