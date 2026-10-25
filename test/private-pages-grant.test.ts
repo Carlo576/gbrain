@@ -32,7 +32,11 @@ import { parseClientRescopeArgs } from '../src/core/grants/cli.ts';
 import { readClientGrant, rescopeClientGrant } from '../src/core/grants/service.ts';
 import { noGrantFederatedScope } from '../src/core/source-resolver.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
-import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
+import { __resetPrivateVisibilityCacheForTests, withPrivateReadableSources } from '../src/core/search/private-visibility.ts';
+import { SemanticQueryCache } from '../src/core/search/query-cache.ts';
+import { prepareSemanticCache, resolveCacheSearchMode } from '../src/core/search/hybrid/cache-stages.ts';
+import { cacheScopeKey } from '../src/core/search/hybrid.ts';
+import type { HybridSearchMeta, SearchResult } from '../src/core/types.ts';
 import type { AuthInfo } from '../src/core/ops/contract.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -261,6 +265,34 @@ for (const kind of testBackends()) {
       await rescopeClient(clients['client-alice'], '--private-pages', 'granted-sources');
       expect((await call(tokens['alice-example'], 'get_page', { slug: PRIVATE_SLUG })).text).toContain(SECRET[ALICE]);
     }, 120_000);
+
+    test('the semantic result cache keys on the private-readable set: a granted caller\'s stored private result never serves an ungranted caller with the same scope and query', async () => {
+      const query = 'renewal thoughts for the quarter';
+      const opts = { excludePrivate: true, sourceIds: [ALICE, TEAM] };
+      const scope = cacheScopeKey(opts);
+      const [{ atttypmod: dims }] = await engine.executeRaw<{ atttypmod: number }>(
+        "SELECT atttypmod FROM pg_attribute WHERE attrelid = 'query_cache'::regclass AND attname = 'embedding'");
+      const embedding = new Float32Array(dims).fill(1 / Math.sqrt(dims));
+      const keyFor = async () => {
+        const { resolvedForCache, knobsHash } = await resolveCacheSearchMode(engine, opts);
+        return (await prepareSemanticCache(engine, query, opts, resolvedForCache, knobsHash)).cacheKnobsHash;
+      };
+      const granted = await withPrivateReadableSources([ALICE, TEAM], keyFor);
+      const ungranted = await keyFor();
+      const cache = new SemanticQueryCache(engine, { enabled: true });
+      const row = { slug: PRIVATE_SLUG, page_id: 1, title: 'Renewal thoughts', type: 'note', chunk_text: SECRET[ALICE], chunk_source: 'compiled_truth', chunk_id: 1, chunk_index: 0, score: 1, stale: false, source_id: ALICE } as SearchResult;
+      await engine.executeRaw('DELETE FROM query_cache');
+      try {
+        await cache.store(query, embedding, [row], { vector_enabled: true, detail_resolved: 'medium', expansion_applied: false, intent: 'general' } as HybridSearchMeta, { sourceId: scope, knobsHash: granted });
+        expect((await cache.lookup(embedding, { sourceId: scope, knobsHash: granted, queryText: query })).hit).toBe(true);
+        const served = await cache.lookup(embedding, { sourceId: scope, knobsHash: ungranted, queryText: query });
+        expect({ hit: served.hit, leaked: JSON.stringify(served).includes(SECRET[ALICE]) }).toEqual({ hit: false, leaked: false });
+        expect(await withPrivateReadableSources([], keyFor)).toBe(ungranted);
+        expect(await withPrivateReadableSources([TEAM, ALICE], keyFor)).toBe(granted);
+      } finally {
+        await engine.executeRaw('DELETE FROM query_cache');
+      }
+    });
 
     test('concurrent calls from two members never cross', async () => {
       const calls: Array<Promise<void>> = [];
