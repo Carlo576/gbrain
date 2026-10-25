@@ -52,7 +52,9 @@ async function extraction({ engine, ctx }: ManagedBrain, slug: string) {
   const backstop: FactsBackstopCtx = { engine, sourceId: 'default', source: 'mcp:put_page', sessionId: null, persistenceRequestId: write, operationContext: ctx };
   const snapshot = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!;
   const input = { turnText: snapshot.page.compiled_truth, pageSlug: slug };
-  return { slug, write, snapshot, backstop, input, session: async () => (await prepareManagedFactsSession(backstop, input))! };
+  // The backstop's settings for an automatic extraction (backstop.ts runPipelineBodyInner).
+  const session = async () => Object.assign((await prepareManagedFactsSession(backstop, input))!, { reportRefusals: true, entityMoveRetry: true });
+  return { slug, write, snapshot, backstop, input, session };
 }
 
 /**

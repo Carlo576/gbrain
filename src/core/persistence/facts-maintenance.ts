@@ -92,7 +92,10 @@ export interface ManagedFactsSession {
   fileRefusalRetry?: boolean;
   /** #6506: the batch is keyed by its input alone (no request id), so a stored withdrawal refusal would replay on every run. */
   inputKeyed?: boolean;
-  /** #7602: no caller request id, so an entity request refused because its entity page moved is re-admitted at the current revision. */
+  /**
+   * #7602: automatic extraction with no caller request id re-admits an entity request refused because its entity page
+   * moved, at the page's current revision. Explicit fact writers (remember, the fence writers) leave it unset and keep the refusal.
+   */
   entityMoveRetry?: boolean;
   /** #6091: set when the facts come from an ambient capture lane. */
   captureSource?: string;
@@ -312,7 +315,6 @@ export async function prepareManagedFactsSession(ctx: FactsBackstopCtx,
     // returning its own recorded outcome, so it never rechecks.
     fileRefusalRetry: !ctx.requestId && (!!ctx.persistenceRequestId || ctx.reAdmitFileRefusals === true && seed === inputDigest),
     inputKeyed: seed === inputDigest,
-    entityMoveRetry: !ctx.requestId,
     wait: new MaintenanceWriteWait(ctx.deadlineAtMs ?? null), ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}),
     ...(captureGateLaneForSource(ctx.source) ? { captureSource: ctx.source } : {}),
     ...(derivation ? { derivation: declareDerivation(derivation.trust, derivation.inputs) } : {}) };
