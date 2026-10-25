@@ -2207,12 +2207,109 @@ CREATE TABLE IF NOT EXISTS page_body_staging_texts (
 CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_texts (source_id, sha256);
 -- END GENERATED from src/core/page-body/schema.ts (PAGE_BODY_SCHEMA_SQL)
 
+-- Wave B per-segment derivation watermarks (migration v273; src/core/page-body/derivations.ts).
+-- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_SEGMENT_DERIVATIONS_SQL). Edit that file, then run: bun run build:schema
+CREATE TABLE IF NOT EXISTS page_segment_derivations (
+  page_id          INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  pipeline         TEXT    NOT NULL CHECK (pipeline IN ('links','mentions','timeline','fences','conversation_facts','facts_backstop','synopsis')),
+  occurrence_id    BIGINT  NOT NULL,
+  pipeline_version INTEGER NOT NULL CHECK (pipeline_version >= 0),
+  segment_sha256   BYTEA   NOT NULL CHECK (octet_length(segment_sha256) = 32),
+  context_hash     BYTEA   NOT NULL CHECK (octet_length(context_hash) = 32),
+  state            TEXT    NOT NULL CHECK (state IN ('done','partial','failed','skipped')),
+  output           JSONB,
+  receipt          JSONB,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, pipeline, occurrence_id)
+);
+CREATE INDEX IF NOT EXISTS page_segment_derivations_unsettled ON page_segment_derivations (pipeline, page_id) WHERE state IN ('partial','failed');
+CREATE TABLE IF NOT EXISTS page_derivation_spend (
+  page_id      INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  family       TEXT    NOT NULL CHECK (family IN ('facts','synopsis')),
+  spent_usd    DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (spent_usd >= 0),
+  reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (reserved_usd >= 0),
+  reserved_at  TIMESTAMPTZ,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, family)
+);
+CREATE TABLE IF NOT EXISTS page_segment_derivation_purges (
+  request_id        UUID      PRIMARY KEY,
+  source_id         TEXT      NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  needles           TEXT[]    NOT NULL,
+  patterns          TEXT[]    NOT NULL,
+  page_ids          INTEGER[] NOT NULL DEFAULT '{}',
+  phase             TEXT      NOT NULL DEFAULT 'sweep' CHECK (phase IN ('sweep','verify','recheck')),
+  recheck           INTEGER[],
+  found             INTEGER   NOT NULL DEFAULT 0 CHECK (found >= 0),
+  cursor_page       INTEGER,
+  cursor_pipeline   TEXT,
+  cursor_occurrence BIGINT,
+  batch_rows        INTEGER   CHECK (batch_rows >= 1),
+  stalled_at        TIMESTAMPTZ,
+  stalled_reason    TEXT      CHECK (stalled_reason IN ('statement_timeout','paid_row_unreadable')),
+  pending_reason    TEXT      CHECK (pending_reason IN ('scope_lock_busy')),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS page_segment_derivation_purges_source ON page_segment_derivation_purges (source_id, created_at);
+CREATE TABLE IF NOT EXISTS page_segment_derivation_purge_pages (
+  request_id UUID    NOT NULL,
+  page_id    INTEGER NOT NULL,
+  PRIMARY KEY (request_id, page_id)
+);
+CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SET search_path = pg_catalog, public AS $func$
+DECLARE
+  src TEXT;
+  page INTEGER;
+BEGIN
+  IF TG_TABLE_NAME = 'pages' THEN
+    src := NEW.source_id;
+    page := NEW.id;
+  ELSE
+    src := OLD.source_id;
+    page := OLD.page_id;
+  END IF;
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('gbrain:derivation-scope:' || src, 0));
+  INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
+    SELECT x.request_id, page FROM page_segment_derivation_purges x WHERE x.source_id = src ON CONFLICT DO NOTHING;
+  RETURN NULL;
+END
+$func$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS page_body_manifest_derivation_scope_retire ON page_body_manifest;
+CREATE TRIGGER page_body_manifest_derivation_scope_retire AFTER UPDATE OF gen_to ON page_body_manifest
+  FOR EACH ROW WHEN (OLD.gen_to IS NULL AND NEW.gen_to IS NOT NULL AND OLD.staging_id IS NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
+DROP TRIGGER IF EXISTS page_body_manifest_derivation_scope_delete ON page_body_manifest;
+CREATE TRIGGER page_body_manifest_derivation_scope_delete AFTER DELETE ON page_body_manifest
+  FOR EACH ROW WHEN (OLD.gen_to IS NULL AND OLD.staging_id IS NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
+DROP TRIGGER IF EXISTS pages_derivation_scope_delete ON pages;
+CREATE TRIGGER pages_derivation_scope_delete AFTER UPDATE OF deleted_at ON pages
+  FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
+CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS $func$
+BEGIN
+  IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
+    WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
+    WHERE m.page_id = NEW.page_id AND m.occurrence_id = NEW.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = NEW.segment_sha256))
+      AND CASE WHEN replace(translate(lower(COALESCE(NEW.output::text, '') || ' ' || COALESCE(NEW.receipt::text, '')), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM (VALUES (NEW.output), (NEW.receipt)) doc(j),
+    LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
+      UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
+    WHERE CASE WHEN replace(translate(lower(s.t), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM unnest(x.needles::text[]) k(n)
+      WHERE strpos(' ' || replace(translate(gbrain_fact_normalize(s.t), 'ς', 'σ'), 'i̇', 'i') || ' ', k.n) > 0) ELSE false END) ELSE false END) THEN
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END
+$func$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
+CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
+  FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
+-- END GENERATED from src/core/page-body/schema.ts (PAGE_SEGMENT_DERIVATIONS_SQL)
+
 -- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_BODY_RLS_SQL). Edit that file, then run: bun run build:schema
 DO $rls$
 DECLARE target TEXT;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
-    FOREACH target IN ARRAY ARRAY['page_segment_texts','page_body_manifest','page_body_stagings','page_body_staging_parts','page_view_digests','page_body_staging_texts'] LOOP
+    FOREACH target IN ARRAY ARRAY['page_segment_texts','page_body_manifest','page_body_stagings','page_body_staging_parts','page_view_digests','page_body_staging_texts','page_segment_derivations','page_segment_derivation_purges','page_segment_derivation_purge_pages'] LOOP
       IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE n.nspname = current_schema() AND c.relname = target AND c.relkind = 'r' AND NOT c.relrowsecurity) THEN
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', target);
@@ -2411,6 +2508,14 @@ BEGIN
         WHEN NOT (allowed ? target_source) THEN 'different_source' ELSE 'old_source_outside' END,
         'target_source',target_source,'old_source',old_source,'allowed',allowed)::text;
   END IF;
+  -- G7a (git-canonical-schema.ts): a git-canonical source takes rows only from a writer that declares the git protocol.
+  IF COALESCE(current_setting('gbrain.git_protocol',true),'') <> '1'
+    AND EXISTS (SELECT 1 FROM git_canonical_brain WHERE singleton=1 AND strict_sources>0)
+    AND EXISTS (SELECT 1 FROM sources WHERE id IN (target_source, old_source) AND config->>'canonical'='git') THEN
+    RAISE EXCEPTION USING ERRCODE='P0001', MESSAGE='git_protocol_required: this source is git-canonical and the writer does not declare the git protocol',
+      TABLE=TG_TABLE_NAME, SCHEMA=TG_TABLE_SCHEMA, CONSTRAINT='git_canonical_fence:mutation',
+      DETAIL=jsonb_build_object('op',TG_OP,'target_source',target_source,'old_source',old_source)::text;
+  END IF;
   IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
 END $fn$;
 
@@ -2426,6 +2531,40 @@ BEGIN
 END $body$;
 ;
 -- END GENERATED from src/core/persistence/schema.ts (PERSISTENCE_SCHEMA_STATEMENTS)
+
+-- BEGIN GENERATED from src/core/persistence/git-canonical-schema.ts (GIT_CANONICAL_SCHEMA_SQL). Edit that file, then run: bun run build:schema
+CREATE TABLE IF NOT EXISTS git_canonical_brain (
+  singleton INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+  strict_sources INTEGER NOT NULL DEFAULT 0 CHECK (strict_sources >= 0)
+);
+CREATE OR REPLACE FUNCTION gbrain_count_git_canonical_sources() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $fn$
+BEGIN
+  INSERT INTO git_canonical_brain(singleton, strict_sources)
+    VALUES (1, (SELECT count(*) FROM sources WHERE config->>'canonical' = 'git'))
+    ON CONFLICT (singleton) DO UPDATE SET strict_sources = EXCLUDED.strict_sources;
+  RETURN NULL;
+END $fn$;
+DROP TRIGGER IF EXISTS git_canonical_sources_count_insert ON sources;
+CREATE TRIGGER git_canonical_sources_count_insert AFTER INSERT ON sources
+  FOR EACH ROW WHEN (NEW.config->>'canonical' = 'git') EXECUTE FUNCTION gbrain_count_git_canonical_sources();
+DROP TRIGGER IF EXISTS git_canonical_sources_count_update ON sources;
+CREATE TRIGGER git_canonical_sources_count_update AFTER UPDATE ON sources
+  FOR EACH ROW WHEN (OLD.config->>'canonical' IS DISTINCT FROM NEW.config->>'canonical') EXECUTE FUNCTION gbrain_count_git_canonical_sources();
+DROP TRIGGER IF EXISTS git_canonical_sources_count_delete ON sources;
+CREATE TRIGGER git_canonical_sources_count_delete AFTER DELETE ON sources
+  FOR EACH ROW WHEN (OLD.config->>'canonical' = 'git') EXECUTE FUNCTION gbrain_count_git_canonical_sources();
+INSERT INTO git_canonical_brain(singleton, strict_sources)
+  VALUES (1, (SELECT count(*) FROM sources WHERE config->>'canonical' = 'git'))
+  ON CONFLICT (singleton) DO UPDATE SET strict_sources = EXCLUDED.strict_sources;
+DO $rls$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper))
+    AND EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema() AND c.relname = 'git_canonical_brain' AND c.relkind = 'r' AND NOT c.relrowsecurity) THEN
+    ALTER TABLE git_canonical_brain ENABLE ROW LEVEL SECURITY;
+  END IF;
+END $rls$;
+-- END GENERATED from src/core/persistence/git-canonical-schema.ts (GIT_CANONICAL_SCHEMA_SQL)
 -- Verified text projection work (migration 153).
 -- BEGIN GENERATED from src/core/page-state/projection-schema.ts (PAGE_PROJECTION_SCHEMA_SQL). Edit that file, then run: bun run build:schema
 DROP TRIGGER IF EXISTS trg_pages_search_vector ON pages;

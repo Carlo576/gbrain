@@ -207,6 +207,25 @@ environment-dependent, so a re-run during an outage could silently repoint a
 healthy Postgres brain at the PGLite floor. Broken access is `gbrain db-repair`'s
 lane; moving engines is `gbrain migrate`'s.
 
+**Put the database next to the agent.** A warm search makes dozens of
+sequential round trips to Postgres, so the distance between the agent host and
+the database dominates its latency: in one deployment, moving Postgres into the
+agent host's region took warm search from 3.0 s to 1.2 s at p50. Create the
+database (and use the pooler) in the region of the machine that runs the agent
+and its `gbrain serve`.
+
+<a id="switching-a-database"></a>
+**Switching a brain's database** (a region move, a new server): stop gbrain's
+writers, then change every URL the tooling reads, not just the main one:
+`GBRAIN_DATABASE_URL`, `DATABASE_URL`, `GBRAIN_DIRECT_DATABASE_URL`, the
+`database_url` in `config.json`, and each env file, wrapper and service
+definition that sets them (`gbrain engine status --json` shows which source
+wins, with the password redacted). Restart every gbrain process, since a
+running process keeps the environment it started with. Prove the switch from
+the database side: a row written after the restart (a job, a test page)
+appears on the new server and no gbrain session remains on the old one. A
+shell's `echo $DATABASE_URL` proves only that shell.
+
 `--json` emits `{status, engine, ladder_rung, url_source}` as the ONLY stdout
 content so a scripted install can `| jq` it. The access token is never
 persisted, logged, or echoed.
@@ -437,7 +456,18 @@ brain rather than making another bundled copy. Follow the
 and preserve edited files.
 
 If you're running an agent platform (OpenClaw, Hermes, or any repo with a workspace),
-scaffold the bundled skills into it:
+scaffold the bundled skills into it. On OpenClaw, install the brain-first core:
+
+```bash
+gbrain skillpack scaffold --harness openclaw --workspace /path/to/agent/workspace
+```
+
+That is five skills (`query`, `brain-ops`, `capture`, `data-loss-gate`,
+`resolve-before-asking`) and their shared files. OpenClaw lists every workspace
+skill's name and description in every prompt, so each scaffolded skill costs
+input tokens on every turn whether or not it is used. Add a skill when the agent
+needs it (`--skill <name>`, repeatable), or the whole bundle with `--all`. On
+Hermes or any other workspace:
 
 ```bash
 cd /path/to/agent/workspace
@@ -534,6 +564,22 @@ Read skills/soul-audit/SKILL.md and follow it.
 This generates SOUL.md (agent identity), USER.md (user profile), ACCESS_POLICY.md
 (who sees what), and HEARTBEAT.md (operational cadence) from the user's answers.
 
+**On OpenClaw,** the due-job list renders as `SCHEDULES.md` instead, and the
+rendered `AGENTS.md` points there. OpenClaw 2026.10.6 retired its own
+`HEARTBEAT.md`: `openclaw doctor --fix` imports a workspace file by that name
+into its heartbeat monitor, archives it under the state directory's
+`backups/heartbeat-migration/` and removes it. Render detects an OpenClaw
+workspace (`OPENCLAW_WORKSPACE_DIR`, `OPENCLAW_WORKSPACE`, or a `workspace`
+tree under `OPENCLAW_STATE_DIR`, `~/.openclaw` or `~/.openclaw-<profile>`);
+for a workspace OpenClaw finds only through its config, pass `--host openclaw`.
+A workspace rendered before this change still has the old references: re-render
+both files with `gbrain bootstrap render --only AGENTS.md,HEARTBEAT.md --force`
+(the old copies are backed up first; carry over any hand edits, and copy the
+doctor's archived `HEARTBEAT.md` when the user edited the job list). Jobs that
+must run on time belong in the host scheduler through the
+[one wrapper](docs/guides/cron-schedule.md#calling-gbrain-unattended), not
+only in the due-job list, which runs only when a session starts.
+
 If skipped, minimal defaults are installed automatically.
 
 ## Step 7: Recurring Jobs
@@ -543,7 +589,32 @@ capture, enrichment, maintenance or a service; do not infer consent from a
 successful install or from a health recommendation.
 
 Set up using your platform's scheduler (OpenClaw cron, Railway cron, crontab), or skip the
-platform glue entirely with `gbrain autopilot --install` (built-in self-maintaining daemon):
+platform glue entirely with `gbrain autopilot --install` (built-in self-maintaining daemon).
+
+Every cron job, workspace script and hook calls gbrain through **one wrapper**
+that sets `GBRAIN_HOME` (never `HOME`), loads the brain's env file and runs
+the installed binary, never `bun run src/cli.ts` with an inherited
+environment. A scheduled job has another `HOME` than your shell, so a bare
+call finds no database (every lookup silently empty) or acts as a second host
+(`refresh_not_owner`). Log the wrapper's stderr instead of sending it to
+`/dev/null`, check exit codes against the [operator protocol](docs/protocol/AGENT_OPERATOR_v1.md),
+keep hook output off stdout so `--json` stays parseable, and give each call a
+timeout of at least 10 s. The wrapper and its rules:
+[call gbrain through one wrapper](docs/guides/cron-schedule.md#calling-gbrain-unattended).
+
+- **Managed brain checkout** (every 15 min, on the owner host):
+  `gbrain sources refresh <id>` is the only sanctioned fast-forward; it drains
+  writes, fast-forwards and re-syncs. Scripts commit the files they write
+  with `gbrain git commit-push -- <paths>` (or save pages through
+  `put_page`/`capture`), never with plain `git commit`: an unpublished local
+  commit makes the checkout diverge and every refresh refuse
+  `refresh_diverged`. `gbrain doctor --only cron_gbrain_home` flags cron
+  lines that skip the wrapper
+  ([scripts and the managed checkout](docs/guides/shared-checkout-git.md#scripts-and-the-managed-checkout)).
+- **Workers**: start `gbrain jobs supervisor` with `--max-rss <MB>`; with
+  `--job-isolation process` the cap also covers each job child's process tree
+  (v0.60.426.0). Size the host for (concurrency + 1) × the cap
+  ([deployment](docs/guides/minions-deployment.md#per-job-process-isolation---job-isolation-process)).
 
 - **Live sync** (every 15 min): `gbrain sync --repo ~/brain && gbrain embed --stale`
   — or `gbrain sync --watch` for a continuous loop. Safe on keyless brains:
@@ -647,6 +718,16 @@ operational DB and content backups, consent, edited files, and grant fences.
 DB-only export, explicit regrants, parent/client reconnection, and native
 verification are separate stages; report pending stages rather than claiming
 the whole migration completed.
+
+On a host with resident processes (autopilot, a jobs worker, a serve), pause
+autopilot (`gbrain autopilot pause`), wait until no job is active, run
+`gbrain upgrade` on every install (it restarts every gbrain process onto the
+new build and verifies one build runs, or refuses `restart_refused` naming the
+process it cannot restart), check that each process reports the new version,
+then `gbrain autopilot resume`. A production brain follows the stable channel
+(`gbrain config set self_upgrade.channel stable`)
+([the order](skills/gbrain-upgrade/SKILL.md#always-on-hosts-pause-drain-upgrade-verify-resume),
+[stable channel](docs/guides/upgrades-auto-update.md#stable-channel)).
 
 For memory-only upgrades, keep services and paid reindexing opt-in. The same
 command works for `bun install -g` and `git clone + bun link` installs:
