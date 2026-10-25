@@ -151,7 +151,7 @@ function putProvenance(row: WriteRequest, snapshot: PageSnapshot | null, parsed:
   return stamp;
 }
 /** A derive-phase page (DERIVE_PHASE_DB_ONLY_DEFAULTS) that never recorded a canonical file. */
-function isNeverFiledDerivedPage(slug: string, page: { source_path?: string | null; source_uri?: string | null }): boolean {
+export function isNeverFiledDerivedPage(slug: string, page: { source_path?: string | null; source_uri?: string | null }): boolean {
   return !page.source_path && !page.source_uri && DERIVE_PHASE_DB_ONLY_DEFAULTS.some(prefix => slug.startsWith(prefix));
 }
 /**
@@ -890,7 +890,7 @@ async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: Wri
   const ordinaryPage = ['put_page','capture','restore_page','revert_version','edit_page'].includes(row.operation);
   // A managed maintenance page (e.g. the dream write-back after grounding
   // quarantine) republishes a body; its automatic links follow that body.
-  const autoLinkedPage = ordinaryPage || p.kind === 'managed_maintenance_page';
+  const autoLinkedPage = ordinaryPage || p.kind === 'managed_maintenance_page' || row.operation === 'add_timeline_entry';
   const capture = row.operation === 'capture' && typeof p.capture_path === 'string' && typeof p.capture_file_hash === 'string'
     ? { path: p.capture_path, hash: p.capture_file_hash } : undefined;
   // Projections, advisories, link resolution (links-preparation.ts), the file target and the core guard go out together.
