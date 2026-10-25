@@ -4,10 +4,11 @@
  * The keyword arm returns only pages that matched the query. With an embedding
  * model on, the vector arm fills the rest of the mode's row limit with every
  * page it can reach, however weakly related, so an agent asking one question
- * read most of a small brain (a median 12 pages a call against keyword's 2 on
- * the harness ladder, and with them pages the asking person may not read).
- * Cosine does not separate those rows: on a small corpus the filler often
- * scores above the keyword hit, so a similarity floor cannot drop them.
+ * read most of a small brain: on the multi-member harness, a median 13 pages a
+ * call against keyword's 1, with a page the asking member may not read in 46 of
+ * 51 calls. Rank 1 was never such a page. Cutting at 3 pages left one in 12
+ * calls; 4 left 23, and 2 left 9 while keeping a third fewer readable pages,
+ * so the default cap is 3.
  *
  * The cap keeps every page with lexical evidence (a keyword or title hit, an
  * alias or exact identity match, a pinned relational answer), exactly the

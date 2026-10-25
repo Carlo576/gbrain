@@ -10,6 +10,32 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.455.0] - 2026-10-25
+
+**A remote `search` or `query` that names no `limit` now returns every page that matched the query's words, a name or an exact identity, but at most 3 pages in total that matched only by meaning. On the multi-member harness with embeddings on, an agent's search used to return a median 13 pages, nearly the whole test brain, and 46 of 51 calls carried a page the asking member could not read. Replayed against this release, the median is 3 pages and 14 calls carry such a page, 4 of them because the agent asked for `limit` itself. A connection with no source grant whose sources hold no page is now refused with `sources_not_readable` instead of answering empty, and `gbrain sources add` prints the command that fixes it.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A remote `search` or `query` with no `limit`, embeddings on | the vector arm filled the mode's row limit with every page it could reach | every page with a keyword, title, alias or exact-identity match, plus pages found only by meaning up to 3 pages in total. A line after the results says how many were left out and that `limit` returns them; `_meta.retrieval.page_cap` counts them |
+| The same call with an explicit `limit`, a paged call (`offset`), or any local CLI call | | unchanged |
+| A brain with no embedding model (keyword search) | | unchanged: every keyword match comes back |
+| Changing the cap | | `gbrain config set search.remote_page_cap <n>`; `0` turns it off |
+| An unscoped remote `search`, `query`, `recall` or `list_pages` from a connection with no source grant, when every source it reads holds no page and other sources do | `[]` with a `sources_not_readable` notice (kind degraded) | refused with `sources_not_readable` (class host_only). The fix runs on the brain host: `gbrain sources federate <source>`, with the source the user picks, or a grant for the token (`gbrain auth rescope --token <name> --sources <ids>`). It never names a source the connection cannot read |
+| The same read when its sources hold pages that match nothing, or on a brain with no pages; any read from a token granted sources, an OAuth client, a bound connection, or one that names `source_id` or `source_ids` | | unchanged |
+| `gbrain sources add` without `--federated` or `--no-federated` on a brain where connections with no source grant read no page | a stderr warning | also `next: gbrain sources federate <id>` on stdout |
+| `gbrain sources add --json` | not available | `{id, name, local_path, remote_url, federated, next?}` on stdout; the human lines move to stderr |
+
+Every vector path (the hybrid vector arm, the embedding-failure fallback and the `query` image branch) now has a test proving it reads only the sources the keyword path reads, for granted tokens and per-call `source_id`/`source_ids`, on PGLite and Postgres. No scope gap was found.
+
+### What to watch for after you upgrade
+
+- An agent that needs the full ranked list (a "find every" or landscape question) should pass `limit`; the line after capped results tells it so.
+- The cap is a default for what one call returns, not an access boundary. Access is still per source: give each member's token only its sources.
+- A deployment whose no-grant tokens used to get `[]` from an empty floor now gets an error. Federate the source those connections should read, or grant the tokens their sources.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
 ## [0.60.452.0] - 2026-10-25
 
 **`search` and `query` take `source_ids`, so one request can be narrowed to the sources the person it serves may see on a shared brain, and the starter MCP tool list that harnesses re-fetch every turn is about 27% smaller: 19,489 bytes instead of 26,546 over stdio (35 tools) and 18,825 instead of 25,555 over HTTP (33 tools). The list only narrows; the token's grant stays the boundary. Every tool is still listed, and every parameter the starter list leaves out is still accepted and comes back from `request_tools {tools: [...]}`.**
