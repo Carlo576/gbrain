@@ -529,3 +529,154 @@ cross-encoder rerank-score cliff, before the limit slice, first page only.
 Never-empty failsafe (`minKeep`), no-op when fewer than 2 results carry a
 finite rerank score (covers the fail-open reranker path), and alias-hop exact
 matches are preserved through the cut. Weak-top floor: when the top rerank
+score is below `minTopScore` (default 0.35, config `search.autocut_min_top`),
+cliff trimming is skipped entirely — a low-confidence list returns the full
+cluster for the caller to judge instead of collapsing to one result. Knobs:
+per-call `SearchOpts.autocut` → `search.autocut` / `search.autocut_jump` /
+`search.autocut_min_top` config → mode bundle. The pre-autocut pool can be
+captured for offline floor replay: `hybridSearch` exposes an eval-only
+`onRerankPool` hook that fires with the exact pool `applyAutocut` is about to
+cut (post-rerank, post alias-hop / exact-lookup, unscored injections included),
+`gbrain eval longmemeval --capture-pool` records it per row as `rerank_pool`,
+and `scripts/replay-autocut-floor.ts` replays every floor — including `off` —
+from that single capture, validating byte-for-byte against the live decisions
+before any other cell is read.
+
+Each stage is testable in isolation. Each stage is replaceable. The whole pipeline is < 1ms of orchestration cost; the latency budget goes to the upstream HTTP calls (embedding, rerank) and the index scans.
+
+## Evidence delivery: whole evidence after ranking
+
+Ranking decides which pages matter; the reader still needs enough of each page
+to answer. `return_unit` (`chunk`, `window`, `section`, `page`, `auto`; default `auto`)
+adds a stage after ranking, cache and capture, and before output
+redaction and snippet capping, shared by `search`, `query`, `recall` and
+`think` (via `think.return_unit`). It groups the ranked hits by page, reads
+every needed neighbor chunk in ONE batched, page_id-keyed query that
+re-authorizes each page under the caller's current scope, sanitizes each
+page's complete body before slicing, locates the hit chunks in it (so chunk
+overlap never duplicates text), cuts the requested unit around the hits,
+and packs blocks by rank into the token budget with a per-page floor so lower
+ranked sessions keep their matching span. The strict protected-body sanitizer
+runs on the whole body first, so delivered evidence never contains more than
+`get_page` returns to the same caller. The default `auto` expands only
+conversation pages (by page type or `chat/` / `conversations/` slug) to the
+whole page and leaves every other hit its ranked chunk; with no conversation
+hit, or with `chunk`, the stage does not run and responses are byte-identical. The measured motivation: on 400 held-out
+LongMemEval questions whole sessions answered 361 against 253 for top-5
+chunks, while neighbor windows reached only 285–292, so `auto` gives
+conversations exactly the `page` unit. `auto` itself answered 445 of 500
+LongMemEval-S questions against 312 for chunks (development data), and the
+preregistered sealed check was inconclusive at a ceiling (149 against 147 of
+150); see `docs/evidence-delivery.md` for the numbers and the token cost. A lexical
+excerpt selector that failed its evaluation is recorded in
+`docs/eval/ANSWER_PACKET_RESULTS.md`. Contract, algorithms and latency:
+[`docs/evidence-delivery.md`](../evidence-delivery.md).
+
+## How to verify on your own brain
+
+```bash
+# Reproduce the public LongMemEval receipt (cleaned S split, k=5) like-for-like:
+# --by-type prints strict recall_all@5 (headline) and recall_any@5 (diagnostic);
+# the like-for-like row pins the reranker and autocut off.
+gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
+  --retrieval-only --top-k 5 --by-type --no-trajectory --mode balanced --reranker off --autocut off
+# The shipped default path (what balanced/tokenmax run): --reranker on --autocut off
+
+# Capture your own queries and replay against retrieval changes
+export GBRAIN_CONTRIBUTOR_MODE=1
+# ... use gbrain normally ...
+gbrain eval export > before.ndjson
+# ... change something ...
+gbrain eval replay --against before.ndjson
+
+# A/B retrieval strategies on a labeled fixture
+gbrain eval --qrels qrels.json --config-a baseline.json --config-b balanced.json
+```
+
+The current measured LongMemEval result (95.53% session-level `recall_all@5` on the release default path, 449/470, and 93.40% with the reranker off, 439/470; cleaned S split, 470 scored questions, k=5, measured 2026-09-06 by the in-repo harness), its per-type table, every measured ranker arm and the judged answer-accuracy row live in [`docs/eval-bench.md`](../eval-bench.md#public-benchmarks-longmemeval).
+
+Methodology + metric glossary in [`docs/eval/SEARCH_MODE_METHODOLOGY.md`](../eval/SEARCH_MODE_METHODOLOGY.md).
+
+## Restricted salience
+
+Remote reads default to the `world` take holder when no grant is supplied; an
+explicit empty grant permits no takes. Counts and average weights use only
+permitted active takes. Stored emotional weight contributes zero because it
+combines all holders. Recent-salience inclusion uses `updated_at` with the
+same recency formula as unrestricted local reads, which use their full
+formulas. Deleted, quarantined and archived contributors are excluded
+before ranking, limits and anomaly-baseline aggregation. Default remote page
+privacy also excludes private pages; its documented opt-outs do not widen
+take-holder permissions.
+
+
+## Chunk rebuilds after upgrading
+
+**Say to your agent:** *"Check whether my search index is ready, and repair
+code metadata without spending on embeddings."* Search and query report
+`projection_readiness` for empty and nonempty results. `projection_pending`
+means visible pages lack a current revision seal; `projection_status_unknown`
+means the diagnostic could not establish readiness. Neither is a clean miss.
+`projection_by_design` means the only unsealed pages in scope are
+protected-OCR images (or pages of an archived source), which stay out of the
+index by design: nothing is pending and no repair applies.
+The CLI names these states; `--json` retains its result-array format and sends
+incompleteness notices to stderr. MCP carries them in `_meta.retrieval`.
+
+A resident `gbrain serve` drains queued Markdown and code rebuilds
+without provider calls. Code repair can also run through the current owner:
+`gbrain reindex-code --force --no-embed`. Rebuilds preserve only exact,
+provenance-compatible vectors: each vector records the embedding input it was
+built from (`content_chunks.embedding_input_hash`: column, model, dimensions,
+wrapping tier and wrapped text), and a rebuild keeps it only when the current
+page would produce the same input, so an unchanged contextual page keeps its
+vectors and a synopsis-mode body edit nulls every synopsis-tier chunk. Vectors
+written before that record existed are grandfathered on pages whose mode
+is still NULL; contextual-mode repair and reindex stamp compatible raw inputs
+when moving those pages to explicit `none`. An explicit `none` page may have
+inherited a title-wrapped vector, so a rebuild clears unstamped vectors there,
+and switching from title or synopsis to `none` clears active text vectors
+immediately. Genuine old raw vectors on explicit `none` pages may need a
+one-time re-embed; it never starts automatically. Remaining NULL vectors
+still need an explicitly authorized `gbrain embed --stale` run. A text-ready
+index is not a promise that every page has a vector. Diagnostics do not
+disclose private or foreign-source pending pages and never start repair
+themselves.
+
+Markdown chunk creation applies the strict protected-body sanitizer before
+splitting text. For remote reads, all existing chunks of every page kind are
+withheld until a successful rebuild records the current chunker version. Public
+pages require this rebuild too; trusted local chunk reads remain available. Body or
+chunk changes invalidate that record until the next successful rebuild. Re-importing
+unchanged content (`gbrain sync --full`, `gbrain import`) re-seals such a page
+without a page write or journal admission. While pages are withheld, remote
+`search` / `query` report `degraded: [safe_index_pending]` on empty and partial
+results alike (the MCP empty-result block names it) instead of a clean or complete
+answer, and `gbrain doctor` counts the withheld markdown and code pages and points
+at `gbrain repair safe-chunks`, which re-seals them on any brain, managed included.
+Direct page reads continue to use current source and visibility policy plus body
+sanitization.
+
+Run rebuild commands from a local installation on the brain host; thin clients
+cannot rebuild the host's indexes.
+`gbrain reindex --markdown --dry-run --no-embed` previews the existing rebuild.
+`gbrain reindex --markdown --no-embed` rebuilds without embedding calls, replacing
+previous vectors; use `gbrain embed --stale` later to restore semantic retrieval
+when provider usage is authorized. The regular reindex path rebuilds and embeds.
+Code pages use `gbrain reindex-code --force --no-embed`. Existing image indexes
+require reimporting the source files; images whose OCR contains protected
+sections remain unavailable to remote chunk retrieval. Schema migrations 160
+and 161 install projection statistics and the pending-projection lookup index;
+they do not rebuild vector indexes or call an embedding provider.
+
+`query --since` includes its exact lower boundary. An exact `--until` timestamp
+is inclusive without losing fractional precision; a date-only upper bound
+includes the entire day, implemented as an exclusive next-midnight boundary.
+Legacy direct engine `afterDate` and `beforeDate` bounds remain strict unless
+their explicit inclusivity flags are set.
+
+
+Optional code-graph expansion is omitted from remote search. The six dedicated
+code-inspection operations are also temporarily local-only; see the
+[MCP surface runbook](../operations/mcp-surface-runbook.md#temporary-code-inspection-availability).
+These restrictions are separate from the chunk rebuild requirement.

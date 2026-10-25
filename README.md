@@ -381,3 +381,78 @@ Data flowing into the brain. Each integration is a recipe — markdown + setup h
 
 Memorable stores replayable procedures from coding sessions. Its relay is off by
 default and requires an explicit disclosure/consent step; it can send redacted
+traces and query text off-machine. Read the [Memorable integration guide](docs/memorable-agents.md)
+for installation, data flow, per-harness limitations, and removal.
+
+**Say to your agent:** *"Explain Memorable's data sharing before enabling it."*
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Repo[Markdown brain repos] --> Sync[Sync and parse]
+    Sync --> Engine{Brain engine}
+    Engine -->|default| PGLite[(PGLite)]
+    Engine -->|shared or large| Postgres[(Postgres and pgvector)]
+    Agent[AI agent or operator] --> Surface[CLI or MCP]
+    Surface --> Ops[Contract-first operations]
+    Ops --> Search[Hybrid retrieval]
+    Ops --> Graph[Typed graph traversal]
+    PGLite --> Search
+    Postgres --> Search
+    PGLite --> Graph
+    Postgres --> Graph
+    Search --> Synthesis[Synthesis and gap analysis]
+    Graph --> Synthesis
+    Synthesis --> Answer[Cited answer]
+```
+
+**Two engines, one contract.** PGLite (Postgres 17 via WASM, zero-config, default) for personal brains up to ~50K pages. Postgres + pgvector (Supabase or self-hosted) for shared / large / multi-machine deployments. The contract-first `BrainEngine` interface in [`src/core/engine.ts`](src/core/engine.ts) defines the 140+ methods both engines implement; CLI and MCP server are generated from one source.
+
+**Canonical files preserve file-backed knowledge.** Your brain repo holds Markdown that GBrain indexes for retrieval; deletes in git become soft-deletes in the database. DB-only pages, unresolved facts, revision history, and operational state need a separate database backup. See the [system-of-record contract](docs/architecture/system-of-record.md). You can publish public subsets, share team mounts, and run thin-client setups pointing at a colleague's brain server. Topologies in [`docs/architecture/topologies.md`](docs/architecture/topologies.md).
+
+**Two organizational axes (brain ⊥ source).** A *brain* is a database (your personal brain, a team mount you joined). A *source* is a repo inside that brain (wiki, gstack, an essay, a knowledge base). Routing lives in `.gbrain-source` dotfiles and resolves via a documented 6-tier precedence chain. Full diagrams in [`docs/architecture/brains-and-sources.md`](docs/architecture/brains-and-sources.md).
+
+**Why the graph matters.** Vector search finds similar text; graph retrieval follows stored relationships. Extracted edges are evidence to inspect, not proof that a relationship is true. Graph freshness depends on the write path and maintenance described in [memory boundaries](docs/guides/memory-boundaries.md#page-writes-and-the-graph-are-separate-outcomes). Deep dive: [retrieval architecture](docs/architecture/RETRIEVAL.md); [entity recall](docs/guides/entity-recall.md).
+
+## Troubleshooting
+
+Start with `gbrain doctor`. For database access failures, use `gbrain engine status --probe` and `gbrain db-repair` before changing configuration.
+
+**Say to your agent:** *"Check my brain health and show me the repair plan before changing anything."*
+
+[Troubleshooting reference](docs/guides/troubleshooting.md) covers installation recovery, PGLite startup, embedding dimensions, locks, import failures, and sync.
+
+## Docs
+
+- [`docs/INSTALL.md`](docs/INSTALL.md) — every install path, end to end
+- [`docs/guides/bootstrap.md`](docs/guides/bootstrap.md) — the persistent-personal-agent bootstrap contract (interview, identity files, hooks, private repo, security posture, uninstall), plus local harness mode (`gbrain bootstrap harness`) for wiring framework-spawned Claude Code/Codex sessions to a running serve
+- [`docs/what-schemas-unlock.md`](docs/what-schemas-unlock.md) — why schemas matter: 7 killer use cases, the structural argument for typed page kinds, the agent-co-curates pattern
+- [`docs/schema-author-tutorial.md`](docs/schema-author-tutorial.md) — 5-minute walkthrough: fork the bundled pack, add a custom type, backfill existing pages, prove the wiring via `gbrain whoknows`
+- [`docs/architecture/`](docs/architecture/) — system design, topologies, retrieval theory
+- [`docs/guides/`](docs/guides/) — how-to runbooks (google connect, open loops, sub-agent routing, minion deployment, skill development, brain-first lookup, idea capture, diligence ingestion)
+- [`docs/integrations/`](docs/integrations/) — connecting external data sources (voice, email, calendar, embedding providers)
+- [MCP task guide](docs/mcp/README.md) — deployment and per-client setup (Claude Desktop, Code, Cursor, ChatGPT, Perplexity, Cowork)
+- [MCP administration](docs/mcp/ADMIN.md) — owner dashboard access, client registration, OAuth, permissions, and token recovery
+- [Evals](docs/eval/) and [research](docs/research/) — methods and results
+- [`docs/ethos/`](docs/ethos/) — philosophy (thin harness, fat skills, markdown as recipes, origin story)
+- [`AGENTS.md`](AGENTS.md) — entry point for non-Claude agents
+- [`CLAUDE.md`](CLAUDE.md) — entry point for Claude Code (deep operating context)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor guide, test discipline, eval-capture mode
+- [`SECURITY.md`](SECURITY.md) — install-path trust model, self-update integrity, automated scanning, OAuth threat model, hardening defaults
+
+## Contributing
+
+Run `bun run test` for the fast loop, `bun run verify` for the pre-push gate, `bun run ci:local` to run the full Docker-backed CI stack locally. Detailed test discipline in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Community PRs are batched into release waves rather than merged one-by-one — see the community-PR-wave process in [`docs/RELEASING.md`](docs/RELEASING.md). Contributor attribution stays attached via `Co-Authored-By:` trailers. We credit every accepted contribution in [`CHANGELOG.md`](CHANGELOG.md).
+
+If you find a bug or want a feature: open an issue first. Quick fixes (typo, doc bug, obvious regression) can go straight to a PR. Anything touching schema, retrieval ranking, MCP protocol, or the security boundary needs a design discussion in the issue first.
+
+## License + credit
+
+MIT. I built GBrain to run my OpenClaw and Hermes deployments — the production brain behind my AI agents.
+
+Origin story: [`docs/ethos/ORIGIN.md`](docs/ethos/ORIGIN.md).
+
+Community PR contributors are credited in `CHANGELOG.md` per release. Attribution for the retired provider's historical embedding and reranker integration remains in Git at `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29`. Voyage AI for the asymmetric-encoding recipe template. Ramp Labs for the search quality improvements lineage.
