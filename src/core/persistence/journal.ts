@@ -464,7 +464,7 @@ export function independentGroup(key: string | null): boolean {
 export function syncGroup(key: string | null): boolean {
   return key !== null && key.startsWith('sync:');
 }
-/** publicationGroupKey in SQL, over a persistence_requests row (test/publication-group-key-sql.test.ts holds them equal). */
+/** publicationGroupKey in SQL, over a persistence_requests row (test/git-door-g6-publication-groups.test.ts holds them equal). */
 export const GROUP_KEY_SQL = `CASE WHEN jsonb_typeof(intent->'group')='string' THEN 'sync:'||(intent->>'group')
   WHEN operation='submit_job' AND intent->>'kind'='managed_maintenance_page' AND jsonb_typeof(intent->'maintenance_batch')='string' THEN 'maintenance:'||(intent->>'maintenance_batch')
   WHEN operation='submit_job' AND (intent->>'kind' IN ('managed_atom_page','managed_atom_delete')
