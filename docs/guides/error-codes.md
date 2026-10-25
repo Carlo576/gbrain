@@ -4521,6 +4521,36 @@ More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/trou
 
 More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
 
+### vector_prewarm_extension_missing
+
+<a id="vector_prewarm_extension_missing"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain embeddings prewarm` was refused before reading anything because the pg_prewarm extension is not created in the brain's database (or the server does not ship it). | Prewarm loads index pages into shared_buffers with pg_prewarm, the Postgres contrib function for exactly that; creating an extension needs a database owner or superuser, so gbrain never creates it itself. | Ask the database administrator to run CREATE EXTENSION IF NOT EXISTS pg_prewarm; (install the PostgreSQL contrib package first if the server lacks it), then rerun gbrain embeddings prewarm. | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/ENGINES.md#vector-index-prewarm](../../docs/ENGINES.md#vector-index-prewarm)
+
+### vector_prewarm_unsupported_engine
+
+<a id="vector_prewarm_unsupported_engine"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain embeddings prewarm` was refused because the brain is PGLite; nothing was read. | Prewarm fills a Postgres server's shared_buffers so later processes find index pages cached; PGLite runs inside each gbrain process, with no server cache that outlives it. | Nothing to do on PGLite. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/ENGINES.md#vector-index-prewarm](../../docs/ENGINES.md#vector-index-prewarm)
+
+### vector_prewarm_wont_fit
+
+<a id="vector_prewarm_wont_fit"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain embeddings prewarm` was refused before reading anything because the brain's HNSW indexes are larger than half of shared_buffers. | Prewarm loads the indexes into shared_buffers, the cache Postgres sizes and keeps; past half of it the prewarm would evict heap and keyword-index pages other reads need, so the next searches would pay first-touch reads on those instead. effective_cache_size does not decide: it is a planner hint, not memory the server holds. | Raise shared_buffers on the database host to at least twice the index size the message names and restart Postgres, or leave the indexes cold; read the fit with gbrain embeddings prewarm --dry-run --json. Run: gbrain embeddings prewarm --dry-run --json | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/ENGINES.md#vector-index-prewarm](../../docs/ENGINES.md#vector-index-prewarm)
+
 ### verification_failed
 
 <a id="verification_failed"></a>
