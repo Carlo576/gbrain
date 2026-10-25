@@ -37,7 +37,6 @@ import { formatTrustRef, pageRef, parseTrustRef, resolvePageRef, type TrustRef }
 import { storedTrustTier, trustLabel, type TrustTier } from './tier.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { getWriteGateHold, releaseWriteGateHold, type WriteGateHold } from '../write-gate-store.ts';
-import { submitTrustRelease } from './release-publish.ts';
 import { withCoordinatedWrite, withTrustPromotion, withWriteAttribution, withWriteTrust } from '../persistence/context.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
@@ -186,7 +185,7 @@ const defaultHoldStore: HoldStoreAdapter = {
     return true;
   },
   async drop(tx, id, by) { return (await tx.executeRaw(decideHoldSql('dropped'), [id, by])).length === 1; },
-  publish: submitTrustRelease,
+  async publish(engine, id, by, config) { return (await import('./release-publish.ts')).submitTrustRelease(engine, id, by, config); },
 };
 /**
  * The transactional release: the fact enters memory as the owner's confirmed row, database-only (its embedding is
