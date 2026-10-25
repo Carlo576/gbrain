@@ -10,6 +10,25 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.460.0] - 2026-10-25
+
+**`search` and `query` now return a conversation page's text as a quoted excerpt, with tool-call JSON in it replaced by a one-line summary, so an agent reading the result can't mistake an old tool call for a live one.**
+
+Imported chat transcripts can quote tool-call or function-call JSON from the original conversation: a pasted agent log, a model that wrote its call as text. Search used to return that JSON verbatim, and one agent harness's prompt-injection classifier flagged such a result as malicious (#7600).
+
+A row whose page has type `conversation` (what `gbrain transcripts ingest` and the chat connectors write) now comes back with `quoted: "transcript"` and its `chunk_text` wrapped: a line naming the page as source material, not instructions, then the text inside a code fence it cannot close. Each tool-call block inside becomes `[tool call: <name>, arguments omitted]`, including a block cut off at the start or end of a chunk; the conversation around it stays. This happens at read time in the one place both MCP and the CLI pass through. Stored pages, ranking, scores and the set of returned rows are unchanged, and every other page type comes back byte-for-byte as before.
+
+### What to watch for after you upgrade
+
+- A script that reads `chunk_text` of conversation rows sees the marker line and fence around the text. Read `quoted` to tell them apart; `get_page` still returns the page as stored.
+- `gbrain search` prints a conversation row as `[quoted transcript]` followed by the start of its text.
+
+### Itemized changes
+
+- `src/core/search/transcript-quote.ts`: the tool-call neutralizer, the fence and the CLI preview; `src/core/ops/search.ts` `searchOutput` applies them; `SearchResult.quoted`, kept in lean rows.
+- `test/search/transcript-quote.test.ts` (block shapes, blocks cut at either end or by an evidence omission line, prose left alone) and `test/search-transcript-quote.test.ts` (a synthetic alice-example ChatGPT export through the importer; remote MCP `search` and `query` and the CLI human and `--json` output on both engines; an ordinary page with the same JSON unchanged).
+- Docs: `docs/mcp/README.md` lean rows, the key-files entry.
+
 ## [0.60.459.0] - 2026-10-25
 
 **`gbrain sources host-repo` hosts a new, empty source in a bare repository that people clone, with every write committed there through the door. A claim now refuses a linked Git worktree whose link is broken.**

@@ -32,6 +32,7 @@ import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from '
 import type { HybridSearchMeta, SearchResult } from '../types.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { applySnippetCap, DEFAULT_AGENT_SNIPPET_CHARS, resultChunkCap } from '../search/snippet-cap.ts';
+import { fenceTranscriptRows, neutralizeTranscriptRows } from '../search/transcript-quote.ts';
 import { scoresFollowRank } from '../search/score-contract.ts';
 import { redactRetrievalOutput } from '../search/output-redaction.ts';
 import { leanRowsKeepId, projectRows, resultRowsFor } from '../search/lean-rows.ts';
@@ -124,7 +125,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   // `explain: true` — every row carries its score breakdown (kept in lean rows).
   if (p.explain === true) for (const r of results) r.score_details = buildScoreDetails(r);
   // #7156: the returned score follows the returned order.
-  results = scoresFollowRank(results);
+  results = neutralizeTranscriptRows(scoresFollowRank(results));
   // The shape is reported where it can vary: remote callers, or an explicit `fields`.
   const shown = ctx.remote !== false || p.fields !== undefined ? { rows } : {};
   // Stage timings are read last, after the returned rows are assembled (meta only, never content).
@@ -136,7 +137,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   };
   if (!evidence) {
     const output = redactRetrievalOutput(results, { ...meta, ...shown });
-    return emit(output, projectRows(applySnippetCap(output.results, resultChunkCap(p.snippet_chars, snippetCap)).map(factRowOutput), rows, lean));
+    return emit(output, projectRows(fenceTranscriptRows(applySnippetCap(output.results, resultChunkCap(p.snippet_chars, snippetCap))).map(factRowOutput), rows, lean));
   }
   // Evidence delivery: explicit snippet_chars wins over the delivered blocks;
   // otherwise the blocks are returned whole (their budget already bounds
@@ -145,7 +146,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   // An explicit budget's cap holds at this final boundary too (snippet
   // markers and redaction recounted); without one both are no-ops.
   const capped = evidence.explicitSnippet ? capDeliveredSnippets(output.results, snippetCap, output.meta.delivery) : capEvidenceToBudget(output.results, output.meta.delivery);
-  return emit(output, projectRows(capped.map(factRowOutput), rows, lean));
+  return emit(output, projectRows(fenceTranscriptRows(capped).map(factRowOutput), rows, lean));
 }
 
 /** C1: the per-call row-shape escape hatch shared by `search` and `query` (`detail` is query's low/medium/high). */
