@@ -42,6 +42,7 @@ test/cli-page-writes.test.ts
 test/colon-slug-windows-5032.test.ts
 test/company-brain-policy.test.ts
 test/company-brain-runtime.test.ts
+test/consolidate-fenced-close-reimport.test.ts
 test/consolidate-same-instant-6023.test.ts
 test/conversation-facts-oversized-sidecar.test.ts
 test/conversation-facts-purged-claim-7438.test.ts
@@ -74,6 +75,7 @@ test/facts-absorb-stalled-receipt-7439.test.ts
 test/facts-insert-guards-7105.test.ts
 test/facts-publication-large-fence-6898.test.ts
 test/facts-subject-infer-7405.test.ts
+test/fence-fact-append.test.ts
 test/fence-repair-receipts.test.ts
 test/file-drift-soft-delete-hold-release-gbra133.test.ts
 test/forecast-journal.test.ts
@@ -102,6 +104,7 @@ test/harness-skills-epoch.test.ts
 test/held-read-signals.test.ts
 test/hermes-clarify-transcripts-7396.test.ts
 test/hold-action-chain-6712.test.ts
+test/hosted-repo-g7b2.test.ts
 test/import-file-result-callback-gbra130.test.ts
 test/import-frontmatter-key-order-5158.test.ts
 test/import-inline-chunk-keep.test.ts
