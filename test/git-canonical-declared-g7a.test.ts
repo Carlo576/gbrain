@@ -23,6 +23,7 @@ import { operations, type OperationContext } from '../src/core/operations.ts';
 import { importManagedFile } from '../src/core/persistence/import-mutations.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
+import { resetWriteSwitches } from '../src/core/persistence/switches.ts';
 import { assertStrictGitHome } from '../src/core/persistence/git-declared.ts';
 import { preparePrivateTransition } from '../src/core/persistence/page-prepare.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
@@ -155,6 +156,11 @@ test('Q3: every strict writer is classified when it prepares; a managed import, 
 
   test('backstop (forced probe): a put whose page became lineage-private after it was prepared is refused, no commit', () => managedBrain(async ({ engine, ctx, root }) => {
     await strict(engine);
+    // Postgres publishes a single write as a group of one first (publishSingleWrite); a refusal there releases the claim,
+    // and when another worker claims the request before the reclaim it prepares again (now database-only) instead of
+    // reaching the refusal. The probe pins the single path, the one whose refusal it asserts.
+    await engine.setConfig('persistence.single_write_group', 'false');
+    resetWriteSwitches();
     expect(await put(ctx, 'notes/origin', page('Origin', 'Public origin.'))).toMatchObject({ state: 'committed' });
     const requestId = randomUUID();
     let flipped = false;
