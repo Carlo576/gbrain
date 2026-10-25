@@ -854,9 +854,7 @@ function installStdioLifecycle(
   // it can never hold the process open. Cleared in beginShutdown. Kill
   // switch: GBRAIN_SWEEP=0 (seam: opts.sweepEnabled). Chunk-level stdin
   // 'data' granularity is sufficient — same rationale as armIdle below.
-  // #7599: a read-only serve runs no resident write duty (no idle sweep, facts drain, movement watch or on-commit watcher).
-  const readOnly = isReadOnlyServeArgs(args);
-  const sweepEnabled = !readOnly && (opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0'));
+  const sweepEnabled = !isReadOnlyServeArgs(args) && (opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0')); // #7599: no sweep in a read-only serve
   if (sweepEnabled) {
     const runIdleSweep = opts.sweep ?? (async (e: BrainEngine) => {
       // #4409: the runner loads lazily here too — the sweep fires after
@@ -914,7 +912,7 @@ function installStdioLifecycle(
   }
 
   // Automatic facts drain (Lane D) and the #6317 movement watch: see installResidentTickers.
-  factsDrain = readOnly ? null : installResidentTickers(engine, opts, deps, () => shuttingDown);
+  factsDrain = isReadOnlyServeArgs(args) ? null : installResidentTickers(engine, opts, deps, () => shuttingDown); // #7599: nor its resident tickers
 
   // Optional idle-timeout safety net. Default OFF; opt-in via
   // `--stdio-idle-timeout <seconds>`. The flag is for the rare case where

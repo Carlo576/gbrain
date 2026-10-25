@@ -318,6 +318,14 @@ function stdioSurfaceSession(
   return { session, finishResult, statusResult };
 }
 
+/**
+ * #7599: a read-only stdio serve runs no resident write duty: no persistence consumer, no delegated sync, nudge or sweep
+ * kinds, no session-cursor GC and no startup sweep (serve.ts also skips the idle sweep and the resident tickers, the on-commit
+ * watcher among them). The long-lived serve, worker or autopilot owns them; doctor's commit_notifier and
+ * two_consumers_on_host say when none runs.
+ */
+const READ_ONLY_SERVE_NOTE = '[gbrain-serve] read-only: no persistence consumer, on-commit sync or sweep runs here; a read-write serve, jobs work or autopilot owns them.\n';
+
 export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpSurface; surfaceSource?: SurfaceSource; invalidSurfaceEnv?: string; sourceGuard?: boolean; onBootPhase?: (phase: string) => void; access?: McpAccess } = {}) {
   const config = loadConfig();
   const bootPhase = (phase: string) => { try { opts.onBootPhase?.(phase); } catch { /* diagnostic only */ } };
@@ -529,21 +537,14 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
     const [{ createPersistenceIpcProvider, residentPersistenceConfig }, { bindResolveIpcForServe }] = await Promise.all([import('../core/persistence/provider.ts'), import('./resolve-ipc-binding.ts')]);
     bootPhase('source_scope');
     const { sourceId: ipcSourceId } = await resolveMcpStdioSourceScope(engine);
-    // #7599: a read-only serve runs no resident write duty: no persistence consumer, no delegated sync, nudge or sweep,
-    // no session-cursor GC and no sweep of its own (serve.ts also skips the idle sweep, facts drain and on-commit watcher).
-    // The long-lived serve, worker or autopilot owns them; doctor's commit_notifier and two_consumers_on_host say when none runs.
     bootPhase('persistence_consumer');
     const persistence = session.readOnly ? undefined : await createPersistenceIpcProvider(engine, residentPersistenceConfig(config) ?? { engine: engine.kind });
     bootPhase('resolve_ipc_bind');
-    ipcBinding = await bindResolveIpcForServe(engine, ipcSourceId, persistence, { rememberCallable: () => !session.allowedOps || session.allowedOps.has('remember'), ...(session.readOnly ? { readOnly: true } : {}) });
-    if (session.readOnly) {
-      process.stderr.write('[gbrain-serve] read-only: no persistence consumer, on-commit sync or sweep runs here; a read-write serve, jobs work or autopilot owns them.\n');
-      import('../core/onboard/mcp-onboarding.ts').then(m => m.startOnboardingRefresher(engine, { idle: () => _stdioRpcsInFlight === 0 })).catch(() => { /* coaching is best-effort */ });
-      return;
-    }
+    ipcBinding = await bindResolveIpcForServe(engine, ipcSourceId, persistence, { rememberCallable: () => !session.allowedOps || session.allowedOps.has('remember'), readOnly: session.readOnly });
+    import('../core/onboard/mcp-onboarding.ts').then(m => m.startOnboardingRefresher(engine, { idle: () => _stdioRpcsInFlight === 0 })).catch(() => { /* coaching is best-effort */ });
+    if (session.readOnly) return void process.stderr.write(READ_ONLY_SERVE_NOTE);
 
-    // v0.45.7 ambient recall: age out stale session cursors once per serve boot
-    // (7-day TTL, indexed DELETE). Best-effort — GC failure never blocks serve.
+    // v0.45.7 ambient recall: age out stale session cursors once per serve boot (7-day TTL, indexed DELETE). Best-effort — GC failure never blocks serve.
     gcSessionContextState(engine).catch(() => {});
 
     // Startup maintenance sweep [ENG-5][CX-P0.1+P0.3]: the serve process is
@@ -553,7 +554,6 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
     // connect, unref'd (can never hold the process open), all errors
     // swallowed inside armStartupSweep. Kill switch: GBRAIN_SWEEP=0 (checked
     // inside the helper). Lazy import keeps sweep code off the boot path.
-    import('../core/onboard/mcp-onboarding.ts').then(m => m.startOnboardingRefresher(engine, { idle: () => _stdioRpcsInFlight === 0 })).catch(() => { /* coaching is best-effort */ });
     bootPhase('startup_sweep');
     try {
       const { armStartupSweep } = await import('../core/sweep.ts');
