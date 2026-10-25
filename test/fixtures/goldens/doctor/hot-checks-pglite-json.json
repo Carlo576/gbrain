@@ -4127,7 +4127,7 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "34 retrieval-affecting file(s) changed since HEAD: src/core/operations.ts, src/core/search/alias-fanout.ts, src/core/search/collapse.ts, …. Re-run `gbrain eval run-all` after committing these changes.",
+            "message": "No retrieval-affecting files changed in working tree.",
             "name": "eval_drift",
             "status": "ok"
           },
@@ -8862,7 +8862,7 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "34 retrieval-affecting file(s) changed since HEAD: src/core/operations.ts, src/core/search/alias-fanout.ts, src/core/search/collapse.ts, …. Re-run `gbrain eval run-all` after committing these changes.",
+            "message": "No retrieval-affecting files changed in working tree.",
             "name": "eval_drift",
             "status": "ok"
           },
