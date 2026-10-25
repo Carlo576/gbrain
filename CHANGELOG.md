@@ -12,21 +12,20 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.461.0] - 2026-10-25
 
-**On a managed brain, releasing a held fact (`gbrain trust release h<id>`) now writes it into its entity page's `## Facts` table through the page-write door, so the released fact lives in Git and a re-import keeps it, instead of a database-only row the file never had.**
+**Test-only CI stability: three flaky tests are fixed at their cause, a test held as a todo now runs, and the shard weights are refreshed. Product behaviour is unchanged.**
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| The owner releases a held fact whose entity page exists, on a managed brain | the fact was inserted as a database-only row; the page's file never held it, so the fact had no Git home | a new `trust_release` page write appends the fact as a row of the page's `## Facts` fence (the shared `prepareFenceFactAppend` door) and flips the hold in the same publication; the row is stamped `user_confirmed` with origin `trust_release`, the belief ledger records the hold as its cause, and the page keeps its trust tier |
-| The hold names an existing fence row (a fence-guard hold) | the release inserted a second, database-only twin next to the file's own row | the release indexes the existing row: one row, and the file is unchanged |
-| The hold is decided after the release was accepted | — | the release fails `preview_changed` and writes nothing; a retry of the same release replays the same request (its id derives from the hold) |
-| The entity page is deleted or private, or the request is remote | — | the release refuses (remote: `confirmation_required`) and the fact stays held |
+| `test/e2e/search-statistics-guard-postgres.test.ts` on the shared e2e database | an autovacuum ANALYZE of `pages` could restore the statistics the test had deleted, so the transaction case failed | autovacuum is off for `pages` while the file holds deleted statistics and is reset in `afterAll`; forced probe (`autovacuum_naptime=1s`, zero thresholds): 4 of 8 red before, 12 of 12 green after |
+| `test/schema-replay-deadlock-6143.test.ts` when the reader starts waiting more than 1 s after the replay | Postgres checks for a deadlock once per wait, so the replay's check found no cycle yet and the reader became the victim | the replay's sessions check at 5 s and the reader's at 60 s, so the replay is the victim; forced probe (reader delayed 1.5 s): 3 of 3 red before, 3 of 3 green after |
+| `test/git-door-g6-synthesize.test.ts`, uncovered world concept republish | a todo waiting on the withheld-path record | a test: the private step removes the file and the world promotion restores it at the recorded path (#7586) |
 
-### What to watch for after you upgrade
+### Itemized changes
 
-- A hold with no entity slug, or whose entity page does not exist, still releases database-only as before; unmanaged brains are unchanged.
-- Facts released by an earlier version are not moved into fences on upgrade; nothing is rewritten and there is no schema migration.
+- `scripts/serial-weights*.json`, `scripts/e2e-weights*.json`: refreshed from test run 40074496877 and e2e run 40168667121.
+- G6 test commits from GBRA-60's branch, cherry-picked.
 
 ## [0.60.460.0] - 2026-10-25
 
