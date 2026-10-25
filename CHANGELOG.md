@@ -31,6 +31,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - Test leaks fixed: output capture in `cli-socket` and `cli-socket-context` tests, overlapping `withEnv` frames, console bindings after the stderr redirect, and a `process.exit` stub. New isolation lint R9 requires any test that installs a process-global hook to undo it.
 - `test/entity-card-perf.slow.test.ts`: the records gate reads thread CPU in alternating pairs. Forced probe (400 ms off-CPU on 70% of the references calls): old gate 100%/164% red, new gate 22%/26% green.
 - `scripts/stress/iteration-weights.json`: the measured stress weight for `entity-card-perf.slow.test.ts`.
+- `test/e2e/persistence-idle-pool.test.ts`: the drain checks count client backends only, so an autovacuum worker on the scratch database no longer reads as a pooled connection. Forced probe (aggressive autovacuum): 4 backends red before, green after.
 
 ## [0.60.450.0] - 2026-10-25
 
