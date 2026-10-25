@@ -10,18 +10,35 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.461.0] - 2026-10-25
+## [0.60.462.0] - 2026-10-25
 
-**A sync pass killed by an out-of-memory guard or a timeout now shows up in`gbrain sync status`and`gbrain doctor`instead of looking healthy. A read-only stdio serve no longer holds session-lane connections or runs the long-lived processes' write duties, so per-session serves can't starve them.**
+**A sync pass killed by an out-of-memory guard or a timeout now shows up in `gbrain sync status` and `gbrain doctor` instead of looking healthy. A read-only stdio serve no longer holds session-lane connections or runs the long-lived processes' write duties, so per-session serves can't starve them.**
 
-A killed pass used to read`resumable`/`pass_unfinished`, the same as one that stopped cleanly at its deadline, and`live`still named the dead PID because its lock row outlives it. Now an open pass that no process is still renewing reads`pass_interrupted`, a second killed pass reads`pass_abandoned`at once, and doctor's`managed_sync_blocked`lists both. This is the visibility half of #7596; the memory growth itself is still being traced on real data.
+A killed pass used to read `resumable` / `pass_unfinished`, the same as one that stopped cleanly at its deadline, and `live` still named the dead PID because its lock row outlives it. Now an open pass that no process is still renewing reads `pass_interrupted`, a second killed pass reads `pass_abandoned` at once, and doctor's `managed_sync_blocked` lists both. This is the visibility half of #7596; the memory growth itself is still being traced on real data.
 
-Harnesses run one`gbrain serve --access read-only`per session. Each one opened the 3-connection resident direct pool, started a persistence consumer, took the on-commit notifier lease and ran sweeps, so a few sessions could exhaust the session lane (`EMAXCONNSESSION`). A read-only serve now holds 0 session-lane connections and runs none of those duties; search latency is unchanged (warm p50 about 0.8 s on both lanes at 50 ms RTT, 3,000 synthetic pages).
+Harnesses run one `gbrain serve --access read-only` per session. Each one opened the 3-connection resident direct pool, started a persistence consumer, took the on-commit notifier lease and ran sweeps, so a few sessions could exhaust the session lane (`EMAXCONNSESSION`). A read-only serve now holds 0 session-lane connections and runs none of those duties. Search latency is unchanged: warm p50 about 0.8 s on both lanes at 50 ms RTT, on 3,000 synthetic pages.
 
 ### Itemized changes
 
--`src/core/persistence/sync-lease.ts`,`sync-pass-status.ts`,`sync-status.ts`,`sync-blocked.ts`,`src/commands/sync/operator.ts`,`src/commands/doctor/checks/managed-sync-blocked.ts`:`drainHolderLive`, the`pass_interrupted`reason and`interrupted`block, and the doctor listing. Test:`test/sync-pass-interrupted-7596.test.ts`.
--`src/core/direct-pool-profile.ts`,`src/commands/serve.ts`,`src/mcp/server.ts`,`src/mcp/resolve-ipc-binding.ts`: a read-only stdio serve takes the one-shot profile and skips the consumer, the delegated sync, nudge and sweep kinds, the resident tickers and the sweeps. Tests:`test/direct-pool-profile.test.ts`and`test/e2e/serve-read-only-session-lane-postgres.test.ts`(3 direct connections on the previous release, 0 now).
+- `src/core/persistence/sync-lease.ts`, `sync-pass-status.ts`, `sync-status.ts`, `sync-blocked.ts`, `src/commands/sync/operator.ts`, `src/commands/doctor/checks/managed-sync-blocked.ts`: `drainHolderLive`, the `pass_interrupted` reason and `interrupted` block, and the doctor listing. Test: `test/sync-pass-interrupted-7596.test.ts`.
+- `src/core/direct-pool-profile.ts`, `src/commands/serve.ts`, `src/mcp/server.ts`, `src/mcp/resolve-ipc-binding.ts`: a read-only stdio serve takes the one-shot profile and skips the consumer, the delegated sync, nudge and sweep kinds, the resident tickers and the sweeps. Tests: `test/direct-pool-profile.test.ts` and `test/e2e/serve-read-only-session-lane-postgres.test.ts` (3 direct connections on the previous release, 0 now).
+
+## [0.60.461.0] - 2026-10-25
+
+**Test-only CI stability: three flaky tests are fixed at their cause, a test held as a todo now runs, and the shard weights are refreshed. Product behaviour is unchanged.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `test/e2e/search-statistics-guard-postgres.test.ts` on the shared e2e database | an autovacuum ANALYZE of `pages` could restore the statistics the test had deleted, so the transaction case failed | autovacuum is off for `pages` while the file holds deleted statistics and is reset in `afterAll`; forced probe (`autovacuum_naptime=1s`, zero thresholds): 4 of 8 red before, 12 of 12 green after |
+| `test/schema-replay-deadlock-6143.test.ts` when the reader starts waiting more than 1 s after the replay | Postgres checks for a deadlock once per wait, so the replay's check found no cycle yet and the reader became the victim | the replay's sessions check at 5 s and the reader's at 60 s, so the replay is the victim; forced probe (reader delayed 1.5 s): 3 of 3 red before, 3 of 3 green after |
+| `test/git-door-g6-synthesize.test.ts`, uncovered world concept republish | a todo waiting on the withheld-path record | a test: the private step removes the file and the world promotion restores it at the recorded path (#7586) |
+
+### Itemized changes
+
+- `scripts/serial-weights*.json`, `scripts/e2e-weights*.json`: refreshed from test run 40074496877 and e2e run 40168667121.
+- G6 test commits from GBRA-60's branch, cherry-picked.
 
 ## [0.60.460.0] - 2026-10-25
 
