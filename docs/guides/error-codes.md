@@ -1687,6 +1687,18 @@ More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-page
 
 More: [docs/guides/concurrent-writes.md#git-durability-at-activation](../../docs/guides/concurrent-writes.md#git-durability-at-activation)
 
+### git_home_required
+
+<a id="git_home_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A git-canonical source would store content in the database without a file in Git; nothing was written. | On a source with canonical: git, page content reaches the database only after Git commits its file. The declared database-only classes (private, alias-private and lineage-private pages, storage.db_only directories, never-filed derive-phase pages, paths Git ignores, detached pages and origin twins) are the only exceptions. no_file_form: the write has no file and is in no declared class; declared_target: a publication would commit a file for a declared page; facts_lane: a writer with no file form yet. | Ask the user which git home to configure (a path Git tracks, or a storage.db_only directory in gbrain.yml), then submit the write again with a new request_id. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `no_file_form`, `declared_target`, `facts_lane`.
+
+More: [docs/guides/write-refusals.md#git_home_required](../../docs/guides/write-refusals.md#git_home_required)
+
 ### git_index_locked
 
 <a id="git_index_locked"></a>
@@ -1702,6 +1714,18 @@ More: [docs/guides/concurrent-writes.md#git-durability-at-activation](../../docs
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Git index stale. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### git_lfs_not_enabled
+
+<a id="git_lfs_not_enabled"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A git-canonical write falls under a Git LFS rule, but storage.git_lfs is off or the checkout does not configure the LFS filter; nothing was written. | The door commits a file before its database row. A path .gitattributes routes through Git LFS commits as an LFS pointer only when the checkout configures the LFS filter (git lfs install --local) and the operator opted in; otherwise the raw bytes would be committed. | Ask the user: configure git-lfs in the checkout and run gbrain config set storage.git_lfs true, or narrow the .gitattributes rule; then submit again with a new request_id. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `opt_in_off`, `checkout_unconfigured`.
+
+More: [docs/guides/write-refusals.md#git_lfs_not_enabled](../../docs/guides/write-refusals.md#git_lfs_not_enabled)
 
 ### git_object_missing
 
@@ -1722,6 +1746,28 @@ More: [docs/guides/write-refusals.md#git_object_missing](../../docs/guides/write
 | A rebase, merge, cherry-pick or revert is in progress in the checkout, so gbrain will not commit or move it. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/shared-checkout-git.md#stuck-rebase](../../docs/guides/shared-checkout-git.md#stuck-rebase)
+
+### git_private_commit_refused
+
+<a id="git_private_commit_refused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A git-canonical source refused to commit the file of a private, alias-private or lineage-private page; nothing was written and HEAD is unchanged. | Private pages of a source with canonical: git are database-only: their bytes never enter Git history. A page turning private is published as the door commit that removes its file, never as a commit of its bytes. | The page stays database-only. Write it through put_page (which publishes a private page without a file), or remove visibility: private if it belongs in Git, then submit again with a new request_id. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `private`, `alias_private`, `lineage_private`.
+
+More: [docs/guides/write-refusals.md#git_private_commit_refused](../../docs/guides/write-refusals.md#git_private_commit_refused)
+
+### git_protocol_required
+
+<a id="git_protocol_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A write reached a git-canonical source from a process that does not declare the git-canonical protocol (an older gbrain, or gbrain.write_sources set by hand); nothing was written. | Only the operator of the brain host can change what blocks this. | Upgrade or stop the gbrain process that wrote it (gbrain upgrade on its host), then retry with a new request_id. | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#git_protocol_required](../../docs/guides/write-refusals.md#git_protocol_required)
 
 ### git_push_unavailable
 
