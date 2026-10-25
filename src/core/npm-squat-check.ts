@@ -8,10 +8,14 @@
  *
  * Pure classification helpers (filesystem-only, no network, no shelling out)
  * so `gbrain doctor` can warn with receipts. The caller supplies the candidate
- * paths (typically the output of `which -a gbrain`).
+ * paths (typically the output of `which -a gbrain`) and the `gbrain` package
+ * directories under the global install roots (`npm root -g`, Bun's global
+ * dir), so an unrelated global install is found even when its bin is not on
+ * PATH.
  */
 import { closeSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
+import type { Action } from './agent-output.ts';
 
 export type GbrainBinaryKind = 'real' | 'foreign' | 'broken' | 'unknown';
 
@@ -21,12 +25,25 @@ export interface ClassifiedGbrainBinary {
   kind: GbrainBinaryKind;
   /** Human-readable evidence for the classification. */
   detail: string;
+  /** The package directory behind a 'real' or 'foreign' script install. */
+  packageDir?: string;
+  /** Found under a global node_modules root rather than through PATH. */
+  global?: true;
 }
 
 export interface NpmSquatAssessment {
   status: 'ok' | 'warn' | 'skip';
   message: string;
   binaries: ClassifiedGbrainBinary[];
+  /** On a warn caused by an unrelated package: remove it, then reinstall when no real gbrain remains on PATH. */
+  fix?: Action;
+}
+
+export interface AssessGbrainBinariesOptions {
+  /** `gbrain` package directories under global install roots, e.g. `<npm root -g>/gbrain`. */
+  globalPackages?: string[];
+  /** Bun's global install root (`$BUN_INSTALL/install/global`), to remove a package found there with Bun. */
+  bunGlobalRoot?: string;
 }
 
 export interface ClassifyGbrainBinaryOptions {
@@ -37,11 +54,18 @@ export interface ClassifyGbrainBinaryOptions {
 /** Repository marker identifying this project's package.json. */
 const REAL_REPO_MARKER = 'garrytan/gbrain';
 
+/** The documented install command (the `latest-stable` release ref). */
+export const GBRAIN_INSTALL_ARGV = ['bun', 'install', '-g', `github:${REAL_REPO_MARKER}#latest-stable`];
+
+/** #218 recovery: a Bun global install can skip the postinstall that applies schema migrations. */
+const SCHEMA_RECOVERY_ARGV = ['gbrain', 'apply-migrations', '--yes', '--no-autopilot-install'];
+
 /** The documented install/remediation path, reused in doctor output. */
 export const NPM_SQUAT_REMEDIATION =
   `Remove the unrelated package (\`bun remove -g gbrain\` or \`npm uninstall -g gbrain\`) ` +
-  `and install/upgrade only via the documented path: \`bun install -g github:${REAL_REPO_MARKER}\` ` +
-  `(or \`git clone https://github.com/${REAL_REPO_MARKER}.git && bun install && bun link\`).`;
+  `and install/upgrade only via the documented path: \`${GBRAIN_INSTALL_ARGV.join(' ')}\` ` +
+  `(or \`git clone https://github.com/${REAL_REPO_MARKER}.git && bun install && bun link\`). ` +
+  `If the schema is then behind (#218), run \`${SCHEMA_RECOVERY_ARGV.join(' ')}\`.`;
 
 /**
  * A `bun build --compile` gbrain binary is a native executable, not a script.
@@ -154,12 +178,69 @@ export function classifyGbrainBinary(
     return { path, kind: 'unknown', detail: `no gbrain package.json found above ${resolved}` };
   }
   if (isRealGbrainPackage(found.pkg)) {
-    return { path, kind: 'real', detail: `this project's install at ${found.dir}` };
+    return { path, kind: 'real', detail: `this project's install at ${found.dir}`, packageDir: found.dir };
   }
   return {
     path,
     kind: 'foreign',
     detail: `unrelated npm package named "gbrain" at ${found.dir}`,
+    packageDir: found.dir,
+  };
+}
+
+function canonicalDir(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return dir;
+  }
+}
+
+/**
+ * Classify a `gbrain` package directory under a global node_modules root.
+ * Null when nothing named "gbrain" is installed there.
+ */
+export function classifyGlobalGbrainPackage(dir: string): ClassifiedGbrainBinary | null {
+  let pkg: Record<string, any>;
+  try {
+    pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!pkg || typeof pkg !== 'object' || pkg.name !== 'gbrain') return null;
+  const packageDir = canonicalDir(dir);
+  if (isRealGbrainPackage(pkg)) {
+    return { path: dir, kind: 'real', detail: `this project's global install at ${packageDir}`, packageDir, global: true };
+  }
+  return {
+    path: dir,
+    kind: 'foreign',
+    detail: `unrelated npm package named "gbrain" installed globally at ${packageDir}`,
+    packageDir,
+    global: true,
+  };
+}
+
+function squatFix(foreign: ClassifiedGbrainBinary, realOnPath: boolean, bunGlobalRoot?: string): Action {
+  const dir = foreign.packageDir ?? foreign.path;
+  const bunRoot = bunGlobalRoot ? canonicalDir(bunGlobalRoot) + sep : undefined;
+  const viaBun = (bunRoot !== undefined && dir.startsWith(bunRoot)) || /[\\/]\.bun[\\/]install[\\/]global[\\/]/.test(dir);
+  const verify = { argv: ['gbrain', 'doctor', '--only', 'npm_squat', '--json'] };
+  const reinstall: Action = {
+    argv: GBRAIN_INSTALL_ARGV, consent: ['persistent_install'], actor: 'agent', requires_exclusive: false, verify,
+    why: 'No real gbrain is left on PATH. This installs it from the latest-stable release ref, the only supported source.',
+    then: {
+      argv: SCHEMA_RECOVERY_ARGV, consent: [], actor: 'agent', requires_exclusive: false,
+      verify: { argv: ['gbrain', 'doctor', '--json'] }, docs: 'README.md#install',
+      why: 'A Bun global install can skip the postinstall that applies schema migrations (#218). This applies them and exits 0 only when the schema is at head; exit 1 with migrations_pending means run gbrain doctor --json and relay what it reports.',
+    },
+  };
+  return {
+    argv: viaBun ? ['bun', 'remove', '-g', 'gbrain'] : ['npm', 'uninstall', '-g', 'gbrain'],
+    consent: ['persistent_install'], actor: 'agent', ask_user: true, requires_exclusive: false, verify, docs: 'README.md#install',
+    why: `The npm registry name "gbrain" belongs to an unrelated package (${dir}); this project is not distributed on npm, and that package ${realOnPath ? 'can take over the gbrain command' : 'is what runs as gbrain'}.`,
+    user_message: `An unrelated npm package named "gbrain" is installed at ${dir}. It is not GBrain${realOnPath ? ' and can take over the gbrain command' : ''}. Should I uninstall it${realOnPath ? '' : ' and install GBrain from its GitHub release'}?`,
+    ...(realOnPath ? {} : { then: reinstall }),
   };
 }
 
@@ -167,19 +248,29 @@ export function classifyGbrainBinary(
  * Assess candidate paths in PATH precedence order (first entry wins when the
  * shell runs `gbrain`).
  *
- *  - skip : no candidates (gbrain not on PATH — nothing to check).
+ * `opts.globalPackages` adds each unrelated global package that no PATH entry
+ * reaches, after the PATH entries; a real global package adds nothing.
+ *
+ *  - skip : no candidates and no unrelated global package.
  *  - warn : the winning entry is broken, or an unrelated npm package shadows
  *           (appears before) the real binary — including when no real binary
  *           is on PATH at all.
  *  - ok   : the winning entry is the real binary (an unrelated install
  *           sitting BEHIND it is noted but not a warn).
  */
-export function assessGbrainBinaries(candidates: string[]): NpmSquatAssessment {
+export function assessGbrainBinaries(candidates: string[], opts: AssessGbrainBinariesOptions = {}): NpmSquatAssessment {
   const unique = [...new Set(candidates.map((c) => c.trim()).filter(Boolean))];
-  if (unique.length === 0) {
+  const binaries = unique.map((candidate) => classifyGbrainBinary(candidate));
+  const reached = new Set(binaries.flatMap((b) => (b.packageDir ? [canonicalDir(b.packageDir)] : [])));
+  for (const dir of new Set(opts.globalPackages ?? [])) {
+    const pkg = classifyGlobalGbrainPackage(dir);
+    if (pkg?.kind !== 'foreign' || reached.has(pkg.packageDir!)) continue;
+    reached.add(pkg.packageDir!);
+    binaries.push(pkg);
+  }
+  if (binaries.length === 0) {
     return { status: 'skip', message: 'gbrain not found on PATH', binaries: [] };
   }
-  const binaries = unique.map((candidate) => classifyGbrainBinary(candidate));
   const first = binaries[0]!;
   const realIdx = binaries.findIndex((b) => b.kind === 'real');
   const foreignIdx = binaries.findIndex((b) => b.kind === 'foreign');
@@ -196,13 +287,14 @@ export function assessGbrainBinaries(candidates: string[]): NpmSquatAssessment {
   }
   if (foreignIdx !== -1 && (realIdx === -1 || foreignIdx < realIdx)) {
     const foreign = binaries[foreignIdx]!;
+    const where = foreign.global
+      ? `An unrelated npm package named "gbrain" is installed globally at ${foreign.packageDir}, and no real gbrain is on PATH. `
+      : `\`gbrain\` on PATH resolves to an unrelated npm package, not this project (${foreign.path} — ${foreign.detail}). `;
     return {
       status: 'warn',
-      message:
-        `\`gbrain\` on PATH resolves to an unrelated npm package, not this project ` +
-        `(${foreign.path} — ${foreign.detail}). gbrain is NOT distributed on npm. ` +
-        NPM_SQUAT_REMEDIATION,
+      message: `${where}gbrain is NOT distributed on npm. ${NPM_SQUAT_REMEDIATION}`,
       binaries,
+      fix: squatFix(foreign, realIdx !== -1, opts.bunGlobalRoot),
     };
   }
   if (foreignIdx !== -1) {

@@ -2,6 +2,8 @@
 
 **Give the agent you already use a memory you control.** GBrain stores explicit facts with their sources, supports corrections and withdrawal, and makes the same memory available across your agents. Start with keyless memory and keyword retrieval; add semantic search, synthesis, and background enrichment when you need them.
 
+GBrain is MIT-licensed and free to self-host. [gbrain.io](https://gbrain.io/?ref=readme) is optional paid hosting for when you'd rather not run it yourself.
+
 > [!TIP]
 > **Need hosted? First time running an agent?** Try **[gbrain.io](https://gbrain.io/?ref=readme)**, hosted GBrain, for the easiest experience: one brain for you and your team, connected to ChatGPT, Claude and Cursor, with nothing to install or keep online. Stuck? Email support@gbrain.io and a person will set it up with you, free.
 
@@ -26,7 +28,7 @@ I'm Garry Tan, President and CEO of Y Combinator. I built GBrain to run my own A
 Alongside keyword and semantic retrieval, GBrain offers two optional ways to use your stored knowledge:
 
 - **A synthesis layer that gives you the actual answer.** Synthesized, well-cited prose across people, companies, deals, and ideas. Not "here are 10 chunks that mention your query"; an actual answer with citations and an explicit note on what the brain doesn't know yet. The gap analysis is the part that changes how you use the brain.
-- **A typed knowledge graph.** Trusted local page writes extract supported references without LLM calls when auto-linking is enabled. Remote `put_page` edges arrive later, via sweeps, maintenance or `add_link`. Ask "who works at acme-example?": walks are breadth-first, milliseconds on dense clusters ([how](docs/architecture/RETRIEVAL.md#breadth-first-graph-walks)). On BrainBench relationship questions a graph adapter scored **P@5 0.3421, R@5 0.9791** vs 0.1917 / 0.6874 plain hybrid ([2026-09-09 refresh](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-09-09-retrieval-refresh.md)): whole systems, not a graph-only lift or a general guarantee.
+- **A typed knowledge graph.** Trusted local page writes extract supported references without LLM calls when auto-linking is enabled. Remote `put_page` edges arrive later, via sweeps, maintenance or `add_link`. Ask "who works at acme-example?": walks are breadth-first, milliseconds on dense clusters ([how](docs/architecture/RETRIEVAL.md#breadth-first-graph-walks)). On the 145 BrainBench relationship questions, turning on relationship retrieval in the production search pipeline raised **R@5 from 0.6626 to 0.7241**, better on 45 of 435 question runs and worse on none ([2026-09-09 refresh](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-09-09-retrieval-refresh.md#production-relationship-retrieval-one-switch)). The often-quoted R@5 0.9791 is `graph-oracle-parse`, an adapter that knows the four question forms in advance: an upper bound, not a product score.
 
 The point of building a 150K-page brain is to use it as a strategic moat. To never lose context. To query what's in your own head without re-reading it. The brain layer is what makes the moat usable. The 24/7 dream cycle is what keeps it sharp. Both run on your hardware, your DB, your keys.
 
@@ -95,7 +97,7 @@ before restarting services with this version.
 > [!WARNING]
 > **GBrain is NOT distributed on npm.** The npm `gbrain` package is unrelated and
 > can shadow the real binary, so never run `npm install -g gbrain` or
-> `bun add -g gbrain`. Install only via `bun install -g github:garrytan/gbrain`
+> `bun add -g gbrain`. Install only via `bun install -g github:garrytan/gbrain#latest-stable`
 > or `git clone` + `bun install && bun link`.
 > Installed it by mistake? `npm uninstall -g gbrain` / `bun remove -g gbrain`, then
 > reinstall; `gbrain doctor` detects it.
@@ -106,7 +108,7 @@ before restarting services with this version.
 **Claude Code or Codex, fastest path:**
 
 ```bash
-bun install -g github:garrytan/gbrain
+bun install -g github:garrytan/gbrain#latest-stable
 gbrain setup claude-code   # or codex; --dry-run previews, --remove undoes
 ```
 
@@ -203,7 +205,7 @@ Onboarding a whole agent harness onto a shared brain? On the brain host, `gbrain
 ### CLI standalone (no agent)
 
 ```bash
-bun install -g github:garrytan/gbrain
+bun install -g github:garrytan/gbrain#latest-stable
 gbrain init --pglite --no-embedding  # keyless; no server, no Docker
 gbrain doctor            # verify health
 gbrain import ~/notes/ --no-embed   # index your markdown
@@ -379,78 +381,3 @@ Data flowing into the brain. Each integration is a recipe — markdown + setup h
 
 Memorable stores replayable procedures from coding sessions. Its relay is off by
 default and requires an explicit disclosure/consent step; it can send redacted
-traces and query text off-machine. Read the [Memorable integration guide](docs/memorable-agents.md)
-for installation, data flow, per-harness limitations, and removal.
-
-**Say to your agent:** *"Explain Memorable's data sharing before enabling it."*
-
-## Architecture
-
-```mermaid
-flowchart LR
-    Repo[Markdown brain repos] --> Sync[Sync and parse]
-    Sync --> Engine{Brain engine}
-    Engine -->|default| PGLite[(PGLite)]
-    Engine -->|shared or large| Postgres[(Postgres and pgvector)]
-    Agent[AI agent or operator] --> Surface[CLI or MCP]
-    Surface --> Ops[Contract-first operations]
-    Ops --> Search[Hybrid retrieval]
-    Ops --> Graph[Typed graph traversal]
-    PGLite --> Search
-    Postgres --> Search
-    PGLite --> Graph
-    Postgres --> Graph
-    Search --> Synthesis[Synthesis and gap analysis]
-    Graph --> Synthesis
-    Synthesis --> Answer[Cited answer]
-```
-
-**Two engines, one contract.** PGLite (Postgres 17 via WASM, zero-config, default) for personal brains up to ~50K pages. Postgres + pgvector (Supabase or self-hosted) for shared / large / multi-machine deployments. The contract-first `BrainEngine` interface in [`src/core/engine.ts`](src/core/engine.ts) defines the 140+ methods both engines implement; CLI and MCP server are generated from one source.
-
-**Canonical files preserve file-backed knowledge.** Your brain repo holds Markdown that GBrain indexes for retrieval; deletes in git become soft-deletes in the database. DB-only pages, unresolved facts, revision history, and operational state need a separate database backup. See the [system-of-record contract](docs/architecture/system-of-record.md). You can publish public subsets, share team mounts, and run thin-client setups pointing at a colleague's brain server. Topologies in [`docs/architecture/topologies.md`](docs/architecture/topologies.md).
-
-**Two organizational axes (brain ⊥ source).** A *brain* is a database (your personal brain, a team mount you joined). A *source* is a repo inside that brain (wiki, gstack, an essay, a knowledge base). Routing lives in `.gbrain-source` dotfiles and resolves via a documented 6-tier precedence chain. Full diagrams in [`docs/architecture/brains-and-sources.md`](docs/architecture/brains-and-sources.md).
-
-**Why the graph matters.** Vector search finds similar text; graph retrieval follows stored relationships. Extracted edges are evidence to inspect, not proof that a relationship is true. Graph freshness depends on the write path and maintenance described in [memory boundaries](docs/guides/memory-boundaries.md#page-writes-and-the-graph-are-separate-outcomes). Deep dive: [retrieval architecture](docs/architecture/RETRIEVAL.md); [entity recall](docs/guides/entity-recall.md).
-
-## Troubleshooting
-
-Start with `gbrain doctor`. For database access failures, use `gbrain engine status --probe` and `gbrain db-repair` before changing configuration.
-
-**Say to your agent:** *"Check my brain health and show me the repair plan before changing anything."*
-
-[Troubleshooting reference](docs/guides/troubleshooting.md) covers installation recovery, PGLite startup, embedding dimensions, locks, import failures, and sync.
-
-## Docs
-
-- [`docs/INSTALL.md`](docs/INSTALL.md) — every install path, end to end
-- [`docs/guides/bootstrap.md`](docs/guides/bootstrap.md) — the persistent-personal-agent bootstrap contract (interview, identity files, hooks, private repo, security posture, uninstall), plus local harness mode (`gbrain bootstrap harness`) for wiring framework-spawned Claude Code/Codex sessions to a running serve
-- [`docs/what-schemas-unlock.md`](docs/what-schemas-unlock.md) — why schemas matter: 7 killer use cases, the structural argument for typed page kinds, the agent-co-curates pattern
-- [`docs/schema-author-tutorial.md`](docs/schema-author-tutorial.md) — 5-minute walkthrough: fork the bundled pack, add a custom type, backfill existing pages, prove the wiring via `gbrain whoknows`
-- [`docs/architecture/`](docs/architecture/) — system design, topologies, retrieval theory
-- [`docs/guides/`](docs/guides/) — how-to runbooks (google connect, open loops, sub-agent routing, minion deployment, skill development, brain-first lookup, idea capture, diligence ingestion)
-- [`docs/integrations/`](docs/integrations/) — connecting external data sources (voice, email, calendar, embedding providers)
-- [MCP task guide](docs/mcp/README.md) — deployment and per-client setup (Claude Desktop, Code, Cursor, ChatGPT, Perplexity, Cowork)
-- [MCP administration](docs/mcp/ADMIN.md) — owner dashboard access, client registration, OAuth, permissions, and token recovery
-- [Evals](docs/eval/) and [research](docs/research/) — methods and results
-- [`docs/ethos/`](docs/ethos/) — philosophy (thin harness, fat skills, markdown as recipes, origin story)
-- [`AGENTS.md`](AGENTS.md) — entry point for non-Claude agents
-- [`CLAUDE.md`](CLAUDE.md) — entry point for Claude Code (deep operating context)
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor guide, test discipline, eval-capture mode
-- [`SECURITY.md`](SECURITY.md) — install-path trust model, self-update integrity, automated scanning, OAuth threat model, hardening defaults
-
-## Contributing
-
-Run `bun run test` for the fast loop, `bun run verify` for the pre-push gate, `bun run ci:local` to run the full Docker-backed CI stack locally. Detailed test discipline in [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-Community PRs are batched into release waves rather than merged one-by-one — see the community-PR-wave process in [`docs/RELEASING.md`](docs/RELEASING.md). Contributor attribution stays attached via `Co-Authored-By:` trailers. We credit every accepted contribution in [`CHANGELOG.md`](CHANGELOG.md).
-
-If you find a bug or want a feature: open an issue first. Quick fixes (typo, doc bug, obvious regression) can go straight to a PR. Anything touching schema, retrieval ranking, MCP protocol, or the security boundary needs a design discussion in the issue first.
-
-## License + credit
-
-MIT. I built GBrain to run my OpenClaw and Hermes deployments — the production brain behind my AI agents.
-
-Origin story: [`docs/ethos/ORIGIN.md`](docs/ethos/ORIGIN.md).
-
-Community PR contributors are credited in `CHANGELOG.md` per release. Attribution for the retired provider's historical embedding and reranker integration remains in Git at `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29`. Voyage AI for the asymmetric-encoding recipe template. Ramp Labs for the search quality improvements lineage.
