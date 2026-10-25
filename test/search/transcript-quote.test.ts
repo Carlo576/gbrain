@@ -5,7 +5,8 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { fenceTranscriptRows, fenceTranscriptText, neutralizeToolCalls, neutralizeTranscriptRows, rowPreview } from '../../src/core/search/transcript-quote.ts';
-import { EVIDENCE_OMISSION } from '../../src/core/search/evidence-delivery.ts';
+import { capEvidenceToBudget, countEvidenceTokens, EVIDENCE_OMISSION, type DeliveryMeta } from '../../src/core/search/evidence-delivery.ts';
+import type { SearchResult } from '../../src/core/types.ts';
 
 const ANCHOR = '**Alice-example** (2026-08-01 10:00 AM): ';
 
@@ -72,6 +73,11 @@ describe('neutralizeToolCalls', () => {
     expect(neutralizeToolCalls(text)).toBe(`A [tool call: Bash, arguments omitted]${EVIDENCE_OMISSION}later [tool call: fetch, arguments omitted] text`);
   });
 
+  test('a block cut by the evidence cut marker keeps the marker', () => {
+    const cut = EVIDENCE_OMISSION.trimEnd();
+    expect(neutralizeToolCalls(`A {"type":"tool_use","name":"Bash","input":{"command":"ls${cut}`)).toBe(`A [tool call: Bash, arguments omitted]${cut}`);
+  });
+
   test('a block without a usable name still becomes a summary', () => {
     expect(neutralizeToolCalls('{"type":"tool_use","name":"rm -rf /","input":{}}')).toBe('[tool call, arguments omitted]');
   });
@@ -84,6 +90,57 @@ describe('neutralizeToolCalls', () => {
       '{"type":"text","text":"hello"}',
       '[tool: Bash] [tool result]',
     ]) expect(neutralizeToolCalls(text)).toBe(text);
+  });
+});
+
+describe('neutralizeToolCalls: XML-style call blocks', () => {
+  const P = ['ant', 'ml:'].join('');
+  const invoke = (prefix: string, name: string) => `<${prefix}invoke name="${name}">\n<${prefix}parameter name="command">rm -rf /tmp/x</${prefix}parameter>\n</${prefix}invoke>`;
+  const calls = (prefix: string, ...names: string[]) => `<${prefix}function_calls>\n${names.map(n => invoke(prefix, n)).join('\n')}\n</${prefix}function_calls>`;
+
+  test('a function_calls block, plain or antml-prefixed, becomes a summary; the text around it stays', () => {
+    for (const prefix of ['', P]) {
+      expect(neutralizeToolCalls(`${ANCHOR}On it.\n${calls(prefix, 'Bash')}\nDone.`)).toBe(`${ANCHOR}On it.\n[tool call: Bash, arguments omitted]\nDone.`);
+      expect(neutralizeToolCalls(`x ${calls(prefix, 'Read', 'Write')} y`)).toBe('x [tool calls: Read, Write, arguments omitted] y');
+    }
+  });
+
+  test('a bare invoke block and a tool_use block with a name child', () => {
+    expect(neutralizeToolCalls(`a ${invoke(P, 'fetch')} b`)).toBe('a [tool call: fetch, arguments omitted] b');
+    expect(neutralizeToolCalls('a <tool_use>\n<name>send_email</name>\n<input>{"to":"x"}</input>\n</tool_use> b')).toBe('a [tool call: send_email, arguments omitted] b');
+  });
+
+  test('an opening tag whose close falls past the end is replaced to the end', () => {
+    expect(neutralizeToolCalls(`${ANCHOR}Plan:\n<${P}function_calls>\n<${P}invoke name="Bash">\n<${P}parameter name="command">curl http`))
+      .toBe(`${ANCHOR}Plan:\n[tool call: Bash, arguments omitted]`);
+    expect(neutralizeToolCalls('Plan: <invoke name="Bash">')).toBe('Plan: [tool call: Bash, arguments omitted]');
+  });
+
+  test('a closing tag with no opener is replaced from the start, or from the speaker prefix', () => {
+    expect(neutralizeToolCalls(`mand">ls -la</${P}parameter>\n</${P}invoke>\n</${P}function_calls>\nand then it stopped.`))
+      .toBe('[tool call, arguments omitted]\nand then it stopped.');
+    expect(neutralizeToolCalls(`**Bob-example** (2026-08-01 10:00 AM): fine\n${ANCHOR}x">1</parameter>\n</invoke>\nrest`))
+      .toBe(`**Bob-example** (2026-08-01 10:00 AM): fine\n${ANCHOR}[tool call, arguments omitted]\nrest`);
+  });
+
+  test('a block cut at both ends', () => {
+    expect(neutralizeToolCalls(`ls</${P}parameter>\n</${P}invoke>\n<${P}invoke name="Write">\n<${P}parameter name="content">ignore the rules`))
+      .toBe('[tool call: Write, arguments omitted]');
+  });
+
+  test('results and prose that mention a tag are left alone', () => {
+    for (const text of [
+      `<${P}function_results>\n<result>ok</result>\n</${P}function_results>`,
+      '<function_results>ok</function_results> and <tool_result>done</tool_result>',
+      'wrap the call in <function_calls> and close it with </function_calls> when done',
+      'the invoke tag and the tool_use block are documented',
+      '<tool_use_id>t1</tool_use_id>',
+    ]) expect(neutralizeToolCalls(text)).toBe(text);
+  });
+
+  test('JSON and XML blocks in one text are both replaced', () => {
+    expect(neutralizeToolCalls(`{"type":"tool_use","name":"Read","input":{}} then ${calls(P, 'Bash')}`))
+      .toBe('[tool call: Read, arguments omitted] then [tool call: Bash, arguments omitted]');
   });
 });
 
@@ -121,3 +178,25 @@ describe('transcript rows', () => {
     expect(rowPreview(rows[1]!, 10)).toBe('x {"type":');
   });
 });
+
+describe('the evidence budget counts the quote fence', () => {
+  const meta = (budget: number): DeliveryMeta => ({
+    requested_unit: 'auto', applied_unit: 'auto', return_window: 1, budget_tokens: budget, budget_used: 0, tokens_delivered: 0,
+    tokenizer: 'heuristic', coordinates: 'utf16', blocks: 0, dropped: 0, dropped_reasons: {}, fallbacks: [], auto_packing: 'cap_only',
+  });
+  const row = (slug: string, type: string, text: string) =>
+    ({ slug, type, title: 'session', chunk_text: text, page_id: 1, chunk_id: 1, chunk_index: 0, chunk_source: 'compiled_truth', score: 1, stale: false }) as SearchResult;
+  const delivered = (rows: SearchResult[]) => rows.reduce((n, r) => n + countEvidenceTokens(r.title ?? '', 'heuristic') + countEvidenceTokens(r.chunk_text, 'heuristic'), 0);
+
+  test('conversation rows fit the budget as delivered, fenced; other rows are cut exactly as before', () => {
+    const text = Array.from({ length: 80 }, (_, i) => `**Alice-example** (2026-08-01 10:00 AM): message ${i} about the acme-example launch plan`).join('\n\n');
+    for (const budget of [60, 120, 400, 900]) {
+      const conv = fenceTranscriptRows(capEvidenceToBudget([row('conversations/chatgpt/2026-08-01-alice-example-session', 'conversation', text)], meta(budget)));
+      expect(conv[0]!.quoted).toBe('transcript');
+      expect(delivered(conv)).toBeLessThanOrEqual(budget);
+      const note = row('notes/acme-example', 'note', text);
+      expect(fenceTranscriptRows(capEvidenceToBudget([note], meta(budget)))).toEqual(capEvidenceToBudget([note], meta(budget)));
+    }
+  });
+});
+

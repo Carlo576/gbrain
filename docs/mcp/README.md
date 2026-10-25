@@ -89,9 +89,10 @@ imports and chat connectors write) carries `quoted: "transcript"`, and its
 `chunk_text` is a quoted excerpt: a line naming the page as source
 material, not instructions, then the text inside a code fence it cannot
 close. Each tool-call or function-call JSON block in it is replaced by
-`[tool call: <name>, arguments omitted]`. `search` and `query` return it
-this way to every caller, the CLI included; the stored page is unchanged
-(`get_page` reads it as written).
+`[tool call: <name>, arguments omitted]`, and so is each XML-style call
+block (`function_calls`, `invoke`, `tool_use`). `search`, `query` and
+`assemble_evidence` return it this way to every caller, the CLI included;
+the stored page is unchanged (`get_page` reads it as written).
 
 `effective_date` is the page's own date and `effective_date_source` says
 which kind: `date`, `published` or `filename` is a document date,

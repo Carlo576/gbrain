@@ -9,15 +9,21 @@
  *   - `neutralizeToolCalls` replaces each tool-call block with
  *     `[tool call: <name>, arguments omitted]`: an object typed tool_use,
  *     server_tool_use, mcp_tool_use, function_call, custom_tool_call,
- *     tool_call or toolCall, and the value of a `tool_calls` array or a
- *     `function_call` object. The rest of the text is kept. A block cut by
+ *     tool_call or toolCall, the value of a `tool_calls` array or a
+ *     `function_call` object, and an XML-style function_calls, invoke or
+ *     tool_use element (namespace prefix optional) with its parameter
+ *     children. Results (function_results, tool_result) and prose that names
+ *     a tag stay. The rest of the text is kept. A block cut by
  *     the start or end of the text (a chunk boundary) or by an evidence
  *     omission line is replaced up to that cut.
  *   - `fenceTranscriptText` wraps the text as quoted source material: a
  *     marker line naming the page, then a code fence longer than any backtick
  *     run in the text, so the text cannot close it early. The row also gets
  *     `quoted: "transcript"`.
- * Ranking, scores and the returned rows are unchanged.
+ * `search`/`query` (ops/search.ts `searchOutput`) and `assemble_evidence`
+ * (evidence-delivery.ts `assembleEvidenceForHits`) run step one before
+ * their caps and step two after them; `capEvidenceToBudget` counts the fence
+ * (`deliveredQuoteText`). Ranking, scores and the returned rows are unchanged.
  */
 import { BUILTIN_PATTERNS } from '../conversation-parser/builtins.ts';
 import type { SearchResult } from '../types.ts';
@@ -28,6 +34,13 @@ const OMISSION = '\n\n[…]\n\n';
 const ANCHOR_RE = BUILTIN_PATTERNS.find(p => p.id === 'imessage-slack')!.regex;
 const TRIGGER_RE = /"type"\s*:\s*"(?:tool_use|server_tool_use|mcp_tool_use|function_call|custom_tool_call|tool_call|toolCall)"|"(?:tool_calls|function_call)"\s*:\s*([[{])/g;
 const NAME_RE = /^[A-Za-z0-9_.:/-]{1,64}$/;
+/** The optional namespace prefix of XML-style call tags. */
+const XML_PREFIX = '(?:' + ['ant', 'ml:'].join('') + ')?';
+const XML_TAG_RE = new RegExp(`<(/?)${XML_PREFIX}(function_calls|invoke|tool_use|parameter)\\b([^<>]*)>`, 'g');
+const XML_INVOKE_NAME_RE = new RegExp(`<${XML_PREFIX}invoke\\b[^<>]*?\\bname\\s*=\\s*"([^"]*)"`, 'g');
+/** A call tag that is markup, not a mention in a sentence: it ends its line, the text, or runs into the next tag. */
+const ENDS_LINE_RE = /^[ \t]*(?:\n|$|<)/;
+const CUT_MARKER = OMISSION.trimEnd();
 const MAX_CANDIDATES = 64;
 
 type Row = Pick<SearchResult, 'slug' | 'type' | 'chunk_text' | 'result_type' | 'quoted'>;
@@ -134,9 +147,64 @@ function neutralizeSegment(segment: string): string {
   return last === 0 ? segment : out + segment.slice(last);
 }
 
-/** Replace every tool-call block in transcript text with its inert summary; text without one comes back unchanged. */
+function xmlNames(block: string): string[] {
+  const invoked = [...block.matchAll(XML_INVOKE_NAME_RE)].map(m => m[1]!);
+  const names = invoked.length > 0 ? invoked : [...block.matchAll(/<name>([^<]*)<\/name>/g)].map(m => m[1]!);
+  return [...new Set(names.filter(n => NAME_RE.test(n)))];
+}
+
+/**
+ * XML-style call blocks: the outermost function_calls, invoke or tool_use
+ * element (namespace prefix optional) with its parameter children. A block
+ * whose close lies past the segment runs to its end; a closing tag with no
+ * opener, or a parameter opener outside any call, starts at the segment start
+ * or the last message anchor. Blocks separated only by whitespace merge.
+ */
+function neutralizeXmlSegment(segment: string): string {
+  const spans: Array<{ start: number; end: number }> = [];
+  const add = (start: number, end: number) => {
+    const prev = spans.at(-1);
+    if (prev && start >= prev.end && /^\s*$/.test(segment.slice(prev.end, start))) prev.end = end;
+    else spans.push({ start, end });
+  };
+  const floor = (at: number) => Math.max(openStart(segment, at), spans.at(-1)?.end ?? 0);
+  let stack: string[] = [];
+  let blockStart = 0;
+  for (const m of segment.matchAll(XML_TAG_RE)) {
+    const [tag, slash, name, attrs] = m as unknown as [string, string, string, string];
+    const after = m.index + tag.length;
+    if (stack.length > 0) {
+      if (!slash) stack.push(name);
+      else if (stack.lastIndexOf(name) >= 0) stack.length = stack.lastIndexOf(name);
+      if (stack.length === 0) add(blockStart, after);
+      continue;
+    }
+    const markup = ENDS_LINE_RE.test(segment.slice(after));
+    const named = /\bname\s*=/.test(attrs);
+    if (slash) { if (markup) add(floor(m.index), after); continue; }
+    if (name === 'parameter') { if (named) { blockStart = floor(m.index); stack = [name]; } continue; }
+    if (markup || (name === 'invoke' && named)) { blockStart = m.index; stack = [name]; }
+  }
+  if (stack.length > 0) add(blockStart, segment.length);
+  if (spans.length === 0) return segment;
+  let out = '';
+  let last = 0;
+  for (const { start, end } of spans) {
+    out += segment.slice(last, start) + summary(xmlNames(segment.slice(start, end)));
+    last = end;
+  }
+  return out + segment.slice(last);
+}
+
+/**
+ * Replace every tool-call block in transcript text with its inert summary;
+ * text without one comes back unchanged. A trailing evidence cut marker is
+ * kept outside any block it ends.
+ */
 export function neutralizeToolCalls(text: string): string {
-  return text.split(OMISSION).map(neutralizeSegment).join(OMISSION);
+  const cut = text.endsWith(CUT_MARKER) ? CUT_MARKER : '';
+  const body = text.slice(0, text.length - cut.length);
+  return body.split(OMISSION).map(segment => neutralizeSegment(neutralizeXmlSegment(segment))).join(OMISSION) + cut;
 }
 
 /** The text as a quoted excerpt of `slug`, in a fence no backtick run inside it can close. */
@@ -149,6 +217,11 @@ export function fenceTranscriptText(text: string, slug: string): string {
 /** Step 1, before any snippet cap: transcript rows get their tool-call blocks summarized (copies; other rows are returned as they are). */
 export function neutralizeTranscriptRows<T extends Row>(rows: T[]): T[] {
   return rows.map(r => (isTranscriptRow(r) ? { ...r, chunk_text: neutralizeToolCalls(r.chunk_text) } as T : r));
+}
+
+/** The text as step 2 delivers it for this row: what a token budget counts (evidence-delivery.ts `capEvidenceToBudget`). */
+export function deliveredQuoteText(row: Row, text: string): string {
+  return isTranscriptRow({ ...row, chunk_text: text }) ? fenceTranscriptText(text, row.slug) : text;
 }
 
 /** Step 2, after the caps: transcript rows are fenced and marked `quoted: "transcript"`. */
