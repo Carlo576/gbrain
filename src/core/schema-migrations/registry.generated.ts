@@ -271,6 +271,10 @@ import { v267 } from './v267-pages-title-search-index.ts';
 import { v268 } from './v268-effect-claim-owner.ts';
 import { v269 } from './v269-links-supersedes-index.ts';
 import { v270 } from './v270-pages-source-created-index.ts';
+import { v271 } from './v271-facts-superseded-by-index.ts';
+import { v272 } from './v272-git-canonical-declared.ts';
+import { v273 } from './v273-segment-derivations.ts';
+import { v274 } from './v274-pages-withheld-source-path.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -540,4 +544,8 @@ export const MIGRATIONS: Migration[] = [
   v268,
   v269,
   v270,
+  v271,
+  v272,
+  v273,
+  v274,
 ];
