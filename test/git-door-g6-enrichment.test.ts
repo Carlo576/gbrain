@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { BrainEngine } from '../src/core/engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { operations } from '../src/core/operations.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
@@ -23,6 +24,14 @@ const ENTITIES = ['people/alice-example', 'people/carol-example', 'companies/acm
 const op = operations.find(o => o.name === 'extract_entities')!;
 const setup = ({ root }: { root: string }) => { writeFileSync(join(root, '.gitignore'), '\n'); durableGitRepo(root, ['.gitignore']); };
 const put = (ctx: OperationContext, slug: string, content: string) => submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(), content } });
+type Entities = { entities: Array<{ slug: string; action: string; timelineAdded: boolean; backlinkCreated: boolean }> };
+/** G5 semantics held by the batch: each entity has its mention's timeline row and the bullet's backlink to the source page. */
+async function expectMentions(engine: BrainEngine, result: Entities): Promise<void> {
+  expect(result.entities.map(e => [e.slug, e.backlinkCreated]).sort()).toEqual(ENTITIES.map(slug => [slug, true]).sort());
+  const rows = await engine.executeRaw<{ slug: string }>(`SELECT p.slug FROM timeline_entries te JOIN pages p ON p.id=te.page_id
+    WHERE p.source_id='default' AND te.source=$1 ORDER BY p.slug`, [SOURCE]);
+  expect(rows.map(row => row.slug)).toEqual([...ENTITIES].sort());
+}
 
 for (const backend of testBackends()) {
   const databaseUrl = backend === 'postgres' ? requirePostgresTestDatabase() : undefined;
@@ -32,8 +41,9 @@ for (const backend of testBackends()) {
       await put(ctx, SOURCE, '---\ntype: meeting\ntitle: Source A\n---\n\nMet people.\n');
       await settleManagedGitEffects(engine);
       const since = await headCommit(root);
-      const result = await op.handler(ctx, { text: TEXT, source_slug: SOURCE }) as { entities: Array<{ slug: string; action: string; timelineAdded: boolean }> };
+      const result = await op.handler(ctx, { text: TEXT, source_slug: SOURCE }) as Entities;
       expect(result.entities.map(e => [e.slug, e.action, e.timelineAdded]).sort()).toEqual(ENTITIES.map(slug => [slug, 'created', true]).sort());
+      await expectMentions(engine, result);
       await settleManagedGitEffects(engine);
       const audit = await auditDoor(engine, root, { since, slugs: ENTITIES });
       console.log(summarizeAudit(`enrichment stubs ${backend}`, audit));
@@ -48,8 +58,9 @@ for (const backend of testBackends()) {
       await put(ctx, ENTITIES[2]!, '---\ntype: company\ntitle: Acme Example Labs\n---\n\nA company.\n');
       await settleManagedGitEffects(engine);
       const since = await headCommit(root);
-      const result = await op.handler(ctx, { text: TEXT, source_slug: SOURCE }) as { entities: Array<{ slug: string; action: string; timelineAdded: boolean }> };
+      const result = await op.handler(ctx, { text: TEXT, source_slug: SOURCE }) as Entities;
       expect(result.entities.map(e => [e.slug, e.action, e.timelineAdded]).sort()).toEqual(ENTITIES.map(slug => [slug, 'updated', true]).sort());
+      await expectMentions(engine, result);
       await settleManagedGitEffects(engine);
       const audit = await auditDoor(engine, root, { since, slugs: ENTITIES });
       console.log(summarizeAudit(`enrichment timeline ${backend}`, audit));

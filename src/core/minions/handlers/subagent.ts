@@ -472,7 +472,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       brainId: data.brain_id,
       allowedSlugPrefixes: data.allowed_slug_prefixes,
       // #1586: cycle-resolved source scope for tool-call OperationContexts.
-      sourceId: data.source_id, readBudgetBytes: data.read_budget_bytes,
+      sourceId: data.source_id, readBudgetBytes: data.read_budget_bytes, stageWrites: data.stage_writes === true && !submitted, // GBRA-60: trusted local jobs only
     });
     const selectedTools = selectAllowedTools(registry, data.allowed_tools);
     const guardTools = (tools: ToolDef[], deferEmbeds = false) => guardDelegatedTools(engine, config, submitted, ctx.id, tools, deps.toolRegistry !== undefined, deferEmbeds);

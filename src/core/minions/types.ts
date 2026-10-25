@@ -649,6 +649,15 @@ export interface SubagentHandlerData {
    */
   dream_output?: DreamOutputSpec;
   /**
+   * GBRA-60: the agent loop's put_page stages each page instead of writing it (minions/tools/staged-put-page.ts): every
+   * check put_page runs before journaling still refuses, but the page lives only in this job's tool-execution ledger
+   * until the submitting phase publishes it (a managed patterns run grounds, stamps and publishes the staged pages as
+   * one maintenance batch, so a strict source commits each page once). Staged writes count for require_writes. Trusted
+   * field: 'subagent' is a PROTECTED_JOB_NAMES job, submit_agent never copies it, and a delegated (remote-owned) job
+   * ignores it. A replacement tool registry (SubagentDeps.toolRegistry) does not stage.
+   */
+  stage_writes?: boolean;
+  /**
    * v0.41 Approach C: opt out of the auto-generated tool-usage preamble
    * that `buildSystemPrompt()` splices into `system`. Default behavior
    * (omitted or false) prepends a deterministic preamble listing each

@@ -1,9 +1,9 @@
 /**
  * G6 (git-canonical memory): the patterns phase (src/core/cycle/patterns.ts runPhasePatterns) and the claim-source
  * de-duplication it runs first (src/core/cycle/pattern-claim-sources.ts dedupePatternClaimSources) on a strict source.
- * On a managed brain the patterns child writes each page with put_page (the admitted subagent operation), the phase
- * rewrites each grounded page (writeGroundedPage) and stamps its provenance (stampMaintenancePage), both maintenance
- * publications (publishMaintenancePage); de-duplication publishes each rewritten page the same way. Target for a batch
+ * On a managed brain the patterns child stages each page with put_page (SubagentHandlerData.stage_writes: nothing is
+ * journaled), and the phase grounds the staged pages, folds in their provenance stamp and publishes them as one
+ * maintenance batch (publishMaintenancePages); de-duplication publishes its rewritten pages as one batch too. Target for a batch
  * of three pages: every page at HEAD with the content its row holds, a clean tree, no git-gap census gap, and at most one
  * commit per publication group (test/helpers/strict-door-audit.ts). Runs on PGLite, and on Postgres through
  * test/e2e/git-door-g6-patterns-postgres.test.ts. The model is a mocked chat transport; synthetic content only.
