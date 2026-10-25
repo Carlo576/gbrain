@@ -55,6 +55,9 @@ export interface ExtractAtomsDrainFailure {
   source: string;
   /** Bounded, sanitized failure reason (secrets/connection info redacted). */
   reason: string;
+  /** #7514: a write that did not commit: its request id (`gbrain write-request` explains it) and the refusal's own code. */
+  request_id?: string;
+  code?: string;
 }
 
 /**
@@ -111,7 +114,9 @@ export interface ExtractAtomsDrainDeps {
     providerFailure?: boolean;
     failureCount?: number;
     firstError?: string;
-    failures?: Array<{ source: string; reason: string }>;
+    failures?: Array<{ source: string; reason: string; request_id?: string; code?: string }>;
+    /** #7514: write failures that recorded a strike toward their hold this batch; a batch of them is progress, not a stall. */
+    writeStrikes?: number;
     budgetSkipped?: number;
     budget?: { spentUsd: number; capUsd: number };
     /** #6503: items the batch cut at `cycle.extract_atoms.max_input_chars` (partial disposition, not complete). */
@@ -367,6 +372,8 @@ export async function runExtractAtomsDrain(
               batch: batches,
               source: sanitizeFailureText(f.source, MAX_DRAIN_FAILURE_SOURCE_CHARS),
               reason: sanitizeFailureText(f.reason, MAX_DRAIN_FAILURE_REASON_CHARS),
+              ...(typeof f.request_id === 'string' ? { request_id: sanitizeFailureText(f.request_id, 64) } : {}),
+              ...(typeof f.code === 'string' ? { code: sanitizeFailureText(f.code, 64) } : {}),
             });
           }
           const representative = batchFailures[0];
@@ -417,7 +424,7 @@ export async function runExtractAtomsDrain(
             const after = await count();
             if (hard.signal.aborted) break;
             if (after !== null) lastCount = after;
-            if (after === null || before === null || after >= before) { stopped = 'no_progress'; break; }
+            if (after === null || before === null || (after >= before && !((r.writeStrikes ?? 0) > 0))) { stopped = 'no_progress'; break; }
           }
         }
 
@@ -552,20 +559,25 @@ export async function runExtractAtomsDrainForSource(
         // three-failure batch used to be unrecoverable from `--json`.
         const typedFailures = failures
           .filter(
-            (f): f is { source: string; error: string } =>
+            (f): f is { source: string; error: string; request_id?: unknown; code?: unknown; strikes?: unknown } =>
               f != null &&
               typeof f === 'object' &&
               typeof (f as { source?: unknown }).source === 'string' &&
               typeof (f as { error?: unknown }).error === 'string',
           )
-          .map(({ source, error }) => ({ source, reason: error }));
+          .map(({ source, error, request_id, code, strikes }) => ({ source, reason: error,
+            ...(typeof request_id === 'string' ? { request_id, code: typeof code === 'string' ? code : undefined, strikes } : {}) }));
+        // #7514: a write that did not commit never reached a provider, so it neither makes nor classes a provider failure.
+        const writeFailures = typedFailures.filter(f => f.request_id !== undefined);
+        const providerFailures = typedFailures.filter(f => f.request_id === undefined);
         return {
           extracted: Number(d.atoms_extracted ?? 0),
           skipped: Number(d.duplicates_skipped ?? 0),
-          providerFailure: failures.length > 0 && itemsSucceeded === 0,
-          providerFailureClass: batchProviderFailureClass(d.aborted_global_error, typedFailures),
+          providerFailure: failures.length > writeFailures.length && itemsSucceeded === 0,
+          providerFailureClass: batchProviderFailureClass(d.aborted_global_error, providerFailures),
           failureCount: failures.length,
           failures: typedFailures,
+          writeStrikes: writeFailures.filter(f => typeof f.strikes === 'number').length,
           budgetSkipped: Number(d.pages_skipped_budget ?? 0) + Number(d.transcripts_skipped_budget ?? 0),
           budget: { spentUsd: Number(d.estimated_spend_usd ?? 0), capUsd: Number(d.budget_usd ?? 0) },
           inputTruncated: Number(d.input_truncated ?? 0),
