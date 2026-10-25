@@ -10,6 +10,48 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.440.0] - 2026-10-25
+
+**Applying a held file-drift repair on a brain whose canonical checkout is behind or diverged no longer refuses most pages as "Reconciliation preview is stale: policy_digest" when nothing about your settings changed. One preview, then one apply, lands the whole window.**
+
+When you preview a repair, gbrain fingerprints the settings that decide what the repair writes (your config, the content-safety limits, the operator junk list), and the apply refuses any page whose fingerprint has changed since. But other gbrain processes on the same machine can do the actual write for the apply, such as `gbrain serve` or the jobs worker. Each of them folded its own API keys, database URLs and model choices into that fingerprint. When the apply's own writer was busy pushing to a diverged checkout, those other processes picked up its pages, and every page they handled read as stale. You had to repeat preview and apply until nothing was left.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain serve` or the jobs worker writes an apply's page, and its environment has different API keys, database URLs or model settings | the page is refused `changed_since_preview` (`policy_digest`); each preview/apply round landed only part of the window | the page lands; the fingerprint covers only what the repair reads |
+| A setting the repair does read changes between preview and apply (the config file's or database's `content_sanity` keys, `GBRAIN_PAGE_WARN_BYTES` / `GBRAIN_PAGE_BLOCK_BYTES` / `GBRAIN_NO_SANITY`, `~/.gbrain/junk-substrings.txt`, the source's config) | refused as stale | still refused as stale |
+
+### What to watch for after you upgrade
+
+- Previews made before the upgrade carry the old fingerprint, so their applies refuse as stale once. Preview again and apply the new hash.
+- Memory growth during a long held apply (#7506) is not addressed by this release.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `reconcilePolicyDigest` (`src/core/persistence/reconcile-state.ts`) builds its config from the config file plus the content-sanity overrides the environment sets (what the import gate resolves), then merges the database config plane. The operator literals, `GBRAIN_NO_SANITY` and the source row stay in the digest.
+- `test/repair-file-drift-consumer-env-7506.test.ts` (PGLite and Postgres): a diverged canonical checkout whose real keep-checkout publish parks on `integrate_conflict`; an apply under different credentials lands every item; a content-sanity override still refuses; the digest moves with each reconcile input and not with credentials; and the apply's heap stays flat per item.
+
+## [0.60.439.0] - 2026-10-24
+
+**`gbrain sources git-gap <source>` shows, read-only, how far a source's database is from what Git has committed: which pages match their committed file, which hold content Git lacks, which Git has moved past, and which are database-only by declaration. Doctor reports the totals as `db_ahead_of_git`. Nothing changes and nothing is written.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Seeing whether a source's database matches Git | no command; only sync holds and drift findings hinted at it | `gbrain sources git-gap <source> [--sample n] [--json]` compares every live page with the committed blob at HEAD (hardened plumbing, no filters) and reports each page as equal, database ahead, Git ahead, declared database-only (by class: private, alias-private, lineage-private, `db_only` prefix, derive-phase folder, Git-ignored, mirror, database-only reason), undeclared database-only, working-tree only or unparseable, with the working tree reported separately |
+| Content with no Git home | invisible | the census counts unfenced facts, facts whose fence page has no file, links that are neither file syntax nor a deterministic derivation, timeline entries on pages without a file, plus Git sync holds and parked targets |
+| `gbrain doctor` | no view of the gap | `db_ahead_of_git` lists the totals per source with a checkout (no slugs or paths), within its own budget (`GBRAIN_DOCTOR_GIT_GAP_TIMEOUT_MS`, 10 s); it is always ok in this release |
+| The design | `docs/designs/DATABASE_CANONICAL_MEMORY.md` | `docs/designs/GIT_CANONICAL_MEMORY.md` (Git stays the source of truth; the database is derived from it); the database-canonical design is marked superseded |
+
+### What to watch for after you upgrade
+
+- The census is trusted local CLI only and reads in short read-only transactions; on a large source it takes a while.
+- No migration, no config key and no behavior change.
+
 ## [0.60.438.0] - 2026-10-24
 
 **A source can now be marked git-canonical: each page write is committed to Git before the database records it, a write interrupted after its commit keeps the committed file, and its Git effect only pushes. The mode is off by default and nothing turns it on yet.**
