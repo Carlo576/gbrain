@@ -2,8 +2,9 @@
  * Grouped publication: one transaction publishes a claimed run of consecutive
  * requests of one worktree that share a group key (journal.ts
  * `publicationGroupKey`): the database-only pages of a bulk managed sync
- * (#5984, ENG-A3/A4) or the pages of one `put_pages` batch, files included
- * (#6007).
+ * (#5984, ENG-A3/A4), the pages of one `put_pages` batch, files included
+ * (#6007), or (G6) one maintenance run's page publications and one managed
+ * atom generation's members and activation.
  *
  * Every member keeps its own request row, authorization, page guard,
  * visibility check, revision check, attribution, effects and receipt; only
@@ -55,6 +56,7 @@ import { assertUnboundPublication, classifyUnboundPage } from './unbound-source.
 import { boundPublication, declarePublication, publicationLeaseMs, publicationTransaction, type PublicationBound } from './publication-deadline.ts';
 import { classifyMirrorPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { commitThroughDoor, doorMarker, sourceCanonicalGit, strictChanged } from './git-door.ts';
+import { assertNoPrivateCommit, declareStrictPublication } from './git-declared.ts';
 import { authorizePageVisibility } from './page-visibility.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
@@ -100,6 +102,24 @@ export function groupable(row: WriteRequest, prepared: PreparedMutation): boolea
   // A streamed file (large-file.ts) is staged before its publication transaction, which only publishMutation does.
   if (isStreamedContent(prepared.file?.content)) return false;
   return independentGroup(publicationGroupKey(row)) || singleWrite(row);
+}
+
+/**
+ * G6: the index of the first member that writes a page or file an earlier member of the group writes (a generation
+ * that deletes and rewrites one path, a batch naming a page twice), or null. Its preparation read the state before the
+ * earlier write, so the group ends before it (executeClaimedGroup). Compared case-insensitively, as a case-insensitive
+ * checkout would. The generation activation journals under a pseudo slug and writes no page, so only its file counts.
+ */
+export function firstSharedTarget(rows: WriteRequest[], prepared: Array<PreparedMutation | undefined>): number | null {
+  const seen = new Set<string>();
+  for (const [i, row] of rows.entries()) {
+    const file = prepared[i]?.file;
+    const page = row.intent?.kind === 'managed_generation_activate' ? [] : [`page:${row.slug.toLowerCase()}`];
+    const targets = [...page, ...(file ? [`file:${file.path.toLowerCase()}`] : [])];
+    if (targets.some(target => seen.has(target))) return i;
+    for (const target of targets) seen.add(target);
+  }
+  return null;
 }
 
 const flattened = new Map<string, string>();
@@ -364,6 +384,8 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
               async () => { if (!file && attribute) await setMemberAttribution(tx, publicationAttribution(row, member.trust)); },
             ]) as [unknown, Awaited<ReturnType<BrainEngine['readPageSnapshot']>>];
             if (!sync) await member.validate?.(tx);
+            // G7a (git-declared.ts): a strict member never writes or commits a private page's bytes; one refusal rolls the group back.
+            await assertNoPrivateCommit(tx, row, member, snapshot, binding);
             if (file) {
               if (persistenceFileHash(file.record.path) !== file.record.beforeHash) throw new OperationError('unexpected_file_bytes', 'The canonical file changed during preparation.', 'The members publish one at a time.');
               await seam('before_publication', row);
@@ -377,6 +399,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
             await classifyUnboundPage(tx, row);
             if (member.databaseOnlyReason === 'mirror_read_only') await classifyMirrorPage(tx, row);
             const final = await publicationPostimage(tx, row, member);
+            await declareStrictPublication(tx, row, member, snapshot, final, binding);
             decoratePublicationOutcome(row, member, outcome, final, file ? 1 : 0, false);
             effects = async () => {
               await recordPublicationFenceTrend(tx, row, outcome);
@@ -776,6 +799,13 @@ export async function executeClaimedGroup(engine: BrainEngine, rows: WriteReques
       run.publication!.onOverdue?.();
     } }) : publish();
     const live = rows.map((row, i) => ({ row, i })).filter(({ row }) => !released.has(row.id));
+    // G6: a member writing a page or file an earlier member writes is prepared again after that write publishes: the group
+    // ends before it, and it and the members after it go back to the queue in order.
+    const shared = ordered ? null : firstSharedTarget(live.map(({ row }) => row), live.map(({ i }) => { const p = prepared[i]; return p && 'ok' in p ? p.ok : undefined; }));
+    for (const { row } of shared === null ? [] : live.splice(shared)) {
+      held.delete(row.id); released.add(row.id);
+      await releaseUnpublishedClaim(engine, row, 'group_member_waiting');
+    }
     if (!live.length) return progressed;
     const liveRows = live.map(({ row }) => row);
     if (run.publication) await holdClaimForPublication(lease, () => renewGroupClaims(engine, liveRows, publicationLeaseMs(run.publication!.ceilingMs), undefined,
