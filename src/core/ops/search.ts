@@ -1039,13 +1039,12 @@ const query: Operation = {
     const typeFilter = await setup(() => reconcileTypeFilter(ctx, querySourceScope, excludePrivate, types));
     types = typeFilter.types;
     let capturedMeta: HybridSearchMeta | null = null; let queryEmbedding: Float32Array | null = null; const resolving = startEntityResolution(ctx, queryText, { ...querySourceScope, excludePrivate });
-    const explainPrep = await setup(() => prepareExplainTarget(ctx, p, querySourceScope, excludePrivate, 'query'));
-    const pageCap = await setup(() => remotePageCap(ctx, p));
+    const [explainPrep, pageCap] = await setup(() => Promise.all([prepareExplainTarget(ctx, p, querySourceScope, excludePrivate, 'query'), remotePageCap(ctx, p)]));
     // v0.32.x search-lite: route the query op through hybridSearchCached so
     // token budget and intent weighting apply at the operation boundary.
     // Semantic cache reuse is suspended in the wrapper.
     // (#1663: `let` — the CRAG gate below may swap in an escalated run.)
-    let capped = capVectorOnlyPages(await hybridSearchCached(ctx.engine, queryText, {
+    let { rows: results, meta: pageCapMeta } = capVectorOnlyPages(await hybridSearchCached(ctx.engine, queryText, {
       // #4356 — was a hard `|| 20`, independent of the mode-resolution
       // hybridSearchCached applies when `limit` is falsy (undefined OR 0):
       // `opts?.limit || resolvedMode.searchLimit` (hybrid.ts). Passing
@@ -1101,7 +1100,6 @@ const query: Operation = {
       relationalRetrieval: typeof p.relational === 'boolean' ? (p.relational as boolean) : undefined,
       explain: p.explain === true, explainTarget: explainPrep?.trace, _timings: timings,
     }), pageCap);
-    let results = capped.rows;
     const declarations = new DeclarationMemo();
     const primaryRows = results;
     const fanned = await timings.stage('alias_fanout', () => withAliasFanOut(ctx.engine, primaryRows, queryText, { ...querySourceScope, excludePrivate },
@@ -1187,8 +1185,7 @@ const query: Operation = {
           crag.escalated = true;
           crag.escalated_confidence = regraded.level;
           if (confidenceRank(regraded.level) > confidenceRank(grade.level)) {
-            capped = capVectorOnlyPages(escalated.slice(0, effectiveLimit), pageCap);
-            results = capped.rows;
+            ({ rows: results, meta: pageCapMeta } = capVectorOnlyPages(escalated.slice(0, effectiveLimit), pageCap));
             capturedMeta = escalatedMeta;
             grade = regraded;
             crag.confidence = regraded.level;
@@ -1269,7 +1266,7 @@ const query: Operation = {
     // #3800: cap AFTER capture/meta/CRAG so every internal consumer graded
     // and recorded the real payload; only the returned envelope is snipped.
     return evidenceOutput(ctx, p, results, plan, { ...querySourceScope, excludePrivate, detail }, capturedMeta, snippetCap, timings,
-      async rows => withExplainTarget({ ...(await buildRetrievalResponseMeta(ctx, querySourceScope, queryText, rows, capturedMeta, { types, typeFilterNotice: typeFilter.notice, declarations, feedbackOp: 'query', entity: fanned.entity, filterHintFor: { op: 'query', p }, timings })), crag, ...(fanned.fanout ? { fanout: fanned.fanout } : {}), ...(capped.meta ? { page_cap: capped.meta } : {}) }, finishExplainTarget(ctx, p, explainPrep, results, 'query')));
+      async rows => withExplainTarget({ ...(await buildRetrievalResponseMeta(ctx, querySourceScope, queryText, rows, capturedMeta, { types, typeFilterNotice: typeFilter.notice, declarations, feedbackOp: 'query', entity: fanned.entity, filterHintFor: { op: 'query', p }, timings })), crag, ...(fanned.fanout ? { fanout: fanned.fanout } : {}), ...(pageCapMeta ? { page_cap: pageCapMeta } : {}) }, finishExplainTarget(ctx, p, explainPrep, results, 'query')));
   },
   scope: 'read', mutating: false,
   cliHints: { name: 'query', positional: ['query'] },
