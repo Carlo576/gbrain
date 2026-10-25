@@ -3108,7 +3108,18 @@ brain rather than making another bundled copy. Follow the
 and preserve edited files.
 
 If you're running an agent platform (OpenClaw, Hermes, or any repo with a workspace),
-scaffold the bundled skills into it:
+scaffold the bundled skills into it. On OpenClaw, install the brain-first core:
+
+```bash
+gbrain skillpack scaffold --harness openclaw --workspace /path/to/agent/workspace
+```
+
+That is five skills (`query`, `brain-ops`, `capture`, `data-loss-gate`,
+`resolve-before-asking`) and their shared files. OpenClaw lists every workspace
+skill's name and description in every prompt, so each scaffolded skill costs
+input tokens on every turn whether or not it is used. Add a skill when the agent
+needs it (`--skill <name>`, repeatable), or the whole bundle with `--all`. On
+Hermes or any other workspace:
 
 ```bash
 cd /path/to/agent/workspace
