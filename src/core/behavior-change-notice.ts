@@ -1296,6 +1296,7 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; 
   // GBRA-187 harness-eval items (HARN-2, HARN-5). `since` is stamped at the merge slot.
   { since: '0.60.456.0', id: 'skillpack_skill_name', text: 'list_brain_skillpack now names each skill `name` instead of `slug`, and get_skill with source_id returns `name` too, matching the get_skill parameter it feeds. A skill name is not a page slug; clients that read `skills[].slug` read `skills[].name` instead.' },
   { since: '0.60.456.0', id: 'openclaw_core_scaffold', text: '`gbrain skillpack scaffold --harness openclaw` now installs five brain-first skills (query, brain-ops, capture, data-loss-gate, resolve-before-asking) instead of the full bundle, because OpenClaw lists every workspace skill in every prompt. `--all` installs the full bundle; existing workspaces are not changed.' },
+  { since: 'TBD', id: 'strict_landed_before_row_receipt', text: 'On a source configured `canonical: git`, a write whose door commit landed in Git before its database row and that then ends without committing (its grant revoked before the replay) now keeps `outcome.persistence = {git_state: committed, git_commit, landed_before_row: true}` on its receipt instead of an empty outcome, because the indexer will import those committed bytes. Other sources are unchanged.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */
