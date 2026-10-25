@@ -61,8 +61,10 @@ export function makeFactsAbsorbHandler(engine: BrainEngine): MinionHandler {
       const { writeFactsAbsorbFailure, writeRefusalCode, DETERMINISTIC_WRITE_REFUSALS } = await import('../../facts/absorb-log.ts');
       await writeFactsAbsorbFailure(engine, slug, err, sourceId);
       // #5362: a deterministic write refusal goes straight to dead; retrying re-runs inference before the same refusal.
+      // #7602: so does a journaled refusal marked not retryable: every retry replays the same stored receipt.
       const refusal = writeRefusalCode(err);
-      if (refusal && DETERMINISTIC_WRITE_REFUSALS.includes(refusal)) {
+      const replayed = (err as { retryable?: boolean; writeRequest?: unknown }).retryable === false && (err as { writeRequest?: unknown }).writeRequest !== undefined;
+      if (refusal && (DETERMINISTIC_WRITE_REFUSALS.includes(refusal) || replayed)) {
         throw new UnrecoverableError(`facts_absorb_write_refused (${refusal}): ${(err as Error).message} Not retried. ` +
           `Fix the cause (gbrain sources writer status ${sourceId}), then gbrain jobs retry ${job.id}. See ${ERROR_CATALOGUE.facts_absorb_write_refused.docs}`);
       }

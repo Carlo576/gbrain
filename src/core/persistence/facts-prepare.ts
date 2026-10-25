@@ -18,7 +18,7 @@ import { authorizePageVisibility } from './page-visibility.ts';
 import { authorizeFactsBackstop } from './effect-facts.ts';
 import { getWriteRequestById } from './journal.ts';
 import { preparePageMutation } from './page-prepare.ts';
-import { FACTS_BATCH_INCOMPLETE_MESSAGE } from './verb-errors.ts';
+import { FACTS_BATCH_INCOMPLETE_MESSAGE, FACTS_DEDUP_CHANGED_MESSAGE, FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE, FACTS_ENTITY_CHANGED_MESSAGE } from './verb-errors.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
 import type { ManagedFactIntent, FrozenExtractedFact } from './facts-maintenance.ts';
@@ -153,7 +153,7 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
   const stored = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
   if (stored?.page.deleted_at || (stored?.page.id ?? null) !== row.page_id || (stored?.revision ?? null) !== (p.expected_revision ?? null)
     && (stored?.revision ?? null) !== await predecessorPartRevision(engine, row, p)) {
-    throw factsRefusal('revision_conflict', 'The fact entity changed after extraction admission.', row,
+    throw factsRefusal('revision_conflict', FACTS_ENTITY_CHANGED_MESSAGE, row,
       `Entity page ${row.slug} changed or was deleted after these facts were admitted, so none were published.`);
   }
   const facts = (p.facts ?? []).map(fact => ({ ...thawFact(fact), embedding_model: fact.embedding ? p.embedding?.model ?? null : null }));
@@ -239,7 +239,7 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
     page = await withPendingFenceRows({ sourceId: row.source_id, slug: row.slug, rowNums, tier: fenceAppendPendingTier(taint?.trust.tier) },
       () => preparePageMutation(engine, { ...row, intent: { ...p, expected_revision: snapshot.revision,
         content: serializePageToMarkdown({ ...snapshot.page, ...next }, snapshot.tags) } }, config));
-    if (page.observedRevision !== snapshot.revision) throw factsRefusal('revision_conflict', 'The fact entity changed during preparation.', row,
+    if (page.observedRevision !== snapshot.revision) throw factsRefusal('revision_conflict', FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE, row,
       `Entity page ${row.slug} changed while its ## Facts table was being prepared, so none of these facts were published.`);
   }
   return { observedRevision: snapshot?.revision ?? null, file: page?.file, ...(page?.exclusiveSources ? { exclusiveSources: page.exclusiveSources } : {}), noop: entries.every(entry => entry.duplicateId !== null || entry.duplicateOf !== undefined),
@@ -262,7 +262,7 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
         }
         if (entry.duplicateOf !== undefined) continue;
         const current = await decideSingleFact(tx, row.source_id, entry.fact, dedupEmbedding(entry.fact), entry.fact.embedding_model, entry.fact.source);
-        if ((current.candidate?.id ?? null) !== (entry.duplicateId ?? entry.supersedes?.id ?? null)) throw factsRefusal('revision_conflict', 'The fact deduplication state changed before publication.', row,
+        if ((current.candidate?.id ?? null) !== (entry.duplicateId ?? entry.supersedes?.id ?? null)) throw factsRefusal('revision_conflict', FACTS_DEDUP_CHANGED_MESSAGE, row,
           `A matching fact in source ${row.source_id} was added or retired before publication, so the deduplication decision for ${row.slug} is stale and none of these facts were published.`);
       }
       await page?.validate?.(tx);

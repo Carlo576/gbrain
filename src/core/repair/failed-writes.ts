@@ -54,6 +54,7 @@ import { submitRememberMutation } from '../persistence/memory-mutations.ts';
 import { getWorktreeBinding } from '../persistence/ownership.ts';
 import { prepareFileTarget } from '../persistence/page-prepare.ts';
 import { PENDING_IMPORT, SYNC_HELD } from '../persistence/pending-import.ts';
+import { FACTS_ENTITY_MOVED_MESSAGES } from '../persistence/verb-errors.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
 import { dispositionOf, PAGE_REMOVAL_OPERATIONS, supersessionOrderSql, supersessionSql } from '../persistence/terminal-classify.ts';
@@ -67,10 +68,17 @@ const GUARD_REFUSAL = `(r.state='failed' AND (r.error_code='writer_coordinator_r
   OR (r.error_code='storage_error' AND r.error_message LIKE 'Publication failed (P0001)%')))`;
 /** #6429: a refusal from prepareFileTarget (page-prepare.ts); the receipt keeps the code, not the refusal's detail. */
 const DRIFT_REFUSAL = `(r.state='conflict' AND r.error_code='source_changed')`;
+/** #7602: a managed fact request refused because its entity page moved; extraction re-admits these since, but older ones stayed refused. */
+const FACTS_MOVED_REFUSAL = `(r.operation='extract_facts' AND r.state='conflict' AND r.error_code='revision_conflict'
+  AND r.error_message IN (${FACTS_ENTITY_MOVED_MESSAGES.map(message => `'${message.replaceAll("'", "''")}'`).join(',')}))`;
+/** #7602: a refused fact request whose retained facts a later request of the same extraction committed on the same page. */
+const FACTS_RECOVERED = `(r.operation='extract_facts' AND EXISTS (SELECT 1 FROM persistence_requests c WHERE c.operation='extract_facts'
+  AND c.source_id=r.source_id AND c.slug=r.slug AND c.state='committed' AND c.sequence>r.sequence
+  AND COALESCE(c.intent->>'inputDigest', c.outcome->>'input_digest')=r.intent->>'inputDigest'))`;
 
 interface FailedWrite {
   id: string; request_id: string; sequence: string; operation: string; source_id: string; slug: string; digest: string; state: string;
-  intent: Record<string, unknown>; authority: WriteAuthority; created_at: string; producer: string | null;
+  intent: Record<string, unknown>; authority: WriteAuthority; created_at: string; producer: string | null; error_code: string | null;
   /** #6693: the refusal's recorded origin (`pending_import`, `sync_held`), when the receipt carries one. */
   origin?: string | null;
 }
@@ -83,6 +91,26 @@ function previewCommand(scope: RepairScope): string {
   return `gbrain repair failed-writes${scope.source_ids.length === 1 ? ` --source ${scope.source_ids[0]}` : ''}`;
 }
 
+/**
+ * #7602: a refused fact request keeps its extracted facts. A page-triggered one (its job is keyed by the page write) is
+ * recovered by retrying that job, which re-admits them at the entity page's current revision with no model call, once
+ * the cause clears. A batch whose follow-ups were refused too would replay the refusal, and a writer-guard refusal or
+ * a batch with no page write is never re-admitted: those are extracted again.
+ */
+async function factsRecovery(engine: BrainEngine, write: FailedWrite, rows: FailedWrite[]): Promise<string> {
+  const origin = (write.intent.origin as { slug?: string } | null | undefined)?.slug;
+  const job = typeof write.intent.originalRequestId === 'string' ? write.intent.originalRequestId : null;
+  const extractAgain = `re-extract: gbrain call extract_facts again on the current text of ${origin ?? 'the source turn'} with a new request_id (one model call)`;
+  if (!job || write.state !== 'conflict') return extractAgain;
+  if (write.error_code === 'revision_conflict') {
+    if (await pageRevision(engine, write.source_id, write.slug) === null) return `not recoverable: entity page ${write.slug} was deleted after these facts were admitted`;
+    const refusals = rows.filter(row => row.operation === 'extract_facts' && row.error_code === 'revision_conflict' && row.source_id === write.source_id
+      && row.slug === write.slug && row.intent.inputDigest === write.intent.inputDigest);
+    if (refusals.length > 1) return `${extractAgain}; its follow-up batches were refused as well, so a job retry replays the refusal`;
+  }
+  return `recover: gbrain facts retry-dead --reset 'facts-absorb:write:${job}' (the next facts_drain pass retries the page's facts-absorb job, which re-admits the retained facts without a model call${write.error_code === 'source_changed' ? ' once the file check passes' : ''})`;
+}
+
 /** The command that produces an owner-internal write again, from current content. */
 function producerCommand(producer: string, sourceId: string): string {
   const parts = producer.split(':');
@@ -90,17 +118,17 @@ function producerCommand(producer: string, sourceId: string): string {
   if (parts.includes('canonical_reconcile')) return `gbrain sources reconcile ${sourceId} --audit`;
   if (parts.includes('managed_file_repair')) return `gbrain repair frontmatter --source ${sourceId} (a frontmatter repair) or gbrain repair fences --source ${sourceId} (a fence repair)`;
   if (parts.includes('relink_facts')) return `gbrain facts relink --source ${sourceId} --dry-run`;
-  if (parts.some(part => part.includes('facts'))) return `gbrain extract --stale --source-id ${sourceId} --json`;
   return 'the next `gbrain dream` cycle (or autopilot) produces it again';
 }
 
 async function failedWrites(engine: BrainEngine, sourceIds: string[], id?: string): Promise<FailedWrite[]> {
   const rows = await engine.executeRaw<FailedWrite>(`SELECT r.id::text, r.request_id::text, r.sequence::text, r.operation, r.source_id, r.slug, r.digest, r.state, r.intent, r.authority,
-      to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at, r.error_detail->>'origin' AS origin,
+      to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at, r.error_detail->>'origin' AS origin, r.error_code,
       CASE WHEN r.operation = ANY($2::text[]) AND NOT (r.operation='put_page' AND r.intent ? 'kind') THEN NULL
         ELSE r.operation || COALESCE(':' || (r.intent->>'kind'), '') END AS producer
     FROM persistence_requests r
-    WHERE r.source_id = ANY($1::text[]) AND NOT r.compacted AND r.intent IS NOT NULL AND (${GUARD_REFUSAL} OR ${DRIFT_REFUSAL})
+    WHERE r.source_id = ANY($1::text[]) AND NOT r.compacted AND r.intent IS NOT NULL AND (${GUARD_REFUSAL} OR ${DRIFT_REFUSAL} OR ${FACTS_MOVED_REFUSAL})
+      AND NOT ${FACTS_RECOVERED}
       ${id ? 'AND r.id=$3::uuid' : ''}
     ORDER BY r.sequence`, id ? [sourceIds, REPLAYABLE, id] : [sourceIds, REPLAYABLE]);
   if (id) return rows;
@@ -312,8 +340,10 @@ export const failedWritesRepair: RepairHandler = {
         const label = `${write.source_id}:${write.slug} ${write.operation} (${write.state} ${write.created_at}, request ${write.id})`;
         if (write.producer) {
           residuals[`producer_owned:${write.producer}`] = (residuals[`producer_owned:${write.producer}`] ?? 0) + 1;
-          producers.set(`${write.producer} in ${write.source_id}`, producerCommand(write.producer, write.source_id));
-          listing.push({ item: label, class: 'producer_owned', detail: `re-run: ${producerCommand(write.producer, write.source_id)}` });
+          const facts = write.operation === 'extract_facts';
+          const run = facts ? await factsRecovery(engine, write, rows) : producerCommand(write.producer, write.source_id);
+          producers.set(`${write.producer} in ${write.source_id}`, facts ? 'each listed request names the command that recovers its facts' : run);
+          listing.push({ item: label, class: 'producer_owned', detail: facts ? run : `re-run: ${run}` });
           continue;
         }
         const verdict = await disposition(engine, write);
