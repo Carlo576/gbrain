@@ -76,7 +76,20 @@ A hosted source (`gbrain sources host-repo`, G7b-2) keeps one bare repository pe
 
 ## Conversion
 
-A source changes mode only through a preview-bound verb. The preview is the [git-gap census](#the-git-gap-census): every page whose row differs from its committed blob, every page with no file that is not in a declared class, held items and parked effects, by category. The operator chooses per category to commit the database content through the door, declare it, or let git win. The preview lists any database content that git-wins would discard, and the apply binds to that preview. A source can return to its previous mode.
+A source changes mode only through a preview-bound verb. The preview is the [git-gap census](#the-git-gap-census): every page whose row differs from its committed blob, every page with no file that is not in a declared class, held items and parked effects, by category. The preview lists any database content that git-wins would discard, and the apply binds to that preview. A source can return to its previous mode.
+
+G8a ships it as `gbrain sources canonical <source-id> --to git|mixed [--dry-run | --apply --expect <hash>] [--json]`: trusted local CLI on a managed brain only, never an MCP operation. `--dry-run` (the default) writes nothing and puts every live page in one category, with counts, a capped path sample and the preview hash (HEAD, the source incarnation and every planned item with its revision):
+
+| Category | What the apply does |
+|---|---|
+| adopt (`database_ahead`, `undeclared_database_only`, `worktree_only`) | Writes the page's export view to its file and commits it through the door, up to 200 pages per commit. The worktree writer lock is taken per group and dropped between groups. No row changes: the bytes read back `equal`, and the strict pass after them rewrites none of those rows. A page with no import record whose row differs from HEAD counts as `database_ahead`, so it is adopted before the strict import could overwrite it. |
+| declared | Nothing. A page under an ignored path is `git_ignored` and never gets a file or a Git effect. |
+| git wins | The strict pass indexes the committed blob: Git moved and the database did not, Git deleted a page the database had not edited, a held deletion, or a held `file_drift` whose side is unknown and whose row already equals the committed file. |
+| holds | Cleared, so Git's verdict runs over them. |
+| parked effects | Retried once, or, for targets Git ignores, the page is stamped `git_ignored` (declared) in the same transaction that marks each parked target `declared: git_ignored`; the target stays as a record and the next preview no longer lists it. |
+| discard | Refused: `git_conversion_blocked` names each category (both sides moved, a both-sides drift hold, an unknown-side drift hold whose row differs from the committed file, a database edit Git deleted, an uncommitted working-tree edit that differs from HEAD and the export, an ignored target (a fail-closed fallback when the ignore rules cannot be read), unparseable, unsafe path, segmented page, export mismatch, or a row a strict pass would overwrite unplanned). There is no override. |
+
+`--apply --expect <hash>` re-plans and refuses `preview_changed` on any difference, adopts group by group (a crash leaves the source mixed and the rerun preview lists only what is left), clears the holds, settles the parked effects, runs the full strict-equivalent pass, then sets `canonical: git` in the transaction that records the conversion. Writes can land between that pass and the flag, so it runs one genuine strict pass and previews again: the conversion is complete only when nothing is left; otherwise it reports `git_conversion_incomplete` with what remains and the source stays strict, because Git wins. `--to mixed` removes the flag and changes nothing else; Git keeps every door commit.
 
 ## The git-gap census
 
@@ -108,6 +121,6 @@ The census also counts rows with no Git home, which G4 and G5 give a file form: 
 | G5 | authored rows written by direct coordinated database writes get a file form |
 | G6 | unmanaged writers routed through the door with batched commits |
 | G7 | declared classes, large files, remote and hosted writes |
-| G8 | conversion verb, retirement of the hold machinery for strict sources |
+| G8 | conversion verb (G8a: `gbrain sources canonical`), retirement of the hold machinery for strict sources |
 
 Every wave is default-off and changes nothing for existing sources until a source is converted.
