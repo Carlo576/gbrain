@@ -32,7 +32,7 @@
  * an explicit `--surface` restart.
  */
 
-import type { OperationMeta } from '../core/ops/contract.ts';
+import type { OperationMeta, ParamDef } from '../core/ops/contract.ts';
 import type { Notice } from '../core/agent-output.ts';
 import type { GBrainConfig } from '../core/config.ts';
 import type { BrainEngine } from '../core/engine.ts';
@@ -223,10 +223,16 @@ export function filterOpsForSurface<T extends OperationMeta>(ops: T[], surface: 
   return ops.filter(op => STARTER_OPS.has(op.name)).map(starterParams);
 }
 
-/** Starter ops advertise every param except the full-surface-only ones. */
+/** Shared params a starter op leaves off its schema; the op keeps the shared definition, so every surface validates the same object. */
+const STARTER_HIDDEN_PARAMS: Readonly<Record<string, ReadonlySet<string>>> = { remember: new Set(['expected_revision', 'force']) };
+
+/** Starter ops advertise every param except the full-surface-only ones and their STARTER_HIDDEN_PARAMS. */
 function starterParams<T extends OperationMeta>(op: T): T {
-  if (!Object.values(op.params).some(p => p.fullSurfaceOnly)) return op;
-  return { ...op, params: Object.fromEntries(Object.entries(op.params).filter(([, p]) => !p.fullSurfaceOnly)) };
+  const hidden = STARTER_HIDDEN_PARAMS[op.name];
+  const keep = ([name, p]: [string, ParamDef]) => !p.fullSurfaceOnly && !hidden?.has(name);
+  const params = Object.entries(op.params);
+  if (params.every(keep)) return op;
+  return { ...op, params: Object.fromEntries(params.filter(keep)) };
 }
 
 /** The fail-closed allow-set handed to dispatchToolCall. */

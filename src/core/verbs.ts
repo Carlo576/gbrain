@@ -68,8 +68,6 @@ const remember: Operation = {
   description: 'Save facts with provenance; set `entity` (the subject) or recall misses it. Branch on `status`; write_pending: poll get_write_request.',
   params: {
     ...AGENT_CONTENT_PARAMS,
-    expected_revision: { ...AGENT_CONTENT_PARAMS.expected_revision, fullSurfaceOnly: true },
-    force: { ...AGENT_CONTENT_PARAMS.force, fullSurfaceOnly: true },
     fact: { type: 'string', description: 'One claim.' },
     items: {
       type: 'array',

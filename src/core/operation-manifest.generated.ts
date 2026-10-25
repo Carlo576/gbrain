@@ -22,13 +22,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "expected_revision": {
         "type": "string",
-        "description": "Revision read; omit to create.",
-        "fullSurfaceOnly": true
+        "description": "Revision read; omit to create."
       },
       "force": {
         "type": "boolean",
-        "description": "Ignore the revision.",
-        "fullSurfaceOnly": true
+        "description": "Ignore the revision."
       },
       "request_id": {
         "type": "string",
