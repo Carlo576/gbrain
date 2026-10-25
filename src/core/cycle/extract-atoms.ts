@@ -1339,8 +1339,7 @@ export async function runPhaseExtractAtoms(
         else pagesSkipped++;
         continue;
       }
-      // #7514: a batch whose write did not commit is a write failure (request id, refusal code, strike), never a provider error.
-      const written = managed && origin ? await atomWriteFailure(engine, managed, origin, err) : null;
+      const written = managed && origin ? await atomWriteFailure(engine, managed, origin, err) : null; // #7514: never a provider error
       if (written) { hardFailureCount++; failures.push({ source: originLabel, ...written }); continue; }
       // gbrain#4148: classify. Transient provider/infra errors (timeouts,
       // rate limits, 5xx, network) stay retryable and are NOT counted toward
