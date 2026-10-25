@@ -529,10 +529,18 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
     const [{ createPersistenceIpcProvider, residentPersistenceConfig }, { bindResolveIpcForServe }] = await Promise.all([import('../core/persistence/provider.ts'), import('./resolve-ipc-binding.ts')]);
     bootPhase('source_scope');
     const { sourceId: ipcSourceId } = await resolveMcpStdioSourceScope(engine);
+    // #7599: a read-only serve runs no resident write duty: no persistence consumer, no delegated sync, nudge or sweep,
+    // no session-cursor GC and no sweep of its own (serve.ts also skips the idle sweep, facts drain and on-commit watcher).
+    // The long-lived serve, worker or autopilot owns them; doctor's commit_notifier and two_consumers_on_host say when none runs.
     bootPhase('persistence_consumer');
-    const persistence = await createPersistenceIpcProvider(engine, residentPersistenceConfig(config) ?? { engine: engine.kind });
+    const persistence = session.readOnly ? undefined : await createPersistenceIpcProvider(engine, residentPersistenceConfig(config) ?? { engine: engine.kind });
     bootPhase('resolve_ipc_bind');
-    ipcBinding = await bindResolveIpcForServe(engine, ipcSourceId, persistence, { rememberCallable: () => !session.allowedOps || session.allowedOps.has('remember') });
+    ipcBinding = await bindResolveIpcForServe(engine, ipcSourceId, persistence, { rememberCallable: () => !session.allowedOps || session.allowedOps.has('remember'), ...(session.readOnly ? { readOnly: true } : {}) });
+    if (session.readOnly) {
+      process.stderr.write('[gbrain-serve] read-only: no persistence consumer, on-commit sync or sweep runs here; a read-write serve, jobs work or autopilot owns them.\n');
+      import('../core/onboard/mcp-onboarding.ts').then(m => m.startOnboardingRefresher(engine, { idle: () => _stdioRpcsInFlight === 0 })).catch(() => { /* coaching is best-effort */ });
+      return;
+    }
 
     // v0.45.7 ambient recall: age out stale session cursors once per serve boot
     // (7-day TTL, indexed DELETE). Best-effort — GC failure never blocks serve.
