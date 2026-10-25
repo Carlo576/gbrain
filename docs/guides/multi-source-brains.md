@@ -183,6 +183,36 @@ current member's sources, but a prompt-injected or buggy bot can omit it, so
 it does not separate members who must not see each other's pages. Use
 per-member tokens for that, and `source_ids` to narrow further.
 
+### Lay out sources by who may read them
+
+gbrain enforces access per source, never per page. Two pages in one source are
+readable by exactly the same tokens. So put content in sources by who may read
+it, before any member's bot connects:
+
+- **One source per channel, team or member.** Give a channel's pages a source
+  of their own (`channel-a`), a team's documents theirs (`team-a`), and each
+  member a private one (`private-alice-example`). Content everyone may read
+  goes in a shared source (`public`).
+- **One grant per member.** Grant each member's token or client every source
+  that member may read, and nothing else:
+
+  ```bash
+  gbrain auth rescope --token bot-alice-example --sources private-alice-example,channel-a,team-a,public
+  gbrain auth rescope --client <client_id> --sources private-alice-example,channel-a,team-a,public
+  ```
+
+  The first id is the token's write source, so a member's saved memories land
+  in their own private source.
+
+> **Warning: one shared source has no boundary inside it.** A bot that answers
+> everyone with one unscoped token over a single source exposes everything in
+> that source to every requester. Neither `source_ids` nor a search limit can
+> narrow a read inside one source: `source_ids` chooses whole sources, and a
+> limit only shortens a ranked list, which can still start with a page the
+> requester should not see. Semantic search makes this more visible, because
+> it returns related pages that a keyword search would not match. Split the
+> content into sources first, then grant per member.
+
 ### Links, backlinks and the graph across sources
 
 `gbrain links`, `gbrain backlinks` and `gbrain graph` (MCP: `get_links`,
