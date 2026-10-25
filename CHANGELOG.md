@@ -10,6 +10,22 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.442.0] - 2026-10-25
+
+**Deleting facts on a large brain no longer scans the whole facts table once per deleted row. A new partial index on `facts(superseded_by)` lets the `ON DELETE SET NULL` foreign key find the rows that point at a deleted fact directly.**
+
+`facts.superseded_by` references `facts(id)` with `ON DELETE SET NULL` (v167), but nothing indexed it. Every deleted fact made Postgres run `UPDATE facts SET superseded_by = NULL WHERE superseded_by = <id>` as a sequential scan, so clearing a page's conversation facts or purging facts slowed down as the brain grew. On a synthetic brain of 200,000 facts, deleting 2,000 unreferenced facts took about 54 s before this release and about 20 ms after it.
+
+### What to watch for after you upgrade
+
+- The migration builds the index online on Postgres (`CREATE INDEX CONCURRENTLY`, outside a transaction; an invalid leftover from an interrupted build is dropped and rebuilt, then the table is analyzed), so writes keep flowing while it builds. PGLite builds it directly.
+- No data changes. The index only covers rows whose `superseded_by` is set.
+
+### Itemized changes
+
+- `src/core/schema-migrations/v271-facts-superseded-by-index.ts`: `idx_facts_superseded_by ON facts (superseded_by) WHERE superseded_by IS NOT NULL`.
+- `test/facts-superseded-by-index.test.ts` (PGLite, and Postgres with `DATABASE_URL`): with 20,000 seeded facts, the plans for the `superseded_by = <id>` lookup and the foreign key's set-null update use the index; dropping it brings back the sequential scan, and re-running the migration restores the index scan.
+
 ## [0.60.441.0] - 2026-10-25
 
 **On a managed brain, the links you add with `add_link` and the timeline bullets `extract_entities` writes now live in the page's Markdown, committed to Git, and the database edges are derived from them. A manual edge survives a rebuild from Git, and every write that touches the database directly is now classified, so a new one can't slip in unnoticed.**
