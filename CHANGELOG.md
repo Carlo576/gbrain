@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.450.0] - 2026-10-24
+## [0.60.449.0] - 2026-10-25
 
 **Search and query answer `response.meta` about 560 ms faster on a large sealed brain when the process has no cached readiness answer (every `gbrain search` or `gbrain query` CLI call): the projection-readiness probe reads the small pending-projection index instead of every page.**
 
