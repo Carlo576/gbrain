@@ -102,6 +102,7 @@ export const FRAGMENTS: readonly Fragment[] = [
     postgres: persistenceSql(PERSISTENCE_SCHEMA_STATEMENTS.filter((s) => !POSTGRES_CONCURRENT_PERSISTENCE_INDEXES.has(s))),
     pglite: persistenceSql(PERSISTENCE_SCHEMA_STATEMENTS),
   },
+  { source: 'src/core/persistence/git-canonical-schema.ts', expr: 'GIT_CANONICAL_SCHEMA_SQL', postgres: GIT_CANONICAL_SCHEMA_SQL, pglite: GIT_CANONICAL_SCHEMA_SQL },
   { source: 'src/core/page-state/projection-schema.ts', expr: 'PAGE_PROJECTION_SCHEMA_SQL', postgres: PAGE_PROJECTION_SCHEMA_SQL, pglite: PAGE_PROJECTION_SCHEMA_SQL },
   { source: 'src/core/persistence/topology-schema.ts', expr: 'PERSISTENCE_TOPOLOGY_SCHEMA_SQL', postgres: PERSISTENCE_TOPOLOGY_SCHEMA_SQL, pglite: PERSISTENCE_TOPOLOGY_SCHEMA_SQL },
   { source: 'src/core/persistence/worktree-refresh-schema.ts', expr: 'WORKTREE_REFRESH_SCHEMA_SQL', postgres: WORKTREE_REFRESH_SCHEMA_SQL, pglite: WORKTREE_REFRESH_SCHEMA_SQL },
@@ -116,7 +117,6 @@ export const FRAGMENTS: readonly Fragment[] = [
   { source: 'src/core/write-gate-schema.ts', expr: 'WRITE_GATE_SCHEMA_SQL', postgres: WRITE_GATE_SCHEMA_SQL, pglite: WRITE_GATE_SCHEMA_SQL },
   { source: 'src/core/questions/schema.ts', expr: 'PINNED_QUESTIONS_SCHEMA_SQL', postgres: PINNED_QUESTIONS_SCHEMA_SQL, pglite: PINNED_QUESTIONS_SCHEMA_SQL },
   { source: 'src/core/belief/schema.ts', expr: 'BELIEF_LEDGER_SCHEMA_SQL', postgres: BELIEF_LEDGER_SCHEMA_SQL, pglite: BELIEF_LEDGER_SCHEMA_SQL },
-  { source: 'src/core/persistence/git-canonical-schema.ts', expr: 'GIT_CANONICAL_SCHEMA_SQL', postgres: GIT_CANONICAL_SCHEMA_SQL, pglite: GIT_CANONICAL_SCHEMA_SQL },
 ];
 
 const fragmentLabel = (f: Fragment) => `${f.source} (${f.expr})`;

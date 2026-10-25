@@ -63,11 +63,13 @@ export function isNeverFiledDerivedPage(slug: string, page: { source_path?: stri
 /**
  * The class G3's indexer reads for a page's path: `db_only_prefix` (a `storage.db_only` dir, folder-wide) or
  * `derive_folder` (a derive-phase page that never recorded a file), else null. A committed file under a derive folder
- * belongs to Git, so a page that records one is never `derive_folder`.
+ * belongs to Git, so a page that records one is never `derive_folder`. `page` null is a page with no row yet: it takes
+ * the file its write offers (G6 commits a strict source's new atoms through the door), and a write that offers none
+ * passes an empty page so the new page is declared (a new concept publishes `file: false`).
  */
 export function declaredPathClass(root: string, slug: string, page: { source_path?: string | null; source_uri?: string | null } | null): 'db_only_prefix' | 'derive_folder' | null {
   if (isSourceDbOnlySlug(root, slug, 'refuse')) return 'db_only_prefix';
-  return isNeverFiledDerivedPage(slug, page ?? {}) ? 'derive_folder' : null;
+  return page && isNeverFiledDerivedPage(slug, page) ? 'derive_folder' : null;
 }
 
 /**
@@ -224,7 +226,7 @@ export async function declareStrictPublication(tx: BrainEngine, row: WriteReques
     return;
   }
   const declared: StrictClass | null = legacyReason(prepared.databaseOnlyReason) || legacyReason(reason) ? 'database_only'
-    : await strictPageClass(tx, row.source_id, root, page, before?.page ?? null)
+    : await strictPageClass(tx, row.source_id, root, page, before?.page ?? {})
       ?? (await ignoredTarget(root, join(root, page.source_path || `${page.slug}.md`)) ? 'git_ignored' : null);
   if (!declared) throw gitHomeRequired(row, 'no_file_form', remote);
   if (isPrivacyClass(declared)) {
