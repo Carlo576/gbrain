@@ -46,6 +46,8 @@ function operatorConfigSafeDirectories(): string[] {
   return values;
 }
 
+export function __resetOperatorGitConfigForTests(): void { operatorConfig = null; }
+
 /**
  * System and global config stay off and every `GIT_*` variable is dropped, except the operator's `safe.directory` entries
  * (system, global, then environment, as Git orders them), carried as environment config (#7584). They relax only Git's
