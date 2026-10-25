@@ -1912,6 +1912,7 @@ export async function runSources(engine: BrainEngine, args: string[]): Promise<v
     case 'set-sync':   return (await import('./sources-sync-enabled.ts')).runSetSync(engine, rest);
     case 'refresh':    return (await import('./sources-refresh.ts')).runSourcesRefresh(engine, rest);
     case 'git-gap':    return (await import('./sources-git-gap.ts')).runSourcesGitGap(engine, rest);
+    case 'host-repo':  return (await import('./sources-host-repo.ts')).runHostRepo(engine, rest);
     case 'reindex':    return (await import('./sources-reindex.ts')).runSourcesReindex(engine, rest);
     case 'canonical':  return (await import('./sources-canonical.ts')).runSourcesCanonical(engine, rest);
     case 'archive':    return runArchive(engine, rest);
@@ -2014,6 +2015,8 @@ Subcommands:
   set-strategy <id> <markdown|code|auto>  Persist the sync strategy every sync of the source uses (PR #5955).
   set-pull-strategy <id> <rebase|merge>   How pulls reconcile local commits with origin (#5429); default rebase.
   set-sync <id> <on|off> [--dry-run] [--expect <on|off>]   Include or exclude the source from automatic sync (config.syncEnabled).
+  host-repo <id> --dir <path> [--push-remote <url>] [--dry-run | --expect <plan_hash>]
+                                    Managed brains: host an empty source in a new bare repository with a gbrain-owned worktree; it becomes git-canonical.
   refresh <id> [--dry-run] [--wait-drain <s>] [--fetch-timeout-ms <ms>] [--resume|--abandon] [--json]
                                     Managed brains: drain writes to the source's worktree, fast-forward
                                     it to its upstream (git merge --ff-only) and sync every source bound

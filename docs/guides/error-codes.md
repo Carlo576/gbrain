@@ -1831,6 +1831,14 @@ More: [docs/guides/write-refusals.md#git_protocol_required](../../docs/guides/wr
 |---|---|---|---|---|---|---|
 | A git command did not complete. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
+### git_worktree_link_broken
+
+<a id="git_worktree_link_broken"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The directory is a linked Git worktree whose link to its repository is broken (the repository's entry was pruned, or the checkout moved), so it cannot be claimed as a canonical worktree; nothing was claimed. | A linked worktree reaches its commits through a .git file naming an entry in the repository, and the repository names the worktree back. With either link broken, Git commands in the directory fail or the next git worktree prune deletes the entry, so a door commit would go nowhere. | From the repository, run git worktree repair on the worktree when both still exist, or add the worktree again with git worktree add, then rerun the claim. | host_admin | `gbrain doctor --json` | 1 | no |
+
 ### gitlink_not_followed
 
 <a id="gitlink_not_followed"></a>
@@ -2084,6 +2092,18 @@ More: [docs/guides/write-refusals.md#head-blocked](../../docs/guides/write-refus
 | This process's `host.json` identity differs from the identity that owns the binding although both resolve on this machine, so writes that need the owner read it as another host. | Host identity is a file under the persistence home: a job worker or container launched with a different `HOME` or `GBRAIN_HOME` mints a new `host.json` and sees the binding as another host's (`owner_unavailable`, `host_mismatch`), so its maintenance writes never reach the owner. The check names both files and the environment each was minted under (`minted_under`, `unknown` for a file minted before it was recorded); re-deriving the identity would re-own every existing binding, so the fix is the environment, never the file. | Set GBRAIN_HOME on the supervisor of the process to the owner's home (the value the check prints; config appends .gbrain itself) and restart it; never edit or delete a host.json. Run: gbrain doctor --only host_identity_mismatch --json | host_admin | `gbrain doctor --only host_identity_mismatch --json` | 1 | no |
 
 More: [docs/guides/troubleshooting.md#host-identity-mismatch](../../docs/guides/troubleshooting.md#host-identity-mismatch)
+
+### hosted_repo_refused
+
+<a id="hosted_repo_refused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain sources host-repo starts a hosted repository only for an empty, unbound source and an absent or empty directory; nothing was created. | The verb makes a new bare repository the source of truth for the source. Existing pages or an existing directory would need converting into it, which is a separate step, so it refuses instead of guessing. | Pick a new source ID and an empty directory, or keep this source as it is. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `source_bound`, `source_has_pages`, `source_has_path`, `source_archived`, `dir_not_empty`.
+
+More: [docs/designs/GIT_CANONICAL_MEMORY.md#remote-and-hosted-writes](../../docs/designs/GIT_CANONICAL_MEMORY.md#remote-and-hosted-writes)
 
 ### idempotency_conflict
 
