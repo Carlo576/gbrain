@@ -26,6 +26,11 @@ export async function sourceCanonicalGit(engine: SqlEngine, sourceId: string, lo
   return row?.strict === true;
 }
 
+/** Whether a managed sync context's source row is strict (G3: the sync level is its commit alone, and Git wins). */
+export function sourceStrict(context: { source: { config: Record<string, unknown> | null } }): boolean {
+  return context.source.config?.canonical === 'git';
+}
+
 /** The door marker a strict publication's recovery record carries: the checkout it commits in and the HEAD it started from. */
 export async function doorMarker(root: string): Promise<NonNullable<FileRecoveryRecord['door']>> {
   return { root, head: await headCommit(root) };
