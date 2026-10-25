@@ -14,8 +14,8 @@ import { MANAGED_WRITER_GUARD_FUNCTION_SQL } from '../persistence/writer-guard-s
 // ACCESS EXCLUSIVE locks on the largest tables. Additive: no source is strict
 // until conversion, so the fence refuses nothing; no page row is read or changed.
 // Provisional number: renumbered at the merge slot.
-export const v271: Migration = {
-  version: 271,
+export const v272: Migration = {
+  version: 272,
   name: 'git_canonical_declared',
   idempotent: true,
   sql: `${GIT_CANONICAL_SCHEMA_SQL}\n${MANAGED_WRITER_GUARD_FUNCTION_SQL}`,

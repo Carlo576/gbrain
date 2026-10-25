@@ -79,6 +79,7 @@ test/forecast-journal.test.ts
 test/frontmatter-reserved-keys-6454.test.ts
 test/get-chunks-paging.test.ts
 test/git-canonical-declared-g7a.test.ts
+test/git-canonical-indexer-g3.test.ts
 test/git-door-strict-gbra133.test.ts
 test/git-gap-census.test.ts
 test/google-connector-facts-fence-7292.test.ts
@@ -405,6 +406,7 @@ test/repair-embedding-effects.test.ts
 test/repair-failed-writes-conflict-6429.test.ts
 test/repair-failed-writes-drift-w411.test.ts
 test/repair-fences.test.ts
+test/repair-file-drift-consumer-env-7506.test.ts
 test/repair-file-drift-deleted-6712.test.ts
 test/repair-file-drift-held-6712.test.ts
 test/repair-file-drift-held-window-gbra133.test.ts

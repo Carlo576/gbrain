@@ -205,7 +205,7 @@ Reasons: `window`, `deadline`, `lock_lost`, `aborted`, `max_batches`, `budget`, 
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Every item an atom drain batch attempted failed at the model provider, so the drain stopped; batches it finished earlier stay committed. | An auth, billing, unknown-model or content-block failure repeats on every retry until someone changes the key, plan, model or content, so it is not retryable. A rate limit or a transient failure (5xx, timeout, network, or a cause the provider did not name) can clear by itself, so those reasons stay retryable on exit 11. | For auth, billing or model_not_found, ask the operator to fix the provider key, plan or model named in last_error, then run the drain again; content_block items are skipped once they fail repeatedly. For rate_limit or transient, run the drain again later. Run: gbrain models --json | agent | `gbrain doctor --only extract_atoms_backlog --json` | 1 | no |
+| Every item an atom drain batch attempted failed at the model provider, so the drain stopped; batches it finished earlier stay committed. An item whose atom write did not commit never reached the provider and is not counted here (#7514): its record names the request id and refusal code, and it is held after 3 such failures (held_failed). | An auth, billing, unknown-model or content-block failure repeats on every retry until someone changes the key, plan, model or content, so it is not retryable. A rate limit or a transient failure (5xx, timeout, network, or a cause the provider did not name) can clear by itself, so those reasons stay retryable on exit 11. | For auth, billing or model_not_found, ask the operator to fix the provider key, plan or model named in last_error, then run the drain again; content_block items are skipped once they fail repeatedly. For rate_limit or transient, run the drain again later. Run: gbrain models --json | agent | `gbrain doctor --only extract_atoms_backlog --json` | 1 | no |
 
 Reasons: `auth`, `billing`, `model_not_found`, `content_block`, `rate_limit`, `transient`.
 
@@ -2035,7 +2035,7 @@ More: [docs/guides/write-refusals.md#head-blocked](../../docs/guides/write-refus
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A managed atom origin (a page or transcript) failed atom extraction 3 times on the same content, so the drain stopped retrying it; doctor `extract_atoms_held_failed` lists it with its last request id. | Every automatic attempt is a paid model call. After MAX_DETERMINISTIC_FAILURES completed failures of one content the origin leaves the atom backlog instead of being paid for every cycle; editing the content starts a new count, and an explicit retry runs it again. | A required capability is not available on this brain. Run `gbrain doctor --json` to see what is missing. Run: gbrain doctor --only extract_atoms_held_failed --json | agent | `gbrain doctor --json` | 1 | no |
+| A managed atom origin (a page or transcript) failed atom extraction 3 times on the same content, or its atom write did not commit 3 times, so the drain stopped retrying it; doctor `extract_atoms_held_failed` lists it with its last request id. | Every automatic attempt is a paid model call. After MAX_DETERMINISTIC_FAILURES completed failures of one content the origin leaves the atom backlog instead of being paid for every cycle; a batch whose write did not commit is struck each time the drain meets it, with no model call, and held at the same bound (#7514). Editing the content starts a new count, and an explicit retry runs it again. | A required capability is not available on this brain. Run `gbrain doctor --json` to see what is missing. Run: gbrain doctor --only extract_atoms_held_failed --json | agent | `gbrain doctor --json` | 1 | no |
 
 ### held_out_overlaps_benchmark
 
@@ -2489,7 +2489,7 @@ More: [docs/guides/repair.md#rename-identity](../../docs/guides/repair.md#rename
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A managed source refuses --skip-failed and --include-gitignored: managed sync keeps every failed-receipt and ignored-file guard, so the run was refused before anything ran. | --skip-failed would acknowledge a failed receipt instead of retrying it, and --include-gitignored would import files Git ignores; neither has a managed meaning. `detail` names the flag. | Rerun the same gbrain sync command without the named flag; fix a failed file and the plain sync retries it, or commit an ignored file to sync it. Run: gbrain sources status --json | agent | `gbrain sources status --json` | 1 | no |
+| A managed source refuses --skip-failed and --include-gitignored, and a strict (git-canonical) source also refuses --working-tree: managed sync keeps every failed-receipt and ignored-file guard and a strict source indexes commits only, so the run was refused before anything ran. | --skip-failed would acknowledge a failed receipt instead of retrying it, and --include-gitignored would import files Git ignores; neither has a managed meaning. `detail` names the flag. | Rerun the same gbrain sync command without the named flag; fix a failed file and the plain sync retries it, or commit an ignored file to sync it. Run: gbrain sources status --json | agent | `gbrain sources status --json` | 1 | no |
 
 More: [docs/guides/write-refusals.md#managed_sync_flag_refused](../../docs/guides/write-refusals.md#managed_sync_flag_refused)
 
@@ -4080,6 +4080,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 Reasons: `database_contention`.
 
 Override: reason `database_contention`: retryable, exit 1, retryable.
+
+### strict_requires_managed
+
+<a id="strict_requires_managed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A git-canonical source (config canonical: git) was written on a brain without managed persistence; nothing was written. | A strict source is committed to Git before the database indexes it, and only managed persistence (the writer coordinator) does that; the legacy writer of an unmanaged brain writes the database first. | Ask the user whether to turn on managed persistence for this brain, or to remove canonical: git from the source. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/designs/GIT_CANONICAL_MEMORY.md#the-model](../../docs/designs/GIT_CANONICAL_MEMORY.md#the-model)
 
 ### sync_admission_restricted
 

@@ -1019,7 +1019,7 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1351 column(s) verified against live schema",
+          "message": "1353 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
@@ -3248,6 +3248,18 @@
           "elapsed_ms": "<volatile>",
           "message": "No source has a Git checkout, so there is no commit to compare the database with.",
           "name": "db_ahead_of_git",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "docs": "docs/designs/GIT_CANONICAL_MEMORY.md#the-model",
+            "sources": [],
+            "warn_seconds": 900
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No source is strict (git-canonical), so no index trails a commit.",
+          "name": "git_index_lag",
           "status": "ok"
         },
         {

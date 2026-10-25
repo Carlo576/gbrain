@@ -3,7 +3,7 @@
  * counts the sources whose row says `config.canonical = "git"`, kept by row triggers on `sources` that fire only when
  * that key changes (or a strict row is inserted or deleted), so routine source updates never touch it. The fence itself is
  * a branch of the managed writer guard (writer-guard-schema.ts): while the count is zero it costs one indexed probe and
- * refuses nothing. Shared by migration v271 and both schema blobs (`bun run build:schema`).
+ * refuses nothing. Shared by migration v272 and both schema blobs (`bun run build:schema`).
  *
  * Additive: no page or source row is read for anything but the count, and nothing is backfilled or rewritten. RLS is
  * enabled on the counter as on every public table (doctor `rls`), only when the role bypasses it (the page-body pattern).
