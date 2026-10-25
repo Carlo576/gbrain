@@ -16,10 +16,14 @@ import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { CONVERSATION_PAGE_URI_PREFIX } from './transcript-discovery.ts';
 import { emptyQuoteVerifyStats, groundSource, verifyDreamPage, type QuoteVerifyStats, type VerifiablePage } from './synthesize-verify.ts';
 import { attributionChecksEnabled } from './attribution-checks.ts';
-import { resolveGroundingDecide } from './grounding-decide.ts';
+import { resolveGroundingDecide, type GroundingStats } from './grounding-decide.ts';
+
+const GROUNDING_COUNTS = ['pages', 'units', 'pass', 'quarantine', 'insufficient_context', 'margin_hold', 'kept_on_error', 'input_tokens', 'cost_usd'] as const;
+/** The S8 grounding counts one child page added: the phase reports them in its own grounding stats. */
+export type GroundingCounts = Partial<Record<typeof GROUNDING_COUNTS[number], number>>;
 
 /** What a child's ledger row records about the page it wrote: the transcript it verified against, and that page's stats. */
-export interface ChildVerification { transcript_hash: string; quote_verify: boolean; stats: QuoteVerifyStats }
+export interface ChildVerification { transcript_hash: string; quote_verify: boolean; stats: QuoteVerifyStats; grounding?: GroundingCounts }
 
 const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
 
@@ -58,6 +62,7 @@ export async function verifyChildPages(engine: BrainEngine, spec: DreamOutputSpe
   const out: Array<{ content: string; verification: ChildVerification }> = [];
   for (const { slug, content } of pages) {
     const stats = emptyQuoteVerifyStats();
+    const before = grounding ? { ...grounding.stats } : undefined;
     const parsed = parseMarkdown(content, slug);
     const existing = (await engine.readPageSnapshot(slug, { sourceId }))?.page ?? null;
     if (existing && isSegmentedPage(existing)) return null;
@@ -79,9 +84,18 @@ export async function verifyChildPages(engine: BrainEngine, spec: DreamOutputSpe
       }
     }
     out.push({ content: serializeMarkdown(page.frontmatter, page.compiled_truth, page.timeline, { type: parsed.type, title: parsed.title, tags: parsed.tags }),
-      verification: { transcript_hash: spec.transcript_hash, quote_verify: spec.quote_verify, stats } });
+      verification: { transcript_hash: spec.transcript_hash, quote_verify: spec.quote_verify, stats,
+        ...(grounding && before ? { grounding: Object.fromEntries(GROUNDING_COUNTS.map(key => [key, grounding.stats[key] - before[key]])) } : {}) } });
   }
   return out;
+}
+
+/** Adds one child page's S8 grounding counts into the phase's grounding stats. */
+export function addGroundingCounts(into: GroundingStats, from: GroundingCounts): void {
+  for (const key of GROUNDING_COUNTS) {
+    const value = from[key];
+    if (typeof value === 'number' && Number.isFinite(value)) into[key] += value;
+  }
 }
 
 /** Adds one child page's verify stats into the phase's. */

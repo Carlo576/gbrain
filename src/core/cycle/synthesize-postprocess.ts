@@ -18,11 +18,11 @@ import type { PhaseResult } from '../cycle.ts';
 import type { DiscoveredTranscript } from './transcript-discovery.ts';
 import { transcriptDerivation } from './dream-taint.ts';
 import { declareDerivation, readDerivationDeclaration } from '../trust/taint.ts';
-import { addVerifyStats, type ChildVerification } from './synthesize-child-verify.ts';
+import { addGroundingCounts, addVerifyStats, type ChildVerification } from './synthesize-child-verify.ts';
 import { storedPageTier } from '../trust/page-write.ts';
-import { emptyQuoteVerifyStats, groundSource, isDreamOwnedPage, resolveVerifyPrior, verifyDreamPage, type GroundedSource, type GroundingPass } from './synthesize-verify.ts';
+import { emptyQuoteVerifyStats, groundSource, isDreamOwnedPage, resolveVerifyPrior, verifyDreamPage, type GroundedSource } from './synthesize-verify.ts';
 import { attributionChecksEnabled } from './attribution-checks.ts';
-import { resolveGroundingDecide } from './grounding-decide.ts';
+import { resolveGroundingDecide, type GroundingDecide } from './grounding-decide.ts';
 import { resolveCycleDate } from './cycle-date.ts';
 import { DEFERRED_READ_LABEL, isPostprocessReadTimeout, pendingOutputsFor, readPostprocessDeferrals, recordPostprocessPass,
   type DeferredRead, type PendingOutput, type PostprocessDeferral } from './synthesize-postprocess-deferral.ts';
@@ -170,7 +170,7 @@ export async function postprocessManagedSynthesis(
   childIds: number[],
   jobRawSource: Map<number, string>,
   transcripts: DiscoveredTranscript[],
-  opts: { cycleDate: string; quoteVerify: boolean; sinceByTranscript: Map<string, Date>; signal?: AbortSignal; grounding?: GroundingPass;
+  opts: { cycleDate: string; quoteVerify: boolean; sinceByTranscript: Map<string, Date>; signal?: AbortSignal; grounding?: GroundingDecide;
     /** The child outputs slug discovery already loaded (loadCommittedOutputsOrDefer). */
     committedOutputs?: CommittedOutputs;
     /** #5575 I2: files under it are third-party speech; their outputs publish external_untrusted. */
@@ -323,7 +323,10 @@ export async function postprocessManagedSynthesis(
         dream_cycle_date: firstDate, dream_created_cycle_date: firstDate, raw_source: path, ...(transcript.seat ? { seat: transcript.seat } : {}) } } : snapshot.page;
       if (opts.quoteVerify) {
         const prior = child?.quote_verify ? 'child' : since ? await resolveVerifyPrior(engine, snapshot.page, ref.source_id, since) : null;
-        if (prior === 'child') addVerifyStats(stats, child!.stats);
+        if (prior === 'child') {
+          addVerifyStats(stats, child!.stats);
+          if (opts.grounding && child!.grounding) addGroundingCounts(opts.grounding.stats, child!.grounding);
+        }
         else if (prior === 'unchanged') stats.skipped_unchanged++;
         else {
           if (prior) stats.preexisting_diffed++;
