@@ -81,9 +81,9 @@ async function assertNotStrictSource(engine: SqlEngine, sourceId: string, operat
   const [row] = await engine.executeRaw<{ strict: boolean }>(`SELECT COALESCE(config->>'canonical','')='git' AS strict FROM sources WHERE id=$1`, [sourceId]);
   if (row?.strict !== true) return;
   const why = `Source ${sourceId} is git-canonical: its pages are committed to Git before the database indexes them, and only managed persistence (the writer coordinator) does that. This brain is not managed, so ${operation} would write the database first.`;
-  throw opError('writer_coordinator_required', `${operation} cannot write git-canonical source ${sourceId} on an unmanaged brain.`,
+  throw opError('strict_requires_managed', `${operation} cannot write git-canonical source ${sourceId} on an unmanaged brain.`,
     `Nothing was written. Ask the user whether to turn on managed persistence for this brain (the supported way to make a source git-canonical), or to remove canonical: git from source ${sourceId}.`,
-    { why, reason: 'strict_source_unmanaged', docs: 'docs/designs/GIT_CANONICAL_MEMORY.md', fix: { consent: [], actor: 'user', requires_exclusive: false, verify: DOCTOR_VERIFY, why,
+    { why, docs: 'docs/designs/GIT_CANONICAL_MEMORY.md', fix: { consent: [], actor: 'user', requires_exclusive: false, verify: DOCTOR_VERIFY, why,
       user_message: `Source ${sourceId} is set to git-canonical, which only a managed brain can serve, so gbrain wrote nothing. Should this brain move to managed writes, or should ${sourceId} stop being git-canonical?` } });
 }
 

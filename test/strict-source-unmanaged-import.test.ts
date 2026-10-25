@@ -1,10 +1,11 @@
 /**
  * G6 (git-canonical memory, docs/designs/GIT_CANONICAL_MEMORY.md): a strict source (`config.canonical = "git"`) is
  * written only through the door, which runs in managed persistence. The legacy writer of an unmanaged brain writes the
- * database row first, so `importFromContent`, `importCodeFile` and `importImageFile` without the coordinator's `prepare` seam refuse a
- * strict source (`writer_coordinator_required`, reason `strict_source_unmanaged`) and write nothing; other sources
+ * database row first, so `importFromContent`, `importCodeFile`, `importImageFile` and the large-page
+ * `importStreamedMarkdownFile` outside the coordinator's seam (`prepare` / `coordinated`) refuse a
+ * strict source (`strict_requires_managed`) and write nothing; other sources
  * import as before. The census pins the rule "no importFromContent outside the door": the only direct paths into the
- * page tables are these three functions' unprepared branches, and each one checks the target source. Red before: the
+ * page tables are these four functions' unprepared branches, and each one checks the target source. Red before: the
  * strict-source import committed the row. Runs on PGLite and, with DATABASE_URL, on Postgres.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
@@ -14,6 +15,8 @@ import ts from 'typescript';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importCodeFile, importFromContent, importImageFile } from '../src/core/import-file.ts';
+import { importStreamedMarkdownFile } from '../src/core/page-body/streamed-import.ts';
+import type { PageBodyPolicy } from '../src/core/page-body/limits.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
@@ -32,18 +35,22 @@ afterAll(async () => {
 const page = (title: string) => `---\ntype: note\ntitle: ${title}\n---\n\n${title} body.\n`;
 const pageCount = async (engine: BrainEngine, sourceId: string, slug: string) => Number((await engine.executeRaw<{ n: number }>(
   'SELECT count(*)::int AS n FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]))[0]!.n);
-const refusal = (promise: Promise<unknown>) => promise.then(() => null, (error: { code?: string; reason?: string; details?: { reason?: string } }) =>
-  ({ code: error.code, reason: error.reason ?? error.details?.reason }));
+const refusal = (promise: Promise<unknown>) => promise.then(() => null, (error: { code?: string }) =>
+  error.code);
 
 for (const backend of backends) test(`[${backend}] an unmanaged brain refuses a direct import into a strict source and writes nothing; other sources import`, async () => {
   const engine = engines[backends.indexOf(backend)]!;
   await engine.executeRaw(`INSERT INTO sources (id, name, config) VALUES ('source-a', 'source-a', '{"canonical":"git"}'::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config`);
   expect(await refusal(importFromContent(engine, 'notes/alice-example', page('Alice'), { noEmbed: true, sourceId: 'source-a' })))
-    .toEqual({ code: 'writer_coordinator_required', reason: 'strict_source_unmanaged' });
+    .toEqual('strict_requires_managed');
   expect(await refusal(importCodeFile(engine, 'src/acme-example.ts', 'export const acme = 1;\n', { noEmbed: true, sourceId: 'source-a' })))
-    .toEqual({ code: 'writer_coordinator_required', reason: 'strict_source_unmanaged' });
+    .toEqual('strict_requires_managed');
   expect(await refusal(importImageFile(engine, join(import.meta.dir, 'no-such-dir', 'acme-example.png'), 'img/acme-example.png', { noEmbed: true, sourceId: 'source-a' })))
-    .toEqual({ code: 'writer_coordinator_required', reason: 'strict_source_unmanaged' });
+    .toEqual('strict_requires_managed');
+  const now = new Date();
+  expect(await refusal(importStreamedMarkdownFile(engine, join(import.meta.dir, 'no-such-dir', 'large.md'), 'notes/large.md', { noEmbed: true, sourceId: 'source-a' },
+    { size: 1, mtimeMs: 0, birthtime: now, mtime: now }, {} as PageBodyPolicy)))
+    .toEqual('strict_requires_managed');
   expect(await pageCount(engine, 'source-a', 'notes/alice-example')).toBe(0);
   expect(await pageCount(engine, 'source-a', 'acme-example-ts')).toBe(0);
   expect((await importFromContent(engine, 'notes/alice-example', page('Alice'), { noEmbed: true })).status).toBe('imported');
@@ -54,14 +61,14 @@ for (const backend of backends) test(`[${backend}] an unmanaged brain refuses a 
 
 // test-reads-source-ok[structural]: the census is a source-text tripwire by design; the planted copies prove it flags a bypass.
 const root = join(import.meta.dir, '..');
-/** Each exported import-file function whose unprepared branch writes the page tables, with whether that branch checks the target source. */
-function unpreparedGuards(text: string): Record<string, boolean> {
-  const file = ts.createSourceFile('import-file.ts', text, ts.ScriptTarget.Latest, true);
+/** Each named function whose branch outside the coordinator's seam writes the page tables, with whether that branch checks the target source. */
+function unpreparedGuards(text: string, names: string[]): Record<string, boolean> {
+  const file = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true);
   const out: Record<string, boolean> = {};
   file.forEachChild(node => {
-    if (!ts.isFunctionDeclaration(node) || !node.name || !['importFromContent', 'importCodeFile', 'importImageFile'].includes(node.name.text) || !node.body) return;
+    if (!ts.isFunctionDeclaration(node) || !node.name || !names.includes(node.name.text) || !node.body) return;
     out[node.name.text] = node.body.statements.some(statement => {
-      if (!ts.isIfStatement(statement) || statement.expression.getText() !== '!opts.prepare') return false;
+      if (!ts.isIfStatement(statement) || !['!opts.prepare', '!opts.coordinated'].includes(statement.expression.getText())) return false;
       const call = statement.thenStatement.getText();
       return call.startsWith('await assertUnmanagedCanonicalWriter(') && /sourceId:/.test(call);
     });
@@ -69,15 +76,20 @@ function unpreparedGuards(text: string): Record<string, boolean> {
   return out;
 }
 
-test('census: every direct importFromContent / importCodeFile / importImageFile write checks its source before writing (no import outside the door on a strict source)', () => {
+test('census: every direct import write (importFromContent, importCodeFile, importImageFile, importStreamedMarkdownFile) checks its source before writing', () => {
+  const names = ['importFromContent', 'importCodeFile', 'importImageFile'];
   const text = readFileSync(join(root, 'src/core/import-file.ts'), 'utf8');
   const fileGuard = "if (!opts.prepare) await assertUnmanagedCanonicalWriter(engine, 'direct file import', { sourceId: opts.sourceId ?? 'default' });";
   const lastFileGuard = text.lastIndexOf(fileGuard);
-  expect(unpreparedGuards(text)).toEqual({ importFromContent: true, importCodeFile: true, importImageFile: true });
-  expect(unpreparedGuards(text.replace("'direct content import', { sourceId: sourceId ?? 'default' })", "'direct content import')")))
+  expect(unpreparedGuards(text, names)).toEqual({ importFromContent: true, importCodeFile: true, importImageFile: true });
+  expect(unpreparedGuards(text.replace("'direct content import', { sourceId: sourceId ?? 'default' })", "'direct content import')"), names))
     .toEqual({ importFromContent: false, importCodeFile: true, importImageFile: true });
-  expect(unpreparedGuards(text.replace(fileGuard, '')))
+  expect(unpreparedGuards(text.replace(fileGuard, ''), names))
     .toEqual({ importFromContent: true, importCodeFile: false, importImageFile: true });
-  expect(unpreparedGuards(text.slice(0, lastFileGuard) + text.slice(lastFileGuard + fileGuard.length)))
+  expect(unpreparedGuards(text.slice(0, lastFileGuard) + text.slice(lastFileGuard + fileGuard.length), names))
     .toEqual({ importFromContent: true, importCodeFile: true, importImageFile: false });
+  const streamed = readFileSync(join(root, 'src/core/page-body/streamed-import.ts'), 'utf8');
+  expect(unpreparedGuards(streamed, ['importStreamedMarkdownFile'])).toEqual({ importStreamedMarkdownFile: true });
+  expect(unpreparedGuards(streamed.replace("'direct content import', { sourceId: opts.sourceId ?? 'default' })", "'direct content import')"), ['importStreamedMarkdownFile']))
+    .toEqual({ importStreamedMarkdownFile: false });
 });
