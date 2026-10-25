@@ -158,8 +158,8 @@ export function parseAdvertiseFlag(args: string[]): McpSurface | null {
   if (idx < 0) return null;
   const raw = args[idx + 1];
   if (raw === undefined || raw.startsWith('--') || !isMcpSurface(raw)) {
-    throw opError('invalid_params', `--advertise takes verbs, starter or full${raw === undefined || raw.startsWith('--') ? '' : ` (got "${raw}")`}`,
-      'Pass --advertise verbs (list the 7 memory verbs and request_tools), --advertise starter or --advertise full. Every tool the surface allows stays callable.');
+    throw opError('invalid_params', `gbrain serve --advertise takes verbs, starter or full${raw === undefined || raw.startsWith('--') ? '' : ` (got "${raw}")`}`,
+      'Run gbrain serve --advertise verbs (list the 7 memory verbs and request_tools), gbrain serve --advertise starter or gbrain serve --advertise full. Every tool the surface allows stays callable.');
   }
   return raw;
 }
