@@ -205,6 +205,44 @@ took 103 s on 16 vCPU with 12 GB and 8 workers. Measured, not shipped:
 (m 16, ef_construction 64, `vector`). Measurements and method:
 [`docs/eval/hnsw-scale-bench.md`](eval/hnsw-scale-bench.md).
 
+### Vector index prewarm
+
+<a id="vector-index-prewarm"></a>
+
+After a Postgres restart or a cache eviction, the first searches walk HNSW
+pages nobody has read yet: on a brain whose index is bigger than the cache,
+an unseen query reads 2,000 to 4,500 index pages and spends 1.2 to 2.7 s in
+the vector stage. `gbrain embeddings prewarm` loads every HNSW index of the
+brain into `shared_buffers` once with `pg_prewarm(<index>, 'buffer')`, so
+those pages are already cached. It is opt-in and local to the brain host: a
+CLI-only command (no MCP tool, refused by thin clients), and
+`gbrain config set serve.vector_prewarm true` runs it once in the
+background each time `gbrain serve` starts (off by default; a refusal is
+logged and the serve carries on).
+
+`shared_buffers` decides whether it runs. The indexes must total at most
+half of it, read with `current_setting('shared_buffers')`; past that the
+prewarm would evict the heap and keyword-index pages every other read needs.
+`effective_cache_size` is printed but never decides: it is a planner hint
+the operator sets, not memory the server holds. The check reads only catalog
+rows and file sizes, so a refusal reads no index page.
+
+| Command | Does |
+|---|---|
+| `gbrain embeddings prewarm --dry-run --json` | Index sizes, `shared_buffers`, `effective_cache_size`, the budget and the fit; reads nothing |
+| `gbrain embeddings prewarm` | Prewarms when the indexes fit and `pg_prewarm` exists |
+| `gbrain config set serve.vector_prewarm true` | Prewarms at each serve start (restart the serve) |
+
+Refusals, each with a fix: `vector_prewarm_wont_fit` (raise
+`shared_buffers` to at least twice the index size and restart Postgres; a
+managed database sizes it with the instance), `vector_prewarm_extension_missing`
+(`CREATE EXTENSION IF NOT EXISTS pg_prewarm;` as a role that may create
+extensions) and `vector_prewarm_unsupported_engine` (PGLite has no server
+cache to fill). Prewarmed pages stay cached until Postgres restarts or other
+reads evict them; pg_prewarm's own `autoprewarm` worker
+(`shared_preload_libraries = 'pg_prewarm'`) can reload them after a restart
+without gbrain.
+
 ### Opt-in RLS source-scope binding (`GBRAIN_RLS_SCOPE_BINDING`)
 
 Defense-in-depth layer for Postgres deployments that want the database itself
@@ -253,8 +291,9 @@ live in `test/postgres-engine-rls-scope.test.ts`.
 keeps its text in `page_segment_texts`, its layout and headings in
 `page_body_manifest`, uploads in progress in `page_body_stagings` /
 `page_body_staging_parts` (with the segment texts each one holds in
-`page_body_staging_texts`), and view sizes in `page_view_digests`. gbrain
-enables RLS on all six on every schema replay, as it does on `pages` and
+`page_body_staging_texts`), view sizes in `page_view_digests`, and per-segment
+derivation results (link candidates, window anchors) in `page_segment_derivations`.
+gbrain enables RLS on all seven on every schema replay, as it does on `pages` and
 `content_chunks`, so with no policy a role that does not bypass RLS reads no row
 of them. Title search, the source-scoped vector scan, the chunk windows search
 reads around its hits, `get_chunks` and get_page check a chunk of a page stored
@@ -297,6 +336,9 @@ CREATE POLICY page_body_staging_parts_scope_filter ON page_body_staging_parts
 CREATE POLICY page_view_digests_scope_filter ON page_view_digests
   USING (current_setting('app.scopes', true) = '*'
          OR EXISTS (SELECT 1 FROM pages p WHERE p.id = page_id));
+CREATE POLICY page_segment_derivations_scope_filter ON page_segment_derivations
+  USING (current_setting('app.scopes', true) = '*'
+         OR EXISTS (SELECT 1 FROM pages p WHERE p.id = page_id));
 CREATE POLICY content_chunks_scope_filter ON content_chunks
   USING (current_setting('app.scopes', true) = '*'
          OR EXISTS (SELECT 1 FROM pages p WHERE p.id = page_id));
@@ -313,6 +355,7 @@ ALTER TABLE page_body_stagings FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_body_staging_parts FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_body_staging_texts FORCE ROW LEVEL SECURITY;
 ALTER TABLE page_view_digests FORCE ROW LEVEL SECURITY;
+ALTER TABLE page_segment_derivations FORCE ROW LEVEL SECURITY;
 ALTER TABLE content_chunks FORCE ROW LEVEL SECURITY;
 ```
 <!-- gbrain:segmented-rls-recipe:end -->
