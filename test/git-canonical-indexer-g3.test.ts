@@ -64,6 +64,8 @@ for (const backend of testBackends()) describe(`[${backend}] G3: a strict source
   const databaseUrl = backend === 'postgres' ? requirePostgresTestDatabase() : undefined;
   const setup = ({ root }: { root: string }) => {
     mkdirSync(join(root, 'notes'), { recursive: true }); git(root, 'init', '-q');
+    // The door commits with the repository's own identity: CI runners have no global one.
+    git(root, 'config', 'user.name', 'Example Writer'); git(root, 'config', 'user.email', 'writer@example.invalid');
     writeFileSync(join(root, '.gitignore'), '\n');
     for (const slug of SLUGS) writeFileSync(join(root, `${slug}.md`), note(slug, `The committed body of ${slug}.`));
     git(root, 'add', '-A'); git(root, 'commit', '-qm', 'notes');
@@ -112,14 +114,14 @@ for (const backend of testBackends()) describe(`[${backend}] G3: a strict source
     expect(preview.overwrites).toHaveLength(2);
     expect(preview).toMatchObject({ imports: 1, deletes: 1 });
     expect((await page(engine, 'notes/ahead'))!.body).toContain('Written to the database alone.');
-    const log = console.log;
+    const log = console.log, priorExitCode = process.exitCode;
     try {
       console.log = () => {};
       await runSourcesReindex(engine, ['default', '--from-git', '--apply', '--expect', 'stale', '--no-embed', '--no-extract']);
       expect((await page(engine, 'notes/ahead'))!.body).toContain('Written to the database alone.');
       _resetCliExitVerdictForTests();
       await runSourcesReindex(engine, ['default', '--from-git', '--apply', '--expect', preview.preview_hash, '--no-embed', '--no-extract']);
-    } finally { console.log = log; _resetCliExitVerdictForTests(); }
+    } finally { console.log = log; _resetCliExitVerdictForTests(); process.exitCode = priorExitCode ?? 0; }
     expect((await page(engine, 'notes/ahead'))!.body).toContain('The committed body of notes/ahead.');
     expect((await page(engine, 'notes/removed'))!.deleted).toBe(true);
     expect((await previewReindex(engine, 'default')).overwrites).toEqual([]);
