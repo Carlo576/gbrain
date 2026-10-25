@@ -206,6 +206,8 @@ jobs:
   # post timed out), so its diag/native-heartbeat/<cell> status stays pending on a job that passed. This Linux job runs
   # after every cell and posts success, naming the cell's real conclusion and last heartbeat, on any cell context still
   # pending (scripts/native/heartbeat-finalize.ts). Nothing on a fork's pull request, whose token cannot write.
+  # Named exception: PR scope reduction, covered by scope=full runs (docs/TESTING.md#event-parity); scope=smoke runs
+  # no darwin-x64 cell, so there is nothing to finalize.
   heartbeat-finalize:
     name: darwin-x64 heartbeat finalize
     needs: [native]
