@@ -79,7 +79,7 @@ async function parkIgnoredEffect(engine: BrainEngine, slug: string, code = 'git_
   });
 }
 
-const SLUGS = ['notes/same', 'notes/ahead', 'notes/gitmoved', 'notes/drift', 'notes/removed'];
+const SLUGS = ['notes/same', 'notes/ahead', 'notes/gitmoved', 'notes/drift', 'notes/removed', 'notes/legacy'];
 const setup = ({ root }: { root: string }) => {
   mkdirSync(join(root, 'notes'), { recursive: true }); git(root, 'init', '-q');
   // The door commits with the repository's own identity: CI runners have no global one.
@@ -97,26 +97,36 @@ const bulkSetup = ({ root }: { root: string }) => {
   git(root, 'add', '-A'); git(root, 'commit', '-qm', 'bulk');
 };
 
+/** The page loses its sync import record, as a page imported before records were written has none. */
+async function dropImportRecord(engine: BrainEngine, slug: string): Promise<void> {
+  const [row] = await engine.executeRaw<{ id: string }>("SELECT id::text FROM pages WHERE source_id='default' AND slug=$1", [slug]);
+  await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='sync-import-provenance' AND fingerprint LIKE $1", [`default:%:${row!.id}`]);
+}
+
+const DRIFT_COMMITTED = 'The committed edit of notes/drift.';
 /**
- * Every category on one non-strict source: notes/ahead and notes/dbonly hold content Git lacks (adopt); notes/secret is
- * private and scratch/ignored is under an ignored path whose Git effect parked (declared, reclassified); notes/gitmoved got
- * a commit sync has not read (git wins); notes/removed was deleted in Git after a database edit and notes/drift moved on
- * both sides without an import record (held, Git wins).
+ * Every category on one non-strict source: notes/ahead and notes/dbonly hold content Git lacks, and notes/legacy has no
+ * import record and a database edit (adopt); notes/secret is private and scratch/ignored is under an ignored path whose
+ * Git effect parked (declared, reclassified); notes/gitmoved got a commit sync has not read (git wins); notes/removed was
+ * deleted in Git after a database edit (held deletion, Git wins); notes/drift moved on both sides without an import record
+ * (held, side unknown); a later database write that matches the commit (`driftMatches`) leaves the hold with nothing to
+ * lose, so Git wins; otherwise the database edit would be discarded.
  */
-async function mixedSource(brain: ManagedBrain): Promise<void> {
+async function mixedSource(brain: ManagedBrain, driftMatches = true): Promise<void> {
   const { engine, root } = brain;
   expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
-  for (const slug of ['notes/ahead', 'notes/drift', 'notes/removed']) await databaseOnlyEdit(engine, slug, `Written to the database alone: ${slug}.`);
-  writeFileSync(join(root, 'notes/drift.md'), note('notes/drift', 'The committed edit of notes/drift.'));
+  for (const slug of ['notes/ahead', 'notes/drift', 'notes/removed', 'notes/legacy']) await databaseOnlyEdit(engine, slug, `Written to the database alone: ${slug}.`);
+  writeFileSync(join(root, 'notes/drift.md'), note('notes/drift', DRIFT_COMMITTED));
   git(root, 'rm', '-q', 'notes/removed.md'); git(root, 'commit', '-qam', 'edit drift, remove removed');
-  const [drift] = await engine.executeRaw<{ id: string }>("SELECT id::text FROM pages WHERE slug='notes/drift'");
-  await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='sync-import-provenance' AND fingerprint LIKE $1", [`default:%:${drift!.id}`]);
+  await dropImportRecord(engine, 'notes/drift');
+  await dropImportRecord(engine, 'notes/legacy');
   await databaseOnlyPage(brain, 'notes/dbonly', note('notes/dbonly', 'Only in the database.'));
   await databaseOnlyPage(brain, 'notes/secret', note('notes/secret', 'A private note.', 'visibility: private\n'));
   await putPage.handler(brain.ctx, { slug: 'scratch/ignored', content: note('scratch/ignored', 'Under an ignored path.'), wait_ms: 30_000 });
   await parkIgnoredEffect(engine, 'scratch/ignored');
   await performManagedSync(engine, OPTS);
   expect(await holds(engine)).toEqual(['notes/drift.md file_drift', 'notes/removed.md file_drift']);
+  if (driftMatches) await databaseOnlyEdit(engine, 'notes/drift', DRIFT_COMMITTED);
   writeFileSync(join(root, 'notes/gitmoved.md'), note('notes/gitmoved', 'The committed edit of notes/gitmoved.'));
   git(root, 'commit', '-qam', 'edit gitmoved');
 }
@@ -130,25 +140,31 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     const base = git(root, 'rev-parse', 'HEAD');
     const before = await revisions(engine);
     const { preview } = await planGitConversion(engine, 'default');
-    expect(preview).toMatchObject({ strict: false, adopt: { count: 2, groups: 1, by: { database_ahead: 1, undeclared_database_only: 1, worktree_only: 0 } },
+    expect(preview).toMatchObject({ strict: false, adopt: { count: 3, groups: 1, by: { database_ahead: 2, undeclared_database_only: 1, worktree_only: 0 } },
       declared: { count: 2, by: { private: 1, git_ignored: 1 } }, git_wins: { count: 3, by: { git_ahead: 1, held_deletion: 1, held_drift_unknown: 1, deleted_by_commit: 0 } },
       holds: { count: 2, by: { 'file_drift:unknown': 1, 'file_drift:deleted': 1 } }, parked_effects: { count: 1, retry: 0, reclassify: 1 }, discard: { count: 0 } });
-    expect(preview.adopt.sample.sort()).toEqual(['notes/ahead.md', 'notes/dbonly.md']);
+    expect(preview.adopt.sample.sort()).toEqual(['notes/ahead.md', 'notes/dbonly.md', 'notes/legacy.md']);
+    expect(preview.git_wins.sample.sort()).toEqual(['notes/drift.md', 'notes/gitmoved.md', 'notes/removed.md']);
     expect(await strict(engine)).toBe(false);
     expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
 
     const result = await applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING);
-    expect(result).toMatchObject({ status: 'converted', committed: { groups: 1, pages: 2 }, holds_cleared: 2, parked: { reclassified: 1 }, after: { remaining: 0, strict: true } });
+    expect(result).toMatchObject({ status: 'converted', committed: { groups: 1, pages: 3 }, holds_cleared: 2, parked: { reclassified: 1 },
+      after: { remaining: 0, strict: true, parked_effects: { count: 0 } } });
     expect(await strict(engine)).toBe(true);
-    expect(conversionCommits(root, base)).toEqual([{ subject: 'gbrain: persist 2 canonical memory updates', paths: ['notes/ahead.md', 'notes/dbonly.md'] }]);
+    expect(conversionCommits(root, base)).toEqual([{ subject: 'gbrain: persist 3 canonical memory updates', paths: ['notes/ahead.md', 'notes/dbonly.md', 'notes/legacy.md'] }]);
     expect(git(root, 'status', '--porcelain')).toBe('');
     expect(readFileSync(join(root, 'notes/ahead.md'), 'utf8')).toContain('Written to the database alone: notes/ahead.');
     const after = await revisions(engine);
     expect(after['notes/ahead']).toBe(before['notes/ahead']);
     expect(after['notes/dbonly']).toBe(before['notes/dbonly']);
+    // A page with no import record is adopted into Git before the strict import runs, so its database body is committed, never overwritten.
+    expect(readFileSync(join(root, 'notes/legacy.md'), 'utf8')).toContain('Written to the database alone: notes/legacy.');
+    expect(after['notes/legacy']).toBe(before['notes/legacy']);
+    expect((await page(engine, 'notes/legacy'))!.body).toContain('Written to the database alone: notes/legacy.');
     expect(after['notes/same']).toBe(before['notes/same']);
     expect((await page(engine, 'notes/gitmoved'))!.body).toContain('The committed edit of notes/gitmoved.');
-    expect((await page(engine, 'notes/drift'))!.body).toContain('The committed edit of notes/drift.');
+    expect((await page(engine, 'notes/drift'))!.body).toContain(DRIFT_COMMITTED);
     expect((await page(engine, 'notes/removed'))!.deleted).toBe(true);
     expect((await page(engine, 'notes/secret'))!.deleted).toBe(false);
     // The page under an ignored path stays database-only (declared git_ignored): no file is written, no git_target_ignored round trip.
@@ -167,6 +183,19 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect(await revisions(engine)).toEqual(settled);
     expect(git(root, 'log', '--format=%H', '-1')).toBe(git(root, 'rev-parse', 'HEAD'));
     expect((await planGitConversion(engine, 'default')).preview).toMatchObject({ strict: true, remaining: 0 });
+  }, { databaseUrl, setup }), 240_000);
+
+  test('an unknown-side drift whose database body differs from the committed file is a discard, refused by path', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await mixedSource(brain, false);
+    const base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ git_wins: { by: { held_drift_unknown: 0 } }, discard: { count: 1, by: { held_drift_unknown_differs: 1 }, sample: ['notes/drift.md'] } });
+    await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'git_conversion_blocked', detail: 'held_drift_unknown_differs' });
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(await strict(engine)).toBe(false);
+    expect(await holds(engine)).toEqual(['notes/drift.md file_drift', 'notes/removed.md file_drift']);
+    expect((await page(engine, 'notes/drift'))!.body).toContain('Written to the database alone: notes/drift.');
   }, { databaseUrl, setup }), 240_000);
 
   test('a stale hash refuses preview_changed and writes nothing', () => managedBrain(async brain => {

@@ -11,12 +11,14 @@
  *     and commits it with commitThroughDoor, one commit per group of CONVERSION_GROUP_MAX pages, under the worktree writer
  *     lock, which is dropped between groups. No row changes: the database already holds those bytes.
  *   - declared: database-only on purpose; nothing is written and nothing deleted.
- *   - git_wins: Git's verdict replaces the row and loses nothing the operator has not accepted (Git moved and the
- *     database did not; Git deleted a page sync had not indexed yet; a held deletion; a held file_drift whose side is
- *     unknown). The strict-equivalent pass applies it.
+ *   - git_wins: Git's verdict replaces the row and loses nothing (Git moved and the database did not; Git deleted a page
+ *     the database had not edited; a held deletion; a held file_drift whose side is unknown and whose row already equals
+ *     the committed file). The strict-equivalent pass applies it. An unknown-side drift whose row differs from the file
+ *     would lose that edit, so it is a discard (held_drift_unknown_differs).
  *   - holds: cleared, so that pass runs Git's verdict over them (a hold at its level would settle the path).
  *   - parked Git effects: retried (retry-effects' one authorized attempt), or reclassified when Git ignores the target
- *     (the page is stamped git_ignored, G7a's declared class, and the target stays parked as a record).
+ *     (in one transaction the page is stamped git_ignored, G7a's declared class, and each target stays parked as a record
+ *     marked `declared: git_ignored`, so the next plan no longer lists it).
  *   - discard: database content that would be neither in Git after the apply nor declared, by category. The apply
  *     refuses (git_conversion_blocked, naming the categories) unless it is zero; there is no override.
  * The preview hash binds HEAD, the source incarnation and every planned item with its revision.
@@ -51,6 +53,7 @@ import { readDeletionProvenance } from './sync-origin-evidence.ts';
 import { retryParkedEffects } from './effect-retry.ts';
 import { runPersistenceEffects } from './effects.ts';
 import { faultPoint } from './fault-points.ts';
+import { declarePersistenceProtocol } from './protocol.ts';
 import { previewChangedError, previewHash } from './preview-approval.ts';
 import { sha256 } from './digest.ts';
 
@@ -65,7 +68,7 @@ export type AdoptState = typeof ADOPT_STATES[number];
 export const GIT_WINS_REASONS = ['git_ahead', 'deleted_by_commit', 'held_deletion', 'held_drift_unknown'] as const;
 export type GitWinsReason = typeof GIT_WINS_REASONS[number];
 /** Database content the apply would discard or cannot place, by why: each must be zero before the apply runs. */
-export const DISCARD_CATEGORIES = ['both_moved', 'held_drift_both', 'deleted_in_git', 'uncommitted_edit', 'ignored_target', 'unparseable', 'unsafe_path',
+export const DISCARD_CATEGORIES = ['both_moved', 'held_drift_both', 'held_drift_unknown_differs', 'deleted_in_git', 'uncommitted_edit', 'ignored_target', 'unparseable', 'unsafe_path',
   'segmented_page', 'export_mismatch', 'git_overwrites_database'] as const;
 export type DiscardCategory = typeof DISCARD_CATEGORIES[number];
 
@@ -146,6 +149,7 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   for (const hold of holds) {
     tally(preview.holds, hold.side ? `${hold.code}:${hold.side}` : hold.code, hold.path);
     if (hold.action === 'blocked') discard('held_drift_both', hold.path);
+    else if (hold.side === 'unknown' && equal.has(hold.path)) gitWins('held_drift_unknown', hold.path);
   }
 
   const noFile = pages.filter(page => page.state === 'undeclared_database_only' && page.path !== null);
@@ -161,12 +165,12 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
       case 'unparseable': discard('unparseable', path); continue;
       case 'unsafe_path': discard('unsafe_path', path); continue;
       case 'git_ahead':
-        if (side === 'unknown') gitWins('held_drift_unknown', path);
+        if (side === 'unknown') discard('held_drift_unknown_differs', path);
         else if (page.databaseAlsoMoved && side !== 'both') discard('both_moved', path);
         else if (!page.databaseAlsoMoved) gitWins('git_ahead', path);
         continue;
       case 'database_ahead':
-        if (side === 'unknown') { gitWins('held_drift_unknown', path); continue; }
+        if (side === 'unknown') { discard('held_drift_unknown_differs', path); continue; }
         if (side === 'both') continue;
         candidates.push({ page, state: 'database_ahead' });
         continue;
@@ -206,7 +210,7 @@ function emptyPreview(sourceId: string, context: ManagedSyncContext, census: Git
     parked_effects: { count: 0, retry: 0, reclassify: 0, by_code: {} }, index: { imports: 0, deletes: 0 }, discard: counted(DISCARD_CATEGORIES), remaining: 0, preview_hash: '', apply: [] };
 }
 
-/** A hold's fate: a held deletion or an unknown-side drift goes to Git, a both-sides drift is database content Git would discard, the rest re-screen. */
+/** A hold's fate: a held deletion or an unknown-side drift goes to Git (planGitConversion discards the drift when its row differs), a both-sides drift is database content Git would discard, the rest re-screen. */
 function holdItem(hold: GitHoldRecord): HoldItem {
   const side = hold.code === 'file_drift' ? fileDriftSide(hold.meta) ?? null : null;
   const action = side === 'both' ? 'blocked' : side === 'unknown' || side === 'deleted' ? 'git_wins' : 'rescreen';
@@ -225,6 +229,8 @@ async function planAdoption(engine: BrainEngine, sourceId: string, root: string,
   const withdrawals = await readExportWithdrawals(engine, sourceId);
   for (const { page, state } of candidates) {
     const path = page.path!;
+    // Fail-closed fallback: an ignored path with no file is already declared git_ignored by the census, and Git commits a
+    // tracked file whatever its ignore rules say, so this fires only when reading the ignore rules fails (ignored is null).
     if (!ignored || ignored.has(path)) { discard('ignored_target', path); continue; }
     if (page.segmented) { discard('segmented_page', path); continue; }
     const snapshot = await readExportPage(engine, { ...page, source_id: sourceId }, withdrawals);
@@ -248,7 +254,8 @@ function diskBytes(path: string): Buffer | null {
 async function readParked(engine: BrainEngine, sourceId: string): Promise<ParkedItem[]> {
   const rows = await engine.executeRaw<{ effect: string; request: string; kind: string; parked: Array<{ slug?: string; error_code: string }> }>(
     `SELECT e.id::text AS effect, r.request_id::text AS request, e.kind, e.data->'parked' AS parked FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
-    WHERE e.source_id=$1 AND jsonb_typeof(e.data->'parked')='array' AND jsonb_array_length(e.data->'parked')>0 ORDER BY e.id`, [sourceId]);
+    WHERE e.source_id=$1 AND jsonb_typeof(e.data->'parked')='array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(e.data->'parked') p WHERE p->>'declared' IS NULL)
+    ORDER BY e.id`, [sourceId]);
   return rows.map(row => {
     const parked = typeof row.parked === 'string' ? JSON.parse(row.parked) as typeof row.parked : row.parked;
     const codes = parked.map(target => target.error_code);
@@ -377,7 +384,13 @@ async function settleParked(engine: BrainEngine, sourceId: string, parked: Parke
   let retried = 0, reclassified = 0;
   for (const item of parked) {
     if (item.action === 'reclassify') {
-      await engine.executeRaw(`UPDATE pages SET database_only_reason='git_ignored' WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL AND database_only_reason IS NULL`, [sourceId, item.slugs]);
+      // Metadata only (G7a has no standalone declare helper): the page's declared class and the parked record change together.
+      await engine.transaction(async tx => {
+        await declarePersistenceProtocol(tx);
+        await tx.executeRaw('SELECT id FROM persistence_effects WHERE id=$1 FOR UPDATE', [item.effect]);
+        await tx.executeRaw(`UPDATE pages SET database_only_reason='git_ignored' WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL AND database_only_reason IS NULL`, [sourceId, item.slugs]);
+        await tx.executeRaw(`UPDATE persistence_effects SET data=jsonb_set(data,'{parked}',(SELECT jsonb_agg(p||'{"declared":"git_ignored"}'::jsonb) FROM jsonb_array_elements(data->'parked') p)),updated_at=now() WHERE id=$1`, [item.effect]);
+      });
       reclassified++;
       continue;
     }
