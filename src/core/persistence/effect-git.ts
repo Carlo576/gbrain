@@ -64,15 +64,15 @@ export interface GitSession { root: string; hooks: string; signal?: AbortSignal;
 
 const gitArgs = (session: GitSession, args: string[], literal: boolean) =>
   [...(literal ? ['--literal-pathspecs'] : []), '-C', session.root, '-c', `core.hooksPath=${session.hooks}`, '-c', 'commit.gpgsign=false', ...args];
-const gitOptions = (session: GitSession) => ({ timeout: session.timeoutMs, termGraceMs: GIT_TERM_GRACE_MS, maxBuffer: 1024 * 1024, signal: session.signal, env: gitChildEnv(GIT_ENV) });
+const gitOptions = (session: GitSession) => ({ timeout: session.timeoutMs, termGraceMs: GIT_TERM_GRACE_MS, maxBuffer: 1024 * 1024, signal: session.signal });
 
 function run(session: GitSession, args: string[], literal = true) {
-  return execFileBounded('git', gitArgs(session, args, literal), gitOptions(session));
+  return execFileBounded('git', gitArgs(session, args, literal), { ...gitOptions(session), env: gitChildEnv(GIT_ENV) });
 }
 
 /** A read-only git step whose stdout is raw bytes (a tree object); null when git exits non-zero. */
 export async function gitBytes(session: GitSession, args: string[]): Promise<Buffer | null> {
-  const { error, stdout } = await execFileBounded('git', gitArgs(session, args, true), { ...gitOptions(session), maxBuffer: 256 * 1024 * 1024, encoding: 'buffer' });
+  const { error, stdout } = await execFileBounded('git', gitArgs(session, args, true), { ...gitOptions(session), env: gitChildEnv(GIT_ENV), maxBuffer: 256 * 1024 * 1024, encoding: 'buffer' });
   if (error && (error.killed || typeof error.code !== 'number')) throw gitFailure('Git execution did not finish within its bounded attempt.',
     `A git command in the canonical checkout did not finish within ${Math.round(session.timeoutMs / 1000)} seconds or could not start.`);
   return error ? null : stdout;
