@@ -20,7 +20,7 @@ export function gitGapScanTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? n : 10_000;
 }
 
-type SourceTotals = Pick<GitGapCensus, 'source_id' | 'head' | 'complete' | 'pages' | 'states' | 'declared' | 'worktree'>;
+type SourceTotals = Pick<GitGapCensus, 'source_id' | 'complete' | 'pages' | 'states' | 'declared' | 'worktree'>;
 
 const nonzero = (record: Record<string, number>) => Object.entries(record).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(', ') || 'no pages';
 
@@ -36,8 +36,8 @@ async function runDbAheadOfGit(ctx: DoctorContext): Promise<Check[]> {
     for (const row of withCheckout) {
       if (Date.now() >= deadlineAt) { unread.push(row.id); continue; }
       try {
-        const { source_id, head, complete, pages, states, declared, worktree } = await censusGitGap(engine, row.id, { sample: 0, deadlineAt });
-        sources.push({ source_id, head, complete, pages, states, declared, worktree });
+        const { source_id, complete, pages, states, declared, worktree } = await censusGitGap(engine, row.id, { sample: 0, deadlineAt });
+        sources.push({ source_id, complete, pages, states, declared, worktree });
       } catch (error) {
         errors.push({ source_id: row.id, message: error instanceof Error ? error.message : String(error) });
       }
