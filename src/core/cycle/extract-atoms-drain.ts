@@ -354,7 +354,7 @@ export async function runExtractAtomsDrain(
           // (the #4539 shape) still contribute to the total via failureCount.
           const batchFailures = Array.isArray(r.failures)
             ? r.failures.filter(
-                (f): f is { source: string; reason: string } =>
+                (f): f is { source: string; reason: string; request_id?: string; code?: string } =>
                   f != null &&
                   typeof f === 'object' &&
                   typeof f.source === 'string' &&
