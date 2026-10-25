@@ -2,7 +2,7 @@
 
 **Give the agent you already use a memory you control.** GBrain stores explicit facts with their sources, supports corrections and withdrawal, and makes the same memory available across your agents. Start with keyless memory and keyword retrieval; add semantic search, synthesis, and background enrichment when you need them.
 
-GBrain is MIT-licensed and free to self-host. [gbrain.io](https://gbrain.io/?ref=readme) is optional paid hosting for when you'd rather not run it yourself.
+GBrain is MIT-licensed and free to self-host; gbrain.io is optional paid hosting.
 
 > [!TIP]
 > **Need hosted? First time running an agent?** Try **[gbrain.io](https://gbrain.io/?ref=readme)**, hosted GBrain, for the easiest experience: one brain for you and your team, connected to ChatGPT, Claude and Cursor, with nothing to install or keep online. Stuck? Email support@gbrain.io and a person will set it up with you, free.
@@ -28,7 +28,7 @@ I'm Garry Tan, President and CEO of Y Combinator. I built GBrain to run my own A
 Alongside keyword and semantic retrieval, GBrain offers two optional ways to use your stored knowledge:
 
 - **A synthesis layer that gives you the actual answer.** Synthesized, well-cited prose across people, companies, deals, and ideas. Not "here are 10 chunks that mention your query"; an actual answer with citations and an explicit note on what the brain doesn't know yet. The gap analysis is the part that changes how you use the brain.
-- **A typed knowledge graph.** Trusted local page writes extract supported references without LLM calls when auto-linking is enabled. Remote `put_page` edges arrive later, via sweeps, maintenance or `add_link`. Ask "who works at acme-example?": walks are breadth-first, milliseconds on dense clusters ([how](docs/architecture/RETRIEVAL.md#breadth-first-graph-walks)). On the 145 BrainBench relationship questions, turning on relationship retrieval in the production search pipeline raised **R@5 from 0.6626 to 0.7241**, better on 45 of 435 question runs and worse on none ([2026-09-09 refresh](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-09-09-retrieval-refresh.md#production-relationship-retrieval-one-switch)). The often-quoted R@5 0.9791 is `graph-oracle-parse`, an adapter that knows the four question forms in advance: an upper bound, not a product score.
+- **A typed knowledge graph.** Trusted local page writes extract supported references without LLM calls when auto-linking is enabled. Remote `put_page` edges arrive later, via sweeps, maintenance or `add_link`. Ask "who works at acme-example?": walks are breadth-first, milliseconds on dense clusters ([how](docs/architecture/RETRIEVAL.md#breadth-first-graph-walks)). On BrainBench relationship questions, relationship retrieval lifts production **R@5 from 0.6626 to 0.7241** ([benchmark](docs/architecture/RETRIEVAL.md#the-benchmark)); 0.9791 is the `graph-oracle-parse` upper bound, not a product score.
 
 The point of building a 150K-page brain is to use it as a strategic moat. To never lose context. To query what's in your own head without re-reading it. The brain layer is what makes the moat usable. The 24/7 dream cycle is what keeps it sharp. Both run on your hardware, your DB, your keys.
 
@@ -99,8 +99,7 @@ before restarting services with this version.
 > can shadow the real binary, so never run `npm install -g gbrain` or
 > `bun add -g gbrain`. Install only via `bun install -g github:garrytan/gbrain#latest-stable`
 > or `git clone` + `bun install && bun link`.
-> Installed it by mistake? `npm uninstall -g gbrain` / `bun remove -g gbrain`, then
-> reinstall; `gbrain doctor` detects it.
+> Installed by mistake? `gbrain doctor` gives the fix.
 > Schema not migrated ([#218](https://github.com/garrytan/gbrain/issues/218))?
 > Run `gbrain apply-migrations --yes --no-autopilot-install`; exit 1 means it's still
 > behind: run `gbrain doctor --json`, not `--yes` (`wedged`: relay its fix).
