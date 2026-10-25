@@ -5,7 +5,7 @@
  * model on, the vector arm fills the rest of the mode's row limit with every
  * page it can reach, however weakly related, so an agent asking one question
  * read most of a small brain: on the multi-member harness, a median 13 pages a
- * call against keyword's 1, with a page the asking member may not read in 46 of
+ * call against keyword's 1, with a page from another member's source in 46 of
  * 51 calls. Rank 1 was never such a page. Cutting at 3 pages left one in 12
  * calls; 4 left 23, and 2 left 9 while keeping a third fewer readable pages,
  * so the default cap is 3.
