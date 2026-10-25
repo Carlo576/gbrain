@@ -209,7 +209,7 @@ function createMcpRequestServer(
   // F1: the contract for THIS token's callable set + readiness tail, resolved at initialize.
   installInstructionsResolver(server, async () => resolveMcpInstructions(config, process.env, {
     writeback: writebackOpts,
-    tools: await httpInstructionTools(engine, config, { ops: mcpOperations, surface, auth: authInfo, allowedOps: surfaceAllowedOps, cache: ctx.readinessCache }),
+    tools: await httpInstructionTools(engine, config, { ops: mcpOperations, surface, auth: authInfo, allowedOps: surfaceAllowedOps, cache: ctx.readinessCache, advertise: ctx.advertise ?? null }),
     ...await readInstructionContent(engine),
   }));
   installCapabilitiesResource(server, async () => {
@@ -246,7 +246,7 @@ async function listMcpTools(ctx: ServeHttpContext, state: McpRequestState) {
   const [gateDisabled, strictParamsMode, advertised] = await Promise.all([
     disabledOpsForPublishGates(engine, config),
     resolveStrictParamsMode(engine, config),
-    resolveAdvertisedSurface(engine, config),
+    resolveAdvertisedSurface(engine, config, ctx.advertise ?? null),
   ]);
   // FOV-4: `agent` deliberately implies only itself, which would strand
   // agent-only tokens with ZERO discovery — ops flagged `agentCallable`
@@ -416,7 +416,7 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
       // WP4 (D2): request_tools bounds its catalog + persist by this.
       surfaceCeiling,
       // D2: a callable tool the advertised surface leaves out of tools/list (same rule as listMcpTools).
-      isListed: async op => !!authInfo.surface || advertisedOps([op], surface, await resolveAdvertisedSurface(engine, ctx.config)).length > 0,
+      isListed: async op => !!authInfo.surface || advertisedOps([op], surface, await resolveAdvertisedSurface(engine, ctx.config, ctx.advertise ?? null)).length > 0,
       resultRows,
       ...(thinClient ? { thinClient: true } : {}),
       // v0.31 follow-up fix: thread auth so the whoami op (and any

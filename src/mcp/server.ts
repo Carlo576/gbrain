@@ -318,7 +318,7 @@ function stdioSurfaceSession(
   return { session, finishResult, statusResult };
 }
 
-export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpSurface; surfaceSource?: SurfaceSource; invalidSurfaceEnv?: string; sourceGuard?: boolean; onBootPhase?: (phase: string) => void; access?: McpAccess } = {}) {
+export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpSurface; surfaceSource?: SurfaceSource; invalidSurfaceEnv?: string; sourceGuard?: boolean; onBootPhase?: (phase: string) => void; access?: McpAccess; advertise?: McpSurface } = {}) {
   const config = loadConfig();
   const bootPhase = (phase: string) => { try { opts.onBootPhase?.(phase); } catch { /* diagnostic only */ } };
   // Refuse to serve a well-formed GBRAIN_SOURCE that no active source row
@@ -371,16 +371,16 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
       instructions: resolveMcpInstructions(config, process.env, { writeback: writebackOpts }),
     },
   );
-  const listing = stdioToolListing(() => resolveAdvertisedSurface(isEngineDegraded(engine) ? null : engine, config), session, server);
+  const listing = stdioToolListing(() => resolveAdvertisedSurface(isEngineDegraded(engine) ? null : engine, config, opts.advertise ?? null), session, server);
   // F1: callable-set contract + readiness tail (or status-only line), resolved at client initialize.
   installInstructionsResolver(server, async () => {
     if (statusMode && isEngineDegraded(engine)) {
       return resolveMcpInstructions(config, process.env, { tools: { callable: n => n === STATUS_TOOL_NAME, statusLine: statusInstructionLine(statusMode) } });
     }
-    const visibleOps = await stdioVisibleTools(engine, session.surfacedOps), visible = new Set(visibleOps.map(op => op.name));
+    const visibleOps = await stdioVisibleTools(engine, session.surfacedOps), listedOps = await listing.listed(visibleOps), listed = new Set(listedOps.map(op => op.name));
     return resolveMcpInstructions(config, process.env, {
       writeback: writebackOpts, ...await readInstructionContent(engine),
-      tools: { callable: n => visible.has(n), readiness: await instructionReadiness(engine, config, 'stdio'), hiddenCallable: visibleOps.length - (await listing.listed(visibleOps)).length },
+      tools: { callable: n => listed.has(n), readiness: await instructionReadiness(engine, config, 'stdio'), hiddenCallable: visibleOps.length - listedOps.length },
     });
   }, gate.initializeAnswered);
 

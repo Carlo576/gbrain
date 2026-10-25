@@ -31,7 +31,7 @@ import { hostedOptionMuted, hostedOptionNotice, writeHostedOption } from '../cor
 import { writeJsonDocument } from '../core/cli-force-exit.ts';
 import { configDir, gbrainPath, loadConfig, type GBrainConfig } from '../core/config.ts';
 import { resolveGbrainBin } from '../core/gbrain-bin.ts';
-import { isRegistrationSurface, isValidName, REGISTRATION_SURFACE } from '../core/mcp-registration.ts';
+import { isRegistrationSurface, isValidName, REGISTRATION_SURFACE, registrationAdvertise, stdioServeArgv } from '../core/mcp-registration.ts';
 import { isValidSourceId } from '../core/source-id.ts';
 import { peekLock } from '../core/pglite-lock.ts';
 import { claudePluginProvidesName, codexPluginProvidesName } from '../core/bootstrap/plugin-lanes.ts';
@@ -89,8 +89,10 @@ and the hook trust entries in $CODEX_HOME/config.toml, the hooks in hooks.json.
 Flags:
   --dry-run            Print the target and every step; write nothing.
   --json               One JSON document on stdout (target, decisions, steps, states).
-  --surface S          MCP tool surface: verbs, starter or full (default: GBRAIN_SURFACE,
-                       then the surface already registered, then full).
+  --surface S          MCP tool surface: verbs, starter or full, listed in full (default:
+                       GBRAIN_SURFACE, then the registration already there, then full
+                       with only the memory verbs and request_tools listed:
+                       serve --surface full --advertise verbs).
   --scope user|project Wiring scope: every Claude Code session (user, default) or only
                        sessions in this directory (project: ~/.claude.json projects
                        entry + .claude/settings.local.json). Codex: user only.
@@ -201,6 +203,7 @@ interface Target {
   transport: 'local-stdio';
   launcher: string;
   surface: McpSurface;
+  advertise?: McpSurface;
   registration_owner: 'none' | 'setup' | 'plugin';
   live_owner: { pid: number; transport: 'stdio' | 'http'; ours: boolean } | null;
   scope: WiringScope;
@@ -247,7 +250,7 @@ function describeTarget(t: Target, out: Out, harness: SetupHarnessId = 'claude-c
   say(out, `Target (${HARNESS_LABEL[harness]}, ${t.scope} scope):`);
   say(out, `  brain      ${brain}`);
   say(out, `  source     ${t.source.id ? `'${t.source.id}' (pinned, from ${t.source.from === 'flag' ? '--source' : 'GBRAIN_SOURCE'})` : 'the brain\'s default source (unpinned)'}`);
-  say(out, `  transport  stdio MCP: ${t.launcher} serve --surface ${t.surface}`);
+  say(out, `  transport  stdio MCP: ${stdioServeArgv(t.launcher, t.surface, t.advertise ?? null).join(' ')}${t.advertise ? ` (lists the ${t.advertise === 'verbs' ? 'memory verbs and request_tools' : `${t.advertise} tools`}; every ${t.surface} tool stays callable)` : ''}`);
   say(out, `  owner      ${t.registration_owner === 'setup' ? `this setup (${t.receipt_path})` : t.registration_owner === 'plugin' ? `the gbrain ${HARNESS_LABEL[harness]} plugin (MCP); setup adds hooks only` : `none yet; setup will own '${t.name}'`}`);
   if (t.live_owner) say(out, `  live       gbrain ${t.live_owner.transport === 'http' ? 'serve --http' : 'stdio serve'} PID ${t.live_owner.pid}${t.live_owner.ours ? ' (started by this registration)' : ''}`);
   say(out, `  files      ${t.config_path} (MCP${t.hooks_path ? ' + hook trust' : ''}), ${t.hooks_path ?? t.settings_path} (hooks)`);
@@ -327,14 +330,22 @@ export async function runSetup(args: string[]): Promise<number> {
     const consent = resolveConsent(flags, prior, cfg, scope, notes);
     const envSurface = process.env.GBRAIN_SURFACE;
     if (envSurface && !isRegistrationSurface(envSurface)) notes.push(`GBRAIN_SURFACE='${envSurface}' is not verbs, starter or full; ignored.`);
-    const surface: McpSurface = flags.surface ?? (isRegistrationSurface(envSurface) ? envSurface : undefined) ?? prior?.surface ?? REGISTRATION_SURFACE;
+    const chosenSurface = flags.surface ?? (isRegistrationSurface(envSurface) ? envSurface : undefined);
+    const surface: McpSurface = chosenSurface ?? prior?.surface ?? REGISTRATION_SURFACE;
+    const advertise = registrationAdvertise({ userChoseSurface: chosenSurface !== undefined, prior });
     const sourceId = flags.source ?? (process.env.GBRAIN_SOURCE && isValidSourceId(process.env.GBRAIN_SOURCE) ? process.env.GBRAIN_SOURCE : null);
-    const plan: ClaudeSetupPlan = {
+    let plan: ClaudeSetupPlan = {
       name: flags.name, scope, ...(projectDir ? { projectDir } : {}), launcher, brainHome,
       ...(process.env.GBRAIN_HOME?.trim() ? { gbrainHomeEnv: process.env.GBRAIN_HOME.trim() } : {}),
-      sourceId, surface, events: hookEvents<ClaudeHookEvent>(consent, 'claude-code'),
+      sourceId, surface, advertise, events: hookEvents<ClaudeHookEvent>(consent, 'claude-code'),
     };
-    const found = inspectClaudeSetup(plan);
+    let found = inspectClaudeSetup(plan);
+    // An entry identical to setup's own except that it lists everything (the form before the verbs listing default) is kept as it is.
+    if (found.mcp.state === 'unowned' && !prior && chosenSurface === undefined && plan.advertise) {
+      const listed: ClaudeSetupPlan = { ...plan, advertise: null };
+      const again = inspectClaudeSetup(listed);
+      if (again.mcp.state === 'current') { plan = listed; found = again; }
+    }
     if (found.mcp.state === 'remote') return refuse(hostedConnection(found.mcp.url ?? 'a hosted brain', true, flags.name), out);
 
     const pluginOwner = flags.name === 'gbrain' ? claudePluginProvidesName(claudeUserSettingsPath(), 'gbrain') : null;
@@ -343,7 +354,7 @@ export async function runSetup(args: string[]): Promise<number> {
       brain: !cfg ? { kind: 'new-local-pglite', path: gbrainPath('brain.pglite'), config_dir: brainHome }
         : cfg.engine === 'pglite' ? { kind: 'local-pglite', path: dataDir, config_dir: brainHome } : { kind: 'local-postgres', config_dir: brainHome },
       source: { id: sourceId, pinned: sourceId !== null, from: flags.source ? 'flag' : sourceId ? 'env' : 'brain-default' },
-      transport: 'local-stdio', launcher, surface,
+      transport: 'local-stdio', launcher, surface, ...(plan.advertise ? { advertise: plan.advertise } : {}),
       registration_owner: pluginOwner ? 'plugin' : prior ? 'setup' : 'none',
       live_owner: liveOwner, scope, name: flags.name,
       config_path: found.configPath, settings_path: found.settingsPath, receipt_path: found.receiptPath,
@@ -466,14 +477,21 @@ async function runCodexSetup(flags: SetupFlags, launcher: string, cfg: GBrainCon
     const consent = resolveConsent(flags, prior, cfg, 'user', notes);
     const envSurface = process.env.GBRAIN_SURFACE;
     if (envSurface && !isRegistrationSurface(envSurface)) notes.push(`GBRAIN_SURFACE='${envSurface}' is not verbs, starter or full; ignored.`);
-    const surface: McpSurface = flags.surface ?? (isRegistrationSurface(envSurface) ? envSurface : undefined) ?? prior?.surface ?? REGISTRATION_SURFACE;
+    const chosenSurface = flags.surface ?? (isRegistrationSurface(envSurface) ? envSurface : undefined);
+    const surface: McpSurface = chosenSurface ?? prior?.surface ?? REGISTRATION_SURFACE;
+    const advertise = registrationAdvertise({ userChoseSurface: chosenSurface !== undefined, prior });
     const sourceId = flags.source ?? (process.env.GBRAIN_SOURCE && isValidSourceId(process.env.GBRAIN_SOURCE) ? process.env.GBRAIN_SOURCE : null);
-    const plan: CodexSetupPlan = {
+    let plan: CodexSetupPlan = {
       name: flags.name, launcher, brainHome,
       ...(process.env.GBRAIN_HOME?.trim() ? { gbrainHomeEnv: process.env.GBRAIN_HOME.trim() } : {}),
-      sourceId, surface, events: hookEvents<CodexSetupEvent>(consent, 'codex'),
+      sourceId, surface, advertise, events: hookEvents<CodexSetupEvent>(consent, 'codex'),
     };
-    const found = inspectCodexSetup(plan);
+    let found = inspectCodexSetup(plan);
+    if (found.mcp.state === 'unowned' && !prior && chosenSurface === undefined && plan.advertise) {
+      const listed: CodexSetupPlan = { ...plan, advertise: null };
+      const again = inspectCodexSetup(listed);
+      if (again.mcp.state === 'current') { plan = listed; found = again; }
+    }
     if (found.mcp.state === 'remote') return refuse(hostedConnection(found.mcp.url ?? 'a hosted brain', true, flags.name, 'codex'), out);
 
     const pluginOwner = codexPluginProvidesName(paths.configPath, flags.name);
@@ -482,7 +500,7 @@ async function runCodexSetup(flags: SetupFlags, launcher: string, cfg: GBrainCon
       brain: !cfg ? { kind: 'new-local-pglite', path: gbrainPath('brain.pglite'), config_dir: brainHome }
         : cfg.engine === 'pglite' ? { kind: 'local-pglite', path: dataDir, config_dir: brainHome } : { kind: 'local-postgres', config_dir: brainHome },
       source: { id: sourceId, pinned: sourceId !== null, from: flags.source ? 'flag' : sourceId ? 'env' : 'brain-default' },
-      transport: 'local-stdio', launcher, surface,
+      transport: 'local-stdio', launcher, surface, ...(plan.advertise ? { advertise: plan.advertise } : {}),
       registration_owner: pluginOwner ? 'plugin' : prior ? 'setup' : 'none',
       live_owner: liveOwner, scope: 'user', name: flags.name,
       config_path: found.configPath, hooks_path: found.hooksPath, receipt_path: found.receiptPath,

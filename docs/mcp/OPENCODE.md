@@ -21,7 +21,7 @@ brain contract loads with zero extra configuration.
 ## Register (recommended)
 
 ```bash
-opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve --surface full
+opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve --surface full --advertise verbs
 ```
 
 `--surface full` serves the whole operation catalog, the seven-verb memory

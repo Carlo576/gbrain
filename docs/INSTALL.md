@@ -129,11 +129,11 @@ gbrain autopilot --install        # background daemon for nightly enrichment
 **Wire this same local brain into your coding agent** — zero server, zero token:
 
 ```bash
-claude mcp add gbrain -- "$(command -v gbrain)" serve --surface full     # Claude Code
-codex  mcp add gbrain -- "$(command -v gbrain)" serve --surface full     # Codex
+claude mcp add gbrain -- "$(command -v gbrain)" serve --surface full --advertise verbs     # Claude Code
+codex  mcp add gbrain -- "$(command -v gbrain)" serve --surface full --advertise verbs     # Codex
 ```
 
-The agent spawns `gbrain serve` as a stdio subprocess against your local brain. `--surface full` (what every registration gbrain writes pins) serves every operation, the seven-verb memory protocol ([MEMORY_VERBS v1](protocol/MEMORY_VERBS_v1.md)) included; a harness that caps its tool count can register `--surface starter` (the verbs plus the daily-driver set, 40 ops) or `--surface verbs` (only the seven verbs). Full walkthrough (both this local path and connecting to a remote brain), plus the brain-first protocol to paste into `CLAUDE.md` / `AGENTS.md`: **[Give your coding agent a memory](tutorials/connect-coding-agent.md)**.
+The agent spawns `gbrain serve` as a stdio subprocess against your local brain. `--surface full --advertise verbs` is what every registration gbrain writes: every operation stays callable, and the tool list shows the seven memory verbs ([MEMORY_VERBS v1](protocol/MEMORY_VERBS_v1.md)) plus `request_tools`, which lists the other tools and returns any tool's full schema. Drop `--advertise verbs` to list every operation, or register `--surface starter` (the verbs plus the daily-driver set, 40 ops) or `--surface verbs` (only the seven verbs, nothing else callable). Full walkthrough (both this local path and connecting to a remote brain), plus the brain-first protocol to paste into `CLAUDE.md` / `AGENTS.md`: **[Give your coding agent a memory](tutorials/connect-coding-agent.md)**.
 
 ## 3. MCP server (any MCP client)
 

@@ -490,7 +490,7 @@ model gbrain removed in v0.33, needs `gbrain skillpack migrate-fence` once.)
 **If you are Hermes:** register gbrain as your MCP server:
 
 ```bash
-printf 'Y\n' | hermes mcp add gbrain --env GBRAIN_HOME=$HOME --connect-timeout 60 --command $(which gbrain) --args serve --surface full
+printf 'Y\n' | hermes mcp add gbrain --env GBRAIN_HOME=$HOME --connect-timeout 60 --command $(which gbrain) --args serve --surface full --advertise verbs
 ```
 
 Keep `--args` last (everything after it becomes server argv) and verify with
@@ -500,7 +500,7 @@ Keep `--args` last (everything after it becomes server argv) and verify with
 **If you are Grok Build** (xAI's `grok` CLI): register gbrain as your MCP server:
 
 ```bash
-grok mcp add gbrain -e "GBRAIN_HOME=$HOME" -- "$(command -v gbrain)" serve --surface full
+grok mcp add gbrain -e "GBRAIN_HOME=$HOME" -- "$(command -v gbrain)" serve --surface full --advertise verbs
 ```
 
 The add is lazy (exit 0 without connecting) — verify with
@@ -516,7 +516,7 @@ install, follow `BOOTSTRAP_FOR_AGENTS.md` instead of this page. For the
 brain-only MCP registration:
 
 ```bash
-opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve --surface full
+opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve --surface full --advertise verbs
 ```
 
 The add is lazy (exit 0 without connecting) — verify with `opencode mcp list`,

@@ -18,7 +18,7 @@ tunnel, no token needed. Works with both PGLite and Supabase engines.
 ## Register (recommended)
 
 ```bash
-grok mcp add gbrain -e "GBRAIN_HOME=$HOME" -- "$(command -v gbrain)" serve --surface full
+grok mcp add gbrain -e "GBRAIN_HOME=$HOME" -- "$(command -v gbrain)" serve --surface full --advertise verbs
 ```
 
 `--surface full` serves the whole operation catalog, the seven-verb memory
