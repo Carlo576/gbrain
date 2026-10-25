@@ -83,6 +83,7 @@ function unpreparedGuards(text: string, names: string[]): Record<string, boolean
 
 test('census: every direct import write (importFromContent, importCodeFile, importImageFile, importStreamedMarkdownFile) checks its source before writing', () => {
   const names = ['importFromContent', 'importCodeFile', 'importImageFile'];
+  // test-reads-source-ok[structural]: the census is an AST tripwire over the import entry points; planted removals prove it flags a missing guard.
   const text = readFileSync(join(root, 'src/core/import-file.ts'), 'utf8');
   const fileGuard = "if (!opts.prepare) await assertUnmanagedCanonicalWriter(engine, 'direct file import', { sourceId: opts.sourceId ?? 'default' });";
   const lastFileGuard = text.lastIndexOf(fileGuard);
@@ -93,6 +94,7 @@ test('census: every direct import write (importFromContent, importCodeFile, impo
     .toEqual({ importFromContent: true, importCodeFile: false, importImageFile: true });
   expect(unpreparedGuards(text.slice(0, lastFileGuard) + text.slice(lastFileGuard + fileGuard.length), names))
     .toEqual({ importFromContent: true, importCodeFile: true, importImageFile: false });
+  // test-reads-source-ok[structural]: the same census over the streamed import entry point.
   const streamed = readFileSync(join(root, 'src/core/page-body/streamed-import.ts'), 'utf8');
   expect(unpreparedGuards(streamed, ['importStreamedMarkdownFile'])).toEqual({ importStreamedMarkdownFile: true });
   expect(unpreparedGuards(streamed.replace("'direct content import', { sourceId: opts.sourceId ?? 'default' })", "'direct content import')"), ['importStreamedMarkdownFile']))
