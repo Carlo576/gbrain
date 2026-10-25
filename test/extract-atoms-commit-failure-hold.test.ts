@@ -18,6 +18,7 @@ import { runExtractAtomsDrainForSource } from '../src/core/cycle/extract-atoms-d
 import { drainOutcome } from '../src/core/cycle/extract-atoms-drain-outcome.ts';
 import { OperationError } from '../src/core/ops/contract.ts';
 import { compactWriteReceipts } from '../src/core/persistence/journal.ts';
+import { retryManagedAtomBatch } from '../src/core/persistence/atom-retry.ts';
 import { disposePersistenceConsumer, stopPersistenceConsumer } from '../src/core/persistence/service.ts';
 import { atomHeldFailedEntry } from '../src/commands/doctor/checks/atom-holds.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
@@ -125,6 +126,12 @@ test('a repeated commit failure is held after MAX_DETERMINISTIC_FAILURES strikes
       expect(held.failure_count).toBe(0);
       expect(held.stopped).toBe('drained');
     }
+    // The reviewed retry the hold names runs one paid extraction and clears it once the write can commit.
+    expect(await retryManagedAtomBatch(engine, 'default', items[0].request_id, 'job:7514')).toMatchObject({ model_rerun: true });
+    expect(calls()).toBe(2);
+    await disposePersistenceConsumer(engine);
+    expect((await doctorHeld()).status).toBe('ok');
+    expect(await engine.executeRaw("SELECT slug FROM pages WHERE type='atom' AND deleted_at IS NULL")).toHaveLength(1);
   });
 }, 120_000);
 
