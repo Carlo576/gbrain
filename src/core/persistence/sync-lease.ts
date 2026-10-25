@@ -36,7 +36,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncResult } from '../../commands/sync.ts';
 import type { Action } from '../agent-output.ts';
-import { fenceLockRow, inspectLock, LockStolenError, LockUnavailableError, syncLockId, withRefreshingLock } from '../db-lock.ts';
+import { fenceLockRow, inspectLock, LockStolenError, LockUnavailableError, resolveStealGraceSeconds, syncLockId, withRefreshingLock } from '../db-lock.ts';
 import { currentRunDeadline, lastForwardProgressAt, noteCommittedProgress, noteForwardProgress } from '../forward-progress.ts';
 import { faultPoint } from './fault-points.ts';
 import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
@@ -158,6 +158,15 @@ export function holderStalled(holder: DrainHolder | null, now = Date.now()): boo
   if (!holder?.started_at || !holder.progress) return false;
   const since = Math.max(Date.parse(holder.started_at), holder.progress.last_progress_at ? Date.parse(holder.progress.last_progress_at) : 0);
   return now - since >= HOLDER_STALL_MS;
+}
+
+/**
+ * #7596: whether a holder still renews the drain lease, by `isLockHolderLive`'s rule at the drain TTL (an unexpired TTL, or a
+ * renewal inside the steal grace). A killed holder's lock row stays until a takeover breaks it, but its renewals stop.
+ */
+export function drainHolderLive(holder: DrainHolder | null, now = Date.now()): boolean {
+  const beat = holder?.last_heartbeat_at ?? holder?.started_at;
+  return !!beat && now - Date.parse(beat) < Math.max(DRAIN_LEASE_TTL_MINUTES * 60_000, resolveStealGraceSeconds(DRAIN_LEASE_TTL_MINUTES) * 1000);
 }
 
 /** What a remote caller may see of a holder: its kind and times, never its host, pid or job id. */

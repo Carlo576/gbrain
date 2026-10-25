@@ -1,0 +1,107 @@
+/**
+ * #7596: a managed sync killed mid-batch (an external memory guard's SIGTERM, an OOM SIGKILL) leaves its pass row open.
+ * `sync status` read that row as a pass still in progress: `resumable` / `pass_unfinished`, the same as a pass that stopped
+ * cleanly at its deadline, and after a SIGKILL it listed the dead process under `live` because its lock row outlives it.
+ * Doctor `managed_sync_blocked` listed nothing. An open pass with no process renewing the source's drain lease is now
+ * `pass_interrupted` in status (with `interrupted` naming the pass and the dead holder) and in doctor.
+ */
+import { describe, expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
+import { join } from 'node:path';
+import type { Check } from '../src/commands/doctor.ts';
+import { managedSyncBlockedEntry } from '../src/commands/doctor/checks/managed-sync-blocked.ts';
+import { syncLockId } from '../src/core/db-lock.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { readBlockedManagedSyncs } from '../src/core/persistence/sync-blocked.ts';
+import { drainHolderLive, type DrainHolder } from '../src/core/persistence/sync-lease.ts';
+import { abandonedPasses, passStatusNext, passStatusState } from '../src/core/persistence/sync-pass-status.ts';
+import { MANAGED_SYNC_PASS_OP, type PassRow } from '../src/core/persistence/sync-pass-row.ts';
+import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
+import { managedBrain } from './helpers/managed-brain.ts';
+import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
+
+const git = (root: string, args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', '-c', 'commit.gpgsign=false', ...args],
+  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const now = Date.parse('2026-10-25T12:00:00Z');
+const row = (outcome: string, streak: number | undefined, quietMs: number): PassRow => ({ updated_at: new Date(now - quietMs).toISOString(),
+  value: { source_id: 's', incarnation: 'i', lease_token: 't', obligations: { baseline_commit: null, mismatch: {}, not_converged_streak: 0, faults: {}, ...(streak ? { abandoned_streak: streak } : {}) },
+    telemetry: { pass_id: 'p', target: 'h', started_at: '', ended_at: null, kind: 'full', round: 0, outcome: outcome as never, stop_reason: null, candidates: 0, settled: 0, remaining: 0, counts: {}, duration_ms: null, timings_ms: {} } } });
+const holder = (beatAgoMs: number): DrainHolder => ({ kind: 'cli', id: null, host: 'host-a', pid: 4242, started_at: new Date(now - 600_000).toISOString(),
+  last_heartbeat_at: new Date(now - beatAgoMs).toISOString(), version: null, progress: null });
+
+describe('#7596: an open pass with no live drain-lease holder reads interrupted', () => {
+  test('a holder that stopped renewing the lease is not live', () => {
+    expect(drainHolderLive(holder(20_000), now)).toBe(true);
+    expect(drainHolderLive(holder(3 * 60_000), now)).toBe(false);
+    expect(drainHolderLive(null, now)).toBe(false);
+  });
+
+  test('the first interrupted pass is resumable pass_interrupted and next is the plain sync', () => {
+    const open = row('open', undefined, 10_000);
+    expect(passStatusState(open, null, null, now, true)).toEqual(['resumable', 'pass_interrupted']);
+    const next = passStatusNext('s', 'pass_interrupted', open, ['--source', 's'], null, true);
+    expect(next.argv).toEqual(['gbrain', 'sync', '--source', 's']);
+    expect(next.why).toContain('killed or crashed');
+    // A pass whose process still renews the lease is running, not interrupted.
+    expect(passStatusState(open, null, null, now, false)).toEqual(['resumable', 'pass_unfinished']);
+    expect(passStatusState(row('synced', undefined, 10_000), null, null, now, true)).toBeNull();
+  });
+
+  test('an interrupted pass after an abandoned one is blocked pass_abandoned without waiting out the quiet window', () => {
+    const second = row('open', 1, 10_000);
+    expect(abandonedPasses(second, now, true)).toBe(2);
+    expect(passStatusState(second, null, null, now, true)).toEqual(['blocked', 'pass_abandoned']);
+    expect(passStatusState(second, null, null, now, false)).toEqual(['resumable', 'pass_unfinished']);
+    // A pass writes its row per batch, so a live holder committing pages for minutes is not quiet, whatever its row's age.
+    expect(passStatusState(row('open', 1, 6 * 60_000), null, null, now, false)).toEqual(['resumable', 'pass_unfinished']);
+  });
+});
+
+const lockRow = (engine: BrainEngine, beat: string, ttl: string) => engine.executeRaw(`INSERT INTO gbrain_cycle_locks(id,holder_pid,holder_host,acquired_at,ttl_expires_at,last_refreshed_at)
+  VALUES($1,$2,$3,now()-interval '10 minutes',now()+$5::interval,now()-$4::interval)
+  ON CONFLICT(id) DO UPDATE SET holder_pid=EXCLUDED.holder_pid,ttl_expires_at=EXCLUDED.ttl_expires_at,last_refreshed_at=EXCLUDED.last_refreshed_at`, [syncLockId('default'), 4242, hostname(), beat, ttl]);
+
+for (const backend of testBackends()) {
+  const databaseUrl = backend === 'postgres' ? requirePostgresTestDatabase() : undefined;
+  test(`#7596 [${backend}]: a killed pass is pass_interrupted in sync status and doctor, and a live one is not`, () => managedBrain(async ({ engine }) => {
+    expect((await performManagedSync(engine, { sourceId: 'default', noPull: true, noEmbed: true, noExtract: true })).status).toMatch(/^(first_sync|synced)$/);
+    const blocked = async () => (await readBlockedManagedSyncs(engine, ['default'])).filter(entry => entry.source_id === 'default');
+    const doctor = async () => (await managedSyncBlockedEntry.run({ engine } as never) as Check[])[0]!;
+    expect(await blocked()).toEqual([]);
+
+    // The pass's process was killed: its row is left open and its drain lease released (a SIGTERM's cleanup).
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,telemetry,outcome}','"open"') WHERE op=$1`, [MANAGED_SYNC_PASS_OP]);
+    const [{ pass_id }] = await engine.executeRaw<{ pass_id: string }>(`SELECT completed_keys->0->'telemetry'->>'pass_id' AS pass_id FROM op_checkpoints WHERE op=$1`, [MANAGED_SYNC_PASS_OP]);
+    let status = await readSyncStatus(engine, 'default', { detail: false });
+    expect([status.state, status.reason]).toEqual(['resumable', 'pass_interrupted']);
+    expect(status.live).toBeNull();
+    expect(status.interrupted).toMatchObject({ pass_id, holder: null });
+    expect(status.next?.argv?.slice(0, 4)).toEqual(['gbrain', 'sync', '--source', 'default']);
+    expect(status.next?.why).toContain('killed or crashed');
+    expect(await blocked()).toEqual([expect.objectContaining({ code: 'pass_interrupted', run_id: pass_id })]);
+    expect(await doctor()).toMatchObject({ name: 'managed_sync_blocked', status: 'warn' });
+
+    // A SIGKILL leaves the lock row behind, its renewals stopped three minutes ago: still no live holder.
+    await lockRow(engine, '3 minutes', '-1 minute');
+    status = await readSyncStatus(engine, 'default', { detail: false });
+    expect([status.state, status.reason]).toEqual(['resumable', 'pass_interrupted']);
+    expect(status.live).toBeNull();
+    expect(status.interrupted?.holder).toMatchObject({ pid: 4242 });
+    expect(await blocked()).toEqual([expect.objectContaining({ code: 'pass_interrupted' })]);
+
+    // A holder that renewed the lease just now is a pass still running: not interrupted, not blocked.
+    await lockRow(engine, '1 second', '2 minutes');
+    status = await readSyncStatus(engine, 'default', { detail: false });
+    expect(status.reason).toBe('pass_unfinished');
+    expect(status.live).toMatchObject({ pid: 4242 });
+    expect(status.interrupted).toBeNull();
+    expect(await blocked()).toEqual([]);
+  }, { databaseUrl, setup: ({ root }) => {
+    git(root, ['init', '-q']);
+    writeFileSync(join(root, 'a.md'), '---\ntype: concept\ntitle: a\n---\n\nA note about a.\n');
+    git(root, ['add', '-A']); git(root, ['commit', '-qm', 'a']);
+  } }), 120_000);
+}
