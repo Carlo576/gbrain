@@ -2010,10 +2010,14 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
   },
   {
     "name": "add_link",
-    "idempotent": false,
+    "idempotent": true,
     "outputRedaction": "no_stored_text",
     "description": "Create a typed link (edge) from one page to another in the same source. Use when recording a relationship (works_at, invested_in, mentions); remote page writes already link [[wikilinks]] to existing pages as mentions (receipt auto_links), so add only typed links or ones the text lacks. Needs write scope; an explicit link_type must be declared by the active schema pack. On page_not_found: resolve both slugs with resolve_slugs.",
     "params": {
+      "request_id": {
+        "type": "string",
+        "description": "Reuse only to retry."
+      },
       "from": {
         "type": "string",
         "required": true,
@@ -2061,10 +2065,14 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
   },
   {
     "name": "remove_link",
-    "idempotent": false,
+    "idempotent": true,
     "outputRedaction": "no_stored_text",
     "description": "Remove a link between two pages (optionally only one link_type or link_source). Use when a relationship was recorded wrongly. Needs write scope. On page_not_found: resolve both slugs with resolve_slugs.",
     "params": {
+      "request_id": {
+        "type": "string",
+        "description": "Reuse only to retry."
+      },
       "from": {
         "type": "string",
         "required": true,
@@ -3493,6 +3501,39 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       }
     },
     "scope": "read",
+    "area": "pages"
+  },
+  {
+    "name": "whois",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": "retrieval",
+    "scope": "read",
+    "description": "Exact identity lookup: entity pages whose email, title or declared alias equals an email address or name, ignoring case, accents and quotes. Never fuzzy: empty matches means no exact match; ambiguous means several.",
+    "params": {
+      "query": {
+        "type": "string",
+        "required": true,
+        "description": "Email address or name, e.g. 'alice@acme-example.com'."
+      },
+      "types": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Page types; default: the schema pack's entity types."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "One source; '__all__' spans your sources."
+      }
+    },
+    "cliHints": {
+      "name": "whois",
+      "positional": [
+        "query"
+      ]
+    },
     "area": "pages"
   },
   {

@@ -208,6 +208,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'unlinked_facts',
   // #7160: title-prefixed person pages that likely duplicate an unprefixed page (preview only).
   'person_title_duplicates',
+  // Git-canonical G1: the database compared with the commit at HEAD per source, informational (doctor/checks/db-ahead-of-git.ts).
+  'db_ahead_of_git',
   'edge_validity',
   'text_projection_readiness',
   'timeline_coverage',
@@ -307,6 +309,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'google_api_access',
   'google_oauth',
   'home_dir_in_worktree',
+  // GBRA-108: cron commands that run gbrain without GBRAIN_HOME (doctor/checks/cron-gbrain-home.ts).
+  'cron_gbrain_home',
   'index_audit',
   'npm_squat',
   'oauth_client_scope_health',

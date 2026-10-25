@@ -31,7 +31,9 @@ const HELP = `Usage: gbrain git commit-push [--path <dir>] -m <msg> [--json] [--
 Commit only the named paths and push them, safely, in a checkout other agents
 share: a short commit lock and a separate push lock per checkout, no
 rebase/stash/reset of the working tree, remote commits merged in memory, and the
-checkout advanced fast-forward only.
+checkout advanced fast-forward only. In a managed canonical worktree it only
+commits the named paths (committed_local): no fetch, merge, push or checkout
+move; the owner's next Git publish, or --push-only --keep-checkout, pushes it.
 
 Flags:
   --path <dir>        Checkout to act on (default: the checkout containing the cwd).
@@ -56,7 +58,7 @@ Flags:
   --json              One JSON result (or the error envelope) on stdout.
 
 Paths are relative to --path when it is given (like git -C), else to the current
-directory. Exit 0 on pushed, nothing_to_commit, push_deferred and
+directory. Exit 0 on pushed, committed_local, nothing_to_commit, push_deferred and
 pushed_checkout_lagging (a notice names the blocking files); 4 when the commit is local but no push was
 confirmed (push_unconfirmed); 1 on other failures, each with an "Error [<code>]" line. Guide: docs/guides/shared-checkout-git.md
 
@@ -182,6 +184,10 @@ export async function runGit(args: string[]): Promise<number> {
       emit(json, { ...result, repo }, `push deferred: another push is running in ${repo} and will publish HEAD too`);
       return 0;
     }
+    if (result.outcome === 'committed_local') {
+      emit(json, { ...result, repo }, `committed ${result.sha!.slice(0, 7)} on ${result.branch}; not pushed: this is a managed checkout, so the owner's next Git publish pushes it (or gbrain git commit-push --push-only --keep-checkout)`);
+      return 0;
+    }
     appendPushLog(result.outcome === 'nothing_to_commit' || result.confirmed === 'remote' ? 'nothing' : result.integrated ? 'ok-after-merge' : 'ok',
       p.branch?.replace(/^refs\/heads\//, '') ?? result.branch, result.sha ?? '');
     if (result.outcome === 'pushed_checkout_lagging') appendPushLog('checkout-lagging', result.branch, result.sha ?? '', result.lagging_reason);
@@ -191,6 +197,9 @@ export async function runGit(args: string[]): Promise<number> {
         : `pushed ${short} to ${result.remote}/${result.branch}${result.integrated ? `; merged ${result.integrated} remote commit(s)` : ''}; checkout ${result.checkout}`);
     if (result.quarantined && !json) {
       process.stderr.write(`[gbrain notice] quarantine: the remote also changed ${result.quarantined.paths.join(', ')}; its version was published and this machine's version is kept under ${result.quarantined.ref}. gbrain doctor lists it (quarantined_changes).\n`);
+    }
+    if (result.superseded_remote_paths && !json) {
+      process.stderr.write(`[gbrain notice] kept this machine's version of ${result.superseded_remote_paths.join(', ')}: the remote held a version this checkout had already replaced. See docs/guides/shared-checkout-git.md#conflicts.\n`);
     }
     if (result.outcome === 'pushed_checkout_lagging' && !json) {
       process.stderr.write(`[gbrain notice] the push landed but this checkout was not advanced: ${result.lagging_reason}. The next commit-push or --pull catches it up.\n`);
