@@ -1,0 +1,77 @@
+/**
+ * G6 (git-canonical memory, docs/designs/GIT_CANONICAL_MEMORY.md): a strict source (`config.canonical = "git"`) is
+ * written only through the door, which runs in managed persistence. The legacy writer of an unmanaged brain writes the
+ * database row first, so `importFromContent` and `importCodeFile` without the coordinator's `prepare` seam refuse a
+ * strict source (`writer_coordinator_required`, reason `strict_source_unmanaged`) and write nothing; other sources
+ * import as before. The census pins the rule "no importFromContent outside the door": the only direct paths into the
+ * page tables are these two functions' unprepared branches, and each one checks the target source. Red before: the
+ * strict-source import committed the row. Runs on PGLite and, with DATABASE_URL, on Postgres.
+ */
+import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import ts from 'typescript';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { importCodeFile, importFromContent } from '../src/core/import-file.ts';
+import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { testBackends } from './helpers/test-backends.ts';
+
+const backends = testBackends();
+const engines: BrainEngine[] = [];
+let closePostgres: (() => Promise<void>) | undefined;
+beforeAll(async () => {
+  if (backends.includes('pglite')) { const engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); engines.push(engine); }
+  if (backends.includes('postgres')) { const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!); engines.push(pg.engine); closePostgres = pg.close; }
+}, 120_000);
+afterAll(async () => {
+  for (const engine of engines) if (engine.kind === 'pglite') await engine.disconnect();
+  await closePostgres?.();
+});
+
+const page = (title: string) => `---\ntype: note\ntitle: ${title}\n---\n\n${title} body.\n`;
+const pageCount = async (engine: BrainEngine, sourceId: string, slug: string) => Number((await engine.executeRaw<{ n: number }>(
+  'SELECT count(*)::int AS n FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]))[0]!.n);
+const refusal = (promise: Promise<unknown>) => promise.then(() => null, (error: { code?: string; reason?: string; details?: { reason?: string } }) =>
+  ({ code: error.code, reason: error.reason ?? error.details?.reason }));
+
+for (const backend of backends) test(`[${backend}] an unmanaged brain refuses a direct import into a strict source and writes nothing; other sources import`, async () => {
+  const engine = engines[backends.indexOf(backend)]!;
+  await engine.executeRaw(`INSERT INTO sources (id, name, config) VALUES ('source-a', 'source-a', '{"canonical":"git"}'::jsonb) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config`);
+  expect(await refusal(importFromContent(engine, 'notes/alice-example', page('Alice'), { noEmbed: true, sourceId: 'source-a' })))
+    .toEqual({ code: 'writer_coordinator_required', reason: 'strict_source_unmanaged' });
+  expect(await refusal(importCodeFile(engine, 'src/acme-example.ts', 'export const acme = 1;\n', { noEmbed: true, sourceId: 'source-a' })))
+    .toEqual({ code: 'writer_coordinator_required', reason: 'strict_source_unmanaged' });
+  expect(await pageCount(engine, 'source-a', 'notes/alice-example')).toBe(0);
+  expect(await pageCount(engine, 'source-a', 'acme-example-ts')).toBe(0);
+  expect((await importFromContent(engine, 'notes/alice-example', page('Alice'), { noEmbed: true })).status).toBe('imported');
+  expect(await pageCount(engine, 'default', 'notes/alice-example')).toBe(1);
+  await engine.executeRaw("UPDATE sources SET config = config - 'canonical' WHERE id='source-a'");
+  expect((await importFromContent(engine, 'notes/alice-example', page('Alice'), { noEmbed: true, sourceId: 'source-a' })).status).toBe('imported');
+}, 60_000);
+
+// test-reads-source-ok[structural]: the census is a source-text tripwire by design; the planted copies prove it flags a bypass.
+const root = join(import.meta.dir, '..');
+/** Each exported import-file function whose unprepared branch writes the page tables, with whether that branch checks the target source. */
+function unpreparedGuards(text: string): Record<string, boolean> {
+  const file = ts.createSourceFile('import-file.ts', text, ts.ScriptTarget.Latest, true);
+  const out: Record<string, boolean> = {};
+  file.forEachChild(node => {
+    if (!ts.isFunctionDeclaration(node) || !node.name || !['importFromContent', 'importCodeFile'].includes(node.name.text) || !node.body) return;
+    out[node.name.text] = node.body.statements.some(statement => {
+      if (!ts.isIfStatement(statement) || statement.expression.getText() !== '!opts.prepare') return false;
+      const call = statement.thenStatement.getText();
+      return call.startsWith('await assertUnmanagedCanonicalWriter(') && /sourceId:/.test(call);
+    });
+  });
+  return out;
+}
+
+test('census: every direct importFromContent / importCodeFile write checks its source before writing (no import outside the door on a strict source)', () => {
+  const text = readFileSync(join(root, 'src/core/import-file.ts'), 'utf8');
+  expect(unpreparedGuards(text)).toEqual({ importFromContent: true, importCodeFile: true });
+  expect(unpreparedGuards(text.replace("'direct content import', { sourceId: sourceId ?? 'default' })", "'direct content import')")))
+    .toEqual({ importFromContent: false, importCodeFile: true });
+  expect(unpreparedGuards(text.replace("if (!opts.prepare) await assertUnmanagedCanonicalWriter(engine, 'direct file import', { sourceId: opts.sourceId ?? 'default' });", '')))
+    .toEqual({ importFromContent: true, importCodeFile: false });
+});
