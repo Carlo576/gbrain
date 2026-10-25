@@ -203,6 +203,21 @@ it, before any member's bot connects:
 
   The first id is the token's write source, so a member's saved memories land
   in their own private source.
+- **Let each member read their own private pages (optional).** Remote
+  reads hide every `visibility: private` page by default, even in a granted
+  source. To let a member's agent read the private pages in the sources its
+  grant names, and no others, opt that token or client in:
+
+  ```bash
+  gbrain auth rescope --token bot-alice-example --private-pages granted-sources
+  gbrain auth rescope --client <client_id> --private-pages granted-sources
+  ```
+
+  A token with no source grant, a federated source the grant does not name,
+  and a request's `source_ids` never add a source; `context_pack`, `delta`
+  and writes keep hiding private pages. `--private-pages none` hides them
+  again on the next request, and `gbrain auth list` shows each token's
+  setting.
 
 > **Warning: one shared source has no boundary inside it.** A bot that answers
 > everyone with one unscoped token over a single source exposes everything in
