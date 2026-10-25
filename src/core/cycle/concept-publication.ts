@@ -4,7 +4,9 @@
  * On a managed brain the phase publishes each concept page through the
  * maintenance coordinator (`publishMaintenancePage`) instead of the legacy
  * `importFromContent` writer, which a managed brain refuses. The caller keeps
- * the #5525 order: publish private, bank provenance edges, then promote.
+ * the #5525 order: publish private, bank provenance edges, then promote; a
+ * concept whose banked edges already cover every member publishes once, at
+ * world (GBRA-60).
  */
 import type { BrainEngine, LinkBatchInput } from '../engine.ts';
 import { preservedConceptSections, stripPreservedConceptSections } from './concept-sections.ts';
@@ -71,6 +73,20 @@ export async function publishManagedConcept(engine: BrainEngine, authority: Main
   const receipt = await publishMaintenancePage(engine, authority, slug, markdown,
     { expectedRevision: snapshot?.revision ?? null, file: !dbOnly, ...(derivation ? { derivation: declareDerivation(derivation.trust, derivation.inputs) } : {}) });
   return typeof receipt.revision === 'string' ? receipt.revision : null;
+}
+
+/**
+ * #5525: whether the concept's `synthesized_from` provenance edges reach every member atom, the condition for publishing
+ * it at world. Read before publication too (GBRA-60): edges a prior run banked let a republished concept go straight to
+ * world instead of committing a private intermediate.
+ */
+export async function conceptProvenanceCovers(engine: BrainEngine, sourceId: string, conceptSlug: string, atomSlugs: readonly string[]): Promise<boolean> {
+  const members = [...new Set(atomSlugs)];
+  const [{ linked }] = await engine.executeRaw<{ linked: number }>(`SELECT COUNT(DISTINCT a.slug)::int AS linked FROM links l
+    JOIN pages c ON c.id=l.from_page_id JOIN pages a ON a.id=l.to_page_id
+    WHERE c.source_id=$1 AND c.slug=$2 AND a.slug=ANY($3::text[]) AND l.link_source='concept-provenance' AND l.link_type='synthesized_from'`,
+  [sourceId, conceptSlug, members]);
+  return Number(linked) === members.length;
 }
 
 /**

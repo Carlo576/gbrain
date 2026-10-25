@@ -512,6 +512,20 @@ export function rowToMinionJob(row: Record<string, unknown>): MinionJob {
  * tool registry and provider config resolve via handler-side defaults + env,
  * not per-job data, so restart/replay uses the same behavior.
  */
+/** GBRA-60: the transcript a dream synthesis child's pages are verified against, and the stamp they carry. */
+export interface DreamOutputSpec {
+  /** The transcript path (or conversation-page URI) the cycle discovered; stamped as `raw_source`. */
+  raw_source: string;
+  /** sha256 of the transcript content the cycle discovered; a child that reads other bytes does not verify. */
+  transcript_hash: string;
+  /** The cycle date the prompt gave as today (`dream_cycle_date`, the verify `checkedAt`). */
+  cycle_date: string;
+  /** `dream.synthesize.quote_verify`; false stamps without verifying. */
+  quote_verify: boolean;
+  /** #4618: the capturing seat. */
+  seat?: string;
+}
+
 export interface SubagentHandlerData {
   /** Top-level user turn kicking off the loop. */
   prompt: string;
@@ -627,6 +641,13 @@ export interface SubagentHandlerData {
    * queued by older builds, which keep the allow-list derivation.
    */
   oneshot_task_prefixes?: string[];
+  /**
+   * GBRA-60: a managed dream synthesis child verifies and stamps each oneshot page against this transcript before it
+   * writes it (cycle/synthesize-child-verify.ts), so a strict source commits each output once. Trusted field
+   * (PROTECTED_JOB_NAMES); a delegated (remote-owned) job ignores it. Absent on jobs queued by older builds, whose
+   * outputs postprocessing verifies and republishes.
+   */
+  dream_output?: DreamOutputSpec;
   /**
    * v0.41 Approach C: opt out of the auto-generated tool-usage preamble
    * that `buildSystemPrompt()` splices into `system`. Default behavior

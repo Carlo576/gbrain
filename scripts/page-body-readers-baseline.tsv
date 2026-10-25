@@ -153,6 +153,9 @@ src/core/cycle/phantom-redirect.ts	tryRedirectPhantom	field	SEGW	canonical targe
 src/core/cycle/propose-takes.ts	ProposeTakesPhase.process	call:contentHash	META	
 src/core/cycle/propose-takes.ts	ProposeTakesPhase.process	field	STREAM	
 src/core/cycle/propose-takes.ts	listCandidatePages	sql	STREAM	
+src/core/cycle/synthesize-child-verify.ts	readTranscript	field	INLINE	a segmented conversation transcript is skipped: the child writes unverified and postprocessing verifies
+src/core/cycle/synthesize-child-verify.ts	verifyChildPages	call:serializeMarkdown	INLINE	serializes the child's own model output, never a stored body
+src/core/cycle/synthesize-child-verify.ts	verifyChildPages	field	INLINE	a segmented page it would replace skips child verification: postprocessing verifies
 src/core/cycle/synthesize-concepts.ts	runPhaseSynthesizeConcepts	field	INLINE	
 src/core/cycle/synthesize-concepts.ts	runPhaseSynthesizeConcepts	sql	INLINE	
 src/core/cycle/synthesize-generations.ts	pages	sql	INLINE	reads the synthesis outputs of one re-synthesized transcript for the predecessor coverage match (generations/synthesis-coverage.ts); segmented pages are excluded in SQL, so a segmented earlier output is never compared and stays live as an unreadable unmatched predecessor
@@ -329,7 +332,7 @@ src/core/mentions/pass.ts	pagesMatchingNames	sql	STREAM	segmented pages are sele
 src/core/mentions/pass.ts	reconcileSource	sql	INLINE	reads body_storage; a segmented row is scanned block by block (pageMentions)
 src/core/mentions/pass.ts	refreshAliases	sql	STREAM	segmented pages excluded in SQL
 src/core/minions/handlers/facts-absorb.ts	makeFactsAbsorbHandler	field	STREAM	
-src/core/minions/handlers/subagent-oneshot.ts	runSubagentOneshot	call:serializeMarkdown	SEGW	
+src/core/minions/handlers/subagent-oneshot.ts	planOneshotWrites	call:serializeMarkdown	SEGW	
 src/core/ops/admin.ts	get_versions	field	SEGW	lane 1e: segmented versions return metadata only
 src/core/ops/attribution.ts	get_write_attribution	field	NONE	not the page body: timeline entry id param
 src/core/ops/attribution.ts	rowTarget	field	NONE	not the page body: timeline entry id param

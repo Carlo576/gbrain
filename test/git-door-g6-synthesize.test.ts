@@ -2,13 +2,16 @@
  * G6 (git-canonical memory): the dream synthesis writers on a strict source.
  *
  *   - synthesize_concepts (synthesize-concepts.ts runPhaseSynthesizeConcepts): on a managed brain it publishes each concept
- *     through publishManagedConcept (concept-publication.ts), private first and then world once the provenance edges land.
- *     A new concept publishes database-only (`file: false`) under the derive-phase folder `concepts/`, a declared
- *     database-only class (DERIVE_PHASE_DB_ONLY_DEFAULTS); a concept that already has a file republishes it.
+ *     through publishManagedConcept (concept-publication.ts), private first and then world once the provenance edges land;
+ *     a world concept whose banked edges already cover every member publishes once, at world (GBRA-60), so no private
+ *     intermediate is committed. A new concept publishes database-only (`file: false`) under the derive-phase folder
+ *     `concepts/`, a declared database-only class (DERIVE_PHASE_DB_ONLY_DEFAULTS); a concept that already has a file
+ *     republishes it.
  *   - synthesize quote-verify repair: verifyAndRepairDreamPages (synthesize-verify.ts) is the unmanaged branch only; a
- *     managed brain routes to postprocessManagedSynthesis (synthesize-postprocess.ts), driven here through the whole
- *     synthesize phase with a stubbed provider whose oneshot child writes three reflection pages, each carrying an
- *     invented quotation the repair must strip.
+ *     managed brain's oneshot child verifies and stamps each page before it writes them as one put_pages batch
+ *     (synthesize-child-verify.ts, GBRA-60), and postprocessManagedSynthesis (synthesize-postprocess.ts) then has nothing
+ *     to publish. Driven here through the whole synthesize phase with a stubbed provider whose oneshot child writes three
+ *     reflection pages, each carrying an invented quotation the repair must strip.
  *
  * Target for each batch (test/helpers/strict-door-audit.ts): every filed page at HEAD with the content its row holds, a
  * clean tree, no git-gap census gap, and at most one commit per publication group. Runs on PGLite, and on Postgres
@@ -35,7 +38,7 @@ const put = (ctx: OperationContext, slug: string, content: string) => submitPage
 const NO_GAP = { database_ahead: 0, worktree_only: 0, undeclared_database_only: 0 };
 
 /** What each batch commit put in Git for one probe per path: the intermediate states history keeps after the batch. */
-const commitProbe = async (root: string, audit: DoorAudit, probe: (blob: string) => unknown) =>
+const commitProbe = async <T>(root: string, audit: DoorAudit, probe: (blob: string) => T) =>
   Promise.all(audit.commits.flatMap(commit => commit.paths.map(async path => ({ sha: commit.sha.slice(0, 8), path, probe: probe(await gitAsync(root, 'show', `${commit.sha}:${path}`).catch(() => '')) }))));
 
 /** Three concept groups: one T2 (five atoms, LLM narrative) and two T3 (two atoms each, deterministic narrative). */
@@ -95,11 +98,19 @@ for (const backend of testBackends()) {
       expect(audit.commits.filter(commit => commit.paths.some(path => path.startsWith('concepts/')))).toEqual([]);
     }, { databaseUrl, setup }), 180_000);
 
-    test('three file-backed concepts republished: at HEAD, clean, no census gap, one commit per group', () => managedBrain(async ({ engine, ctx, root }) => {
+    /**
+     * Three file-backed world concepts a prior run wrote, republished. `banked`: the prior run's provenance edges cover
+     * every member, so each concept publishes once, at world. Without them the #5525 private step comes first.
+     */
+    const republish = ({ banked }: { banked: boolean }) => managedBrain(async ({ engine, ctx, root }) => {
       await strictSource(engine);
       await seedAtoms(ctx);
       for (const slug of CONCEPTS) {
         await put(ctx, slug, `---\ntype: concept\ntitle: ${slug.split('/')[1]}\nsynthesized_by: synthesize_concepts-v0.41\nsynthesis_mode: llm\nmember_hash: stale-example\nvisibility: world\n---\n\nAn older narrative from source-a.\n`);
+      }
+      if (banked) {
+        await engine.addLinksBatch(ATOMS.map(atom => ({ from_slug: `concepts/${atom.stem}`, to_slug: atom.slug, link_type: 'synthesized_from',
+          link_source: 'concept-provenance', context: 'member atom', from_source_id: 'default', to_source_id: 'default' })));
       }
       await settleManagedGitEffects(engine);
       const seeded = [...ATOMS.map(a => a.slug), ...CONCEPTS];
@@ -120,9 +131,22 @@ for (const backend of testBackends()) {
       await settleManagedGitEffects(engine);
       const audit = await auditDoor(engine, root, { since, slugs: CONCEPTS });
       console.log(summarizeAudit(`synthesize_concepts republish ${backend}`, audit));
-      console.log(`[g6-measure] synthesize_concepts republish commits ${backend}: ${JSON.stringify(await commitProbe(root, audit, blob => /^visibility: (\w+)/m.exec(blob)?.[1] ?? null))}`);
+      const probes = await commitProbe(root, audit, blob => /^visibility: (\w+)/m.exec(blob)?.[1] ?? null);
+      console.log(`[g6-measure] synthesize_concepts republish (${banked ? 'banked' : 'no'} edges) commits ${backend}: ${JSON.stringify(probes)}`);
+      // GBRA-176: private content is never committed, so no commit in the batch holds a private concept.
+      expect(probes.filter(probe => probe.probe !== 'world')).toEqual([]);
       expectDoorTarget(audit, engine.kind);
-    }, { databaseUrl, setup }), 180_000);
+    }, { databaseUrl, setup });
+
+    test('three file-backed concepts with banked provenance edges republished once at world: at HEAD, clean, no census gap, one commit per group',
+      () => republish({ banked: true }), 180_000);
+
+    // GBRA-60/GBRA-95: a file-backed world concept whose edges do not yet cover its members takes the #5525 private step;
+    // on a strict source that step is a visibility transition (one door commit that removes the file and clears
+    // source_path/source_uri), owned by G7a. Until G7a's transition helper lands the private step commits the private
+    // page, so this stays a todo; `bun test --todo` runs it.
+    test.todo('three file-backed concepts without provenance edges republished: the private step removes the file (G7a visibility transition)',
+      () => republish({ banked: false }), 180_000);
   });
 
   describe(`[${backend}] G6: synthesize postprocess (managed quote-verify repair) on a strict source writes only through the door`, () => {
@@ -176,8 +200,19 @@ for (const backend of testBackends()) {
       await settleManagedGitEffects(engine);
       const audit = await auditDoor(engine, root, { since, slugs: outputs });
       console.log(summarizeAudit(`synthesize postprocess ${backend}`, audit));
-      console.log(`[g6-measure] synthesize postprocess commits ${backend}: ${JSON.stringify(await commitProbe(root, audit, blob => ({ invented_quote_in_body: blob.slice(blob.indexOf('\n---\n', 3) + 5).includes('"an entirely invented'), dream_generated: /^dream_generated: true/m.test(blob) })))}`);
+      const probes = await commitProbe(root, audit, blob => ({ invented_quote_in_body: blob.slice(blob.indexOf('\n---\n', 3) + 5).includes('"an entirely invented'), dream_generated: /^dream_generated: true/m.test(blob) }));
+      console.log(`[g6-measure] synthesize postprocess commits ${backend}: ${JSON.stringify(probes)}`);
       console.log(summarizeAudit(`synthesize summary ${backend}`, await auditDoor(engine, root, { since, slugs: [String(result.details.summary_slug)] })));
+      // GBRA-60: the child verifies and stamps before its put_page, so each output is committed once, verified and
+      // stamped, and the invented quotation never reaches Git history except as its `unverified_claims` review record.
+      expect(audit.pages.map(page => ({ slug: page.slug, commits: page.commits }))).toEqual(outputs.map(slug => ({ slug, commits: 1 })));
+      const outputPaths = new Set(audit.pages.map(page => page.path));
+      expect(probes.filter(p => outputPaths.has(p.path) && (p.probe.invented_quote_in_body || !p.probe.dream_generated))).toEqual([]);
+      for (const page of audit.pages) {
+        const added = (await gitAsync(root, 'log', '-p', `${since}..HEAD`, '--', page.path)).split('\n')
+          .filter(line => line.startsWith('+') && line.includes('"an entirely invented') && !/^\+\s+- text: /.test(line));
+        expect({ path: page.path, added }).toEqual({ path: page.path, added: [] });
+      }
       expectDoorTarget(audit, engine.kind);
     }, { databaseUrl, setup }), 180_000);
   });

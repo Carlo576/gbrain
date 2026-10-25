@@ -45,7 +45,7 @@ import { maintenancePreflight } from '../persistence/prepared-maintenance.ts';
 import { derivedWriteThrough, reportFileHolds } from './derived-write-through.ts';
 import { addSpellingRedirects, canonicalConceptStem, loadConceptRedirects, loadLiveConceptStems } from './concept-redirects.ts';
 import {
-  replaceConceptProvenanceLinks, CONCEPT_DEFERRAL_CODES, CONCEPT_HOLD_CODES, conceptPublicationHold, publishClassicConcept, publishManagedConcept, stripFenceSections,
+  conceptProvenanceCovers, replaceConceptProvenanceLinks, CONCEPT_DEFERRAL_CODES, CONCEPT_HOLD_CODES, conceptPublicationHold, publishClassicConcept, publishManagedConcept, stripFenceSections,
 } from './concept-publication.ts';
 import { readPhaseConfigNumber, SYNTHESIZE_CONCEPTS_BUDGET_KEY, SYNTHESIZE_CONCEPTS_DEFAULT_BUDGET_USD } from './phase-config-values.ts';
 import { ConceptRetryBound, MAX_CONCEPT_ATTEMPTS } from './concept-retry-bound.ts';
@@ -534,7 +534,11 @@ export async function runPhaseSynthesizeConcepts(
       };
       // #5525: a world concept stays private until every member's provenance
       // edge is durable, because a later private flip reaches it through them.
-      if (!await publishOrRecord('private')) continue;
+      // GBRA-60: one whose edges already cover every member publishes once, at
+      // world, so a strict source never commits an intermediate private page.
+      const src = opts.sourceId ?? 'default';
+      const covered = visibility === 'world' && await conceptProvenanceCovers(engine, src, conceptSlug, group.atomSlugs);
+      if (!await publishOrRecord(covered ? 'world' : 'private')) continue;
       if (synthesisMode === 'llm') retries.succeed(`${opts.sourceId ?? 'default'}:${conceptSlug}`);
       // #4589: bank concept<->member-atom provenance edges. The prompt forbids
       // enumerating atoms in the body and no frontmatter field maps to a link
@@ -544,7 +548,6 @@ export async function runPhaseSynthesizeConcepts(
       // another source drops out of the batch JOIN — no cross-source edge).
       // ON CONFLICT DO NOTHING makes re-runs idempotent, so a failure here is
       // best-effort: recorded as a warn, the page write stands. Mirrors #3961.
-      const src = opts.sourceId ?? 'default';
       const provenanceLinks: LinkBatchInput[] = [...new Set(group.atomSlugs)].flatMap((atomSlug) => [
         { from_slug: conceptSlug, to_slug: atomSlug, link_type: 'synthesized_from', link_source: 'concept-provenance', context: 'member atom', from_source_id: src, to_source_id: src },
         { from_slug: atomSlug, to_slug: conceptSlug, link_type: 'synthesizes', link_source: 'concept-provenance', context: 'concept synthesized from this atom', from_source_id: src, to_source_id: src },
@@ -568,14 +571,7 @@ export async function runPhaseSynthesizeConcepts(
         linkWarnings.push({ concept: group.conceptSlug, warning: `provenance links failed: ${msg}` });
         console.error(`[synthesize_concepts] provenance links failed for ${conceptSlug} (non-fatal): ${msg}`);
       }
-      if (visibility === 'world') {
-        const members = [...new Set(group.atomSlugs)];
-        const [{ linked }] = await engine.executeRaw<{ linked: number }>(`SELECT COUNT(DISTINCT a.slug)::int AS linked FROM links l
-          JOIN pages c ON c.id=l.from_page_id JOIN pages a ON a.id=l.to_page_id
-          WHERE c.source_id=$1 AND c.slug=$2 AND a.slug=ANY($3::text[]) AND l.link_source='concept-provenance' AND l.link_type='synthesized_from'`,
-        [src, conceptSlug, members]);
-        if (Number(linked) === members.length && !await publishOrRecord('world')) continue;
-      }
+      if (visibility === 'world' && !covered && await conceptProvenanceCovers(engine, src, conceptSlug, group.atomSlugs) && !await publishOrRecord('world')) continue;
     }
     conceptsWritten++;
     // v0.41.19.0 (T4): one tick per concept group with running count.
