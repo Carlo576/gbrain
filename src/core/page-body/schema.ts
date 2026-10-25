@@ -172,7 +172,7 @@ ${PAGE_BODY_STAGING_TEXTS_SQL}`;
  * The derivation pipelines whose per-segment results page_segment_derivations records (wave-b spec 8.1-8.6, PR 4), and
  * the states a row can settle in. One list feeds the table's CHECKs and the TS types (page-body/derivations.ts).
  */
-export const SEGMENT_DERIVATION_KINDS = ['links', 'mentions', 'timeline', 'fences', 'conversation_facts', 'extract_atoms', 'facts_backstop', 'synopsis'] as const;
+export const SEGMENT_DERIVATION_KINDS = ['links', 'mentions', 'timeline', 'fences', 'conversation_facts', 'facts_backstop', 'synopsis'] as const;
 export const SEGMENT_DERIVATION_STATES = ['done', 'partial', 'failed', 'skipped'] as const;
 const sqlList = (values: readonly string[]) => values.map(v => `'${v}'`).join(',');
 
@@ -260,7 +260,7 @@ export function derivationScopeLockSql(sourceId: string): string {
  * before it ends.
  *
  * PR 4 (Wave B incremental derivation, transcripts): page_derivation_spend is the per-page lifetime spend ledger of each
- * paid derivation family (`facts`, `atoms`, `synopsis`; page-spend.ts), each capped by `derive.max_usd_per_page` on its own,
+ * paid derivation family (`facts`, `synopsis`; page-spend.ts), each capped by `derive.max_usd_per_page` on its own,
  * apart from the embedding ledger (page_embedding_budget), so derivation spend never starves a page's embeddings.
  */
 export const PAGE_SEGMENT_DERIVATIONS_SQL = `CREATE TABLE IF NOT EXISTS page_segment_derivations (
@@ -280,7 +280,7 @@ export const PAGE_SEGMENT_DERIVATIONS_SQL = `CREATE TABLE IF NOT EXISTS page_seg
 CREATE INDEX IF NOT EXISTS page_segment_derivations_unsettled ON page_segment_derivations (pipeline, page_id) WHERE state IN ('partial','failed');
 CREATE TABLE IF NOT EXISTS page_derivation_spend (
   page_id      INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
-  family       TEXT    NOT NULL CHECK (family IN ('facts','atoms','synopsis')),
+  family       TEXT    NOT NULL CHECK (family IN ('facts','synopsis')),
   spent_usd    DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (spent_usd >= 0),
   reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (reserved_usd >= 0),
   reserved_at  TIMESTAMPTZ,

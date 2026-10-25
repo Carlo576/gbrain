@@ -4,7 +4,7 @@
  * (test/e2e/conversation-facts-incremental-core-postgres.test.ts). No default changes and no price is invented: an unpriced
  * model reserves its ceiling estimate, so the per-page cap stops it after about one window. Fake extractors only.
  *
- * 1. Protects: when the facts, conversation facts, atoms or synopsis step stops (or books its reservation) because the
+ * 1. Protects: when the facts, conversation facts or synopsis step stops (or books its reservation) because the
  *    model has no price, its derivation receipt says reason `unpriced_model` with the model id, and doctor
  *    derivation_unpriced_model warns with a fix naming pricing.overrides (gbrain pricing set <model> ...); once the price
  *    is registered the warning clears.
@@ -18,7 +18,6 @@ import { PAGE_EMBED_CAP_KEY } from '../../src/core/page-embedding-budget.ts';
 import { PAGE_DERIVATION_CAP_KEY } from '../../src/core/page-spend.ts';
 import { derivationUnpricedModelEntry } from '../../src/commands/doctor/checks/derivation-pricing.ts';
 import { reembedPageWithContextualRetrieval } from '../../src/core/contextual-retrieval-service.ts';
-import { runPhaseExtractAtoms, EXTRACT_ATOMS_MODEL_KEY } from '../../src/core/cycle/extract-atoms.ts';
 import { __setChatTransportForTests, chat as gatewayChat, type ChatOpts, type ChatResult } from '../../src/core/ai/gateway.ts';
 import { runExtractConversationFactsCore } from '../../src/commands/extract-conversation-facts.ts';
 import type { DoctorContext } from '../../src/commands/doctor/context.ts';
@@ -30,7 +29,7 @@ export const UNPRICED = 'anthropic:claude-unpriced-example';
 
 const doctor = async (engine: BrainEngine) => (await derivationUnpricedModelEntry.run({ engine } as unknown as DoctorContext) as Check[])
   .find(c => c.name === 'derivation_unpriced_model')!;
-const receiptsOf = async (engine: BrainEngine, slug: string, kind: 'extract_atoms' | 'synopsis') => {
+const receiptsOf = async (engine: BrainEngine, slug: string, kind: 'synopsis') => {
   const [page] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug=$1", [slug]);
   return (await engine.readSegmentDerivations(Number(page!.id), { kind })).map(r => r.receipt as Record<string, unknown> | null).filter(Boolean);
 };
@@ -65,33 +64,6 @@ export function defineDerivationUnpricedCases(opts: { getBrain: () => AppendBrai
     } finally {
       await brain.engine.setConfig('facts.extraction_model', '');
       await brain.engine.setConfig('pricing.overrides', '');
-      await brain.engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
-    }
-  }, 600_000);
-
-  test('atoms under an unpriced model: the cap stop says unpriced_model with the model', async () => {
-    const brain = opts.getBrain();
-    const slug = `notes/unpriced-atoms-${randomUUID().slice(0, 8)}`;
-    const prompts: string[] = [];
-    const chat = async (o: ChatOpts): Promise<ChatResult> => {
-      prompts.push(String(o.messages[0]?.content ?? ''));
-      const text = JSON.stringify({ atoms: [] });
-      return { text, blocks: [{ type: 'text', text }], stopReason: 'end', model: UNPRICED, providerId: 'groq', usage: { input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0 } };
-    };
-    await brain.engine.setConfig(PAGE_EMBED_CAP_KEY, 'off');
-    await brain.engine.setConfig(PAGE_DERIVATION_CAP_KEY, '0.000001');
-    await brain.engine.setConfig(EXTRACT_ATOMS_MODEL_KEY, UNPRICED);
-    try {
-      await brain.seed(slug, chatPage('Unpriced atoms', chatDays(4500, 100, 42)).replace('type: conversation', 'type: meeting'));
-      await runPhaseExtractAtoms(brain.engine, { sourceId: 'default', _chat: chat, _transcripts: [] });
-      const receipts = await receiptsOf(brain.engine, slug, 'extract_atoms');
-      expect({ receipts: [...new Set(receipts.map(r => JSON.stringify({ kind: r!.kind, reason: r!.reason, model: r!.model })))] })
-        .toEqual({ receipts: [JSON.stringify({ kind: 'unread_windows', reason: 'unpriced_model', model: UNPRICED })] });
-      const check = await doctor(brain.engine);
-      expect({ status: check.status, atoms: (check.details as { models: Array<{ model: string; pipelines: string[] }> }).models.some(m => m.model === UNPRICED && m.pipelines.includes('extract_atoms')) })
-        .toEqual({ status: 'warn', atoms: true });
-    } finally {
-      await brain.engine.setConfig(EXTRACT_ATOMS_MODEL_KEY, '');
       await brain.engine.setConfig(PAGE_DERIVATION_CAP_KEY, 'off');
     }
   }, 600_000);

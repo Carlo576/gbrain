@@ -1,6 +1,6 @@
 /**
  * derivation_unpriced_model (PR 4, Wave B incremental derivation): segmented pages whose paid derivation (facts,
- * conversation facts, atoms, synopsis) stopped or booked its whole reservation because the model has no price. An
+ * conversation facts, synopsis) stopped or booked its whole reservation because the model has no price. An
  * unpriced model reserves a ceiling estimate (no default changes and no price is invented), so under the per-page cap it
  * gets about one window per page and every call books that ceiling. The receipts on page_segment_derivations say so
  * (reason or kind `unpriced_model`, with the model; unpricedModelReceipt); this check groups them by model and names

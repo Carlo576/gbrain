@@ -7,12 +7,10 @@
  *    facts and rows; an abort partway through a page keeps the finished windows; a facts call reserves every attempt
  *    extract.ts may make and books what the provider reported for each attempt; a cap stop after a title change keeps
  *    the facts of the windows it did not extract again; a --since run keeps the facts before it and never settles the
- *    page; windows run across segment cuts exactly as the whole-page pass cuts them; extract_atoms retires nothing when
- *    the page changed before it settled; a visibility change re-extracts; the facts backstop keeps its finished windows'
- *    rows when a window throws.
+ *    page; windows run across segment cuts exactly as the whole-page pass cuts them; a visibility change re-extracts;
+ *    the facts backstop keeps its finished windows' rows when a window throws.
  * 2. Fails when: a throw or an abort drops finished windows or their spend, a retry is paid past the cap, a partial or
- *    filtered run deletes facts it did not replace, windows stop at segment cuts, or atoms are retired by a settle whose
- *    revision check failed.
+ *    filtered run deletes facts it did not replace, or windows stop at segment cuts.
  */
 import { expect, test } from 'bun:test';
 import { createHash, randomUUID } from 'node:crypto';
@@ -28,7 +26,6 @@ import { outcomeSession, regularPageVersionToken } from '../../src/core/facts/co
 import { TERMINAL_AUDIT_SOURCE } from '../../src/core/facts/audit-sources.ts';
 import { runFactsBackstop } from '../../src/core/facts/backstop.ts';
 import { truthLead } from '../../src/core/page-body/segment-blocks.ts';
-import { runPhaseExtractAtoms } from '../../src/core/cycle/extract-atoms.ts';
 import { chatDays, chatPage, derivations, extract, factsOf, PAID_MODEL, paidTransport } from './conversation-facts-incremental-cases.ts';
 
 const pageIdOf = async (engine: BrainEngine, slug: string) =>
@@ -218,64 +215,6 @@ export function defineDerivationSpendCases(opts: { getBrain: () => AppendBrain }
       expect(prompts.filter(p => firstTwo.includes(p))).toEqual([]);
       expect(prompts.length).toBeGreaterThan(0);
     } finally { __setChatTransportForTests(null); }
-  }, 600_000);
-
-  test('extract_atoms retires no atom when the page changed between its last window and its settle', async () => {
-    const brain = opts.getBrain();
-    const slug = `notes/atoms-race-${randomUUID().slice(0, 8)}`;
-    await caps(brain.engine, 'off');
-    await brain.engine.setConfig('cycle.extract_atoms.max_input_chars', '50000');
-    await brain.seed(slug, chatPage('Atoms race', chatDays(2400, 100, 14)).replace('type: conversation', 'type: meeting'));
-    const pageId = await pageIdOf(brain.engine, slug);
-    const prompts: string[] = [];
-    let n = 0;
-    const chat = async (o: ChatOpts): Promise<ChatResult> => {
-      prompts.push(o.messages.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n'));
-      const title = `race atom ${++n}`;
-      const text = JSON.stringify({ atoms: [{ title, atom_type: 'insight', body: `Body for ${title}.`, source_quote: null, lesson: null, concepts: null, virality_score: null, emotional_register: null }] });
-      return { text, blocks: [{ type: 'text', text }], stopReason: 'end', model: 'test:stub', providerId: 'test', usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 } };
-    };
-    // The page is edited right after a window of this page settles on its derivation row: with one window offered, that
-    // is between the last window and the page's settle.
-    let armed = false;
-    let edited = false;
-    const engine = new Proxy(brain.engine, {
-      get(target, prop) {
-        if (prop === 'upsertSegmentDerivations') {
-          return async (rows: Parameters<BrainEngine['upsertSegmentDerivations']>[0]) => {
-            const out = await target.upsertSegmentDerivations(rows);
-            if (armed && rows.some(row => row.pageId === pageId && row.kind === 'extract_atoms' && row.state === 'done')) {
-              armed = false;
-              expect(await brain.call('append_page', { slug, text: chatDays(2600, 1, 14), request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
-              edited = true;
-            }
-            return out;
-          };
-        }
-        const value = Reflect.get(target, prop, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
-    const drain = async () => { for (let run = 0; run < 20; run++) { const made = n; await runPhaseExtractAtoms(engine, { sourceId: 'default', _chat: chat, _transcripts: [] }); if (n === made) break; } };
-    const live = async () => (await brain.engine.executeRaw<{ slug: string }>(
-      "SELECT slug FROM pages WHERE source_id='default' AND type='atom' AND deleted_at IS NULL AND frontmatter->>'source_slug'=$1", [slug])).map(r => r.slug).sort();
-    await drain();
-    // An atom of an earlier whole-page extraction: the page's next settle retires it.
-    const earlier = `atoms/earlier-${randomUUID().slice(0, 8)}`;
-    await brain.engine.putPage(earlier, { type: 'atom', title: 'Earlier atom', compiled_truth: 'From a whole-page extraction.', frontmatter: { source_slug: slug, source_hash: 'earlier00000000' } });
-    const settled = await live();
-    expect(settled).toContain(earlier);
-    // One more turn grows the tail window only: one window is offered.
-    expect(await brain.call('append_page', { slug, text: 'Bob Example (11:59 PM): one more budget review.', request_id: randomUUID() }, { remote: true })).toMatchObject({ isError: false });
-    prompts.length = 0;
-    armed = true;
-    await runPhaseExtractAtoms(engine, { sourceId: 'default', _chat: chat, _transcripts: [] });
-    expect({ edited, offered: prompts.filter(p => p.includes('Source: ' + slug + '\n')).length }).toEqual({ edited: true, offered: 1 });
-    const after = await live();
-    expect(settled.filter(s => !after.includes(s))).toEqual([]);
-    // Once the page stops changing, its windows settle and the earlier atom is retired.
-    await drain();
-    expect(await live()).not.toContain(earlier);
   }, 600_000);
 }
 

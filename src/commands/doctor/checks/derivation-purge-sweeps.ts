@@ -1,7 +1,7 @@
 /**
  * Wave B PR 4 (lane 4a): doctor `derivation_purge_sweeps`. A fact purge records a sweep of the stored derivation
  * results holding its claim and deletes them after it commits (segment-derive.ts continueDerivationPurges). While a
- * sweep is recorded, paid atom, synopsis and fact extraction makes no call on the pages it covers (receipts say
+ * sweep is recorded, paid synopsis and fact extraction makes no call on the pages it covers (receipts say
  * `purge_sweep_pending`), so a sweep left pending or stalled holds that work back. This check names each one with its
  * purge request id and the command that continues it.
  */
@@ -38,7 +38,7 @@ async function runDerivationPurgeSweeps(ctx: DoctorContext): Promise<Check[]> {
   checks.push({
     name: 'derivation_purge_sweeps', status: 'warn', details: { sweeps: rows.length, truncated: rows.length > sweeps.length, records: sweeps },
     message: `${rows.length} fact purge sweep(s) of stored derivation results are not finished: ${listed}${rows.length > sweeps.length ? ` (first ${sweeps.length} of ${rows.length} shown)` : ''}. `
-      + 'Until each ends, paid atom, synopsis and fact extraction makes no call on the pages it covers (purge_sweep_pending). '
+      + 'Until each ends, paid synopsis and fact extraction makes no call on the pages it covers (purge_sweep_pending). '
       + (busy ? 'A sweep marked scope_lock_busy has walked to its end and waits only for a write in its source that is still open (an import, sync or page edit): let that write finish, then continue it. ' : '')
       + `Continue each with gbrain forget --purge --status --request-id <request_id> --continue.`,
     ...(first ? { fix: { argv: continueSweepArgv(first), consent: [], actor: 'agent' as const, requires_exclusive: false, verify: doctorVerify('derivation_purge_sweeps'),

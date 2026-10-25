@@ -187,7 +187,7 @@ export async function planPageEmbedding(engine: BrainEngine, page: BudgetPage,
 /**
  * Reserve `estimateUsd` of one paid step on `page` against its per-page cap (wave-b spec 8.3), before the provider call.
  * An embedding reserves on page_embedding_budget under `embed.max_usd_per_page` (a new embedding model starts a new
- * ledger, as planPageEmbedding does); a derivation (facts, atoms, synopsis) on its own family's ledger (page-spend.ts).
+ * ledger, as planPageEmbedding does); a derivation (facts, synopsis) on its own family's ledger (page-spend.ts).
  * Metered: segmented pages and pages over `pages.inline_max_bytes`; any other page is unmetered. A refusal reserves
  * nothing, so the caller skips the call. A derivation runs its call through meterPaidCall, which books the actual cost.
  */

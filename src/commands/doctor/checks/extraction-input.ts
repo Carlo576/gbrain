@@ -19,8 +19,8 @@
  * are read; a page counts once per pipeline and receipt kind. A derivation receipt
  * without a `kind` (the synopsis pass's tier fallback or refused reservation), or of
  * kind `unpriced_model` (doctor derivation_unpriced_model), is not an input-truncation
- * receipt and is not counted. A receipt whose reason is `purge_sweep_pending` (atoms,
- * synopsis or fact extraction made no paid call because a fact purge's sweep covers the
+ * receipt and is not counted. A receipt whose reason is `purge_sweep_pending` (synopsis
+ * or fact extraction made no paid call because a fact purge's sweep covers the
  * page) counts under that kind, whatever its own: its remedy is finishing the sweep
  * (doctor derivation_purge_sweeps), not a higher spend cap.
  *
@@ -118,7 +118,7 @@ async function runExtractionInputTruncatedCheck(ctx: DoctorContext): Promise<Che
       checks.push({ name: 'extraction_input_truncated', status: 'ok', severity: 'info', readiness_state: 'degraded', message: summary, details });
       return checks;
     }
-    const atoms = actionable.find(g => g.pipeline === 'extract_atoms' && g.kind !== UNREAD_WINDOWS && g.kind !== PURGE_SWEEP);
+    const atoms = actionable.find(g => g.pipeline === 'extract_atoms');
     const capped = actionable.some(g => g.kind === UNREAD_WINDOWS);
     const sweeping = actionable.some(g => g.kind === PURGE_SWEEP);
     checks.push({ name: 'extraction_input_truncated', status: 'warn', message: summary, details,

@@ -67,7 +67,6 @@ export interface ExtractAtomsInput {
  * the #6503 disposition holds (no completion stamp, nothing retired).
  */
 export function extractAtomsInput(item: ExtractAtomsItem, maxInputChars: number, watermark: StoredWatermark | null = null): ExtractAtomsInput {
-  if (item.kind === 'page' && item.window) return { promptContent: item.content, truncated: false, inputChars: item.content.length };
   if (item.kind === 'page') {
     const plan = planExtraction(item.content, watermark, { cap: maxInputChars, pipeline: 'extract_atoms', emptyTail: 'head' });
     return { promptContent: plan.text, truncated: plan.mode !== 'full', inputChars: item.content.length, plan };

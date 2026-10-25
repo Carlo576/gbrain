@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, describe } from 'bun:test';
 import { openAppendBrain, type AppendBrain } from '../helpers/append-brain.ts';
-import { defineConversationFactsIncrementalCases, defineSegmentReceiptDoctorCases, defineSegmentedAtomsCases, defineSegmentedBackstopCases } from '../helpers/conversation-facts-incremental-cases.ts';
+import { defineConversationFactsIncrementalCases, defineSegmentReceiptDoctorCases, defineSegmentedBackstopCases } from '../helpers/conversation-facts-incremental-cases.ts';
 import { defineDerivationSpendCases } from '../helpers/derivation-spend-cases.ts';
 import { defineDerivationUnpricedCases } from '../helpers/derivation-unpriced-cases.ts';
 import { hasDatabase } from './helpers.ts';
@@ -19,7 +19,6 @@ import { hasDatabase } from './helpers.ts';
   afterAll(async () => { await brain.close(); }, 120_000);
   defineConversationFactsIncrementalCases({ getBrain: () => brain });
   defineSegmentedBackstopCases({ getBrain: () => brain });
-  defineSegmentedAtomsCases({ getBrain: () => brain });
   defineSegmentReceiptDoctorCases({ getBrain: () => brain });
   defineDerivationSpendCases({ getBrain: () => brain });
   defineDerivationUnpricedCases({ getBrain: () => brain });

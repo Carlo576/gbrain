@@ -2,7 +2,7 @@
  * PR 4 (Wave B incremental derivation, transcripts): the per-page spend ledgers of the paid derivations on a large page
  * (wave-b spec 8.3) and the reservation window both ledgers use.
  *
- * Families: every paid derivation family (conversation facts and the facts backstop as `facts`, `atoms`, `synopsis`)
+ * Families: every paid derivation family (conversation facts and the facts backstop as `facts`, `synopsis`)
  * has its own lifetime ledger per page in page_derivation_spend, each capped by `derive.max_usd_per_page` (default $2;
  * unlimited under `spend.posture tokenmax` when unset; `off` disables it). Embedding keeps its own ledger and cap
  * (page_embedding_budget, `embed.max_usd_per_page`), so derivation spend never starves a page's embeddings, and a new
@@ -21,8 +21,8 @@ import { parseUsdLimit, resolveSpendPosture } from './spend-posture.ts';
 export const PAGE_DERIVATION_CAP_KEY = 'derive.max_usd_per_page';
 export const DEFAULT_PAGE_DERIVATION_CAP_USD = 2;
 
-/** What a paid step spends on a page: the kind and its model, `embedding:<signature>`, `facts:<model>`, `atoms:<model>`, `synopsis:<model>`. */
-export type PageSpendKind = 'embedding' | 'facts' | 'atoms' | 'synopsis';
+/** What a paid step spends on a page: the kind and its model, `embedding:<signature>`, `facts:<model>`, `synopsis:<model>`. */
+export type PageSpendKind = 'embedding' | 'facts' | 'synopsis';
 export type PageSpendSignature = `${PageSpendKind}:${string}`;
 export type DerivationFamily = Exclude<PageSpendKind, 'embedding'>;
 

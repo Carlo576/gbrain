@@ -1,6 +1,6 @@
 /**
  * Per-page spend ledgers (wave-b spec 8.3, PR 4 lane 4b): embeddings reserve on page_embedding_budget under
- * `embed.max_usd_per_page`; each paid derivation family (facts, atoms, synopsis) reserves on its own page_derivation_spend
+ * `embed.max_usd_per_page`; each paid derivation family (facts, synopsis) reserves on its own page_derivation_spend
  * row under `derive.max_usd_per_page`; meterPaidCall books what the provider reported.
  *
  * 1. Protects: each family has its own cap and the embedding cap counts embeddings only; a reservation over what a cap
@@ -96,16 +96,15 @@ describe('per-page spend ledgers', () => {
       const page = await segmentedPage(engine);
       const calls = { n: 0 };
       expect((await paidStep(engine, page, 'facts:anthropic:claude-haiku-5-5', 0.6, calls)).kind, name).toBe('grant');
-      expect((await paidStep(engine, page, 'atoms:anthropic:claude-haiku-5-5', 0.5, calls)).kind, name).toBe('grant');
       const refused = await paidStep(engine, page, 'facts:anthropic:claude-haiku-5-5', 0.5, calls);
       expect(refused, name).toEqual({ kind: 'refused', reason: 'cap_reached', capUsd: 1, spentUsd: 0.6, reservedUsd: 0, estimateUsd: 0.5 });
-      expect(calls.n, name).toBe(2);
+      expect(calls.n, name).toBe(1);
       expect((await paidStep(engine, page, 'embedding:openai:text-embedding-3-large:1536', 1, calls)).kind, name).toBe('grant');
       expect((await paidStep(engine, page, 'synopsis:anthropic:claude-haiku-5-5', 0.9, calls)).kind, name).toBe('grant');
-      expect(calls.n, name).toBe(4);
-      expect({ facts: await familyLedger(engine, page.id, 'facts'), atoms: await familyLedger(engine, page.id, 'atoms'),
+      expect(calls.n, name).toBe(3);
+      expect({ facts: await familyLedger(engine, page.id, 'facts'),
         synopsis: await familyLedger(engine, page.id, 'synopsis'), embedding: await embedLedger(engine, page.id) }, name).toEqual({
-        facts: { spent: 0.6, reserved: 0 }, atoms: { spent: 0.5, reserved: 0 }, synopsis: { spent: 0.9, reserved: 0 },
+        facts: { spent: 0.6, reserved: 0 }, synopsis: { spent: 0.9, reserved: 0 },
         embedding: { spent: 1, reserved: 0, signature: 'openai:text-embedding-3-large:1536' } });
     }
   });
@@ -243,8 +242,8 @@ describe('per-page spend ledgers', () => {
       await expect(meterPaidCall(engine, page, `facts:${HAIKU}`, 0.2, async () => { throw new Error('failed before any call'); }), name).rejects.toThrow('before any call');
       expect(await familyLedger(engine, page.id, 'facts'), name).toEqual({ spent: expect.closeTo(after, 12), reserved: 0 });
       __setChatTransportForTests(async () => ({ ...answer(10, 10), model: 'test:unpriced-model' }));
-      await meterPaidCall(engine, page, 'atoms:test:unpriced-model', 0.05, () => chat({ model: 'test:unpriced-model', messages: [{ role: 'user', content: 'w' }], maxTokens: 50 }));
-      expect(await familyLedger(engine, page.id, 'atoms'), name).toEqual({ spent: 0.05, reserved: 0 });
+      await meterPaidCall(engine, page, 'synopsis:test:unpriced-model', 0.05, () => chat({ model: 'test:unpriced-model', messages: [{ role: 'user', content: 'w' }], maxTokens: 50 }));
+      expect(await familyLedger(engine, page.id, 'synopsis'), name).toEqual({ spent: 0.05, reserved: 0 });
       __setChatTransportForTests(null);
     }
   });
@@ -262,8 +261,8 @@ describe('per-page spend ledgers', () => {
       expect({ out, ledger: await familyLedger(engine, page.id, 'synopsis') }, name)
         .toEqual({ out: { value: 'done' }, ledger: { spent: expect.closeTo(reservationCostUsd(HAIKU, 'chat', 1000, 200)!, 12), reserved: 0 } });
       __setChatTransportForTests(async () => { throw Object.assign(new Error('fixture rate limit'), { status: 429 }); });
-      await meterPaidCall(engine, page, `atoms:${HAIKU}`, 0.2, () => ask().catch(() => null));
-      expect(await familyLedger(engine, page.id, 'atoms'), name).toEqual({ spent: 0, reserved: 0 });
+      await meterPaidCall(engine, page, `facts:${HAIKU}`, 0.2, () => ask().catch(() => null));
+      expect(await familyLedger(engine, page.id, 'facts'), name).toEqual({ spent: 0, reserved: 0 });
       __setChatTransportForTests(null);
     }
   });
@@ -411,7 +410,7 @@ describe('per-page spend ledgers', () => {
       try {
         const first = withBudgetTracker(parent, () => meterPaidCall(engine, page, `facts:${HAIKU}`, 0.2, big));
         await inFlight;
-        const second = await withBudgetTracker(parent, () => meterPaidCall(engine, page, `atoms:${HAIKU}`, 0.2, big))
+        const second = await withBudgetTracker(parent, () => meterPaidCall(engine, page, `synopsis:${HAIKU}`, 0.2, big))
           .then(() => 'ran', (error: unknown) => (error instanceof BudgetExhausted ? 'refused by --max-usd' : String(error)));
         release();
         expect({ second, first: await first }, name).toEqual({ second: 'refused by --max-usd', first: { value: answer(1000, 200) } });
