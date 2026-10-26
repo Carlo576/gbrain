@@ -186,4 +186,12 @@ describe('serve --flag=value', () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('gbrain serve');
   });
+
+  // Value: protects=schema add-type's own parser accepting --json=true also prints the JSON document; fails_when=the output mode reads only the exact --json token; why_new=the parser pin never checked the output; seam=none; no_claim=other own parsers
+  test('schema add-type --json=true prints the JSON document', () => {
+    expect(cli(['schema', 'fork', 'gbrain-base', 'pack-example']).status).toBe(0);
+    const r = cli(['schema', 'add-type', 'widget-example', '--primitive', 'entity', '--no-prefix', '--pack', 'pack-example', '--json=true']);
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ pack: 'pack-example' });
+  });
 });

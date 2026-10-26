@@ -80,6 +80,8 @@ describe('supervisorRestartArgv', () => {
     expect(parseGlobalFlags([...argv]).cliOpts.brain).toBe('work');
     expect(supervisorRestartArgv(argv).start).toEqual(['gbrain', 'jobs', 'supervisor', 'start', '--detach', '--brain=work', '--timeout=30s', '--queue', 'ingest', '--progress-interval=500', '--json']);
     for (const flag of EQUALS_READERS['jobs supervisor'] ?? []) expect(supervisorRestartArgv(['jobs', 'supervisor', 'start', `${flag}=x`]).start).toContain(`${flag}=x`);
+    expect(() => parseGlobalFlags(['jobs', 'supervisor', 'start', '--wait=abc'])).toThrow();
+    expect(supervisorRestartArgv(['jobs', 'supervisor', 'start', '--wait=abc', '--concurrency=4']).start).toEqual(['gbrain', 'jobs', 'supervisor', 'start', '--detach', '--wait=abc', '--concurrency=4', '--json']);
   });
 });
 

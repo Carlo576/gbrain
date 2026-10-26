@@ -652,6 +652,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     expect(syncOperatorVerb(args)).toBe('status');
     expect(await argvFor('sync', args)).toEqual(args);
     expect(await refusalFor('sync', ['trigger', '--status', '--limit=5'])).toContain('--limit=…');
+    expect(await refusalFor('sync', ['unblock', '--status', '--limit=5'])).toContain('--limit=…');
   });
 
   test('an unknown or miscased flag with a multi-line = value is still unknown', () => {
