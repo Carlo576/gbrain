@@ -12,7 +12,8 @@ import { readFileSync } from 'node:fs';
 import { Glob } from 'bun';
 import { CLI_ONLY, cliOnlyFlagArgs, validateCommandFlags } from '../src/cli/main.ts';
 import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
-import { END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, directEntryArgs, knownSwitches } from '../src/cli/flag-equals.ts';
+import { COMMAND_VALUES, END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, directEntryArgs, findUnknownFlag, knownSwitches } from '../src/cli/flag-equals.ts';
+import { CLI_COMMANDS } from '../src/cli/command-table.ts';
 import { SEARCH_SUBCOMMANDS } from '../src/cli/subcommands.ts';
 import { SYNC_FLAGS } from '../src/core/sync-flags.ts';
 import { _resetCliOptionsForTest, getCliOptions } from '../src/core/cli-options.ts';
@@ -27,6 +28,8 @@ import { parseTakesMutation } from '../src/commands/takes-mutation.ts';
 import { parseReconcileArgs } from '../src/commands/source-reconcile.ts';
 import { parseMigrateEmbeddingsFlags } from '../src/core/embedding-migration-cli.ts';
 import { parseGoogleAttachmentsArgs } from '../src/commands/google-attachments.ts';
+import { parseGraduationArgs, routesToGraduation } from '../src/commands/migrate-graduation.ts';
+import type { GBrainConfig } from '../src/core/config.ts';
 import { parseAppendArgs } from '../src/cli/commands/append.ts';
 import { splitFlagEquals } from '../src/cli/flag-equals.ts';
 
@@ -46,6 +49,7 @@ async function refusalFor(command: string, args: string[]): Promise<string | nul
 async function ownTable(command: string): Promise<Map<string, string>> {
   const types = new Map((await loadCuratedHelp(command))?.flags.map(f => [f.name, f.type] as [string, string]));
   if (command === 'sync') for (const [flag, spec] of Object.entries(SYNC_FLAGS as Record<string, { arity: string }>)) if (!types.has(flag)) types.set(flag, spec.arity);
+  for (const flag of COMMAND_VALUES[command] ?? []) if (!types.has(flag)) types.set(flag, 'string');
   return types;
 }
 
@@ -467,7 +471,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
       ['reinit-pglite', ['--path=/tmp/brain-example'], '--path'], ['bootstrap', ['interview', '--confirm=abc123'], '--confirm'],
       ['extract', ['links', '--source', 'db', '--source-id=source-a'], '--source-id'], ['extract', ['--stale', '--source-id=source-a'], '--source-id'],
       ['trust', ['explain', 'ref-example', '--source=source-a'], '--source'], ['jobs', ['work', '--concurrency=4'], '--concurrency'],
-      ['forget', ['34', '--reason=stale-example'], '--reason'], ['migrate', ['--to=pglite'], '--to'],
+      ['forget', ['34', '--reason=stale-example'], '--reason'], ['migrate', ['--to', 'pglite', '--path=/tmp/brain-example'], '--path'],
       ['jobs', ['submit', 'shell', '--params={"a":1}'], '--params'], ['jobs', ['submit', 'sync', '--max-usd=5'], '--max-usd'],
     ] as const) {
       const r = await cliOnlyFlagArgs(command, [...args]);
@@ -477,6 +481,14 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
   });
 
   // Value: protects=a split value never becomes the first numeric/slug target (forget --purge --reason=3 34 must not hit fact 3); fails_when=a refusal turns into a split or keep; why_new=rows only asserted not-null; seam=none; no_claim=handler behavior after a split (argv-level only)
+  test('migrate splits the target engine and URL, which every migrate path reads as two arguments', async () => {
+    expect(await argvFor('migrate', ['--to=postgres', '--url-env', 'TARGET_URL', '--plan'])).toEqual(['--to', 'postgres', '--url-env', 'TARGET_URL', '--plan']);
+    expect(await argvFor('migrate', ['--to=pglite', '--path', '/tmp/brain-example'])).toEqual(['--to', 'pglite', '--path', '/tmp/brain-example']);
+    expect(await argvFor('migrate', ['--to=postgres', '--url=-', '--plan'])).toEqual(['--to', 'postgres', '--url', '-', '--plan']);
+    expect(parseGraduationArgs(['--to', 'postgres', '--url', '-', '--plan'])).toMatchObject({ mode: 'plan', to: 'postgres', urlFromStdin: true });
+    expect(routesToGraduation(['--to', 'postgres'], { engine: 'pglite' } as GBrainConfig, 'linux')).toBe(true);
+  });
+
   test('a flag value never becomes the numeric or slug target of a mutating subcommand', async () => {
     for (const [command, args] of [
       ['forget', ['--purge', '--reason=3', '34', '--dry-run']],
@@ -618,6 +630,23 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     expect(await argvFor('doctor', ['--json=true'])).toEqual(['--json']);
     expect(await argvFor('sync', ['--json=true'])).toEqual(['--json']);
     expect(await refusalFor('sync', ['--json=false'])).toContain('--json is a switch');
+    for (const sub of SEARCH_SUBCOMMANDS) {
+      expect(await argvFor('search', [sub, '--json=true'])).toEqual([sub, '--json']);
+      expect(await refusalFor('search', [sub, '--json=false'])).toContain('--json=…');
+    }
+  });
+
+  test('an unknown or miscased flag with a multi-line = value is still unknown', () => {
+    const legal = new Set(CLI_FLAG_REGISTRY.auth);
+    expect(findUnknownFlag(['create', 'bot', '--scope=read\nwrite'], legal)).toBe('--scope');
+    expect(findUnknownFlag(['create', 'bot', '--Scopes=read\nwrite'], legal)).toBe('--Scopes');
+  });
+
+  test('every command-table end_of_options command has an END_OF_OPTIONS path', () => {
+    for (const c of CLI_COMMANDS) {
+      if (!(c as { end_of_options?: true }).end_of_options) continue;
+      expect([...END_OF_OPTIONS].some(k => k.split(' ')[0] === c.name)).toBe(true);
+    }
   });
 
   test('a refused credential value is never echoed', async () => {

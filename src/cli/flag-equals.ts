@@ -116,7 +116,7 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   lint: ['--exclude'],
   // migrate-graduation.ts:97 flagValue (parseGraduationArgs :121-151); graduation-only flags, the legacy copier (migrate-engine.ts) never reads them.
   migrate: ['--url-env', '--trigger-bypass', '--drain-timeout', '--batch-size', '--expect'],
-  // models.ts:853 doctor mode only (sub selection :817), repeated --skip=<provider>, =-only.
+  // models.ts:853 doctor mode only (sub selection :818), repeated --skip=<provider>, =-only.
   'models doctor': ['--skip'],
   // core/bounded-listing-cli.ts:15 parseListingFlags via orphans.ts:353.
   orphans: ['--limit', '--cursor'],
@@ -210,6 +210,11 @@ export const COMMAND_SWITCHES: Readonly<Record<string, readonly string[]>> = {
   embed: ['--stale'],
 };
 
+/** Value flags of a command with no curated help that every path reads as `--flag <value>` (migrate-engine.ts parseArgs, migrate-graduation.ts flagValue and routesToGraduation); their `=` form splits. */
+export const COMMAND_VALUES: Readonly<Record<string, readonly string[]>> = {
+  migrate: ['--to', '--url'],
+};
+
 /** Paths (`command sub`) whose handler treats a bare `--` as the end of its options; everywhere else the scan continues past it. */
 export const END_OF_OPTIONS: ReadonlySet<string> = new Set(['agent run', 'frontmatter validate']);
 
@@ -250,7 +255,7 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
     const value = m[2]!;
     if (flag === '--json' && value === 'true') { out.push(flag); continue; }
     types ??= new Map((await loadCuratedHelp(command))?.flags.map(f => [f.name, f.type]));
-    const own = types.get(flag) ?? (command === 'sync' ? (SYNC_FLAGS as Record<string, { arity: string }>)[flag]?.arity : undefined);
+    const own = types.get(flag) ?? (command === 'sync' ? (SYNC_FLAGS as Record<string, { arity: string }>)[flag]?.arity : undefined) ?? (COMMAND_VALUES[command]?.includes(flag) ? 'string' : undefined);
     const isSwitch = own !== undefined ? own === 'boolean' : flag.startsWith('--no-') || COMMAND_SWITCHES[command]?.includes(flag) || (await knownSwitches()).has(flag);
     const refusal = !legal
       ? [`${where} reads no = form`, `Check the flag in ${where} --help: write a switch on its own (a value never turns it off), or a value as the next argument.`]
@@ -273,7 +278,7 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
 export function findUnknownFlag(args: string[], legal: ReadonlySet<string>): string | null {
   for (const a of args) {
     if (a === '--') break;
-    const m = /^--([a-z0-9][a-z0-9-]*)(?:=.*)?$/i.exec(a);
+    const m = /^--([a-z0-9][a-z0-9-]*)(?:=[\s\S]*)?$/i.exec(a);
     if (!m) continue;
     // Casing typo = unknown flag: every handler in the repo is
     // case-sensitive-lowercase, so `--MIGRATE-ONLY` passing validation would
