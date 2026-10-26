@@ -5,7 +5,7 @@
  * rerun (#7674).
  */
 import { afterEach, expect, spyOn, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runAgentSetupCli } from '../src/core/agent-install/entry.ts';
@@ -54,6 +54,38 @@ test('setup refuses a bundle carrying Bun below the floor before writing anythin
   expect(result.message).toContain(`curl --fail --silent --show-error --location ${HELPER_URL} --output /tmp/gbrain-setup.sh && bash /tmp/gbrain-setup.sh --root '${root}' --harness grok-bot --upgrade --skills memory-only`);
   expect(existsSync(root)).toBe(false);
 });
+
+function snapshot(dir: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+    const path = join(entry.parentPath, entry.name);
+    files[path.slice(dir.length)] = entry.isFile() ? readFileSync(path, 'utf8') : '<dir>';
+  }
+  return files;
+}
+
+for (const [label, extra, seed] of [
+  ['an upgrade of an installed root', ['--upgrade'], 'receipt'],
+  ['a repair of an installed root', [], 'receipt'],
+  ['an adoption of an unowned brain', ['--adopt'], 'unowned'],
+] as const) {
+  test(`${label} below the floor leaves the root exactly as it was`, async () => {
+    const { root, bundle } = fixture('1.4.3');
+    mkdirSync(join(root, '.gbrain', 'brain.pglite'), { recursive: true });
+    writeFileSync(join(root, '.gbrain', 'config.json'), '{"engine":"pglite"}');
+    writeFileSync(join(root, 'memory.md'), 'existing memory');
+    if (seed === 'receipt') {
+      mkdirSync(join(root, '.gbrain', 'agent-install'), { recursive: true });
+      writeFileSync(join(root, '.gbrain', 'agent-install', 'receipt.json'), JSON.stringify({ format_version: 1, root, harness: 'grok-bot', state: 'ready', artifact: { source_ref: 'b'.repeat(40), bun_version: '1.4.3' } }));
+    }
+    const before = snapshot(root);
+    const { exit, result } = await run(setupArgs(root, bundle, [...extra]));
+    expect(exit).toBe(1);
+    expect(result.reason).toBe('runtime_below_floor');
+    expect(result.message).toContain(`bash /tmp/gbrain-setup.sh --root '${root}' --harness grok-bot${extra.length ? ` ${extra.join(' ')}` : ''}`);
+    expect(snapshot(root)).toEqual(before);
+  });
+}
 
 test('a prerelease of the floor and an unparseable version are refused too', async () => {
   for (const staged of [`${MINIMUM_BUN_VERSION}-canary.1`, '']) {
