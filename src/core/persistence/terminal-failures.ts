@@ -28,7 +28,7 @@ import { readReceiptRetentionDays, DEFAULT_RECEIPT_RETENTION_DAYS } from './limi
 import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
 import { SYNC_PASS_SUPERSEDED } from './sync-checkpoint-replaced.ts';
 import type { PublicCategory } from './public-category.ts';
-import { classifyTerminal, dispositionOf, driftSinceAction, TERMINAL_FIXED_IN, supersessionOrderSql, supersessionSql, terminalInspectArgv, terminalKnockOnSql, type TerminalCategory,
+import { classifyTerminal, dispositionOf, driftSinceAction, faultOperation, TERMINAL_FIXED_IN, supersessionOrderSql, supersessionSql, terminalInspectArgv, terminalKnockOnSql, type TerminalCategory,
   type TerminalDisposition, type TerminalVerdict, CONNECTION_MESSAGE_PATTERN, LEGACY_PUBLICATION_PREFIX } from './terminal-classify.ts';
 
 export const TERMINAL_WINDOW_KEY = 'persistence.terminal_failures.window_days';
@@ -326,6 +326,7 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
   const out: TerminalFailureRow[] = [];
   // #6712 PR 2: the oldest admission per drift group, so the group's file-drift fix selects every page in it with one concrete --since.
   const driftSince = new Map<string, string>();
+  const faultOperationOf = new Map<string, string>();
   let cursor = q.before ?? null, scanned = 0, exhausted = false;
   const want = q.groupBy ? MAX_SCAN : limit + 1;
   while (out.length < want && scanned < MAX_SCAN && !exhausted) {
@@ -351,7 +352,8 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
       const disposition = row.error_code === SYNC_PASS_SUPERSEDED ? 'superseded' : dispositionOf(row.later_state ? { state: row.later_state, same_intent: row.same_intent === true } : null);
       const historical = !row.has_recovery && (disposition !== 'unknown' || v.historical);
       const matches = (!q.category || v.category === q.category) && (!q.code || v.code === q.code)
-        && (q.origin === undefined || (v.origin ?? NO_ORIGIN) === q.origin) && (!q.operation || row.operation === q.operation) && (state === 'all' || !historical);
+        && (q.origin === undefined || (v.origin ?? NO_ORIGIN) === q.origin) && (!q.operation || faultOperation(row.operation, row.intent_kind) === q.operation) && (state === 'all' || !historical);
+      if (matches) faultOperationOf.set(row.request_id, faultOperation(row.operation, row.intent_kind));
       if (matches) out.push({ request_id: row.request_id, slug: row.slug, operation: row.operation, state: row.state, code: v.code, origin: v.origin, category: v.category, public_category: v.public_category, class: v.class,
         safe_actions: v.safe_actions, needs_human: v.needs_human, ...(v.human_reason ? { human_reason: v.human_reason } : {}), disposition, blocking: row.has_recovery, historical,
         compacted: row.compacted, ended_at: row.ended_at, cursor: row.sequence, ...(v.root_request_id ? { root_request_id: v.root_request_id } : {}),
@@ -373,7 +375,7 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
   }
   const groups = new Map<string, TerminalFailureGroup>();
   for (const row of out) {
-    const operation = row.category === 'sync_fault' ? row.operation : undefined;
+    const operation = row.category === 'sync_fault' ? faultOperationOf.get(row.request_id) : undefined;
     const key = `${row.code}\0${row.origin ?? ''}\0${row.category}${operation === undefined ? '' : `\0${operation}`}`;
     let g = groups.get(key);
     if (!g) {

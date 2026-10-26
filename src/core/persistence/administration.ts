@@ -112,7 +112,7 @@ function writerFailuresQuery(sourceId: string, params: Record<string, unknown>):
   if (bad('before', /^\d{1,19}$/)) throw invalid('Invalid --before value.', 'Pass --before exactly as the previous page\'s next_cursor.');
   if (bad('code', /^[a-z][a-z0-9_]{0,63}$/)) throw invalid('Invalid --code value.', 'Pass --code as a snake_case code a group names, e.g. --code storage_error.');
   if (bad('origin', /^[a-z][a-z0-9_]{0,63}$/)) throw invalid('Invalid --origin value.', 'Pass --origin as an origin a group names, or none for receipts with no recorded origin.');
-  if (bad('operation', /^[a-z][a-z0-9_]{0,63}$/)) throw invalid('Invalid --operation value.', 'Pass --operation as the operation a group names, e.g. --operation put_page.');
+  if (bad('operation', /^[a-z][a-z0-9_]{0,63}$/)) throw invalid('Invalid --operation value.', 'Pass --operation as the operation a group names, e.g. --operation put_page or --operation canonical_reconcile.');
   if (bad('category', /^[a-z][a-z_]{0,63}$/)) throw invalid('Invalid --category value.', 'Pass --category as a category a group names, e.g. --category knock_on.');
   if (params.limit !== undefined && !(typeof params.limit === 'number' && Number.isInteger(params.limit) && params.limit >= 1 && params.limit <= 100)) {
     throw invalid('Invalid --limit value.', 'Pass --limit as a whole number from 1 to 100 (default 20).');

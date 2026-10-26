@@ -405,11 +405,19 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     await seed({ slug: 'notes/r', operation: 'remember', state: 'failed', code: 'preparation_stalled' });
     await seed({ slug: 'notes/t1', operation: 'takes_supersede', state: 'failed', code: 'preparation_stalled' });
     await seed({ slug: 'notes/t2', operation: 'takes_resolve', state: 'failed', code: 'preparation_stalled' });
+    await seed({ slug: 'notes/rc', operation: 'put_page', state: 'failed', code: 'preparation_stalled', kind: 'canonical_reconcile' });
+    await seed({ slug: 'notes/mi', operation: 'put_page', state: 'failed', code: 'preparation_stalled', kind: 'managed_file_import' });
+    await seed({ slug: 'notes/ef', operation: 'extract_facts', state: 'failed', code: 'preparation_stalled' });
     const grouped = await readTerminalFailures(engine, { sourceId: SOURCE, groupBy: 'category' });
     if (grouped.status !== 'ok') throw new Error('unknown');
     const stalled = grouped.groups!.filter(g => g.code === 'preparation_stalled');
-    expect(stalled.map(g => g.operation ?? '').sort()).toEqual(['put_page', 'remember', 'submit_job', 'takes_resolve', 'takes_supersede']);
-    expect(stalled.find(g => g.operation === 'submit_job')!.fix.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
+    expect(stalled.map(g => g.operation ?? '').sort()).toEqual(['canonical_reconcile', 'extract_facts', 'managed_file_import', 'put_page', 'remember', 'submit_job', 'takes_resolve', 'takes_supersede']);
+    for (const op of ['submit_job', 'canonical_reconcile']) expect(stalled.find(g => g.operation === op)!.fix.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
+    expect(stalled.find(g => g.operation === 'managed_file_import')!.fix.why).toContain('rerun the command that wrote it');
+    expect(stalled.find(g => g.operation === 'extract_facts')!.fix.why).not.toContain('request_id');
+    const flat = await readTerminalFailures(engine, { sourceId: SOURCE, limit: 50 });
+    if (flat.status !== 'ok') throw new Error('unknown');
+    for (const g of stalled) for (const s of g.samples) expect(flat.rows!.find(r => r.request_id === s.request_id)!.fix).toEqual(g.fix);
     for (const op of ['put_page', 'remember', 'takes_supersede', 'takes_resolve']) {
       const g = stalled.find(x => x.operation === op)!;
       expect(g.rows).toBe(1);
@@ -422,7 +430,7 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
       expect(parsed.params.operation).toBe(g.operation);
       const rows = await runPersistenceAdministration(engine, parsed.operation, parsed.params) as TerminalFailureListing;
       if (rows.status !== 'ok') throw new Error('unknown');
-      expect(rows.rows!.map(r => r.operation)).toEqual([g.operation ?? '']);
+      expect(rows.rows!.map(r => r.request_id)).toEqual(g.samples.map(s => s.request_id));
     }
     const table = renderWriterFailures(grouped, false).split('\n');
     for (const op of ['submit_job', 'takes_supersede', 'takes_resolve']) expect(table.some(l => /^\s+\d+\s/.test(l) && l.includes(' preparation_stalled ') && l.includes(` ${op} `))).toBe(true);

@@ -343,13 +343,27 @@ const RESUBMITTED_WRITES = new Set(['put_page', 'put_pages', 'capture', 'delete_
   'add_tag', 'remove_tag', 'add_link', 'remove_link', 'add_timeline_entry', 'takes_add', 'takes_update', 'takes_supersede', 'takes_resolve', 'takes_remove']);
 
 /**
- * #7630: a sync write (and a recorded sync fault, read as one) is stored as `submit_job`; its retry is the sync. A
- * foreground write (`remember`, `put_page`, ...) is resubmitted by its caller. Any other operation (maintenance,
- * administration) is neither: writer status names what holds it.
+ * #7630: the operation a fault's fix depends on. A reconcile or managed write (import, repair, quarantine clear,
+ * grandfather) is stored as `put_page` under its own intent kind, which names it while the intent survives.
+ */
+export function faultOperation(operation: string, intentKind: string | null | undefined): string {
+  return operation !== 'submit_job' && intentKind && (intentKind === 'canonical_reconcile' || intentKind.startsWith('managed_')) ? intentKind : operation;
+}
+
+/**
+ * #7630: a sync write, a maintenance job and a recorded sync fault (read as one) are stored as `submit_job`; their
+ * retry is the sync. A foreground write (`remember`, `put_page`, ...) is resubmitted by its caller, and a managed write
+ * by rerunning the command that wrote it. Any other operation (`extract_facts`, writer administration) is neither:
+ * writer status names what holds it.
  */
 function faultAction(code: string, input: TerminalInput): Action {
   const v = classifySyncFault({ code });
-  if (v.safe_actions[0] === 'retry' && input.intent_kind === 'canonical_reconcile') {
+  const operation = faultOperation(input.operation, input.intent_kind);
+  if (v.safe_actions[0] === 'retry' && operation.startsWith('managed_')) {
+    return inspect(input.source_id, `The ${operation} write ended ${code}; it was not part of a sync, so a sync does not retry it. `
+      + 'Writer status names the step it stopped at and what held it, read-only. Once that clears, rerun the command that wrote it (an import, repair, quarantine clear or grandfather).');
+  }
+  if (v.safe_actions[0] === 'retry' && operation === 'canonical_reconcile') {
     return syncRetry(input.source_id, `The canonical reconcile recorded ${code} (${v.class}); the next sync re-admits a keep_db reconcile, and a \`gbrain sources reconcile\` run is retried by running it again.`);
   }
   if (v.safe_actions[0] === 'retry' && input.operation !== 'submit_job' && !RESUBMITTED_WRITES.has(input.operation)) {
