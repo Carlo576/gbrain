@@ -434,6 +434,19 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
       expect(rows.rows!.map(r => r.request_id)).toEqual(g.samples.map(s => s.request_id));
     }
     const table = renderWriterFailures(grouped, false).split('\n');
+    await seed({ slug: 'notes/big1', operation: 'submit_job', state: 'failed', code: 'file_too_large' });
+    await seed({ slug: 'notes/big2', operation: 'put_page', state: 'failed', code: 'file_too_large' });
+    const regrouped = await readTerminalFailures(engine, { sourceId: SOURCE, groupBy: 'category' });
+    if (regrouped.status !== 'ok') throw new Error('unknown');
+    const big = regrouped.groups!.filter(g => g.code === 'file_too_large');
+    expect(big.map(g => g.operation).sort()).toEqual(['put_page', 'submit_job']);
+    for (const g of big) {
+      expect(g.fix.argv).toEqual(['gbrain', 'sources', 'writer', 'status', '--source', SOURCE, '--json']);
+      const parsed = parsePersistenceAdminArgs('writer', g.drill_down.slice(3));
+      const rows = await runPersistenceAdministration(engine, parsed.operation, parsed.params) as TerminalFailureListing;
+      if (rows.status !== 'ok') throw new Error('unknown');
+      expect(rows.rows!.map(r => r.request_id)).toEqual(g.samples.map(s => s.request_id));
+    }
     for (const op of ['submit_job', 'takes_supersede', 'takes_resolve']) expect(table.some(l => /^\s+\d+\s/.test(l) && l.includes(' preparation_stalled ') && l.includes(` ${op} `))).toBe(true);
   });
 
