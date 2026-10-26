@@ -6,7 +6,7 @@ import { withCompanyBrainSource } from './company-brain/profile.ts';
  */
 import { realpathSync } from 'fs';
 import { syncDispatchRow } from './sync-dispatch-read.ts';
-import { resolve as pathResolve } from 'path';
+import { isAbsolute, resolve as pathResolve } from 'path';
 import type { BrainEngine } from './engine.ts';
 import type { SyncOpts } from '../commands/sync.ts';
 import { ownsGlobalSyncAnchor, sameRepoDir } from './sync.ts';
@@ -78,6 +78,10 @@ export async function readSyncAnchor(
  * commit runs `git add -A` at the git root (there's no file list yet to
  * scope it to — collection happens after this point) — see the P2 review
  * finding on `createSyncBaselineCommit`'s callers.
+ *
+ * #7630: a relative stored anchor (a legacy `local_path` of ".") proves
+ * nothing: it realpath-resolves against the process cwd, so it "equals"
+ * whatever directory the sync runs from. Only an absolute anchor can.
  */
 export async function isAnchorOwnedSyncPath(
   engine: BrainEngine,
@@ -87,7 +91,7 @@ export async function isAnchorOwnedSyncPath(
   if (opts.srcSubpath) return false;
   if (opts.sourceId && opts.sourceId !== 'default') return false;
   const anchor = await readSyncAnchor(engine, opts.sourceId, 'repo_path');
-  if (anchor === null) return false;
+  if (anchor === null || !isAbsolute(anchor)) return false;
   try {
     return realpathSync(anchor) === realpathSync(repoPath);
   } catch {

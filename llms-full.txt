@@ -10978,6 +10978,39 @@ syncs keep ending `partial` or failing has none, however many pages it imported.
     or the managed failure, then retry.
   - `no_attempt`: run `gbrain sync --source <id>` (`--no-pull` on a managed brain).
 
+## Relative source path
+
+<a id="relative-source-path"></a>
+
+**Say to your agent:** *"Sync refused with `sync_anchor_relative`, or doctor warns that my default source's local_path is relative."*
+
+A source's stored directory (`sources.local_path`, or the legacy `sync.repo_path`)
+must be an absolute path. A relative one such as `.` names whatever directory
+gbrain runs from, so it cannot say which folder is the brain. Before #7630, a
+`gbrain sync --source default` or `gbrain sync --all` run from an unrelated
+folder treated that folder as the brain repo: it ran `git init`, committed
+everything in it and imported its markdown. Sync now refuses
+`sync_anchor_relative` (exit 3) before any Git probe, cost estimate or import,
+and nothing is changed. Doctor's `default_source_local_path` check warns on a
+relative `default` path.
+
+Ask the user which directory holds the source, then do one of:
+
+- `gbrain sources set-path <id> <absolute-directory>` points the source at that
+  directory (non-destructive; it only updates the pointer).
+- `gbrain sources set-path <id> --clear` clears the relative pointer. It changes
+  no file or page. A `default` source with no path writes through
+  `sync.repo_path` (the designed fallback), and its sync refuses until a path
+  is set again.
+
+For `sync.repo_path`: `gbrain config set sync.repo_path <absolute-directory>`.
+
+If an earlier sync already initialized and imported the wrong folder, the user
+decides what to undo: the folder's new `.git` directory and the pages imported
+from it are theirs to review before anything is removed.
+Verify with `gbrain sources status <id> --json` and
+`gbrain doctor --only default_source_local_path --json`.
+
 ---
 
 ## docs/guides/exit-codes.md

@@ -1,5 +1,6 @@
 /** `gbrain sync` CLI body (`runSyncInner`): flag parsing, --all fan-out, watch mode. */
 import { existsSync } from 'fs';
+import { isAbsolute } from 'path';
 import { getCompanyBrainProfile } from '../../core/company-brain/profile.ts';
 import { slog, withSourcePrefix } from '../../core/console-prefix.ts';
 import type { BrainEngine } from '../../core/engine.ts';
@@ -19,6 +20,7 @@ import {
 import type { SyncEmbedBackfillOutcome } from '../../core/sync-embed-backfill.ts';
 import { runBreakLock } from '../../core/sync-lock.ts';
 import { automaticSyncSkip, isSyncDisabledConfig } from '../../core/sync-policy.ts';
+import { assertSyncAnchorAbsolute, syncAnchorRelativeError } from '../../core/sync-applicability.ts';
 import { composeAbortSignals } from '../../core/sync-reconcile.ts';
 import { acknowledgeFailures, unacknowledgedSyncFailures } from '../../core/sync.ts';
 import type { SyncResult, SyncOpts } from '../sync.ts';
@@ -469,6 +471,8 @@ async function runSyncAll(
   const companyPolicies = new Map<string, Awaited<ReturnType<typeof getCompanyBrainProfile>>>();
   const policyFailures = new Map<string, unknown>();
   for (const source of runnableSources) {
+    // #7630: a relative local_path fails its source before the cost gate walks the directory.
+    if (source.local_path && !isAbsolute(msysToNativePath(source.local_path))) { policyFailures.set(source.id, syncAnchorRelativeError(source.id, source.local_path)); continue; }
     try { companyPolicies.set(source.id, await getCompanyBrainProfile(engine, source.id)); }
     catch (error) { policyFailures.set(source.id, error); }
   }
@@ -813,6 +817,8 @@ async function runSingleSourceSync(
     excludePatterns, includeHiddenPatterns, concurrency, timeoutSeconds,
   } = flags;
   const { sourceId, companyPolicy, noEmbed, resumeCommand, args } = input;
+  // #7630: before the cost gate walks the directory.
+  await assertSyncAnchorAbsolute(engine, { sourceId, repoPath });
   // v0.41.13.0 (T6) — single-source --timeout: same per-source AbortController
   // shape as the --all runOne closure. Timer scoped to this CLI invocation;
   // try/finally clears it after performSync resolves (or throws).

@@ -4151,6 +4151,16 @@ More: [docs/designs/GIT_CANONICAL_MEMORY.md#the-model](../../docs/designs/GIT_CA
 |---|---|---|---|---|---|---|
 | `sync.admission` is not `normal`, so managed sync admits less than it classifies: `imports_only` admits no deletes and no keep_db writes (they wait as `paused_deletes` and `paused_keep_db`), and `classify_only` writes and stamps nothing. | The owner sets the switch on the brain host (`gbrain config set`; it is never settable remotely) as the first response to a suspected sync bug. A pass reads it at pin and in every group's admission, and a destructive request re-reads it at publication, so the change applies at the next group; `sync status --json` reports `admission: {value, set_at, effective}`, where `effective` turns true once no pass pinned before `set_at` holds the lease and no delete or keep_db reconcile admitted before it is unpublished. Doctor warns, with the value's age, for as long as it stays restricted. | Tell the user how long ago the switch was set and ask whether its reason still holds. Only they restore it: gbrain config set sync.admission normal on the brain host; the next sync admits what waited. Run: gbrain config set sync.admission normal | user | `gbrain doctor --only sync_admission_restricted --json` | 1 | no |
 
+### sync_anchor_relative
+
+<a id="sync_anchor_relative"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Sync refused: the source's stored directory (sources.local_path, or sync.repo_path) is a relative path such as ".", which names whatever directory gbrain runs from. | A relative stored path cannot prove which folder is the brain. Before #7630 a sync run from an unrelated folder treated that folder as the brain repo: it Git-initialized it, committed everything in it and imported its markdown. gbrain now refuses before any Git probe or import, and nothing is changed. | Ask the user which directory holds the source, then gbrain sources set-path <id> <absolute-directory>; or clear the pointer with gbrain sources set-path <id> --clear. | user | `repeat the read that failed` | 3 | no |
+
+More: [docs/guides/troubleshooting.md#relative-source-path](../../docs/guides/troubleshooting.md#relative-source-path)
+
 ### sync_cursor_replaced
 
 <a id="sync_cursor_replaced"></a>
