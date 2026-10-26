@@ -41,7 +41,8 @@ import type { Operation, OperationContext } from '../core/operations.ts';
 import { currentCliWriteWait } from '../core/persistence/write-wait.ts';
 import { isScopeErrorCode } from '../core/error-catalogue.ts';
 import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict, writeStdoutFinal } from '../core/cli-force-exit.ts';
-import { printCuratedHelp } from './help/render.ts';
+import { loadCuratedHelp, printCuratedHelp } from './help/render.ts';
+import { splitFlagEquals } from './flag-equals.ts';
 import { printHelp } from './top-help.ts';
 import { curatedFlagError } from './help/validate.ts';
 import { cliCommandOf, exitCliError, exitOnRepairFailed, unknownFlagError, usageError, writeCliError, writeCliNotice, writeFatalCliError } from './cli-error.ts';
@@ -63,7 +64,7 @@ import { maybePromptForUpgrade } from '../core/thin-client-upgrade-prompt.ts';
 import { CLI_FLAG_REGISTRY } from '../core/cli-flag-registry.generated.ts';
 import { cliHelpRequested } from './subcommands.ts';
 import { printRouterHelp } from './router-help.ts';
-import { strictArgsRefusal } from './strict-args.ts';
+import { strictArgsRefusal, strictSpecFor } from './strict-args.ts';
 import { migrationCliArgumentError } from '../core/embedding-migration-cli.ts';
 import { VERSION } from '../version.ts';
 import { bigintToStringReplacer } from '../core/utils.ts';
@@ -362,7 +363,9 @@ async function main() {
   // #7191: `search --exact` -> search-exact, before any ranked-search flag is parsed (cli/command-route.ts).
   const routed = routeCommand(command, args.slice(1));
   command = routed.command;
-  const subArgs = routed.subArgs;
+  const flagArgs = helpRequested ? { args: routed.subArgs } : await cliOnlyFlagArgs(command, routed.subArgs);
+  if ('refusal' in flagArgs) exitCliError(flagArgs.refusal, command);
+  const subArgs = flagArgs.args;
   dispatchedCommand = command;
   {
     const { directPoolProfileForCommand, setDirectPoolProfile } = await import('../core/direct-pool-profile.ts');
@@ -1319,6 +1322,12 @@ export function validateCommandFlags(command: string, subArgs: string[]): string
   const op = cliOps.get(command) ?? cliAliases.get(command);
   if (op) return findUnknownOpFlag(op, op.name === 'put_page' ? subArgs.filter((a, i) => !/^--file(=|$)/.test(a) && subArgs[i - 1] !== '--file') : subArgs); // put --file: cli/commands/append.ts
   return null; // unknown command — the dispatcher's own error handles it
+}
+
+/** #7619: the argv a CLI_ONLY handler receives, `--flag=value` split (cli/flag-equals.ts); commands with their own `=`-aware parser keep it. */
+export async function cliOnlyFlagArgs(command: string, subArgs: string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
+  if (!CLI_ONLY.has(command) || flagValidationExempt(command, subArgs) || command === 'retrieval-upgrade' || command === 'migrate' && subArgs[0] === 'embeddings' || strictSpecFor(command, subArgs)) return { args: subArgs };
+  return splitFlagEquals(command, subArgs, await loadCuratedHelp(command));
 }
 
 /** CLI_ONLY lane: token scan against the generated legal set. */
