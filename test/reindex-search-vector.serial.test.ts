@@ -179,8 +179,8 @@ describe('runReindexSearchVector', () => {
     expect(result.language).toBe('english');
     expect(state.calls.length).toBe(16);
 
-    // Trigger recreates (calls 1, 2) and chunks backfill (call 4) embed the
-    // language literal. Pages backfill (call 3) is UPDATE-to-self that
+    // Trigger recreates (calls 1, 2) and chunks backfill (call 5) embed the
+    // language literal. Pages backfill (call 4) is UPDATE-to-self that
     // re-fires the trigger, so the language literal lives in the trigger
     // function body — not in the UPDATE statement.
     expect(state.calls[1]).toContain("'english'");
