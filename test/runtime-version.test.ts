@@ -18,12 +18,12 @@ import { MINIMUM_BUN_VERSION, SECURE_BUN_VERSION, assertSupportedBun, exitOnUnsu
 import { checkBunRuntime } from '../src/commands/doctor/checks/upgrade-health.ts';
 
 const root = join(import.meta.dir, '..');
-const OLD_BUN_REFUSAL = 'GBrain requires Bun 1.4.0 or newer (found Bun 1.3.14).\n'
+const OLD_BUN_REFUSAL = 'GBrain requires Bun 1.4.4 or newer (found Bun 1.3.14).\n'
   + 'Fix: run `bun upgrade`, then restart GBrain. If a `gbrain upgrade` stopped here, finish it with `gbrain post-upgrade`.';
 
 describe('Bun runtime floor', () => {
   test('an older Bun is refused with the found version, the floor and the fix', () => {
-    expect(MINIMUM_BUN_VERSION).toBe('1.4.0');
+    expect(MINIMUM_BUN_VERSION).toBe('1.4.4');
     expect(unsupportedBunMessage('1.3.14')).toBe(OLD_BUN_REFUSAL);
     let error: unknown;
     try { assertSupportedBun('1.3.14'); } catch (caught) { error = caught; }
@@ -33,42 +33,46 @@ describe('Bun runtime floor', () => {
   });
 
   test('every release below the floor, prereleases and a missing runtime are refused', () => {
-    for (const version of ['1.3.11', '1.3.13', '1.3.14', '1.2.99', '1.4.0-canary.1', '']) {
+    for (const version of ['1.3.11', '1.3.13', '1.3.14', '1.2.99', '1.4.0-canary.1', '1.4.4-canary.1', '']) {
       expect(unsupportedBunMessage(version)).toContain('Fix: run `bun upgrade`');
     }
-    expect(unsupportedBunMessage('')).toStartWith('GBrain requires Bun 1.4.0 or newer (found no Bun runtime).');
+    expect(unsupportedBunMessage('')).toStartWith('GBrain requires Bun 1.4.4 or newer (found no Bun runtime).');
+  });
+
+  test('Bun 1.4.0 to 1.4.3 are refused: postgres.js over TLS keeps every chunk it reads on 1.4.0-1.4.2, and 1.4.4 carries the Brotli fix', () => {
+    for (const version of ['1.4.0', '1.4.1', '1.4.2', '1.4.2+5a1b2c3', '1.4.3']) {
+      expect(unsupportedBunMessage(version)).toBe(`GBrain requires Bun 1.4.4 or newer (found Bun ${version}).\n`
+        + 'Fix: run `bun upgrade`, then restart GBrain. If a `gbrain upgrade` stopped here, finish it with `gbrain post-upgrade`.');
+      expect(() => assertSupportedBun(version)).toThrow('GBrain requires Bun 1.4.4 or newer');
+    }
   });
 
   test('the floor and newer releases start', () => {
-    for (const version of ['1.4.0', '1.4.2', '1.5.0', '2.0.0', '1.4.2+abc123', '1.5.0-canary.3+abc123']) {
+    for (const version of ['1.4.4', '1.4.5', '1.5.0', '2.0.0', '1.4.4+abc123', '1.5.0-canary.3+abc123']) {
       expect(unsupportedBunMessage(version)).toBeNull();
       expect(() => assertSupportedBun(version)).not.toThrow();
     }
   });
 
   test('doctor reports the running Bun against the floor, with the fix on failure', () => {
-    expect(checkBunRuntime('1.4.4')).toEqual({ name: 'bun_runtime', status: 'ok', message: 'Bun 1.4.4 (minimum 1.4.0)' });
-    expect(checkBunRuntime('1.5.0+abc123')).toEqual({ name: 'bun_runtime', status: 'ok', message: 'Bun 1.5.0+abc123 (minimum 1.4.0)' });
+    expect(checkBunRuntime('1.4.4')).toEqual({ name: 'bun_runtime', status: 'ok', message: 'Bun 1.4.4 (minimum 1.4.4)' });
+    expect(checkBunRuntime('1.5.0+abc123')).toEqual({ name: 'bun_runtime', status: 'ok', message: 'Bun 1.5.0+abc123 (minimum 1.4.4)' });
     expect(checkBunRuntime('1.3.14')).toEqual({ name: 'bun_runtime', status: 'fail', message: OLD_BUN_REFUSAL.replace('\n', ' ') });
+    expect(checkBunRuntime('1.4.2')).toEqual({ name: 'bun_runtime', status: 'fail', message: 'GBrain requires Bun 1.4.4 or newer (found Bun 1.4.2). '
+      + 'Fix: run `bun upgrade`, then restart GBrain. If a `gbrain upgrade` stopped here, finish it with `gbrain post-upgrade`.' });
     expect(checkBunRuntime().status).toBe(Bun.semver.order(Bun.version, SECURE_BUN_VERSION) >= 0 ? 'ok' : 'warn');
   });
 
-  test('#7373: a supported Bun without the Brotli fix warns with the CVE and the upgrade path for how gbrain is installed', () => {
+  test('#7373: the floor carries the Brotli fix, so a Bun without it is refused however gbrain is installed', () => {
     expect(SECURE_BUN_VERSION).toBe('1.4.4');
+    expect(Bun.semver.order(MINIMUM_BUN_VERSION, SECURE_BUN_VERSION)).toBeGreaterThanOrEqual(0);
     for (const version of ['1.4.0', '1.4.3', '1.4.4-canary.2']) {
-      const standalone = checkBunRuntime(version, '/usr/local/bin/gbrain');
-      expect(standalone.status).toBe('warn');
-      expect(standalone.message).toStartWith(`Bun ${version} carries the Brotli decoder flaw CVE-2026-111497, fixed in Bun 1.4.4`);
-      expect(standalone.message).toContain('This gbrain binary embeds that Bun: install the latest gbrain binary (`gbrain upgrade`)');
-      expect(standalone.fix).toMatchObject({ argv: ['gbrain', 'upgrade'], actor: 'user', verify: { argv: expect.arrayContaining(['doctor']) } });
-      for (const runtime of ['/home/alice-example/.bun/bin/bun', 'C:\\Users\\alice-example\\.bun\\bin\\bun.exe', '/opt/bun-1.4.3/bun-linux-x64']) {
-        const viaBun = checkBunRuntime(version, runtime);
-        expect(viaBun.status).toBe('warn');
-        expect(viaBun.message).toEndWith('Run `bun upgrade`, then restart GBrain services.');
-        expect(viaBun.fix).toMatchObject({ argv: ['bun', 'upgrade'], actor: 'user' });
+      for (const runtime of ['/usr/local/bin/gbrain', '/home/alice-example/.bun/bin/bun', 'C:\\Users\\alice-example\\.bun\\bin\\bun.exe', '/opt/bun-1.4.3/bun-linux-x64']) {
+        const row = checkBunRuntime(version, runtime);
+        expect(row.status).toBe('fail');
+        expect(row.message).toStartWith(`GBrain requires Bun 1.4.4 or newer (found Bun ${version}).`);
       }
     }
-    expect(MINIMUM_BUN_VERSION).toBe('1.4.0');
   });
 });
 
@@ -101,11 +105,16 @@ describe('CLI entrypoint gate', () => {
     expect(exitCode).toBe(1);
     expect(stderr).toEqual([OLD_BUN_REFUSAL]);
     expect(stdout).toHaveLength(1);
-    expect(stdout[0]).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z \[autopilot\] GBrain requires Bun 1\.4\.0 or newer \(found Bun 1\.3\.14\)\./);
+    expect(stdout[0]).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z \[autopilot\] GBrain requires Bun 1\.4\.4 or newer \(found Bun 1\.3\.14\)\./);
   });
 
   test('a supported Bun passes through silently', () => {
-    expect(runGate('doctor', '1.4.0')).toEqual({ exitCode: undefined, stderr: [], stdout: [] });
+    expect(runGate('doctor', '1.4.4')).toEqual({ exitCode: undefined, stderr: [], stdout: [] });
+  });
+
+  test('Bun 1.4.2 exits 1 before any command runs', () => {
+    expect(runGate('sync', '1.4.2')).toEqual({ exitCode: 1, stderr: [`GBrain requires Bun 1.4.4 or newer (found Bun 1.4.2).\n`
+      + 'Fix: run `bun upgrade`, then restart GBrain. If a `gbrain upgrade` stopped here, finish it with `gbrain post-upgrade`.'], stdout: [] });
   });
 });
 

@@ -328,6 +328,19 @@ await new Promise(() => setInterval(() => {}, 1000));`);
     expect(await new Response(proc.stderr).text()).toContain(`capture-test-log: ${BUN_SPAWNSYNC_POISONED}?`);
   }, 30000);
 
+  it('on a Bun that carries the upstream fix (1.4.3 or newer) the same shape is some other hang, so nothing names the Bun defect', () => {
+    const onFixedBun = (bun: string, lines: string[]) => [`bun test v${bun} (abc)`, ...lines.slice(1)];
+    for (const bun of ['1.4.3', '1.4.4', '1.5.0']) {
+      const c = feed(onFixedBun(bun, poisonedRun));
+      expect(c.poisoned()).toBe(false);
+      expect(c.render('test (7)', '/tmp/unit.log', 1)).not.toContain(BUN_SPAWNSYNC_POISONED);
+      const live = new FailureCollector();
+      const notes: string[] = [];
+      for (const line of onFixedBun(bun, cancelledRun)) { live.feed(line); notes.push(...live.takeLiveNotes()); }
+      expect(notes).toEqual([]);
+    }
+  });
+
   it('a non-timeout failure after the kill, or timeouts confined to one file, is left for its own diagnosis', () => {
     const mixed = feed([
       ...poisonedRun,

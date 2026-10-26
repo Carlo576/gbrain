@@ -18,7 +18,7 @@
  * order inside a `::group::` block that ends with an `ARM_FILE` line carrying
  * its measured duration. With GBRAIN_TEST_RECEIPT_DIR set, each file writes its
  * own executed-test receipt (scripts/lib/test-env.sh describes the format).
- * `--postgres-only` (the Bun 1.4.3 cell) sets GBRAIN_TEST_BACKEND=postgres, so
+ * `--postgres-only` (the Bun 1.4.4 cell) sets GBRAIN_TEST_BACKEND=postgres, so
  * testBackends() suites run only their PostgreSQL side; their PGLite side runs
  * in the unit and serial lanes, and files that read DATABASE_URL directly keep
  * both arms.
