@@ -39,8 +39,8 @@ export const PINNED_FUNCTION_NAMES = [
  * Appends pg_temp to the pinned search_path of every gbrain function (PINNED_FUNCTION_NAMES) in public the current
  * role may alter that still pins `pg_catalog, public` or `pg_catalog`. A function the role does not own is
  * left as it was, and so is a procedure (ALTER FUNCTION refuses one, and gbrain installs none). Shared by the schema blob (its last statement, so a replay's CREATE OR REPLACE never leaves a function
- * without it), both engines' initSchema after migrations (a migration that re-creates a function resets its path, and
- * this runs even when a later migration fails), the migration and `gbrain reindex-search-vector`, which rewrites the
+ * without it), the migration, the end of every migration run (src/core/migrate.ts: a migration that re-creates a
+ * function resets its path, and the run may stop before v277) and `gbrain reindex-search-vector`, which rewrites the
  * search_vector trigger functions.
  */
 export const FUNCTION_SEARCH_PATH_HARDENING_SQL = `DO $harden$
@@ -57,20 +57,3 @@ BEGIN
   END LOOP;
 END $harden$;`;
 
-/**
- * Runs the pending migrations, then the hardening: a migration that re-creates a function resets its search_path. When a
- * migration fails, the hardening still runs before the failure propagates, so a guard re-created earlier in the run is
- * not left without pg_temp until a retry gets past the failing migration (its own error is dropped; doctor names any
- * function it left).
- */
-export async function runMigrationsThenHarden(migrate: () => Promise<{ applied: number }>, harden: () => Promise<unknown>): Promise<number> {
-  let result: { applied: number };
-  try {
-    result = await migrate();
-  } catch (error) {
-    await harden().catch(() => {});
-    throw error;
-  }
-  await harden();
-  return result.applied;
-}

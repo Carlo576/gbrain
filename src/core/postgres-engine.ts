@@ -24,7 +24,6 @@ import { hasPostgresCancellationCapability, postgresCancellationUnavailable, res
 import { runBoundedStatement } from './postgres-engine/bounded-statement.ts';
 import { needsJitOff, runJitOffStatement } from './postgres-engine/jit-off-statement.ts';
 import { retrySchemaReplayOnDeadlock, schemaDiagnosticConnection, withSchemaLockTimeout } from './postgres-engine/schema-lock-timeout.ts';
-import { FUNCTION_SEARCH_PATH_HARDENING_SQL, runMigrationsThenHarden } from './function-search-path.ts';
 export { hasPostgresCancellationCapability } from './postgres-engine/cancellation.ts';
 import type {
   BrainEngine,
@@ -624,9 +623,8 @@ export class PostgresEngine implements BrainEngine {
 
         await retrySchemaReplayOnDeadlock(() => withSchemaLockTimeout(conn, () => conn.unsafe(sqlText), { step: 'replay', diagnostic: schemaDiagnosticConnection(this._savedConfig?.database_url) })); // #5227: bounded wait, typed schema_lock_blocked; #6143: a deadlock victim runs again
 
-        // Run any pending migrations automatically, then put pg_temp back on every gbrain function (#7632)
-        const applied = await runMigrationsThenHarden(async () => (await import('./migrate.ts')).runMigrations(this), // engine-dynamic-import-ok: initSchema only, keeps the ~220 migration modules off every connect
-          () => withSchemaLockTimeout(conn, () => conn.unsafe(FUNCTION_SEARCH_PATH_HARDENING_SQL), { step: 'search_path', diagnostic: schemaDiagnosticConnection(this._savedConfig?.database_url) }));
+        // Run any pending migrations automatically
+        const { applied } = await (await import('./migrate.ts')).runMigrations(this); // engine-dynamic-import-ok: initSchema only, keeps the ~220 migration modules off every connect
         if (applied > 0) {
           process.stderr.write(`  ${applied} migration(s) applied\n`);
         }

@@ -322,22 +322,27 @@ describeE2E('a temp table or view named like a ledger hides nothing from the gua
     }
   }, 120_000);
 
-  test('8. an upgrade whose migrations re-create guard functions and then fail before v277 still leaves pg_temp on every pinned path', async () => {
-    const brain = await freshBrain();
-    const engine = new PostgresEngine();
-    try {
-      await brain.conn.unsafe(`DROP INDEX persistence_requests_foreground_committed;
-        CREATE TABLE persistence_requests_foreground_committed (x int);
-        UPDATE config SET value = '263' WHERE key = 'version';`);
-      await engine.connect({ database_url: brain.url });
-      const { value: failure } = await capturingStderr(() => engine.initSchema().then(() => null, (e: unknown) => e));
-      expect(failure).not.toBeNull();
-      const [version] = await brain.conn.unsafe<Array<{ value: string }>>(`SELECT value FROM config WHERE key = 'version'`);
-      expect(Number(version!.value)).toBeLessThan(v277.version);
-      expect((await catalog(brain.conn)).withoutTemp).toEqual([]);
-    } finally {
-      await engine.disconnect();
-      await brain.conn.end();
-    }
-  }, 300_000);
+  for (const [entry, migrate] of [
+    ['initSchema', (engine: PostgresEngine) => engine.initSchema()],
+    ['runMigrations (the locked apply-migrations and upgrade path)', (engine: PostgresEngine) => runMigrations(engine)],
+  ] as const) {
+    test(`8. an upgrade through ${entry} whose migrations re-create guard functions and then fail at v276 still leaves pg_temp on every pinned path`, async () => {
+      const brain = await freshBrain();
+      const engine = new PostgresEngine();
+      try {
+        await brain.conn.unsafe(`DROP INDEX persistence_requests_foreground_committed;
+          CREATE TABLE persistence_requests_foreground_committed (x int);
+          UPDATE config SET value = '263' WHERE key = 'version';`);
+        await engine.connect({ database_url: brain.url });
+        const { value: failure } = await capturingStderr(() => migrate(engine).then(() => null, (e: unknown) => e));
+        expect(String((failure as Error | null)?.message)).toContain('Index persistence_requests_foreground_committed is not valid');
+        const [version] = await brain.conn.unsafe<Array<{ value: string }>>(`SELECT value FROM config WHERE key = 'version'`);
+        expect(version!.value).toBe('275');
+        expect((await catalog(brain.conn)).withoutTemp).toEqual([]);
+      } finally {
+        await engine.disconnect();
+        await brain.conn.end();
+      }
+    }, 300_000);
+  }
 });
