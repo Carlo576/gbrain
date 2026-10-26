@@ -17,6 +17,7 @@ import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { LATEST_VERSION, runMigrations } from '../../src/core/migrate.ts';
 import { derivationNeedles } from '../../src/core/page-body/segment-derive.ts';
+import { v276 } from '../../src/core/schema-migrations/v276-function-search-path-pg-temp.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const describeE2E = DATABASE_URL ? describe : describe.skip;
@@ -110,14 +111,14 @@ async function catalog(c: Sql) {
   };
 }
 
-/** Puts a brain back in the shape every brain had before #7632 (no pg_temp on any pinned path), at the version before. */
+/** Puts a brain back in the shape every brain had before #7632 (no pg_temp on any pinned path), at the version before v276. */
 async function rewind(c: Sql): Promise<void> {
   await c.unsafe(`DO $$ DECLARE f RECORD; BEGIN
       FOR f IN SELECT p.oid::regprocedure AS sig, substr(s.setting, 13) AS path FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                 CROSS JOIN LATERAL unnest(p.proconfig) AS s(setting) WHERE n.nspname = 'public' AND s.setting LIKE 'search_path=%, pg_temp' LOOP
         EXECUTE format('ALTER FUNCTION %s SET search_path = %s', f.sig, left(f.path, -9));
       END LOOP; END $$;
-    UPDATE config SET value = '${LATEST_VERSION - 1}' WHERE key = 'version';`);
+    UPDATE config SET value = '${v276.version - 1}' WHERE key = 'version';`);
 }
 
 describeE2E('a temp table or view named like a ledger hides nothing from the guards (#7632)', () => {
@@ -294,7 +295,6 @@ describeE2E('a temp table or view named like a ledger hides nothing from the gua
   }, 300_000);
 
   test('7. v276 refuses with schema_lock_blocked while another session holds a function it alters, and finishes after', async () => {
-    const { v276 } = await import('../../src/core/schema-migrations/v276-function-search-path-pg-temp.ts');
     const { withEnv } = await import('../helpers/with-env.ts');
     const engine = new PostgresEngine();
     const holder = postgres(url, { max: 1, prepare: false, onnotice: () => {} });

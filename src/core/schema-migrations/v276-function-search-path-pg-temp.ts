@@ -31,7 +31,7 @@ export async function hardenFunctionSearchPaths(engine: BrainEngine, label: stri
   }
   const left = (await engine.executeRaw<{ sig: string }>(
     `SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-      WHERE n.nspname = 'public' AND p.proconfig && $1::text[] ORDER BY 1`, [[...LEGACY_SEARCH_PATH_SETTINGS]])).map(r => r.sig);
+      WHERE n.nspname = 'public' AND p.prokind = 'f' AND p.proconfig && $1::text[] ORDER BY 1`, [[...LEGACY_SEARCH_PATH_SETTINGS]])).map(r => r.sig);
   if (left.length > 0) {
     process.stderr.write(`  ${label}: ${left.length} function(s) left without pg_temp on their search_path (${left.join(', ')}): `
       + 'ALTER FUNCTION needs the owner. Run gbrain doctor for the SQL to run as that role.\n');

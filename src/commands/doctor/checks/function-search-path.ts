@@ -19,7 +19,7 @@ export async function functionSearchPathProblems(engine: BrainEngine): Promise<{
   const rows = await engine.executeRaw<{ sig: string; path: string }>(
     `SELECT p.oid::regprocedure::text AS sig, substr(c.setting, 13) AS path
        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL unnest(p.proconfig) AS c(setting)
-      WHERE n.nspname = 'public' AND c.setting = ANY($1::text[]) ORDER BY 1`,
+      WHERE n.nspname = 'public' AND p.prokind = 'f' AND c.setting = ANY($1::text[]) ORDER BY 1`,
     [[...LEGACY_SEARCH_PATH_SETTINGS]]);
   return {
     functions: rows.map(r => r.sig),

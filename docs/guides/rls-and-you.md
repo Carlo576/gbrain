@@ -268,8 +268,10 @@ could shadow a purge or withdrawal ledger a guard reads with an empty temporary 
 the same name and store purged content again. On an older brain, migration v276 appends
 `pg_temp` to every gbrain function it owns with `ALTER FUNCTION` (no body changes), and
 `gbrain doctor` (`function_search_path`) names any function it could not change, with the
-`ALTER FUNCTION` to run as its owner. [docs/ENGINES.md](../ENGINES.md) ("Purge and
-withdrawal guards") has what this does not change for a scoped write role. The three fact-fingerprint functions
+`ALTER FUNCTION` to run as its owner. This does not close the scoped-writer gap: on
+Postgres, a write role with no RLS policy on a ledger still reads it empty, so its purged
+or withdrawn writes still go through (gbrain#7659 tracks the fix; [docs/ENGINES.md](../ENGINES.md)
+("Purge and withdrawal guards") has the policy to add meanwhile). The three fact-fingerprint functions
 (`gbrain_fact_fingerprint`, `gbrain_fact_fingerprint_v1`,
 `gbrain_fact_normalize`) are SQL functions that an index expression uses, so
 they call `pg_catalog.`-qualified built-ins instead of pinning a setting (a

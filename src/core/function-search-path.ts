@@ -18,7 +18,7 @@ export const LEGACY_SEARCH_PATH_SETTINGS = ['search_path=pg_catalog, public', 's
 /**
  * Appends pg_temp to the pinned search_path of every function in public the current role may alter that still pins
  * `pg_catalog, public` or `pg_catalog` (every gbrain function that pins one did). A function the role does not own is
- * left as it was. Shared by the schema blob (its last statement, so a replay's CREATE OR REPLACE never leaves a function
+ * left as it was, and so is a procedure (ALTER FUNCTION refuses one, and gbrain installs none). Shared by the schema blob (its last statement, so a replay's CREATE OR REPLACE never leaves a function
  * without it), the migration and `gbrain reindex-search-vector`, which rewrites the search_vector trigger functions.
  */
 export const FUNCTION_SEARCH_PATH_HARDENING_SQL = `DO $harden$
@@ -26,7 +26,7 @@ DECLARE f RECORD;
 BEGIN
   FOR f IN SELECT p.oid::regprocedure AS sig, substr(c.setting, 13) AS path
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL unnest(p.proconfig) AS c(setting)
-    WHERE n.nspname = 'public' AND c.setting IN (${LEGACY_SEARCH_PATH_SETTINGS.map(v => `'${v}'`).join(', ')})
+    WHERE n.nspname = 'public' AND p.prokind = 'f' AND c.setting IN (${LEGACY_SEARCH_PATH_SETTINGS.map(v => `'${v}'`).join(', ')})
       AND pg_has_role(current_user, p.proowner, 'USAGE')
     ORDER BY 1
   LOOP

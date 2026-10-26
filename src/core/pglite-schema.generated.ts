@@ -2826,7 +2826,7 @@ DECLARE f RECORD;
 BEGIN
   FOR f IN SELECT p.oid::regprocedure AS sig, substr(c.setting, 13) AS path
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL unnest(p.proconfig) AS c(setting)
-    WHERE n.nspname = 'public' AND c.setting IN ('search_path=pg_catalog, public', 'search_path=pg_catalog')
+    WHERE n.nspname = 'public' AND p.prokind = 'f' AND c.setting IN ('search_path=pg_catalog, public', 'search_path=pg_catalog')
       AND pg_has_role(current_user, p.proowner, 'USAGE')
     ORDER BY 1
   LOOP
