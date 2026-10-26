@@ -58,7 +58,8 @@ function releaseTarget(hold: WriteGateHold): { slug: string; mode: ReleaseIntent
 /**
  * Publishes a managed release through the door and waits for it; true once committed. Null when the hold takes the
  * transactional release instead (see the module comment); false when it is no longer held and no request of this
- * approval exists.
+ * approval exists. `approved` (the owner's preview binding, re-read by owner-actions.ts) is checked after the replay of
+ * an existing request and before admission: a hold re-gated since the owner confirmed it refuses `preview_changed`.
  */
 export async function submitTrustRelease(engine: BrainEngine, holdId: number, by: string, config?: GBrainConfig,
   approved?: (hold: WriteGateHold) => Promise<boolean>): Promise<boolean | null> {

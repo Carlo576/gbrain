@@ -103,6 +103,7 @@ export interface OwnerApplyOptions {
 const hash8 = (value: string): string => createHash('sha256').update(value).digest('hex').slice(0, 8);
 const bindingOf = (value: unknown): string => createHash('sha256')
   .update(JSON.stringify(value, (_key, v: unknown) => typeof v === 'bigint' ? v.toString() : v)).digest('hex');
+const holdBinding = (hold: Pick<HoldRow, 'id' | 'status' | 'last_seen_at'>): string => bindingOf({ id: hold.id, status: hold.status, last_seen_at: hold.last_seen_at });
 const snippet = (text: unknown, max = 80): string => {
   const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat;
@@ -189,7 +190,7 @@ const defaultHoldStore: HoldStoreAdapter = {
     return (await import('./release-publish.ts')).submitTrustRelease(engine, id, by, config,
       approved === undefined ? undefined : async hold => {
         const row = await defaultHoldStore.get(engine, hold.id);
-        return !!row && bindingOf({ id: row.id, status: row.status, last_seen_at: row.last_seen_at }) === approved;
+        return !!row && holdBinding(row) === approved;
       });
   },
 };
@@ -326,7 +327,7 @@ async function previewHold(engine: BrainEngine, id: number, action: 'release' | 
   if (!hold) throw notFound(label, 'held write');
   const text = hold.payload.fact ?? hold.payload.claim ?? '';
   return { action, ref: label, token: label, command: trustCommand(action, label), raises: action === 'release',
-    binding: bindingOf({ id: hold.id, status: hold.status, last_seen_at: hold.last_seen_at }), tier: hold.tier,
+    binding: holdBinding(hold), tier: hold.tier,
     ...(action === 'release' ? { target_tier: 'user_confirmed' as TrustTier } : {}),
     summary: action === 'release'
       ? `Release held ${hold.kind} ${label} ("${snippet(text)}", ${hold.reason_families.join(', ') || 'detector error'}) into memory as "confirmed by you"`
