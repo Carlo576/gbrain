@@ -421,7 +421,7 @@ async function main() {
   // NOT a free-text search for the literal word "modes". Free-text
   // `gbrain search "<query>"` falls through to the cheap-hybrid `search` op
   // below (T4). Preserves the v0.41.6.0 read-only connect+dispatch timeout.
-  if (command === 'search' && SEARCH_DASHBOARD_SUBCOMMANDS.includes(subArgs[0] ?? '')) {
+  if (command === 'search' && ['modes', 'stats', 'tune', 'diagnose'].includes(subArgs[0] ?? '')) {
     const { withTimeout, OperationTimeoutError } = await import('../core/timeout.ts');
     const isDiagnose = subArgs[0] === 'diagnose';
     // Gap-closure wave [OV6]: thin clients route the read-only dashboard
@@ -1324,7 +1324,7 @@ export function validateCommandFlags(command: string, subArgs: string[]): string
   return null; // unknown command — the dispatcher's own error handles it
 }
 
-/** `search` subcommands main() dispatches by hand before the op lane; they read their flags as exact tokens. */
+/** The `search` subcommands main() dispatches by hand before the op lane (the dashboard branch); they read their flags as exact tokens. */
 const SEARCH_DASHBOARD_SUBCOMMANDS = ['modes', 'stats', 'tune', 'diagnose'];
 
 /** #7619: the argv a CLI_ONLY handler receives, `--flag=value` split or refused (cli/flag-equals.ts); commands with their own `=`-aware parser keep it. */
