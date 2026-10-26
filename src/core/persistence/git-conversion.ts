@@ -11,6 +11,10 @@
  *     and commits it with commitThroughDoor, one commit per group of CONVERSION_GROUP_MAX pages, under the worktree writer
  *     lock, which is dropped between groups. No row changes: the database already holds those bytes.
  *   - declared: database-only on purpose; nothing is written and nothing deleted.
+ *   - withhold: a private, alias-private or lineage-private page whose row still records a file. The apply takes G7a's
+ *     private transition: a committed file's removal goes through the door, then the row withholds its origin
+ *     (withheld_source_path), so the strict pass leaves the page live; with no file at HEAD, only the row changes. Any
+ *     other declared page with a committed file is a discard (git_overwrites_database), as Git's import would replace it.
  *   - git_wins: Git's verdict replaces the row and loses nothing (Git moved and the database did not; Git deleted a page
  *     the database had not edited; a held deletion; a held file_drift whose side is unknown and whose row already equals
  *     the committed file). The strict-equivalent pass applies it. An unknown-side drift whose row differs from the file
@@ -48,6 +52,7 @@ import { currentVerifiedLocalWriter, localHostId } from './identity.ts';
 import { acquireWorktree, readManagedMode } from './ownership.ts';
 import { resolveManagedSyncContext, type ManagedSyncContext } from './sync-discovery.ts';
 import { readShadowLevel } from './sync-pass.ts';
+import { isPrivacyClass, type PrivacyClass } from './git-declared.ts';
 import { classifySyncPath } from './sync-classify.ts';
 import { clearGitHold, fileDriftSide, readGitSourceHolds, readSyncImportProvenances, type GitHoldRecord } from './sync-holds.ts';
 import { readDeletionProvenance } from './sync-origin-evidence.ts';
@@ -74,6 +79,9 @@ export type GitWinsReason = typeof GIT_WINS_REASONS[number];
 export const DISCARD_CATEGORIES = ['both_moved', 'held_drift_both', 'held_drift_unknown_differs', 'deleted_in_git', 'uncommitted_edit', 'ignored_target', 'unparseable', 'unsafe_path',
   'segmented_page', 'export_mismatch', 'git_overwrites_database'] as const;
 export type DiscardCategory = typeof DISCARD_CATEGORIES[number];
+/** A private, alias-private or lineage-private page whose row still records a file: committed at HEAD, or absent from it. */
+export const WITHHOLD_KINDS = ['file_committed', 'file_absent'] as const;
+export type WithholdKind = typeof WITHHOLD_KINDS[number];
 
 interface Counted<K extends string> { count: number; by: Record<K, number>; sample: string[] }
 /**
@@ -90,6 +98,8 @@ export interface DiscardDetail {
 }
 /** `disk`: sha256 of the working-tree bytes the preview saw (HEAD's or the export's), null when the file was absent. */
 export interface AdoptItem { id: string; source_id: string; slug: string; revision: string | null; path: string; state: AdoptState; disk: string | null }
+/** `disk`: sha256 of the working-tree bytes of a committed file the preview saw, null when absent from the disk. */
+export interface WithholdItem { id: string; slug: string; revision: string | null; path: string; kind: WithholdKind; declared: PrivacyClass; disk: string | null }
 interface HoldItem { path: string; code: string; side: string | null; observed_at: string; action: 'git_wins' | 'rescreen' | 'blocked' }
 interface ParkedItem { effect: string; request: string; kind: string; codes: string[]; slugs: string[]; action: 'retry' | 'reclassify' }
 
@@ -105,20 +115,23 @@ export interface GitConversionPreview {
   adopt: Counted<AdoptState> & { action: 'commit_through_door'; groups: number };
   declared: Counted<string> & { action: 'none' };
   git_wins: Counted<GitWinsReason> & { action: 'index_committed_blob' };
+  /** G7a's private transition for a privacy-class page that still records a file: its file's removal is committed, then the row withholds its origin. */
+  withhold: Counted<WithholdKind> & { action: 'commit_removal_and_withhold'; groups: number };
   /** `unplaced`: holds at a path no category above placed (a declared page, no live page), which the index check judges as the strict pass will see them. */
   holds: Counted<string> & { action: 'clear'; unplaced: { count: number; by: Record<string, number> } };
   parked_effects: { count: number; retry: number; reclassify: number; by_code: Record<string, number> };
   /** What a strict pass would import or delete that no page row loses (files with no row, removals Git committed). */
   index: { imports: number; deletes: number };
   discard: Counted<DiscardCategory> & { detail: DiscardDetail };
-  /** Every item the apply still has to act on (adopt, git_wins, holds, parked retries, discard); 0 on a converted source. */
+  /** Every item the apply still has to act on (adopt, withhold, git_wins, holds, parked retries, discard); 0 on a converted source. */
   remaining: number;
   preview_hash: string;
   apply: string[];
 }
 
-/** `settled`: paths whose Git import replaces nothing (the census reads them equal, or the plan adopts or accepts them). */
-export interface GitConversionPlan { preview: GitConversionPreview; context: ManagedSyncContext; adopt: AdoptItem[]; holds: HoldItem[]; parked: ParkedItem[]; settled: Set<string>; incarnation: string }
+/** `settled`: paths whose Git import replaces nothing (the census reads them equal, or the plan adopts, withholds or accepts them). */
+export interface GitConversionPlan { preview: GitConversionPreview; context: ManagedSyncContext; adopt: AdoptItem[]; withhold: WithholdItem[]; holds: HoldItem[]; parked: ParkedItem[];
+  settled: Set<string>; incarnation: string }
 
 const counted = <K extends string>(keys: readonly K[]): Counted<K> => ({ count: 0, by: Object.fromEntries(keys.map(key => [key, 0])) as Record<K, number>, sample: [] });
 const bump = (into: Record<string, number>, key: string) => { into[key] = (into[key] ?? 0) + 1; };
@@ -165,7 +178,7 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   const holdRecords = (await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? [];
   const held = new Map(holdRecords.map(hold => [hold.path, hold]));
   const preview = emptyPreview(sourceId, context, census);
-  const adopt: AdoptItem[] = [], accepted = new Set<string>(), discarded = new Set<string>();
+  const adopt: AdoptItem[] = [], withhold: WithholdItem[] = [], accepted = new Set<string>(), discarded = new Set<string>();
   const discard = (category: DiscardCategory, path: string) => { tally(preview.discard, category, path); discarded.add(path); };
   const gitWins = (reason: GitWinsReason, path: string) => { tally(preview.git_wins, reason, path); accepted.add(path); };
   const holds = holdRecords.map(hold => holdItem(hold));
@@ -184,7 +197,17 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
     const hold = page.path ? held.get(page.path) : undefined;
     const side = hold?.code === 'file_drift' ? fileDriftSide(hold.meta) ?? null : null;
     switch (page.state) {
-      case 'declared_database_only': tally(preview.declared, page.declared!, path); continue;
+      case 'declared_database_only': {
+        tally(preview.declared, page.declared!, path);
+        // A privacy class takes G7a's private transition; any other declared page with a committed file stays a discard (planIndex).
+        if (!isPrivacyClass(page.declared) || !page.path || (!page.headBlob && !page.recordsFile)) continue;
+        if (page.worktree === 'modified') { discard('uncommitted_edit', path); bump(preview.discard.detail.uncommitted_edit, 'modified'); continue; }
+        const disk = page.headBlob ? diskBytes(join(root, page.path)) : null;
+        const kind: WithholdKind = page.headBlob ? 'file_committed' : 'file_absent';
+        withhold.push({ id: page.id, slug: page.slug, revision: page.revision, path: page.path, kind, declared: page.declared, disk: disk ? sha256(disk) : null });
+        tally(preview.withhold, kind, path);
+        continue;
+      }
       case 'unparseable': discard('unparseable', path); bump(preview.discard.detail.unparseable, page.unparseable ?? 'unknown'); continue;
       case 'unsafe_path': discard('unsafe_path', path); continue;
       case 'git_ahead':
@@ -215,7 +238,7 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   preview.parked_effects.count = parked.length;
   preview.parked_effects.retry = parked.filter(item => item.action === 'retry').length;
   preview.parked_effects.reclassify = parked.filter(item => item.action === 'reclassify').length;
-  const settled = new Set([...equal, ...adopt.map(item => item.path), ...accepted]);
+  const settled = new Set([...equal, ...adopt.map(item => item.path), ...withhold.map(item => item.path), ...accepted]);
   const placed = new Set([...settled, ...discarded]);
   const unplaced = holds.filter(hold => !placed.has(hold.path));
   for (const hold of unplaced) bump(preview.holds.unplaced.by, hold.side ? `${hold.code}:${hold.side}` : hold.code);
@@ -223,18 +246,21 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   const declared = new Map(pages.flatMap(page => page.declared ? [[page.id, page.declared] as const] : []));
   await planIndex(engine, context, preview, placed, new Set(unplaced.map(hold => hold.path)), declared, discard);
   preview.adopt.groups = Math.ceil(adopt.length / CONVERSION_GROUP_MAX);
-  preview.remaining = preview.adopt.count + preview.git_wins.count + preview.holds.count + preview.parked_effects.retry + preview.discard.count;
+  preview.withhold.groups = Math.ceil(withhold.filter(item => item.kind === 'file_committed').length / CONVERSION_GROUP_MAX);
+  preview.remaining = preview.adopt.count + preview.withhold.count + preview.git_wins.count + preview.holds.count + preview.parked_effects.retry + preview.discard.count;
   preview.preview_hash = previewHash({ source: sourceId, incarnation, to: 'git', strict: preview.strict, head: preview.head, states: census.states, declared: census.declared,
     adopt: adopt.map(item => [item.id, item.revision, item.path, item.state, item.disk]), git_wins: [...accepted].sort(), discard: preview.discard.by,
+    // Bound only when present, so the hash of a plan with nothing to withhold is the one earlier releases gave.
+    withhold: withhold.length ? withhold.map(item => [item.id, item.revision, item.path, item.kind, item.disk]) : undefined,
     holds: holds.map(hold => [hold.path, hold.code, hold.side, hold.observed_at]), parked: parked.map(item => [item.effect, item.action, item.codes]), index: preview.index });
   preview.apply = ['gbrain', 'sources', 'canonical', sourceId, '--to', 'git', '--apply', '--expect', preview.preview_hash];
-  return { preview, context, adopt, holds, parked, settled, incarnation };
+  return { preview, context, adopt, withhold, holds, parked, settled, incarnation };
 }
 
 function emptyPreview(sourceId: string, context: ManagedSyncContext, census: GitGapCensus): GitConversionPreview {
   return { status: 'preview', source_id: sourceId, to: 'git', strict: context.source.config?.canonical === 'git', head: census.head, pages: census.pages, equal: census.states.equal,
     adopt: { ...counted(ADOPT_STATES), action: 'commit_through_door', groups: 0 }, declared: { ...counted<string>([]), action: 'none' },
-    git_wins: { ...counted(GIT_WINS_REASONS), action: 'index_committed_blob' }, holds: { ...counted<string>([]), action: 'clear', unplaced: { count: 0, by: {} } },
+    git_wins: { ...counted(GIT_WINS_REASONS), action: 'index_committed_blob' }, withhold: { ...counted(WITHHOLD_KINDS), action: 'commit_removal_and_withhold', groups: 0 }, holds: { ...counted<string>([]), action: 'clear', unplaced: { count: 0, by: {} } },
     parked_effects: { count: 0, retry: 0, reclassify: 0, by_code: {} }, index: { imports: 0, deletes: 0 }, discard: emptyDiscard(), remaining: 0, preview_hash: '', apply: [] };
 }
 
@@ -354,6 +380,8 @@ export interface GitConversionResult {
   source_id: string;
   head: string | null;
   committed: { groups: number; pages: number; commits: string[] };
+  /** Privacy-class pages that now withhold their origin, and the door commits that removed their committed files. */
+  withheld: { pages: number; commits: string[] };
   holds_cleared: number;
   parked: { retried: number; reclassified: number };
   /** The plan after the flag was set and a strict pass ran: nothing left on a completed conversion. */
@@ -376,6 +404,7 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   if (plan.preview.preview_hash !== expect) throw previewChangedError(expect, previewCommand);
   if (plan.preview.discard.count) throw blockedError(plan.preview);
   const committed = await adoptGroups(engine, plan, previewCommand);
+  const withheld = await withholdGroups(engine, plan, previewCommand);
   let holdsCleared = 0;
   for (const hold of plan.holds) {
     if (await engine.transaction(tx => clearGitHold(tx, { sourceId, incarnation: plan.incarnation, path: hold.path, observedAt: hold.observed_at }))) holdsCleared++;
@@ -395,7 +424,7 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   await recordConversion(engine, sourceId, plan.incarnation, 'git', expect, plan.preview.head);
   passOrThrow(sourceId, await performManagedSync(engine, { sourceId, noPull: true, full: true, ...processing }));
   const after = (await planGitConversion(engine, sourceId)).preview;
-  return { status: after.remaining === 0 ? 'converted' : 'incomplete', source_id: sourceId, head: after.head, committed, holds_cleared: holdsCleared, parked, after };
+  return { status: after.remaining === 0 ? 'converted' : 'incomplete', source_id: sourceId, head: after.head, committed, withheld, holds_cleared: holdsCleared, parked, after };
 }
 
 const PASS_DONE = new Set(['first_sync', 'synced', 'up_to_date']);
@@ -437,6 +466,59 @@ async function adoptGroups(engine: BrainEngine, plan: GitConversionPlan, preview
     await faultPoint('conversion:group_committed', { sourceId: context.sourceId, round: start / CONVERSION_GROUP_MAX + 1 });
   }
   return { groups: commits.length, pages: adopt.length, commits };
+}
+
+/**
+ * G7a's private transition for each withheld page, mirrored from git-declared.ts `declareStrictPublication` (privacy
+ * branch), which runs only inside a publication: a committed file's removal goes through the door group by group under
+ * the writer lock, and the transaction after that commit stamps the class and moves `source_path` to
+ * `withheld_source_path`, so the strict pass never reads the removal as the deletion of a live page. A page whose file
+ * is already absent from HEAD only gets the stamp. A page whose revision or working tree moved since the preview stops
+ * the apply (preview_changed); after a crash between a commit and its stamp, the rerun preview lists the page as file_absent.
+ */
+async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, previewCommand: string): Promise<GitConversionResult['withheld']> {
+  const { context } = plan;
+  const root = context.root;
+  const commits: string[] = [];
+  const assertUnchanged = async (item: WithholdItem) => {
+    const [live] = await engine.executeRaw<{ revision: string | null }>('SELECT knowledge_revision::text AS revision FROM pages WHERE id=$1::bigint AND deleted_at IS NULL', [item.id]);
+    if (!live || live.revision !== item.revision) throw previewChangedError(plan.preview.preview_hash, previewCommand);
+  };
+  const stamp = (items: WithholdItem[]) => engine.transaction(async tx => {
+    await declarePersistenceProtocol(tx);
+    for (const item of items) {
+      await tx.executeRaw(`UPDATE pages SET database_only_reason=$2, withheld_source_path=COALESCE(NULLIF(source_path,''), withheld_source_path),
+        source_path=NULL, source_uri=NULL WHERE id=$1::bigint`, [item.id, item.declared]);
+    }
+  });
+  const committed = plan.withhold.filter(item => item.kind === 'file_committed');
+  for (let start = 0; start < committed.length; start += CONVERSION_GROUP_MAX) {
+    const group = committed.slice(start, start + CONVERSION_GROUP_MAX);
+    const lock = await acquireWorktree(context.binding, LOCK_WAIT_MS, undefined, engine, { yieldLanes: true });
+    if (!lock) throw opError('writer_busy', `The writer lock of source ${context.sourceId}'s checkout stayed busy for ${LOCK_WAIT_MS / 1000}s, so the removal of private pages' files was not committed.`,
+      `Run ${previewCommand} again; the removals already committed read as file_absent, so the new plan holds only what is left.`, { retryable: true });
+    try {
+      for (const item of group) {
+        await assertUnchanged(item);
+        const disk = diskBytes(join(root, item.path));
+        if ((disk ? sha256(disk) : null) !== item.disk) throw previewChangedError(plan.preview.preview_hash, previewCommand);
+      }
+      for (const item of group) removeConfined(root, join(root, item.path));
+      const commit = await commitThroughDoor(root, group.map(item => ({ path: join(root, item.path) })), lock);
+      if (commit) commits.push(commit);
+      await stamp(group);
+    } finally { await lock.release(); }
+  }
+  const absent = plan.withhold.filter(item => item.kind === 'file_absent');
+  for (const item of absent) await assertUnchanged(item);
+  if (absent.length) await stamp(absent);
+  return { pages: plan.withhold.length, commits };
+}
+
+function removeConfined(root: string, target: string): void {
+  if (!diskBytes(target)) return;
+  if (relative(realpathSync(root), realpathSync(dirname(target))).split(sep)[0] === '..') throw opError('git_target_unsafe', `${target} resolves outside the checkout, so it was not removed.`, 'Reconcile the path first.');
+  rmSync(target);
 }
 
 function writeAtomically(root: string, target: string, bytes: Buffer): void {

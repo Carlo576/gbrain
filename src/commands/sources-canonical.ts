@@ -43,6 +43,7 @@ export function describeGitPreview(p: GitConversionPreview): string {
   const lines = [`Source ${p.source_id}${p.strict ? ' (already git-canonical)' : ''} at ${p.head?.slice(0, 12) ?? 'no commit'}: ${p.pages} live page(s), ${p.equal} equal to HEAD.`,
     `Adopt (write the database's page to its file and commit it through the door, ${p.adopt.groups} commit(s) of up to ${CONVERSION_GROUP_MAX}): ${p.adopt.count} (${counts(p.adopt.by)}).`, ...sample(p.adopt.sample),
     `Declared database-only (nothing written, nothing deleted): ${p.declared.count} (${counts(p.declared.by)}).`,
+    `Withhold (a private page's committed file is removed through the door, ${p.withhold.groups} commit(s), and its row withholds its origin): ${p.withhold.count} (${counts(p.withhold.by)}).`, ...sample(p.withhold.sample),
     `Git wins (the strict pass indexes the committed file): ${p.git_wins.count} (${counts(p.git_wins.by)}).`, ...sample(p.git_wins.sample),
     `Holds cleared so Git's verdict runs: ${p.holds.count} (${counts(p.holds.by)})${p.holds.unplaced.count ? `; ${p.holds.unplaced.count} at a path nothing else placed (${counts(p.holds.unplaced.by)}), counted below by the strict pass's verdict` : ''}.`,
     `Parked effects: ${p.parked_effects.count} (retry ${p.parked_effects.retry}, reclassify as declared ${p.parked_effects.reclassify}; ${counts(p.parked_effects.by_code)}).`,
@@ -54,7 +55,7 @@ export function describeGitPreview(p: GitConversionPreview): string {
 }
 
 function describeResult(r: GitConversionResult): string {
-  const lines = [`Source ${r.source_id} ${r.status === 'converted' ? 'is git-canonical' : 'is git-canonical, with work left'}: ${r.committed.pages} page(s) committed in ${r.committed.groups} door commit(s), ${r.holds_cleared} hold(s) cleared, ${r.parked.retried} parked effect(s) retried and ${r.parked.reclassified} reclassified.`];
+  const lines = [`Source ${r.source_id} ${r.status === 'converted' ? 'is git-canonical' : 'is git-canonical, with work left'}: ${r.committed.pages} page(s) committed in ${r.committed.groups} door commit(s), ${r.withheld.pages} private page(s) withheld (${r.withheld.commits.length} removal commit(s)), ${r.holds_cleared} hold(s) cleared, ${r.parked.retried} parked effect(s) retried and ${r.parked.reclassified} reclassified.`];
   if (r.status === 'incomplete') lines.push(describeGitPreview(r.after));
   return lines.join('\n');
 }
