@@ -1379,7 +1379,7 @@ bash /workspace/gbrain/bin/gbrain-setup --upgrade
 Upgrade installs the currently stable package and applies its migrations.
 Repair is not an upgrade, and neither operation resets the brain.
 
-A helper written before v0.60.379.0 stages a Bun below 1.4.4 (1.4.2 or 1.4.3),
+A helper written before v0.60.379.0 stages a Bun below 1.4.4 (1.4.3 or older),
 which current releases refuse: setup stops with `runtime_below_floor` before it
 changes anything and prints the command to run instead. It fetches the current
 helper and reruns setup with the same root, harness and flags:
