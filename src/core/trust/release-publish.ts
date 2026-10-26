@@ -38,6 +38,8 @@ import { getWriteGateHold, releaseWriteGateHold, type WriteGateHold } from '../w
 
 export const TRUST_RELEASE_OPERATION = 'trust_release';
 export const DOOR_WAIT_MS = 60_000;
+/** The CLI's wait for trust_apply over the owner socket: the door's own wait plus room for the owner's work before admission. */
+export const OWNER_APPLY_TIMEOUT_MS = DOOR_WAIT_MS + 30_000;
 
 interface ReleaseIntent { hold_id: number; last_seen_at: string; by: string; mode: 'append' | 'index-existing'; row_num?: number }
 

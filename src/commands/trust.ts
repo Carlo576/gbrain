@@ -229,7 +229,6 @@ export async function maybeDelegateTrust(hostConfig: GBrainConfig | null, args: 
   const { loadMounts } = await import('../core/brain-registry.ts');
   const { maybeDelegateLocalAdministration, persistenceConfigForBrain } = await import('../core/persistence/local-client.ts');
   const { inspectLockHolder } = await import('../core/pglite-lock.ts');
-  const { DOOR_WAIT_MS } = await import('../core/trust/release-publish.ts');
   const brainId = resolveBrainId(getCliOptions().brain, process.cwd());
   const config = persistenceConfigForBrain(hostConfig, brainId, brainId === 'host' ? [] : loadMounts());
   if (config?.engine !== 'pglite' || !config.database_path || config.database_url || !inspectLockHolder(config.database_path).held) return false;
@@ -242,7 +241,10 @@ export async function maybeDelegateTrust(hostConfig: GBrainConfig | null, args: 
     review: async filter => await call('trust_read', { view: 'review', filter: { source: filter.sourceId, kind: filter.kind, since: filter.since?.toISOString() } }) as unknown as TrustReview,
     explain: async (query, source) => (await call('trust_read', { view: 'explain', query, source })).items as TrustExplanation[],
     preview: async input => await call('trust_preview', { input }) as unknown as OwnerActionPreview,
-    apply: async (input, binding, confirmed) => await call('trust_apply', { input, binding, ...(confirmed ? { confirmed: 'tty' } : {}) }, DOOR_WAIT_MS + 30_000) as unknown as OwnerActionResult,
+    apply: async (input, binding, confirmed) => {
+      const { OWNER_APPLY_TIMEOUT_MS } = await import('../core/trust/release-publish.ts');
+      return await call('trust_apply', { input, binding, ...(confirmed ? { confirmed: 'tty' } : {}) }, OWNER_APPLY_TIMEOUT_MS) as unknown as OwnerActionResult;
+    },
   };
   await runTrustOwnerCommand(backend, sub!, rest);
   return true;
