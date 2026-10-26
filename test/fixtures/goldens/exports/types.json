@@ -7723,7 +7723,7 @@
         "kind": "function",
         "name": "capEvidenceToBudget",
         "signature": [
-          "<T extends SearchResult & { delivered?: DeliveredEvidence; }>(results: T[], delivery: DeliveryMeta) => T[]"
+          "<T extends SearchResult & { delivered?: DeliveredEvidence; }>(results: T[], delivery: DeliveryMeta, quote?: boolean) => T[]"
         ]
       },
       {

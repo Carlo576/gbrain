@@ -315,6 +315,7 @@ describe('pre-landing review fixes, pass 2 (GBRA-156 /ship Step 9)', () => {
   test('nested call openers with unmatched closes, and long whitespace before an anchor, stay linear', () => {
     // gstack-timing-ok: the stack search and the per-block whitespace walk took about 4-5 s on these inputs
     expect(time('<invoke name="a">\n'.repeat(24000) + '</parameter>\n'.repeat(24000)).ms).toBeLessThan(1000);
+    // gstack-timing-ok: the per-block whitespace walk took about 4 s on this input and linear work takes milliseconds
     expect(time(ANCHOR + 'hi\n' + `<${P}invoke name="x"></${P}invoke>\n`.repeat(6000) + ' '.repeat(50000) + '\n' + BOB + 'kept').ms).toBeLessThan(1000);
   });
 
