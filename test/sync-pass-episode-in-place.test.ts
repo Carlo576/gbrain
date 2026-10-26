@@ -14,6 +14,9 @@
  *   was neither imported nor waived); a page with a stale parser, a stale chunker version, a stale contextual mode, a
  *   stale text projection, an edited committed file, a re-screen-due hold or a moved origin is re-imported (its record
  *   carries the episode). The pass converges and the episode closes as before.
+ * - the links watermark is not part of `derivedCurrent` (GBRA-108): a reparse of unchanged bytes never advances
+ *   `links_extracted_at` (link extraction is the sync tail's and `extract --stale`'s), so a current page whose watermark
+ *   is null or older than the extractor is `matched` under a full pass and is not reparsed.
  *
  * Each test fails before this change: there every live page an open episode had not re-imported was `reparse`, so a full
  * pass re-imported (or waived) the all-current page and rewrote its import record with the episode.
@@ -28,6 +31,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { classifySyncPath, type SyncClass, type SyncPathState } from '../src/core/persistence/sync-classify.ts';
 import { SYNC_IMPORT_PROVENANCE_OP, writeGitHold } from '../src/core/persistence/sync-holds.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { readShadowLevel } from '../src/core/persistence/sync-pass.ts';
 import { RECOVERY_VERSION } from '../src/core/markdown.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -125,6 +129,19 @@ for (const backend of testBackends()) {
       expect(Number(chunker!.v)).toBeGreaterThan(3);
       expect((await engine.getPage('notes/edited', { sourceId: 'default' }))?.compiled_truth).toContain('An edited body');
       expect((await performManagedSync(engine, OPTS)).status).toBe('up_to_date');
+    }));
+
+    test('a current page with a null or stale links watermark is matched under a full pass and not reparsed', () => brain(async ({ engine }) => {
+      expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+      await engine.executeRaw("UPDATE pages SET links_extracted_at=NULL WHERE source_id='default' AND slug='notes/current'");
+      await engine.executeRaw("UPDATE pages SET links_extracted_at='2000-01-01T00:00:00Z' WHERE source_id='default' AND slug='notes/parser'");
+      const watermarked = ['notes/current', 'notes/parser'];
+      const level = (await readShadowLevel(engine, { sourceId: 'default', full: true }))!;
+      expect(Object.fromEntries(level.paths.filter(entry => watermarked.includes(entry.path.replace(/\.md$/, ''))).map(entry => [entry.path, entry.result.cls])))
+        .toEqual({ 'notes/current.md': 'matched', 'notes/parser.md': 'matched' });
+      const before = await Promise.all(watermarked.map(async slug => ({ record: await recordOf(engine, slug), requests: await requestsFor(engine, slug) })));
+      expect((await performManagedSync(engine, { ...OPTS, full: true })).status).toBe('synced');
+      expect(await Promise.all(watermarked.map(async slug => ({ record: await recordOf(engine, slug), requests: await requestsFor(engine, slug) })))).toEqual(before);
     }));
   });
 }
