@@ -165,6 +165,15 @@ for (const backend of testBackends()) {
       expect(error?.code).toBe('fence_row_changed');
       expect(await holdStatus(engine, `h${first!.id}`)).toBe('held');
       expect(await factRows(engine)).toEqual([]);
+
+      const again = await applyOwnerAction(engine, { action: 'release', ref: `h${first!.id}` }, { binding: preview.binding, confirmation: { via: 'tty' }, by: owner })
+        .then(() => null, (e: { code?: string }) => e);
+      expect(again?.code).toBe('fence_row_changed');
+      const requests = await engine.executeRaw<{ id: string; state: string }>("SELECT id, state FROM persistence_requests WHERE operation='trust_release' ORDER BY created_at, id");
+      expect(requests.map(r => r.state)).toEqual(['failed', 'failed']);
+      expect(new Set(requests.map(r => r.id)).size).toBe(2);
+      expect(await holdStatus(engine, `h${first!.id}`)).toBe('held');
+      expect(await factRows(engine)).toEqual([]);
     }, { setup, databaseUrl }), 180_000);
 
     test('a fence-guard hold whose source cell was edited after it was held refuses: the edit re-gates the hold, so the older approval is stale', () => managedBrain(async ({ engine, ctx, root }) => {
