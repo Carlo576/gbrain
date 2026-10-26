@@ -326,8 +326,8 @@ uses one file per activation state to stay within the unchanged per-file cap. Op
 `GBRAIN_TEST_RECONCILE_CRASH_MANIFEST_DIR` retains executed-case evidence.
 `test/e2e/reconcile-pgbouncer.test.ts` requires the transaction-mode pooler when
 `GBRAIN_CI_REQUIRE_PGBOUNCER=1` and proves repair followed by a new private memory
-write. The durable-persistence workflow runs these contracts on both supported
-Bun versions and uploads the crash manifests; local CI runs the slow and E2E lanes.
+write. The durable-persistence workflow runs these contracts on every supported
+Bun version and uploads the crash manifests; local CI runs the slow and E2E lanes.
 
 `test/put-page-persistence.test.ts` and `test/e2e/put-page-persistence-postgres.test.ts`
 pin durable page acceptance and ordinary-error publication: native contention
@@ -529,7 +529,7 @@ lock, and actual source deletion/recreation. The reusable persistence lane
 runs this matrix on every supported Bun version and uploads its manifest.
 
 The required persistence lane also runs `scripts/persistence/performance.ts`
-on both engines and Bun versions. Three independent instances use the
+on both engines and every supported Bun version. Three independent instances use the
 existing 500-page/200-query read-latency corpus, with public `put_page`
 mutations and actual in-flight interval coverage of at least 90%. Any read
 or write failure invalidates the sample. CI uses `--informational`: the 50%
