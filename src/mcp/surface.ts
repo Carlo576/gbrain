@@ -154,9 +154,10 @@ export function parseSurfaceFlag(args: string[]): McpSurface | null {
  * absent, `mcp.advertised_surface` decides.
  */
 export function parseAdvertiseFlag(args: string[]): McpSurface | null {
+  const inline = args.find(a => a.startsWith('--advertise='));
   const idx = args.indexOf('--advertise');
-  if (idx < 0) return null;
-  const raw = args[idx + 1];
+  if (inline === undefined && idx < 0) return null;
+  const raw = inline !== undefined ? inline.slice('--advertise='.length) : args[idx + 1];
   if (raw === undefined || raw.startsWith('--') || !isMcpSurface(raw)) {
     throw opError('invalid_params', `gbrain serve --advertise takes verbs, starter or full${raw === undefined || raw.startsWith('--') ? '' : ` (got "${raw}")`}`,
       'Run gbrain serve --advertise verbs (list the 7 memory verbs and request_tools), gbrain serve --advertise starter or gbrain serve --advertise full. Every tool the surface allows stays callable.');

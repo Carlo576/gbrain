@@ -69,6 +69,8 @@ describe('advertised surface (pure)', () => {
     expect(parseAdvertiseFlag(['--surface', 'full'])).toBeNull();
     expect(() => parseAdvertiseFlag(['--advertise', 'everything'])).toThrow('--advertise takes verbs, starter or full');
     expect(() => parseAdvertiseFlag(['--advertise'])).toThrow('--advertise takes verbs, starter or full');
+    expect(parseAdvertiseFlag(['--advertise=verbs'])).toBe('verbs');
+    expect(() => parseAdvertiseFlag(['--advertise=everything'])).toThrow('--advertise takes verbs, starter or full');
   });
 
   test('the database plane wins over the file plane; unrecognized values advertise everything', async () => {
