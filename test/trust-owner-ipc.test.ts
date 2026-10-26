@@ -144,7 +144,10 @@ describe('gbrain trust through the resident owner (DX-2)', () => {
     expect(await tier('notes/ipc-two-example')).toBe('user_confirmed');
   }, 120_000);
 
-  test('the CLI waits for trust_apply past the release door\'s own wait, so a slow release ends in its receipt, not owner_unavailable', async () => {
+  // Value: protects=trust_apply over the owner socket waits longer than the release door's own wait (DOOR_WAIT_MS);
+  // fails_when=the CLI falls back to the socket's 30 s default (red at 70dd6dd18^: timeoutMs undefined); why_new=no test pinned the apply timeout;
+  // seam=a call-through spy on maybeDelegateLocalAdministration; no_claim=a real release slower than 30 s over the socket
+  test('trust_apply over the owner socket is given a timeout longer than the release door\'s wait (DOOR_WAIT_MS)', async () => {
     const { tp } = await loweredPage('notes/ipc-three-example');
     const input = new PassThrough();
     const output = new PassThrough();
@@ -154,11 +157,11 @@ describe('gbrain trust through the resident owner (DX-2)', () => {
     const delegate = spyOn(localClient, 'maybeDelegateLocalAdministration');
     const log = console.log;
     console.log = () => {};
+    let calls: typeof delegate.mock.calls = [];
     try {
       expect(await withEnv({ GBRAIN_HOME: dir, ...ENV }, () => maybeDelegateTrust(config as never, ['confirm', tp]))).toBe(true);
-    } finally { console.log = log; __setConfirmationIoForTests(null); }
-    const apply = delegate.mock.calls.find(call => call[0] === 'trust_apply');
-    delegate.mockRestore();
+    } finally { calls = [...delegate.mock.calls]; console.log = log; __setConfirmationIoForTests(null); delegate.mockRestore(); }
+    const apply = calls.find(call => call[0] === 'trust_apply');
     expect(apply).toBeDefined();
     expect(apply![3]?.timeoutMs).toBeGreaterThan(DOOR_WAIT_MS);
   }, 120_000);
