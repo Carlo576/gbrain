@@ -432,6 +432,10 @@ describe('#7619 split rules', () => {
     const owned = new Set(Object.values(MODULE_OWNERS).filter(v => Array.isArray(v)).flat());
     expect([...owned].sort()).toEqual(Object.keys(EQUALS_READERS).sort());
     for (const [key, flags] of Object.entries(EQUALS_READERS)) for (const flag of flags) expect(CLI_FLAG_REGISTRY[key.split(' ')[0]!]).toContain(flag);
+    for (const [key, flags] of Object.entries(EQUALS_READERS)) {
+      const sources = Object.entries(MODULE_OWNERS).filter(([, o]) => Array.isArray(o) && o.includes(key)).map(([p]) => readFileSync(p, 'utf8'));
+      for (const flag of flags) expect(sources.some(src => src.includes(flag)) ? flag : `${key} ${flag}: no owner module names it`).toBe(flag);
+    }
   });
 });
 

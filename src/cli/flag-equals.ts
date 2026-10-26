@@ -34,11 +34,14 @@
  * `--json=true` becomes `--json` (the agent contract's JSON spelling, read
  * the same way by jsonRequested). Refusals name `--flag=…`, never the value,
  * which may be a credential. A short flag never takes `=` (`-y=n` is refused,
- * never taken as consent). OWN_EQUALS_PARSERS pass their argv through,
- * unregistered flags keep the token for the validator to name, and a bare
- * `--` ends the scan only on a path whose handler stops there (END_OF_OPTIONS,
- * keyed by `command sub`): `serve`, `auth`, `frontmatter generate` and
- * `questions` read flags after it.
+ * never taken as consent). OWN_EQUALS_PARSERS pass their argv through. On a
+ * command with a registry row, unregistered flags keep the token for the
+ * validator to name; on a path with none (the hand-parsed search
+ * subcommands), every `=` token but `--json=true` refuses with a neutral
+ * message that names the subcommand, echoes no value and vouches for no
+ * switch. A bare `--` ends the scan only on a path whose handler stops there
+ * (END_OF_OPTIONS, keyed by `command sub`): `serve`, `auth`,
+ * `frontmatter generate`, `questions` and `agent logs` read flags after it.
  */
 import type { OperationError } from '../core/ops/contract.ts';
 import { CLI_FLAG_REGISTRY } from '../core/cli-flag-registry.generated.ts';
