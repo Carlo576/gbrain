@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { applyGitConversion, CONVERSION_GROUP_MAX, CONVERSION_PHASES, planGitConversion, type ConversionProgress } from '../src/core/persistence/git-conversion.ts';
@@ -30,6 +30,18 @@ const bulkSetup = ({ root }: { root: string }) => {
   for (let i = 0; i < BULK; i++) writeFileSync(join(root, 'bulk/p' + String(i).padStart(3, '0') + '.md'), note('bulk/p' + i, 'Committed body ' + i + '.'));
   git(root, 'add', '-A'); git(root, 'commit', '-qm', 'bulk');
 };
+/** bulkSetup with git durability's shape: a bare tracking remote beside the checkout that holds the seeded commit. */
+const remoteOf = (root: string) => join(dirname(root), 'remote.git');
+const durableSetup = (brain: { root: string }) => {
+  bulkSetup(brain);
+  execFileSync('git', ['init', '-q', '--bare', remoteOf(brain.root)]);
+  git(brain.root, 'remote', 'add', 'origin', remoteOf(brain.root));
+  git(brain.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+  git(brain.root, 'branch', '--set-upstream-to=origin/main');
+};
+const enableDurability = (engine: Parameters<Parameters<typeof managedBrain>[0]>[0]['engine']) =>
+  engine.executeRaw("UPDATE persistence_host_bindings SET git_durability='enabled'");
+const remoteHead = (root: string) => execFileSync('git', ['-C', remoteOf(root), 'rev-parse', 'refs/heads/main'], { encoding: 'utf8' }).trim();
 /** Every bulk page edited in the database alone: the plan adopts them in two door groups. */
 const editBulk = (engine: Parameters<Parameters<typeof managedBrain>[0]>[0]['engine']) => engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(
   "UPDATE pages SET compiled_truth=compiled_truth || ' Edited in the database.', knowledge_revision=gen_random_uuid(), revision_write_request_id=NULL WHERE source_id='default' AND slug LIKE 'bulk/%'"), TEST_WRITE_ATTRIBUTION));
@@ -73,6 +85,35 @@ for (const backend of testBackends()) describe('[' + backend + '] #7644: a conve
     expect(lines.map(line => line.phase)).toEqual([...CONVERSION_PHASES]);
     expect(lines.at(-1)).toMatchObject({ event: 'conversion_progress', source_id: 'default', phase: 'strict_pass_2', groups_committed: 2 });
   }, { databaseUrl, setup: bulkSetup }), 300_000);
+
+  test('with durability on, the apply pushes its door commits: the remote branch ends at HEAD', () => managedBrain(async ({ engine, root }) => {
+    await enableDurability(engine);
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await editBulk(engine);
+    const seeded = remoteHead(root);
+    const { preview } = await planGitConversion(engine, 'default');
+    const seen: ConversionProgress[] = [];
+    const result = await applyGitConversion(engine, 'default', preview.preview_hash, { noEmbed: true, noExtract: true, onProgress: progress => seen.push(progress) });
+    expect(result).toMatchObject({ status: 'converted', committed: { groups: 2 }, push: { state: 'pushed' } });
+    expect(remoteHead(root)).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect(remoteHead(root)).not.toBe(seeded);
+    // The push lands before the strict pass, so an apply stopped there has already sent its door commits.
+    expect(seen.find(progress => progress.phase === 'strict_pass_1')?.push).toEqual({ state: 'pushed' });
+  }, { databaseUrl, setup: durableSetup }), 300_000);
+
+  test('a remote that rejects the push still converts, and the receipt reports the push pending', () => managedBrain(async ({ engine, root }) => {
+    await enableDurability(engine);
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await editBulk(engine);
+    const seeded = remoteHead(root);
+    writeFileSync(join(remoteOf(root), 'hooks', 'pre-receive'), '#!/bin/sh\necho "pushes are closed" >&2\nexit 1\n', { mode: 0o755 });
+    const { preview } = await planGitConversion(engine, 'default');
+    const result = await applyGitConversion(engine, 'default', preview.preview_hash, { noEmbed: true, noExtract: true });
+    expect(result).toMatchObject({ status: 'converted', committed: { groups: 2 }, push: { state: 'pending', code: 'git_push_unavailable' } });
+    expect(result.push.notice).toContain('committed locally');
+    expect(remoteHead(root)).toBe(seeded);
+    expect(git(root, 'rev-list', '--count', '@{upstream}..HEAD')).toBe('2');
+  }, { databaseUrl, setup: durableSetup }), 300_000);
 });
 
 describe('#7644: SIGTERM during the strict pass', () => {
@@ -115,7 +156,7 @@ describe('#7644: SIGTERM during the strict pass', () => {
     expect(code).toBe(143);
     const report = JSON.parse(stdout.trim().split('\n').at(-1)!);
     expect(report).toMatchObject({ status: 'interrupted', signal: 'SIGTERM', source_id: 'notes', phase: 'strict_pass_1', groups_committed: 0, canonical: 'mixed',
-      code: 'git_conversion_incomplete', detail: 'interrupted' });
+      code: 'git_conversion_incomplete', detail: 'interrupted', push: { state: 'skipped', reason: 'durability_not_enabled' } });
     expect(report.scanned).toBeLessThanOrEqual(report.total);
     // The conversion is crash-safe: the source stays mixed, and a new preview applies.
     expect(JSON.parse(cli('sources', 'canonical', 'notes', '--to', 'git', '--dry-run', '--json').trim().split('\n').at(-1)!)).toMatchObject({ strict: false, discard: { count: 0 } });

@@ -44,7 +44,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts } from '../../commands/sync.ts';
 import { loadConfig } from '../config.ts';
 import { resolveSourceId } from '../source-resolver.ts';
-import { opError, type OperationError } from '../ops/contract.ts';
+import { opError, OperationError } from '../ops/contract.ts';
 import { trustedCliRequired } from '../ops/op-fix.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { inlineExportMarkdown, readExportPage, readExportPages, readExportWithdrawals, type ExportSnapshot } from '../export-snapshot.ts';
@@ -52,6 +52,8 @@ import { scannerSlugRootMode, scannerSourcePath } from '../write-through.ts';
 import { censusGitGap, type GitGapCensus, type GitGapPage } from '../../commands/sources-git-gap.ts';
 import { compareInlineExportFile, ignoredPaths, readBlobs, type DeclaredClass, type ExportFileComparison } from './git-gap.ts';
 import { commitThroughDoor } from './git-door.ts';
+import { gitRootAhead, pushGitRoot } from './effect-git.ts';
+import { DURABILITY_NOT_ENABLED_REASON, gitDurabilityPolicy } from './git-durability-policy.ts';
 import { currentVerifiedLocalWriter, localHostId } from './identity.ts';
 import { acquireWorktree, readManagedMode } from './ownership.ts';
 import { resolveManagedSyncContext, type ManagedSyncContext } from './sync-discovery.ts';
@@ -84,7 +86,13 @@ export type ConversionPhase = typeof CONVERSION_PHASES[number];
  * went through of its total. In a strict pass, `round` is the pass round, `total` the paths its level read until it
  * admits, then its batch, and `scanned` the batch entries settled.
  */
-export interface ConversionProgress { phase: ConversionPhase; groups_committed: number; scanned: number; total: number; round?: number }
+export interface ConversionProgress { phase: ConversionPhase; groups_committed: number; scanned: number; total: number; round?: number; push?: ConversionPush }
+/**
+ * Where the push of the apply's door commits stands: `pushed`; `pending` (the commits are local and the next page write's
+ * push-only effect pushes them; `code` and `notice` say why it did not land); `skipped` (`reason`: durability is off,
+ * there was nothing to push, or the branch tracks no remote).
+ */
+export interface ConversionPush { state: 'pushed' | 'pending' | 'skipped'; reason?: string; code?: string; notice?: string }
 type ConversionReporter = (patch: Partial<ConversionProgress>) => void;
 
 export const ADOPT_STATES = ['database_ahead', 'undeclared_database_only', 'worktree_only'] as const;
@@ -447,6 +455,8 @@ export interface GitConversionResult {
   withheld: { pages: number; commits: string[] };
   holds_cleared: number;
   parked: { retried: number; reclassified: number };
+  /** #7644: the push of the door commits, as it stood when the apply ended. */
+  push: ConversionPush;
   /** The plan after the flag was set and a strict pass ran: nothing left on a completed conversion. */
   after: GitConversionPreview;
 }
@@ -473,6 +483,7 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   const committed = await adoptGroups(engine, plan, previewCommand, report);
   report({ phase: 'withhold', scanned: 0, total: plan.withhold.length });
   const withheld = await withholdGroups(engine, plan, previewCommand, groups => report({ scanned: progress.scanned + groups.pages, groups_committed: committed.groups + groups.commits }));
+  report({ push: await pushConversion(engine, plan.context) });
   const parked = await settleParked(engine, sourceId, plan.parked);
   report({ phase: 'recheck', scanned: 0, total: 0 });
   // The planned holds are cleared only once this check passes, so a refusal keeps them: a held path is judged as the
@@ -503,8 +514,35 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   await recordConversion(engine, sourceId, plan.incarnation, 'git', expect, plan.preview.head);
   report({ phase: 'strict_pass_2', scanned: 0, total: 0, round: undefined });
   passOrThrow(sourceId, await performManagedSync(engine, { sourceId, noPull: true, full: true, ...processing, onProgress: passProgress(report) }));
+  const final = await pushConversion(engine, plan.context);
+  const push = final.reason === 'nothing_to_push' ? progress.push! : final;
+  report({ push });
   const after = (await planGitConversion(engine, sourceId)).preview;
-  return { status: after.remaining === 0 ? 'converted' : 'incomplete', source_id: sourceId, head: after.head, committed, withheld, holds_cleared: holdsCleared, parked, after };
+  return { status: after.remaining === 0 ? 'converted' : 'incomplete', source_id: sourceId, head: after.head, committed, withheld, holds_cleared: holdsCleared, parked, push, after };
+}
+
+/**
+ * #7644: a door commit of the apply belongs to no write request, so no push-only Git effect pushes it (G2 pairs every other
+ * door commit with one). Where durability applies, the apply pushes them itself under the worktree writer lock, after the
+ * adoption and withhold groups and once at the end. A push that fails leaves them local and the apply goes on: the next
+ * page write's push-only effect pushes the branch.
+ */
+async function pushConversion(engine: BrainEngine, context: ManagedSyncContext): Promise<ConversionPush> {
+  const { root } = context;
+  const pending = (code: string, why: string): ConversionPush => ({ state: 'pending', code,
+    notice: `The conversion's door commits are committed locally, but their push did not land (${why}). The next page write's push sends them; to push now, run gbrain git commit-push --push-only --path ${root}.` });
+  try {
+    if (!(await gitDurabilityPolicy(context.binding, root)).durable) return { state: 'skipped', reason: DURABILITY_NOT_ENABLED_REASON };
+    if (!(await gitRootAhead(root))) return { state: 'skipped', reason: 'nothing_to_push' };
+    const lock = await acquireWorktree(context.binding, LOCK_WAIT_MS, undefined, engine, { yieldLanes: true });
+    if (!lock) return pending('writer_busy', `the writer lock stayed busy for ${LOCK_WAIT_MS / 1000}s`);
+    try {
+      const pushed = await pushGitRoot(root);
+      return pushed.push === 'committed' ? { state: 'pushed' } : { state: 'skipped', reason: pushed.reason };
+    } finally { await lock.release(); }
+  } catch (error) {
+    return pending(error instanceof OperationError ? error.code : 'git_push_unavailable', error instanceof Error ? error.message : String(error));
+  }
 }
 
 /** A strict pass's progress events as the apply's: a round's level read sets the total, its batch the scanned entries. */

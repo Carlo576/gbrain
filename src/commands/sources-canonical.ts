@@ -61,6 +61,7 @@ export function describeGitPreview(p: GitConversionPreview): string {
 
 function describeResult(r: GitConversionResult): string {
   const lines = [`Source ${r.source_id} ${r.status === 'converted' ? 'is git-canonical' : 'is git-canonical, with work left'}: ${r.committed.pages} page(s) committed in ${r.committed.groups} door commit(s), ${r.withheld.pages} private page(s) withheld (${r.withheld.commits.length} removal commit(s)), ${r.holds_cleared} hold(s) cleared, ${r.parked.retried} parked effect(s) retried and ${r.parked.reclassified} reclassified.`];
+  if (r.push.state === 'pending') lines.push(`Push pending (${r.push.code}): ${r.push.notice}`);
   if (r.status === 'incomplete') lines.push(describeGitPreview(r.after));
   return lines.join('\n');
 }
@@ -105,7 +106,7 @@ async function withConversionReport<T>(engine: BrainEngine, sourceId: string, js
         { docs: DOCS, detail: 'interrupted' });
       const report = { status: 'interrupted', signal, source_id: sourceId, ...at, canonical };
       process.stdout.write(`${json ? JSON.stringify({ ...report, ...toAgentError(error, { transport: 'cli', command: 'sources canonical', render: cliRenderContext() }) })
-        : `Conversion interrupted (${signal}) during ${at.phase}${at.round ? ` round ${at.round}` : ''}: ${at.scanned}/${at.total} scanned, ${at.groups_committed} group(s) committed; source canonical state: ${canonical}.\nNext: ${error.suggestion}`}\n`);
+        : `Conversion interrupted (${signal}) during ${at.phase}${at.round ? ` round ${at.round}` : ''}: ${at.scanned}/${at.total} scanned, ${at.groups_committed} group(s) committed; source canonical state: ${canonical}.${at.push?.state === 'pending' ? `\nPush pending (${at.push.code}): ${at.push.notice}` : ''}\nNext: ${error.suggestion}`}\n`);
       await triggerCleanupAndExit(SIGNAL_EXIT[signal] ?? 1);
     })();
   };
