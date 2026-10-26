@@ -30,7 +30,7 @@ import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
 import { publishManagedEntityFacts } from '../../src/core/facts/managed-fact-write.ts';
 import { runFactsPipeline } from '../../src/core/facts/backstop.ts';
 import { FACTS_DEFAULT_VISIBILITY_KEY } from '../../src/core/facts/visibility.ts';
-import { FACTS_DEDUP_CHANGED_MESSAGE } from '../../src/core/persistence/verb-errors.ts';
+import { FACTS_DEDUP_CHANGED_MESSAGE, FACTS_ENTITY_CHANGED_MESSAGE, PAGE_CHANGED_DURING_PREPARATION_MESSAGE } from '../../src/core/persistence/verb-errors.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { requirePostgresTestDatabase, testBackends } from '../helpers/test-backends.ts';
@@ -186,7 +186,8 @@ for (const backend of testBackends()) {
     }
 
     // Value: protects=automatic extraction (no request id) publishes both entities' facts in one run when another write moves one
-    // entity page before its fact request publishes, and a replay adds nothing; fails_when=the moved entity's refusal stands, the
+    // entity page before its fact request publishes (refused at admission, or by the coordinator between preparation and
+    // publication), and a replay adds nothing; fails_when=the moved entity's refusal stands or carries another message, the
     // committed entity is re-admitted or counted twice, or a replay re-runs the model; why_new=#7602 tests move a single entity and
     // only A-36 explicit callers move one of two; seam=none; no_claim=the move is a direct coordinated write in a fault hook, not a
     // concurrent facts-absorb job (stub chat model)
@@ -199,6 +200,8 @@ for (const backend of testBackends()) {
           const first = await expectUnitNotAborted(extract);
           expect(reachedB()).toBe(1);
           expect({ inserted: first.inserted, refused: first.refused }).toEqual({ inserted: 2, refused: undefined });
+          expect(await engine.executeRaw("SELECT error_code, error_message FROM persistence_requests WHERE source_id=$1 AND operation='extract_facts' AND slug=$2 AND state='conflict'", [sourceId, B]))
+            .toEqual([{ error_code: 'revision_conflict', error_message: at === 'consumer:prepared' ? PAGE_CHANGED_DURING_PREPARATION_MESSAGE : FACTS_ENTITY_CHANGED_MESSAGE }]);
           const stored = await requests(engine, sourceId);
           expect(stored.map(row => [row.slug, row.state])).toEqual([[A, 'committed'], [B, 'conflict'], [COMPLETE, 'conflict'], [B, 'committed'], [COMPLETE, 'committed']]);
           expect(await factEntities(engine, sourceId)).toEqual([B, A].sort());

@@ -14,6 +14,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FactsBackstopCtx } from '../src/core/facts/backstop.ts';
 import { RECOVERY_VERSION } from '../src/core/markdown.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import { prepareManagedFactsSession, publishManagedFacts, resumeManagedFacts } from '../src/core/persistence/facts-maintenance.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { registerLocalWriter, withVerifiedLocalRegistration } from '../src/core/persistence/identity.ts';
@@ -76,7 +77,11 @@ for (const backend of testBackends()) {
     expect(await factRows(engine)).toEqual([]);
     // Value: protects=repair failed-writes lists a held-file fact refusal with the job retry that recovers it, then drops it once a
     // follow-up committed; fails_when=the listing names extract --stale, loses the file-check note, or keeps a recovered request;
-    // why_new=#7602 covers revision_conflict listings only; seam=none; no_claim=does not run the job retry itself
+    // why_new=#7602 covers revision_conflict listings only; seam=the job died is set by SQL (the reset needs a dead job); no_claim=does
+    // not run the job retry itself
+    const key = `facts-absorb:write:${write}`;
+    const job = await new MinionQueue(engine).add('facts-absorb', { slug: ORIGIN, sourceId: 'default', persistence_request_id: write }, { queue: 'default', idempotency_key: key });
+    await engine.executeRaw("UPDATE minion_jobs SET status='dead' WHERE id=$1", [job.id]);
     const [listed, ...others] = await factsListing(engine);
     expect(others).toEqual([]);
     expect(listed!.class).toBe('producer_owned');

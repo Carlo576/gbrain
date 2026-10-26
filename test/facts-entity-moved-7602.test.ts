@@ -17,9 +17,12 @@
  */
 import { afterEach, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { configureGateway, resetGateway, __setChatTransportForTests, type ChatResult } from '../src/core/ai/gateway.ts';
 import { FENCE_FACTS_INTENT } from '../src/core/cycle/extract-facts.ts';
 import type { FactsBackstopCtx } from '../src/core/facts/backstop.ts';
+import { RECOVERY_VERSION } from '../src/core/markdown.ts';
 import { FACTS_DEFAULT_VISIBILITY_KEY } from '../src/core/facts/visibility.ts';
 import { makeFactsAbsorbHandler } from '../src/core/minions/handlers/facts-absorb.ts';
 import { jobRefusal } from '../src/core/minions/refusal.ts';
@@ -28,6 +31,7 @@ import { prepareManagedFactsSession, publishManagedFacts, resumeManagedFacts } f
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { maintenancePreflight, submitDatabaseMaintenanceIntent } from '../src/core/persistence/prepared-maintenance.ts';
 import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
+import { writeGitHold } from '../src/core/persistence/sync-holds.ts';
 import { resolveRepairScope } from '../src/core/repair/core.ts';
 import { repairRunner } from '../src/core/repair/registry.ts';
 import type { ManagedBrain } from './helpers/managed-brain.ts';
@@ -154,6 +158,23 @@ for (const backend of testBackends()) {
     expect(await factsListing(engine)).toEqual([]);
   }, { databaseUrl }), 120_000);
 
+  // Value: protects=the third follow-up still runs and publishes when the page stops moving after three reads; fails_when=the walk
+  // stops before MAX_FILE_REFUSAL_RETRIES follow-ups; why_new=the row below covers only the side where every follow-up loses;
+  // seam=none; no_claim=the moves are direct publications from a read hook, not concurrent facts-absorb jobs
+  test(`#7602 [${backend}]: a page that moves for the first three reads publishes on the third follow-up`, () => managedBrain(async brain => {
+    const { engine } = brain;
+    const { move, loser } = await setup(brain, 3);
+    const race = raceEntityReads(engine, 3, move);
+    const first = await publishManagedFacts(engine, await loser.session(), loser.backstop, [fact(CLAIM_B)], 'private', loser.slug).finally(race.restore);
+    expect(race.moves()).toBe(3);
+    expect(first.inserted).toBe(1);
+    expect(first.refused).toBeUndefined();
+    expect((await entityRequests(engine)).map(row => [row.state, row.error_code])).toEqual([
+      ['conflict', 'revision_conflict'], ['conflict', 'revision_conflict'], ['conflict', 'revision_conflict'], ['committed', null]]);
+    expect(await claimB(engine)).toEqual([{ fact: CLAIM_B, source_markdown_slug: TARGET }]);
+    expect(await factsListing(engine)).toEqual([]);
+  }, { databaseUrl }), 120_000);
+
   test(`#7602 [${backend}]: a page that moves before every follow-up is followed three times, then the refusal stands and is not retryable`, () => managedBrain(async brain => {
     const { engine } = brain;
     const { move, loser } = await setup(brain, 4);
@@ -178,7 +199,11 @@ for (const backend of testBackends()) {
     }
   }, { databaseUrl }), 120_000);
 
-  test(`#7602 [${backend}]: a refusal stored before the fix is listed with the job retry that recovers its facts, and the retry's replay publishes them`, () => managedBrain(async brain => {
+  // Value: protects=repair failed-writes offers the job reset only for a dead facts-absorb job, and the reset's replay publishes the
+  // retained facts; fails_when=a waiting or completed job is listed with retry-dead (a command that finds no dead job), or the replay
+  // does not publish; why_new=the rows above never list a recoverable refusal; seam=the job's status is set by SQL; no_claim=does not
+  // run the worker or facts_drain
+  test(`#7602 [${backend}]: a refusal stored before the fix is listed with the job retry once its job is dead, and the retry's replay publishes them`, () => managedBrain(async brain => {
     const { engine } = brain;
     const { move, loser } = await setup(brain, 1);
     const before = await loser.session();
@@ -186,10 +211,16 @@ for (const backend of testBackends()) {
     const race = raceEntityReads(engine, 1, move);
     const refused = await publishManagedFacts(engine, before, loser.backstop, [fact(CLAIM_B)], 'private', loser.slug).catch(error => error).finally(race.restore);
     expect(refused.code).toBe('revision_conflict');
+    const key = `facts-absorb:write:${loser.write}`;
+    const jobStatus = (status: string) => engine.executeRaw("UPDATE minion_jobs SET status=$2 WHERE name='facts-absorb' AND idempotency_key=$1 RETURNING id", [key, status]);
+    expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`pending: its facts-absorb job (${key}) is waiting; preview again once it ends`]);
+    expect(await jobStatus('completed')).toHaveLength(1);
+    expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call); its facts-absorb job is completed, so gbrain facts retry-dead has no dead job to reset`]);
+    expect(await jobStatus('dead')).toHaveLength(1);
     const [entry, ...others] = await factsListing(engine);
     expect(others).toEqual([]);
     expect(entry!.class).toBe('producer_owned');
-    expect(entry!.detail).toStartWith(`recover: gbrain facts retry-dead --reset 'facts-absorb:write:${loser.write}'`);
+    expect(entry!.detail).toStartWith(`recover: gbrain facts retry-dead --reset '${key}'`);
     const retried = await resumeManagedFacts(engine, await loser.session());
     expect(retried?.inserted).toBe(1);
     expect(await claimB(engine)).toEqual([{ fact: CLAIM_B, source_markdown_slug: TARGET }]);
@@ -265,6 +296,52 @@ for (const backend of testBackends()) {
         .toEqual([['producer_owned', `re-run: ${command}`]]);
     }, { databaseUrl }), 120_000);
   }
+
+  // Value: protects=an entity page replaced at its slug (a new page id) after admission is not re-targeted, and repair lists the
+  // refusal for re-extraction, not the job retry that would replay it; fails_when=the replacement page gets the retained facts or the
+  // listing offers retry-dead; why_new=the deleted-page row leaves no page at the slug; seam=none; no_claim=the replacement is a
+  // direct purge and put in the race
+  test(`#7602 [${backend}]: an entity page replaced after admission is not re-targeted and is listed for re-extraction`, () => managedBrain(async brain => {
+    const { engine, ctx } = brain;
+    const { loser } = await setup(brain, 0);
+    const race = raceEntityReads(engine, 1, async () => {
+      const snapshot = (await engine.readPageSnapshot(TARGET, { sourceId: 'default' }))!;
+      await submitPageMutation(ctx, { operation: 'delete_page', params: { slug: TARGET, expected_revision: snapshot.revision, purge: true, request_id: randomUUID() } });
+      await submitPageMutation(ctx, { operation: 'put_page', params: { slug: TARGET, request_id: randomUUID(),
+        content: '---\ntype: person\ntitle: Example\n---\nA different synthetic person page created at the same slug after the purge.\n' } });
+      expect((await engine.readPageSnapshot(TARGET, { sourceId: 'default' }))!.page.id).not.toBe(snapshot.page.id);
+    });
+    const refused = await publishManagedFacts(engine, await loser.session(), loser.backstop, [fact(CLAIM_B)], 'private', loser.slug).catch(error => error).finally(race.restore);
+    expect(race.moves()).toBe(1);
+    expect([refused.code, refused.retryable]).toEqual(['revision_conflict', false]);
+    expect((await entityRequests(engine)).map(row => row.state)).toEqual(['conflict']);
+    expect(await claimB(engine)).toEqual([]);
+    expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call); entity page ${TARGET} was replaced after these facts were admitted, so a job retry replays the refusal`]);
+  }, { databaseUrl }), 120_000);
+
+  // Value: protects=when the entity's file is held between the move and the follow-up, repair lists the whole chain for
+  // re-extraction instead of the job retry, which would replay the follow-up's file refusal; fails_when=either request is listed
+  // with retry-dead; why_new=#7439 covers a held file on the original batch only; seam=the hold is written directly, as #7439 does;
+  // no_claim=the follow-up is not re-admitted after the hold clears (a known limit: re-extraction recovers it)
+  test(`#7602 [${backend}]: a moved entity whose file is held before the follow-up publishes is listed for re-extraction`, () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    const { move, loser } = await setup(brain, 1);
+    const race = raceEntityReads(engine, 2, async n => {
+      if (n === 0) return move(0);
+      const snapshot = (await engine.readPageSnapshot(TARGET, { sourceId: 'default' }))!;
+      const path = `${TARGET}.md`, file = join(root, path);
+      writeFileSync(file, readFileSync(file, 'utf8') + '\nAn unimported edit.\n');
+      await engine.transaction(tx => writeGitHold(tx, { source_id: 'default', incarnation: snapshot.sourceIncarnation,
+        path, source_path: path, slug: TARGET, page_id: null, code: 'preparation_stalled', message: 'The write owner stalled.',
+        upstream_version: null, observed_at: new Date().toISOString(), run_id: null, mode: 'managed', meta: { recovery_version: RECOVERY_VERSION } }));
+    });
+    const refused = await publishManagedFacts(engine, await loser.session(), loser.backstop, [fact(CLAIM_B)], 'private', loser.slug).catch(error => error).finally(race.restore);
+    expect(race.moves()).toBe(2);
+    expect(refused.code).toBe('source_changed');
+    expect((await entityRequests(engine)).map(row => [row.state, row.error_code])).toEqual([['conflict', 'revision_conflict'], ['conflict', 'source_changed']]);
+    expect(await claimB(engine)).toEqual([]);
+    expect((await factsListing(engine)).map(entry => entry.detail)).toEqual(Array(2).fill(`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call); a follow-up of its moved-entity refusal was refused for a held file, which a job retry does not re-admit`));
+  }, { databaseUrl }), 120_000);
 
   test(`#7602 [${backend}]: an entity page deleted after admission is not re-targeted; the refusal is not retryable`, () => managedBrain(async brain => {
     const { engine, ctx } = brain;
