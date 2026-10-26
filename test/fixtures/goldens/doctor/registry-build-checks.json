@@ -359,7 +359,7 @@
       },
       {
         "category": "ops",
-        "name": "guard_functions"
+        "name": "function_search_path"
       },
       {
         "category": "meta",

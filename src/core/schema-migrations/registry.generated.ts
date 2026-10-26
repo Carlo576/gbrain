@@ -276,7 +276,7 @@ import { v272 } from './v272-git-canonical-declared.ts';
 import { v273 } from './v273-segment-derivations.ts';
 import { v274 } from './v274-pages-withheld-source-path.ts';
 import { v275 } from './v275-rls-backfill-unguarded-tables.ts';
-import { v276 } from './v276-guard-triggers-security-definer.ts';
+import { v276 } from './v276-function-search-path-pg-temp.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.

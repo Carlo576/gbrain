@@ -48,7 +48,7 @@ import { FACT_PURGE_LOOKUP_INDEX_SQL, MEMORY_PURGE_SCHEMA_SQL } from '../src/cor
 import { WRITE_GATE_SCHEMA_SQL } from '../src/core/write-gate-schema.ts';
 import { BELIEF_LEDGER_SCHEMA_SQL } from '../src/core/belief/schema.ts';
 import { GIT_CANONICAL_SCHEMA_SQL } from '../src/core/persistence/git-canonical-schema.ts';
-import { FUNCTION_SEARCH_PATH_HARDENING_SQL } from '../src/core/guard-definer.ts';
+import { FUNCTION_SEARCH_PATH_HARDENING_SQL } from '../src/core/function-search-path.ts';
 
 const REPO = resolve(import.meta.dir, '..');
 export const SCHEMA_SQL_PATH = 'src/schema.sql';
@@ -120,7 +120,7 @@ export const FRAGMENTS: readonly Fragment[] = [
   { source: 'src/core/questions/schema.ts', expr: 'PINNED_QUESTIONS_SCHEMA_SQL', postgres: PINNED_QUESTIONS_SCHEMA_SQL, pglite: PINNED_QUESTIONS_SCHEMA_SQL },
   { source: 'src/core/belief/schema.ts', expr: 'BELIEF_LEDGER_SCHEMA_SQL', postgres: BELIEF_LEDGER_SCHEMA_SQL, pglite: BELIEF_LEDGER_SCHEMA_SQL },
   // Last: a replay's CREATE OR REPLACE resets each function's search_path, so pg_temp is appended after every one (#7632).
-  { source: 'src/core/guard-definer.ts', expr: 'FUNCTION_SEARCH_PATH_HARDENING_SQL', postgres: FUNCTION_SEARCH_PATH_HARDENING_SQL, pglite: FUNCTION_SEARCH_PATH_HARDENING_SQL },
+  { source: 'src/core/function-search-path.ts', expr: 'FUNCTION_SEARCH_PATH_HARDENING_SQL', postgres: FUNCTION_SEARCH_PATH_HARDENING_SQL, pglite: FUNCTION_SEARCH_PATH_HARDENING_SQL },
 ];
 
 const fragmentLabel = (f: Fragment) => `${f.source} (${f.expr})`;

@@ -1008,8 +1008,8 @@
         {
           "category": "ops",
           "elapsed_ms": "<volatile>",
-          "message": "The 7 purge and withdrawal guards read their ledgers as their owner; every gbrain function pins pg_temp last",
-          "name": "guard_functions",
+          "message": "Every gbrain function that pins a search_path ends it with pg_temp",
+          "name": "function_search_path",
           "status": "ok"
         },
         {

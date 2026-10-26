@@ -7,7 +7,6 @@
     "trg:page_body_manifest.page_body_manifest_derivation_scope_delete",
     "trg:page_body_manifest.page_body_manifest_derivation_scope_retire",
     "trg:page_segment_derivations.page_segment_derivations_refuse_purging",
-    "trg:page_segment_derivations.page_segment_derivations_refuse_stored_purging",
     "trg:page_segment_texts.managed_writer_guard",
     "trg:pages.bump_page_generation_clock_trg",
     "trg:pages.bump_page_generation_trg",

@@ -965,8 +965,8 @@
         {
           "category": "ops",
           "elapsed_ms": "<volatile>",
-          "message": "Skipped (PGLite: one role, so every guard reads every row)",
-          "name": "guard_functions",
+          "message": "Every gbrain function that pins a search_path ends it with pg_temp",
+          "name": "function_search_path",
           "status": "ok"
         },
         {
