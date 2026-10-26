@@ -167,6 +167,58 @@ for (const backend of testBackends()) {
       expect(await factRows(engine)).toEqual([]);
     }, { setup, databaseUrl }), 180_000);
 
+    test('a fence-guard hold whose source cell was edited after it was held refuses: the edit re-gates the hold, so the older approval is stale', () => managedBrain(async ({ engine, ctx, root }) => {
+      await seedPage(engine, ctx);
+      await enableTrustProtections(engine);
+      const row = { rowNum: 1, claim: CLAIM, kind: 'fact' as const, confidence: 1, visibility: 'world' as const, notability: 'medium' as const,
+        validFrom: '2026-01-01', source: 'email', context: 'Approved context.', active: true };
+      const write = async (r: typeof row) => {
+        const current = await engine.readPageSnapshot(slug, { sourceId: 'default' });
+        await submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(), content_origin: 'tool_output', expected_revision: current!.revision,
+          content: `---\ntype: person\ntitle: Alice Example\n---\n\n# Alice Example\n\nBody.\n\n## Facts\n\n${renderFactsTable([r])}\n` } });
+        await settleManagedGitEffects(engine);
+      };
+      await write(row);
+      const [hold] = await engine.executeRaw<{ id: number }>("SELECT id FROM write_gate_holds WHERE source_id='default' AND slug=$1 AND status='held'", [slug]);
+      expect(hold).toBeDefined();
+      const preview = await previewOwnerAction(engine, { action: 'release', ref: `h${hold!.id}` });
+      await write({ ...row, source: 'meeting' });
+      expect(fenceCells(readFileSync(file(root), 'utf8')).map(f => [f.context, f.source])).toEqual([['Approved context.', 'meeting']]);
+
+      const error = await applyOwnerAction(engine, { action: 'release', ref: `h${hold!.id}` }, { binding: preview.binding, confirmation: { via: 'tty' }, by: owner })
+        .then(() => null, (e: { code?: string }) => e);
+      expect(error?.code).toBe('preview_changed');
+      expect(await holdStatus(engine, `h${hold!.id}`)).toBe('held');
+      expect(await factRows(engine)).toEqual([]);
+    }, { setup, databaseUrl }), 180_000);
+
+    test('an unedited fence-guard row with context, or with no source cell, releases without fence_row_changed', async () => {
+      for (const shape of [{ context: 'Approved context with  two spaces | and a pipe.', source: 'email' }, { context: 'Some context.' }] as Array<{ context: string; source?: string }>) {
+        await managedBrain(async ({ engine, ctx, root }) => {
+          await seedPage(engine, ctx);
+          await enableTrustProtections(engine);
+          const row = { rowNum: 1, claim: CLAIM, kind: 'fact' as const, confidence: 1, visibility: 'world' as const, notability: 'medium' as const,
+            validFrom: '2026-01-01', active: true, ...shape };
+          const current = await engine.readPageSnapshot(slug, { sourceId: 'default' });
+          await submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(), content_origin: 'tool_output', expected_revision: current!.revision,
+            content: `---\ntype: person\ntitle: Alice Example\n---\n\n# Alice Example\n\nBody.\n\n## Facts\n\n${renderFactsTable([row])}\n` } });
+          await settleManagedGitEffects(engine);
+          const [hold] = await engine.executeRaw<{ id: number }>("SELECT id FROM write_gate_holds WHERE source_id='default' AND slug=$1 AND status='held'", [slug]);
+          expect(hold).toBeDefined();
+          const before = readFileSync(file(root), 'utf8');
+          expect(fenceCells(before).map(f => [f.context, f.source ?? null])).toEqual([[shape.context, shape.source ?? null]]);
+
+          const result = await release(engine, `h${hold!.id}`).catch((e: { code?: string }) => ({ code: e.code }));
+          expect({ shape, result }).toMatchObject({ shape, result: { status: 'released', tier: 'user_confirmed' } });
+          const rows = await factRows(engine);
+          expect(rows).toHaveLength(1);
+          expect(Number(rows[0]!.row_num)).toBe(1);
+          await settleManagedGitEffects(engine);
+          expect(readFileSync(file(root), 'utf8')).toBe(before);
+        }, { setup, databaseUrl });
+      }
+    }, 300_000);
+
     test('a retry of the same approval replays one receipt: one request, one fact, one fence row', () => managedBrain(async ({ engine, ctx, root }) => {
       await seedPage(engine, ctx);
       const ref = await holdRemember(engine, ctx);
@@ -295,6 +347,34 @@ for (const backend of testBackends()) {
     // Value: protects=on an unmanaged brain a held fact whose entity page exists still releases database-only: no trust_release request, no fence row;
     // fails_when=submitTrustRelease's managed-mode check is dropped and every release goes through the door; why_new=no test releases a real hold unmanaged;
     // seam=none; no_claim=the unmanaged page body (only that no fence row and no request appear)
+    test('a release that ended without committing twice admits a distinct attempt each time and replays the committed one', () => managedBrain(async ({ engine, ctx, root }) => {
+      await seedPage(engine, ctx);
+      const ref = await holdRemember(engine, ctx);
+      const lift = `PERFORM set_config('gbrain.write_sources', '["default"]', true); PERFORM set_config('gbrain.git_protocol', '1', true);`;
+      const restore = () => engine.executeRaw(`DO $$ BEGIN ${lift} UPDATE pages SET deleted_at=NULL WHERE source_id='default' AND slug='${slug}'; END $$`);
+      await engine.executeRaw(`CREATE FUNCTION test_delete_page() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN ${lift} UPDATE pages SET deleted_at=now() WHERE source_id='default' AND slug=NEW.slug; RETURN NEW; END $$`);
+      await engine.executeRaw(`CREATE TRIGGER test_delete_page AFTER INSERT ON persistence_requests FOR EACH ROW
+        WHEN (NEW.operation = 'trust_release') EXECUTE FUNCTION test_delete_page()`);
+      for (let i = 0; i < 2; i++) {
+        const failed = await release(engine, ref).then(() => null, (e: { code?: string }) => e);
+        expect(failed?.code).toBe('page_identity_changed');
+        await restore();
+      }
+      await engine.executeRaw('DROP TRIGGER test_delete_page ON persistence_requests');
+      expect(await holdStatus(engine, ref)).toBe('held');
+
+      expect(await release(engine, ref)).toMatchObject({ status: 'released', tier: 'user_confirmed' });
+      const requests = await engine.executeRaw<{ id: string; state: string }>("SELECT id, state FROM persistence_requests WHERE operation='trust_release' ORDER BY created_at, id");
+      expect(requests.map(r => r.state)).toEqual(['conflict', 'conflict', 'committed']);
+      expect(new Set(requests.map(r => r.id)).size).toBe(3);
+      expect(await currentHoldStore().publish!(engine, Number(ref.slice(1)), 'owner-example')).toBe(true);
+      expect(await engine.executeRaw("SELECT id FROM persistence_requests WHERE operation='trust_release'")).toHaveLength(3);
+      expect(await factRows(engine)).toHaveLength(1);
+      await settleManagedGitEffects(engine);
+      expect(fenceCells(readFileSync(file(root), 'utf8'))).toHaveLength(1);
+    }, { setup, databaseUrl }), 180_000);
+
     test('on an unmanaged brain a held fact releases database-only even when its entity page exists', async () => {
       const home = mkdtempSync(join(tmpdir(), 'gbrain-release-unmanaged-'));
       try {
