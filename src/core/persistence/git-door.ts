@@ -20,9 +20,9 @@
  * and after `hash-object -w` stores it (an edit landing during the write refuses `git_target_changed`), and each
  * target's index entry must equal HEAD's before the commit is built (a staged change of a target refuses
  * `git_index_conflict`, index untouched). After the branch moves, an entry someone staged meanwhile is left as it is
- * and the write reports that its commit landed. A write whose path already holds the planned blob at HEAD only refreshes
- * an index entry still holding the parent commit's version (the door's own interrupted refresh); any other staged
- * entry refuses `git_index_conflict`.
+ * and the write reports that its commit landed. An entry still holding HEAD's first parent's version at that path counts
+ * as clean: it is what an interrupted refresh after the door's own commit leaves, and its bytes are in history, so the
+ * next write (or a replay whose blob HEAD already holds) refreshes it; any other staged entry refuses `git_index_conflict`.
  *
  * Recovery inverts for those writes: the recovery record names the HEAD it was prepared against (`door`), and a
  * publication that stopped after its commit landed keeps the committed file instead of restoring the prior bytes.
@@ -283,15 +283,15 @@ async function doorCommit(session: GitSession, root: string, files: DoorFile[]):
       if (fresh.length) await refuseIgnored(session, root, fresh);
       const indexed = await readIndex(session, index, [...targets.values()]);
       const staged = [...targets.values()].filter(target => indexed.entries.get(target.rel) !== target.head);
-      if (!changed.length) {
-        if (!staged.length) return head;
+      if (staged.length) {
         const parent = await parentEntries(session, head, staged);
         const foreign = staged.filter(target => indexed.entries.get(target.rel) !== parent.get(target.rel));
         if (foreign.length) throw indexConflict(root, foreign);
-        await syncIndex(session, root, prefix, index, [...targets.values()], head, indexed);
+      }
+      if (!changed.length) {
+        if (staged.length) await syncIndex(session, root, prefix, index, [...targets.values()], head, indexed);
         return head;
       }
-      if (staged.length) throw indexConflict(root, staged);
 
       // The trees are rebuilt bottom-up: an emptied directory leaves its parent, the rest are written and linked.
       const written: { path: string; oid: string }[] = [];
@@ -358,7 +358,7 @@ function refuseChanged(root: string, targets: Iterable<Target>): void {
     'Another process changed the file during the write; recovery leaves the changed file as it is. Retry the write with a new request_id once the file has settled.', { detail: moved.join(',') });
 }
 
-/** Targets whose index entry differs from HEAD's (a staged change, or a merge conflict) refuse as `git_index_conflict`. */
+/** Targets whose index entry differs from HEAD's and from its first parent's (a staged change, or a merge conflict) refuse as `git_index_conflict`. */
 function indexConflict(root: string, staged: Target[]): OperationError {
   const paths = staged.map(target => target.rel);
   return opError('git_index_conflict', `${paths.join(', ')} in ${root} has a staged change that is not committed, so this write committed nothing and the index was left as it was.`,

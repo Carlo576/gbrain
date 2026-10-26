@@ -7,10 +7,15 @@
  *   - D4: a disk edit landing during the publication is never committed: it refuses git_target_changed, HEAD and the
  *     row keep the prior revision, and recovery holds the edited file as it is (red before: HEAD held the edit while the
  *     row recorded the publication's content);
+ *   - D4's recovery record pauses every later write of the worktree until `gbrain repair stuck-recovery --keep disk`
+ *     resolves it: the human's bytes stay on disk, the write ends failed, the queued write publishes, Git and the row
+ *     keep the prior revision until the edit is committed, and a sync then imports it;
  *   - with no interference the planned blob commits and the index and status are clean;
  *   - plumbing: a file rewritten between plan and commit refuses with nothing committed or staged; a change staged
- *     after the pre-commit check and before the index refresh is left staged and the refusal says the commit landed; a
- *     commit already at HEAD refreshes an entry still holding the parent's version and refuses any other staged entry.
+ *     after the pre-commit check and before the index refresh is left staged and the refusal says the commit landed; an
+ *     entry still holding the parent's version (a landed commit whose index refresh failed) counts as clean, so the next
+ *     changed write and a replay already at HEAD both refresh it, while any other staged entry refuses (red before: the
+ *     next changed write refused git_index_conflict until someone ran git restore --staged).
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -26,10 +31,13 @@ import { publishMutation, type PublicationHooks } from '../src/core/persistence/
 import { sha256 } from '../src/core/persistence/digest.ts';
 import { commitThroughDoor, doorSeams } from '../src/core/persistence/git-door.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
-import { admitWrite, claimNextWrite } from '../src/core/persistence/journal.ts';
+import { admitWrite, claimNextWrite, getWriteRequestById } from '../src/core/persistence/journal.ts';
 import { getWorktreeBinding } from '../src/core/persistence/ownership.ts';
 import { preparePageMutation } from '../src/core/persistence/page-prepare.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
+import { readHeadBlockers } from '../src/core/persistence/head-blocker.ts';
+import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { runRepairCommand } from '../src/commands/repair.ts';
 import { durableGitRepo } from './helpers/git-publication.ts';
 import { managedBrain, settleManagedGitEffects } from './helpers/managed-brain.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -59,8 +67,22 @@ async function publish(engine: BrainEngine, ctx: OperationContext, content: stri
   const intent = { slug: SLUG, content, expected_revision: old.revision };
   await admitWrite(engine, { principal: authority.principal, authority, operation: 'put_page', sourceId: 'default', sourceIncarnation: binding.source_incarnation,
     slug: SLUG, pageId: old.page.id, requestId: randomUUID(), callerIntent: intent, intent, worktreeId: binding.worktree_id, topologyGeneration: binding.topology_generation });
-  const row = (await claimNextWrite(engine, host))!;
+  return publishNext(engine, ctx, hooks);
+}
+
+/** Claims and publishes the next queued write of this host. */
+async function publishNext(engine: BrainEngine, ctx: OperationContext, hooks: PublicationHooks = {}) {
+  const host = localHostId(), row = (await claimNextWrite(engine, host))!;
   return publishMutation(engine, row, await preparePageMutation(engine, row, ctx.config), host, hooks);
+}
+
+/** `gbrain repair <args>` in this process, returning what it printed. */
+async function repairCli(engine: BrainEngine, args: string[]): Promise<string> {
+  let printed = '';
+  const original = console.log;
+  console.log = (...parts: unknown[]) => { printed += `${parts.map(String).join(' ')}\n`; };
+  try { await runRepairCommand(engine, args); } finally { console.log = original; }
+  return printed;
 }
 
 /** Where the page stands afterwards: the row's title, HEAD's and the disk's title lines, and the index entry's blob. */
@@ -119,6 +141,40 @@ for (const backend of testBackends()) describe(`[${backend}] the door commits on
     expect(git(root, 'rev-parse', 'HEAD')).toBe(head);
     expect(git(root, 'status', '--porcelain')).toBe(`M ${FILE}`);
   }, { databaseUrl, setup }), 120_000);
+
+  test('D4 resolution: the record pauses later writes; repair stuck-recovery --keep disk frees them, keeps the edit, and a commit of it syncs in', () => managedBrain(async ({ engine, ctx, root }) => {
+    await committedPage(engine, ctx);
+    const d4 = await publish(engine, ctx, page('Second'), { boundary: async name => {
+      if (name !== 'after_publication') return;
+      writeFileSync(join(root, FILE), readFileSync(join(root, FILE), 'utf8').replace('title: Second', 'title: USER DISK EDIT'));
+    } });
+    expect(d4).toMatchObject({ state: 'recovering', error_code: 'git_target_changed', blocked_reason: 'unexpected_file_bytes' });
+    const pending = await putPage.handler(ctx, { slug: 'notes/other', content: page('Other'), request_id: randomUUID(), wait_ms: 200 })
+      .then(() => null, (error: { code?: string; writeRequest?: { request_id: string } }) => error);
+    expect(pending).toMatchObject({ code: 'write_pending' });
+    await disposePersistenceConsumer(engine);
+    const [{ id: later }] = await engine.executeRaw<{ id: string }>('SELECT id::text AS id FROM persistence_requests WHERE request_id=$1::uuid', [pending!.writeRequest!.request_id]);
+    expect((await readHeadBlockers(engine, [later!], localHostId())).get(later!)).toMatchObject({ status: 'blocked',
+      blocker: { predicate: 'request_recovery', ids: [d4.request_id], state: 'unexpected_file_bytes', intervention: true, file: { slug: SLUG } } });
+
+    const preview = await repairCli(engine, ['stuck-recovery', '--source', 'default', '--json']);
+    const hash = /"preview_hash": "([0-9a-f]{64})"/.exec(preview)![1]!;
+    const applied = await repairCli(engine, ['stuck-recovery', '--source', 'default', '--keep', 'disk', '--apply', '--expect', hash, '--yes', '--json']);
+    expect(applied).toContain('"resolved": 1');
+    expect(await getWriteRequestById(engine, d4.id)).toMatchObject({ state: 'failed', error_code: 'git_target_changed', recovery: null });
+    expect((await readHeadBlockers(engine, [later!], localHostId())).get(later!)).toEqual({ status: 'claimable' });
+    expect(await publishNext(engine, ctx)).toMatchObject({ id: later, state: 'committed' });
+
+    expect(['first_sync', 'synced', 'up_to_date']).toContain((await performManagedSync(engine, { sourceId: 'default', noPull: true })).status);
+    const head = git(root, 'rev-parse', `HEAD:${FILE}`);
+    expect(await standing(engine, root)).toEqual({ row: 'First', head: 'First', disk: 'USER DISK EDIT', index: head });
+    expect(git(root, 'status', '--porcelain')).toBe(`M ${FILE}`);
+
+    git(root, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Keep the edit', '--', FILE);
+    expect(['synced', 'up_to_date']).toContain((await performManagedSync(engine, { sourceId: 'default', noPull: true })).status);
+    expect(await standing(engine, root)).toEqual({ row: 'USER DISK EDIT', head: 'USER DISK EDIT', disk: 'USER DISK EDIT', index: git(root, 'rev-parse', `HEAD:${FILE}`) });
+    expect(git(root, 'status', '--porcelain')).toBe('');
+  }, { databaseUrl, setup }), 180_000);
 
   test('with no interference the planned blob commits, and the index and status are clean', () => managedBrain(async ({ engine, ctx, root }) => {
     await committedPage(engine, ctx);
@@ -196,6 +252,26 @@ describe('door plumbing: the planned state', () => {
     expect(git(root, 'show', 'HEAD:notes/b.md')).toBe('door');
     expect(git(root, 'rev-parse', ':notes/b.md')).toBe(staged);
     expect(git(root, 'rev-parse', ':notes/a.md')).toBe(git(root, 'rev-parse', 'HEAD:notes/a.md'));
+  });
+
+  test('after a door commit whose index refresh failed, the next changed write to those paths commits and leaves the index clean', async () => {
+    const root = repo({ 'notes/a.md': 'a\n' });
+    const lock = join(root, '.git', 'index.lock');
+    doorSeams.beforeUpdateRef = () => { writeFileSync(lock, ''); };
+    put(root, 'notes/a.md', 'first\n'); put(root, 'notes/new.md', 'first new\n');
+    const landed = await refusal(commitThroughDoor(root, ['notes/a.md', 'notes/new.md'].map(path => ({ path: join(root, path), planned: sha256(readFileSync(join(root, path))) }))));
+    rmSync(lock);
+    delete doorSeams.beforeUpdateRef;
+    expect(landed).toMatchObject({ code: 'git_unavailable', message: expect.stringContaining('landed, but the index') });
+    expect(git(root, 'show', 'HEAD:notes/a.md')).toBe('first');
+    expect(git(root, 'rev-parse', ':notes/a.md')).toBe(git(root, 'rev-parse', 'HEAD^:notes/a.md'));
+    expect(git(root, 'ls-files', '--', 'notes/new.md')).toBe('');
+    put(root, 'notes/a.md', 'second\n'); put(root, 'notes/new.md', 'second new\n');
+    const commit = await commitThroughDoor(root, ['notes/a.md', 'notes/new.md'].map(path => ({ path: join(root, path), planned: sha256(readFileSync(join(root, path))) })));
+    expect(commit).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect(git(root, 'show', 'HEAD:notes/a.md')).toBe('second');
+    expect(git(root, 'show', 'HEAD:notes/new.md')).toBe('second new');
+    expect(git(root, 'status', '--porcelain')).toBe('');
   });
 
   test('a commit already at HEAD refreshes an entry holding the parent\'s version and refuses any other staged entry', async () => {
