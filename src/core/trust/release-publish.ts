@@ -15,8 +15,9 @@
  * committed; a request that ended without committing (the page was deleted meanwhile, its file was held) leaves the next
  * retry a fresh attempt, so the owner can release again once the cause is fixed.
  *
- * Every other hold returns null and takes the transactional database-only release in owner-actions.ts: an unmanaged
- * brain, a held take, a hold with no entity slug, or one whose page is missing (GBRA-190 G4 owns that class). A
+ * Every other hold returns null: a held take, which owner-actions.ts refuses (`unavailable`), and an unmanaged brain,
+ * a hold with no entity slug, or one whose page is missing (GBRA-190 G4 owns that class), which take its transactional
+ * database-only release. A
  * deleted or private page refuses and the fact stays held; a segmented page over the ceiling, a malformed fence or a
  * row that no longer reads back refuse at preparation the same way.
  */
