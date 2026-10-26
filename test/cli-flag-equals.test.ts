@@ -528,21 +528,30 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     }
   });
 
-  // Value: protects=free text that only looks like an = flag reaches the handler (capture text, the agent run prompt), while the flag zone and the trailing switches agent run hoists still refuse; fails_when=the scan reads quoted text or the prompt as flags, or skips the flag zone or the hoisted trailing switches; why_new=the short-flag and prompt rows only covered refusals; seam=none; no_claim=agent run's own parse after the gate (argv-level)
+  // Value: protects=free text that only looks like an = flag reaches the handler (capture text, agent run prompt words that are not its flags), while the flag zone and the trailing switches agent run hoists still refuse; fails_when=the scan reads quoted text or the prompt as flags, or skips the flag zone or the hoisted trailing switches; why_new=the short-flag and prompt rows only covered refusals; seam=none; no_claim=agent run's own parse after the gate (argv-level)
   test('free text that only looks like an = flag is not scanned', async () => {
     expect(await argvFor('capture', ['-n=3 is the answer'])).toEqual(['-n=3 is the answer']);
-    expect(await argvFor('agent', ['run', 'fix', 'the', '--model=opus', 'bug'])).toEqual(['run', 'fix', 'the', '--model=opus', 'bug']);
-    expect(await argvFor('agent', ['run', '--model', 'opus', 'fix', '--tools=x'])).toEqual(['run', '--model', 'opus', 'fix', '--tools=x']);
     expect(await refusalFor('agent', ['run', '--model=opus', 'fix'])).toContain('--model=…');
     expect(await refusalFor('agent', ['run', '--detach', '--tools=x', 'fix'])).toContain('--tools=…');
-    for (const args of [['run', '--detach', 'fix', '--model=opus'], ['run', '--follow', 'summarize', '--tools=bash'], ['run', '--detach', '-n=3'], ['run', '--note', '--tools=x'], ['run', 'fix', '--', '--detach=true'], ['run', '--', '--model=opus', 'fix'],
-      ['run', '--model', '-n=3', 'do X'], ['run', '--note: a=b', '--model=x'], ['run', '--re: x=1', '--detach=true', 'and', 'more'], ['run', 'summarize', '--follow=up items in the thread'], ['run', 'fix the bug', '--detach=now please']]) {
+    for (const args of [['run', '--detach', '-n=3'], ['run', 'fix', '--', '--detach=true'], ['run', '--', 'fix', 'the', '--model=opus', 'bug'],
+      ['run', '--model', '-n=3', 'do X'], ['run', 'summarize', '--follow=up items in the thread'], ['run', 'fix the bug', '--detach=now please'], ['run', 'fix', 'the', '--model opus', 'bug']]) {
       expect(await argvFor('agent', args)).toEqual(args);
     }
     for (const [args, flag] of [[['run', 'summarize the page', '--detach=true'], '--detach'], [['run', 'fix', '--detach', '--no-follow=1'], '--no-follow'], [['run', 'fix', '--follow=false', '--detach'], '--follow'], [['run', '--tools=bash, read', 'fix'], '--tools'], [['run', 'fix', '--follow=up'], '--follow']] as const) {
       const message = await refusalFor('agent', [...args]);
       expect(message).toContain(`${flag}=…`);
       expect(message).toMatch(new RegExp(`${flag} is a switch|${flag} <value> as two arguments`));
+    }
+  });
+
+  // Value: protects=an agent run flag written with = inside the prompt (after a token parseRunFlags does not read, such as --json or --yes, or after a prompt word) refuses instead of reaching the job as prompt text with the restriction dropped; fails_when=agent run --json --tools=read submits a job with every tool; why_new=the flag zone ends at the first token parseRunFlags does not read, and everything after it was passed through; seam=none; no_claim=two-argument flags after the prompt (parseRunFlags design, unchanged)
+  test('agent run refuses its own = flag inside the prompt and names both escapes', async () => {
+    for (const [args, flag] of [[['run', '--json', '--tools=read', '--detach', 'do X'], '--tools'], [['run', '--yes', '--source=team-b', 'go'], '--source'], [['run', 'fix', 'the', '--model=opus', 'bug'], '--model'], [['run', '--model', 'opus', 'fix', '--tools=x'], '--tools'], [['run', '--detach', 'fix', '--model=opus'], '--model'], [['run', '--note', '--max-turns=2'], '--max-turns'], [['run', '--re: x=1', '--detach=true', 'and', 'more'], '--detach']] as const) {
+      const r = await cliOnlyFlagArgs('agent', [...args]);
+      expect('refusal' in r && r.refusal.code).toBe('invalid_params');
+      expect('refusal' in r && r.refusal.message).toContain(`${flag}=…`);
+      expect('refusal' in r && r.refusal.message).toContain('reads its flags before the prompt');
+      expect('refusal' in r && r.refusal.suggestion).toContain('before the prompt, or put the prompt after --');
     }
   });
 

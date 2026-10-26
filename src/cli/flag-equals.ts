@@ -41,7 +41,9 @@
  * tokens, so `--tools=bash, read` still refuses) and, when the prompt holds no
  * bare `--`, the trailing switches it hoists, exact or with an `=` value and
  * no whitespace (`--detach=true` there refuses); the prompt between them is
- * text. OWN_EQUALS_PARSERS pass their argv through. On a
+ * text, except that one of its own flags written with `=` and no whitespace
+ * refuses there (`agent run --json --tools=read ...` would hand the job every
+ * tool) with advice to write it before the prompt or put the prompt after `--`. OWN_EQUALS_PARSERS pass their argv through. On a
  * command with a registry row, unregistered flags keep the token for the
  * validator to name; on a path with none (the hand-parsed search
  * subcommands), every `=` token but `--json=true` refuses with a neutral
@@ -272,7 +274,11 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
       if (RUN_VALUE_FLAGS.has(t)) values.add(++promptAt);
       else if (!BOOLEAN_TAIL_FLAGS.has(t) && !(t.startsWith('--') && EQUALS_TOKEN.test(t))) break;
     }
-    if (!args.slice(promptAt).includes('--')) while (tailAt > promptAt && BOOLEAN_TAIL_FLAGS.has(args[tailAt - 1]!.split('=')[0]!) && !/\s/.test(args[tailAt - 1]!)) tailAt--;
+    if (!args.slice(promptAt).includes('--')) {
+      while (tailAt > promptAt && BOOLEAN_TAIL_FLAGS.has(args[tailAt - 1]!.split('=')[0]!) && !/\s/.test(args[tailAt - 1]!)) tailAt--;
+      const stray = args.slice(promptAt, tailAt).map(t => /^(--[a-z0-9][a-z0-9-]*)=\S*$/.exec(t)?.[1]).find(f => f !== undefined && (RUN_VALUE_FLAGS.has(f) || BOOLEAN_TAIL_FLAGS.has(f)));
+      if (stray) return { refusal: usageError(`gbrain agent: \`${stray}=…\`: agent run reads its flags before the prompt, so this would be prompt text.`, `Write ${RUN_VALUE_FLAGS.has(stray) ? `${stray} <value>` : stray} before the prompt, or put the prompt after -- to keep it as text.`) };
+    }
   }
   for (let i = 0; i < args.length; i++) {
     const token = args[i]!;
