@@ -107,6 +107,11 @@ describe('#2185 acceptance — real usage stays legal', () => {
     expect(validateCommandFlags('sync', ['--full'])).toBeNull();
   });
 
+  test('#7599: serve does not take sync --watch from the pool-profile module it imports', () => {
+    expect(validateCommandFlags('serve', ['--watch'])).toBe('--watch');
+    expect(validateCommandFlags('sync', ['--watch'])).toBeNull();
+  });
+
   test('scope flags require direct consumption on upgrade surfaces', () => {
     expect(validateCommandFlags('reindex', ['--markdown', '--type', 'atom'])).toBeNull();
     expect(validateCommandFlags('upgrade', ['--type', 'atom'])).toBe('--type');
