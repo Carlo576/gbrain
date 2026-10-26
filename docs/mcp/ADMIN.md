@@ -583,7 +583,8 @@ drives `tools/list`, the `gbrain://capabilities` resource (`access:
 mutations; owner maintenance on the same process (startup migrations, hook
 IPC banking) is a separate control. The default is `--access full`.
 `--access=read-only` is the same flag; a repeated `--access` never widens a
-read-only value.
+read-only value. `--surface=verbs` is likewise the same as `--surface verbs`, and a
+repeated `--surface` takes the narrowest value.
 
 On Postgres a read-only serve is also not a resident owner, because harnesses
 start one per session. It holds no session-lane (direct pool) connection, starts no

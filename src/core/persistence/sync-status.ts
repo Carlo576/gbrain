@@ -113,7 +113,7 @@ export function supersedingAttempt(phase: ManagedSyncFailure['phase'], failureAt
   return passed[0] ? { at: new Date(passed[0][1]).toISOString(), by: passed[0][0] } : null;
 }
 
-/** #7243: the process holding the source's drain lease (`readDrainHolder`), with the Minions job id when it is a sync job and whether it stalled. */
+/** #7243: the process holding the source's drain lease while it still renews it (`readDrainLease` with `live`, #7596), with the Minions job id when it is a sync job and whether it stalled. */
 export type SyncStatusLive = DrainHolder & { job_id: number | null; stalled: boolean };
 
 export interface SyncStatus {

@@ -110,6 +110,7 @@ describe('#2185 acceptance — real usage stays legal', () => {
   test('#7599: serve does not take sync --watch from the pool-profile module it imports', () => {
     expect(validateCommandFlags('serve', ['--watch'])).toBe('--watch');
     expect(validateCommandFlags('sync', ['--watch'])).toBeNull();
+    for (const args of [['--access', 'read-only'], ['--access=read-only']]) expect(validateCommandFlags('serve', args)).toBeNull();
   });
 
   test('scope flags require direct consumption on upgrade surfaces', () => {

@@ -28,7 +28,7 @@ async function runManagedSyncBlockedCheck(ctx: DoctorContext): Promise<Check[]> 
     const over = blocked.filter(b => now - Date.parse(b.blocked_since) > MANAGED_SYNC_BLOCKED_FAIL_MS);
     const first = over[0] ?? blocked[0]!;
     const minutes = (since: string) => Math.max(0, Math.floor((now - Date.parse(since)) / 60_000));
-    const list = blocked.map(b => `${b.source_id} (${b.code}, blocked ${minutes(b.blocked_since)} min)`).join('; ');
+    const list = blocked.map(b => `${b.source_id} (${b.code}, ${b.code === 'pass_interrupted' ? 'stopped' : 'blocked'} ${minutes(b.blocked_since)} min)`).join('; ');
     checks.push({ name: 'managed_sync_blocked', status: over.length ? 'fail' : 'warn', readiness_state: 'degraded',
       details: { threshold_ms: MANAGED_SYNC_BLOCKED_FAIL_MS, sources: blocked.map(b => ({ ...b, blocked_minutes: minutes(b.blocked_since) })), docs: DOCS },
       message: `${list}: the managed sync run is stopped on a page that did not commit, its passes keep stopping without converging, or its pass stopped before it ended with no process left to finish it (killed or crashed), so the source indexes nothing new until it is cleared`

@@ -22,17 +22,18 @@ const SHORT_LIVED_COMMANDS = new Set(['sync', 'mcp', 'dream', 'cycle', 'sources'
 let processProfile: DirectPoolProfile = 'resident';
 
 /**
- * Every `--access` value in `args`, in either form (`--access read-only`, `--access=read-only`; a bare flag at the end reads
- * ''). The one parse behind the MCP access ceiling (`parseAccessFlag`, src/mcp/surface.ts) and the pool profile: reading only
- * the bare form let `--access=read-only` pass flag validation and start a serve with full access.
+ * Every value of `flag` in `args`, in either form (`--access read-only`, `--access=read-only`; a bare flag at the end reads '').
+ * The one parse behind serve's ceilings (`parseAccessFlag`, `parseSurfaceFlag` in src/mcp/surface.ts) and the pool profile; it
+ * lives here because this module imports nothing. Reading only the bare form let `--access=read-only` and `--surface=verbs` pass
+ * flag validation and start a serve without the ceiling they asked for.
  */
-export function accessFlagValues(args: readonly string[]): string[] {
-  return args.flatMap((arg, i) => arg === '--access' ? [args[i + 1] ?? ''] : arg.startsWith('--access=') ? [arg.slice('--access='.length)] : []);
+export function flagValues(args: readonly string[], flag: string): string[] {
+  return args.flatMap((arg, i) => arg === flag ? [args[i + 1] ?? ''] : arg.startsWith(`${flag}=`) ? [arg.slice(flag.length + 1)] : []);
 }
 
 /** `serve ... --access read-only`: a stdio serve that runs no resident write duty on Postgres (#7599). */
 export function isReadOnlyServeArgs(args: readonly string[]): boolean {
-  return accessFlagValues(args).includes('read-only');
+  return flagValues(args, '--access').includes('read-only');
 }
 
 /**
