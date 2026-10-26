@@ -187,7 +187,7 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   'sources pull': ['--branch'],
   // status.ts:812 parseDeadlineFlag, :834 parseSectionFlag (runStatus :871-881).
   status: ['--section', '--deadline-ms'],
-  // core/bounded-listing-cli.ts:15 via sync/operator.ts:167 holdsListing (+ :173 sized check).
+  // core/bounded-listing-cli.ts:15 via sync/operator.ts:167 holdsListing (+ :173 sized check); the `sync --status` alias (syncOperatorVerb, operator.ts:136) reads as this path.
   'sync status': ['--limit', '--cursor'],
   // trust-claim.ts:65 flagValues (:81, :113).
   'trust claim-sources': ['--source'],
@@ -242,7 +242,8 @@ const EQUALS_TOKEN = /^(--[a-z0-9][a-z0-9-]*|-[A-Za-z])=([\s\S]*)$/;
 export async function splitFlagEquals(command: string, args: readonly string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
   if (!args.some(a => /^-[^=\s]*=/.test(a))) return { args: [...args] };
   const legal = CLI_FLAG_REGISTRY[command];
-  const readers = [...EQUALS_READERS[command] ?? [], ...EQUALS_READERS[`${command} ${args[0]}`] ?? []];
+  const sub = command === 'sync' && args[0] !== 'unblock' && args[0] !== 'trigger' && args.includes('--status') ? 'status' : args[0];
+  const readers = [...EQUALS_READERS[command] ?? [], ...EQUALS_READERS[`${command} ${sub}`] ?? []];
   let types: Map<string, string> | undefined;
   const out: string[] = [];
   const where = args[0] && !args[0].startsWith('-') ? `gbrain ${command} ${args[0]}` : `gbrain ${command}`;

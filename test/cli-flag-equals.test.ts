@@ -29,6 +29,7 @@ import { parseReconcileArgs } from '../src/commands/source-reconcile.ts';
 import { parseMigrateEmbeddingsFlags } from '../src/core/embedding-migration-cli.ts';
 import { parseGoogleAttachmentsArgs } from '../src/commands/google-attachments.ts';
 import { parseGraduationArgs, routesToGraduation } from '../src/commands/migrate-graduation.ts';
+import { syncOperatorVerb } from '../src/commands/sync/operator.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { parseAppendArgs } from '../src/cli/commands/append.ts';
 
@@ -633,6 +634,13 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
       expect(await argvFor('search', [sub, '--json=true'])).toEqual([sub, '--json']);
       expect(await refusalFor('search', [sub, '--json=false'])).toContain('--json=…');
     }
+  });
+
+  test('the sync --status alias keeps the listing = values sync status reads', async () => {
+    const args = ['--status', '--source', 'source-a', '--limit=5', '--cursor=abc'];
+    expect(syncOperatorVerb(args)).toBe('status');
+    expect(await argvFor('sync', args)).toEqual(args);
+    expect(await refusalFor('sync', ['trigger', '--status', '--limit=5'])).toContain('--limit=…');
   });
 
   test('an unknown or miscased flag with a multi-line = value is still unknown', () => {
