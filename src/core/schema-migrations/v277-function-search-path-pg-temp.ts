@@ -16,6 +16,11 @@ import { FUNCTION_SEARCH_PATH_HARDENING_SQL, PINNED_FUNCTION_NAMES, LEGACY_SEARC
 
 /** Appends pg_temp where the role may, then names on stderr and returns every function still without it. */
 export async function hardenFunctionSearchPaths(engine: BrainEngine, label: string): Promise<string[]> {
+  const legacy = async () => (await engine.executeRaw<{ sig: string }>(
+    `SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.prokind = 'f' AND p.proconfig && $1::text[] AND p.proname = ANY($2::text[]) ORDER BY 1`,
+    [[...LEGACY_SEARCH_PATH_SETTINGS], [...PINNED_FUNCTION_NAMES]])).map(r => r.sig);
+  if ((await legacy()).length === 0) return [];
   const lockTimeoutMs = resolveSchemaLockTimeoutMs();
   try {
     await engine.transaction(async tx => {
@@ -29,10 +34,7 @@ export async function hardenFunctionSearchPaths(engine: BrainEngine, label: stri
     if (isLockTimeoutError(error)) throw schemaLockBlockedError({ step: `${label} search_path`, timeoutMs: lockTimeoutMs, sessions: null, sampledDuringWait: false });
     throw error;
   }
-  const left = (await engine.executeRaw<{ sig: string }>(
-    `SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-      WHERE n.nspname = 'public' AND p.prokind = 'f' AND p.proconfig && $1::text[] AND p.proname = ANY($2::text[]) ORDER BY 1`,
-    [[...LEGACY_SEARCH_PATH_SETTINGS], [...PINNED_FUNCTION_NAMES]])).map(r => r.sig);
+  const left = await legacy();
   if (left.length > 0) {
     process.stderr.write(`  ${label}: ${left.length} function(s) left without pg_temp on their search_path (${left.join(', ')}): `
       + 'ALTER FUNCTION needs the owner. Run gbrain doctor for the SQL to run as that role.\n');
