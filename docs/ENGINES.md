@@ -684,8 +684,13 @@ Worked examples:
    migrations run. If the blob gains an index, FK, trigger or view that references a column an
    older brain may lack, add that column's probe and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
    to the forward-reference bootstrap both engines run (`src/core/engine-sql/bootstrap.ts`:
-   probe, gap, DDL). A column only defined in a
+   probe, gap, DDL). A partial index's `WHERE` predicate and `INCLUDE` list count as references (an
+   index filtering on a column a later migration adds wedges the replay). A column only defined in a
    `CREATE TABLE` needs no bootstrap entry. `test/schema-bootstrap-coverage.test.ts` names any gap.
+   The schema-history upgrade tests (`test/schema-history-upgrade.slow.test.ts` on PGLite,
+   `test/e2e/schema-history-upgrade.test.ts` on Postgres) upgrade a stored fresh brain of each release
+   from schema v260 on (`test/fixtures/schema-history/`, written by
+   `scripts/capture-schema-history-fixture.ts`) and compare the result with a fresh install.
 
 ## Engine detection and access repair
 
