@@ -11,6 +11,26 @@ import { importFromContent } from '../src/core/import-file.ts';
 import { inlineExportMarkdown, readExportPage, readExportPages, readExportWithdrawals } from '../src/core/export-snapshot.ts';
 import { overlayCanonicalBodies } from '../src/core/page-state/snapshot.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
+import { rowToPage } from '../src/core/utils.ts';
+import { isSegmentedPage } from '../src/core/page-body/page-shape.ts';
+import type { ExportWithdrawal } from '../src/core/export-snapshot.ts';
+
+/** The per-page export read as it shipped before #7617, kept as the reference the batch read must reproduce byte for byte. */
+async function referenceExportPage(tx: BrainEngine, key: { id: string; source_id: string; slug: string }, withdrawals: ExportWithdrawal[]) {
+  const [row] = await tx.executeRaw<Record<string, unknown>>(`WITH export_page AS MATERIALIZED (
+    SELECT * FROM pages WHERE id=$1::bigint
+  ) SELECT p.*,
+    COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS export_tags
+    FROM export_page p WHERE p.source_id=$2 AND p.slug=$3 AND p.deleted_at IS NULL`, [key.id, key.source_id, key.slug]);
+  if (!row) throw new Error('Export snapshot unexpectedly lost a selected page.');
+  const page = rowToPage(row);
+  if (!isSegmentedPage(page) && (page.compiled_truth.includes('gbrain:facts:') || page.timeline.includes('gbrain:facts:'))) {
+    const applicable = withdrawals.filter(w => w.subject === '*' || w.subject === page.slug)
+      .map(({ visibility, fact_hash, withdrawn_at, purged }) => ({ visibility, fact_hash, withdrawn_at, ...(purged ? { purged: true } : {}) }));
+    Object.assign(page, await overlayCanonicalBodies(tx.executeRaw.bind(tx), page.compiled_truth, page.timeline, applicable));
+  }
+  return { page, tags: row.export_tags as string[] };
+}
 
 for (const backend of testBackends()) describe(`coherent export: ${backend}`, () => {
   let engine: BrainEngine;
@@ -82,7 +102,7 @@ for (const backend of testBackends()) describe(`coherent export: ${backend}`, ()
       }
     });
   }, 60000);
-  test('#7617: readExportPages gives every page exactly the snapshot readExportPage gives, in two statements', async () => {
+  test('#7617: readExportPages gives every page exactly the snapshot the per-page read gave, in two statements', async () => {
     await engine.executeRaw('DELETE FROM pages');
     await engine.executeRaw("DELETE FROM fact_withdrawals WHERE source_id='default'");
     await engine.executeRaw("DELETE FROM fact_purges WHERE source_id='default'");
@@ -139,10 +159,11 @@ for (const backend of testBackends()) describe(`coherent export: ${backend}`, ()
       expect(batch.length).toBe(keys.length);
       let overlaid = 0;
       for (const [i, key] of keys.entries()) {
-        const single = await readExportPage(tx, key, withdrawals);
+        const single = await referenceExportPage(tx, key, withdrawals);
         expect(batch[i]!.page.slug).toBe(key.slug);
         expect(JSON.stringify(batch[i])).toBe(JSON.stringify(single));
         expect(inlineExportMarkdown(batch[i]!)).toBe(inlineExportMarkdown(single));
+        expect(JSON.stringify(await readExportPage(tx, key, withdrawals))).toBe(JSON.stringify(single));
         if ([single.page.compiled_truth, single.page.timeline].some(text => parseFactsFence(text).facts.some(fact => fact.active === false))) overlaid++;
       }
       // The overlay really ran: withdrawn rows read inactive in the fenced shapes and every fifth bulk page.
