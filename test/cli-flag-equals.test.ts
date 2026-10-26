@@ -535,13 +535,24 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     expect(await argvFor('agent', ['run', '--model', 'opus', 'fix', '--tools=x'])).toEqual(['run', '--model', 'opus', 'fix', '--tools=x']);
     expect(await refusalFor('agent', ['run', '--model=opus', 'fix'])).toContain('--model=…');
     expect(await refusalFor('agent', ['run', '--detach', '--tools=x', 'fix'])).toContain('--tools=…');
-    for (const args of [['run', '--detach', 'fix', '--model=opus'], ['run', '--follow', 'summarize', '--tools=bash'], ['run', '--detach', '-n=3'], ['run', '--note', '--tools=x'], ['run', 'fix', '--', '--detach=true'], ['run', '--', '--model=opus', 'fix']]) {
+    for (const args of [['run', '--detach', 'fix', '--model=opus'], ['run', '--follow', 'summarize', '--tools=bash'], ['run', '--detach', '-n=3'], ['run', '--note', '--tools=x'], ['run', 'fix', '--', '--detach=true'], ['run', '--', '--model=opus', 'fix'],
+      ['run', '--model', '-n=3', 'do X'], ['run', '--note: a=b', '--model=x'], ['run', '--re: x=1', '--detach=true', 'and', 'more'], ['run', 'summarize', '--follow=up items in the thread'], ['run', 'fix the bug', '--detach=now please']]) {
       expect(await argvFor('agent', args)).toEqual(args);
     }
-    for (const [args, flag] of [[['run', 'summarize the page', '--detach=true'], '--detach'], [['run', 'fix', '--detach', '--no-follow=1'], '--no-follow'], [['run', 'fix', '--follow=false', '--detach'], '--follow']] as const) {
+    for (const [args, flag] of [[['run', 'summarize the page', '--detach=true'], '--detach'], [['run', 'fix', '--detach', '--no-follow=1'], '--no-follow'], [['run', 'fix', '--follow=false', '--detach'], '--follow'], [['run', '--tools=bash, read', 'fix'], '--tools'], [['run', 'fix', '--follow=up'], '--follow']] as const) {
       const message = await refusalFor('agent', [...args]);
       expect(message).toContain(`${flag}=…`);
-      expect(message).toMatch(new RegExp(`${flag} is a switch|write ${flag} on its own`));
+      expect(message).toMatch(new RegExp(`${flag} is a switch|${flag} <value> as two arguments`));
+    }
+  });
+
+  // Value: protects=the agent run = scan reads exactly the flags parseRunFlags reads; fails_when=a flag added to parseRunFlags but not to RUN_VALUE_FLAGS or BOOLEAN_TAIL_FLAGS ends the scanned zone early, so a later --model=x reaches the prompt unrefused; why_new=the two lists are kept by hand in agent.ts; seam=none; no_claim=flags of other agent subcommands
+  test('every agent flag parseRunFlags reads is in the scan tables', async () => {
+    const { RUN_VALUE_FLAGS, BOOLEAN_TAIL_FLAGS, __testing } = await import('../src/commands/agent.ts');
+    for (const flag of CLI_FLAG_REGISTRY.agent!) {
+      const { rest } = __testing.parseRunFlags([flag, '5', 'prompt']);
+      const kind = rest.length === 1 ? 'value' : rest[0] === '5' ? 'switch' : 'prompt';
+      expect([flag, kind]).toEqual([flag, RUN_VALUE_FLAGS.has(flag) ? 'value' : BOOLEAN_TAIL_FLAGS.has(flag) ? 'switch' : 'prompt']);
     }
   });
 

@@ -36,10 +36,12 @@
  * which may be a credential. A short flag never takes `=` (`-y=n` is refused,
  * never taken as consent); a quoted argument with whitespace that only starts
  * like one (`capture "-n=3 is the answer"`) is text. `agent run` scans only
- * where parseRunFlags reads flags: the leading flag zone (up to the first word
- * that is not one of its flags or a value flag's value) and, when the prompt
- * holds no bare `--`, the trailing switches it hoists (`--detach=true` there
- * refuses); the prompt between them is text. OWN_EQUALS_PARSERS pass their argv through. On a
+ * where parseRunFlags reads flags: the leading flag zone (its switches, its value
+ * flags with their value, which passes untouched, and flag-shaped `--x=`
+ * tokens, so `--tools=bash, read` still refuses) and, when the prompt holds no
+ * bare `--`, the trailing switches it hoists, exact or with an `=` value and
+ * no whitespace (`--detach=true` there refuses); the prompt between them is
+ * text. OWN_EQUALS_PARSERS pass their argv through. On a
  * command with a registry row, unregistered flags keep the token for the
  * validator to name; on a path with none (the hand-parsed search
  * subcommands), every `=` token but `--json=true` refuses with a neutral
@@ -224,6 +226,7 @@ export const OWN_EQUALS_PARSERS: ReadonlySet<string> = new Set([
 export const COMMAND_SWITCHES: Readonly<Record<string, readonly string[]>> = {
   sync: ['--detail'],
   schema: ['--fields'],
+  agent: ['--follow', '--detach'],
   dream: ['--unsafe-bypass-dream-guard'],
   embed: ['--stale'],
 };
@@ -261,15 +264,20 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
   let pastDashDash = false;
   let promptAt = -1;
   let tailAt = args.length;
+  const values = new Set<number>();
   if (command === 'agent' && args[0] === 'run') {
     const { RUN_VALUE_FLAGS, BOOLEAN_TAIL_FLAGS } = await import('../commands/agent.ts');
-    promptAt = 1;
-    while (promptAt < args.length && args[promptAt] !== '--' && (/^--[^=]+=/.test(args[promptAt]!) || RUN_VALUE_FLAGS.has(args[promptAt]!) || BOOLEAN_TAIL_FLAGS.has(args[promptAt]!))) promptAt += RUN_VALUE_FLAGS.has(args[promptAt]!) ? 2 : 1;
-    if (!args.slice(promptAt).includes('--')) while (tailAt > promptAt && BOOLEAN_TAIL_FLAGS.has(args[tailAt - 1]!.split('=')[0]!)) tailAt--;
+    for (promptAt = 1; promptAt < args.length; promptAt++) {
+      const t = args[promptAt]!;
+      if (RUN_VALUE_FLAGS.has(t)) values.add(++promptAt);
+      else if (!BOOLEAN_TAIL_FLAGS.has(t) && !(t.startsWith('--') && EQUALS_TOKEN.test(t))) break;
+    }
+    if (!args.slice(promptAt).includes('--')) while (tailAt > promptAt && BOOLEAN_TAIL_FLAGS.has(args[tailAt - 1]!.split('=')[0]!) && !/\s/.test(args[tailAt - 1]!)) tailAt--;
   }
   for (let i = 0; i < args.length; i++) {
     const token = args[i]!;
     if (token === '--' && END_OF_OPTIONS.has(`${command} ${args[0]}`)) return { args: [...out, ...args.slice(i)] };
+    if (values.has(i)) { out.push(token); continue; }
     if (i === promptAt && promptAt < tailAt) { out.push(...args.slice(i, tailAt)); i = tailAt - 1; continue; }
     pastDashDash ||= token === '--';
     const m = EQUALS_TOKEN.exec(token);
