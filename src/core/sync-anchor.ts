@@ -206,7 +206,8 @@ export async function sourceCommitAnchorAllowed(
   try {
     let configured: string | null = null;
     if (sourceId === 'default') {
-      configured = (await engine.getConfig('sync.repo_path')) || null;
+      const globalPath = (await engine.getConfig('sync.repo_path')) || null;
+      configured = globalPath && isAbsolute(globalPath) ? globalPath : null;
     }
     if (configured === null) {
       const rows = await engine.executeRaw<{ local_path: string | null }>(

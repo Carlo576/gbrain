@@ -587,6 +587,31 @@ for (const backend of testBackends()) {
       expect((await ownsSourceSyncAnchor(engine, 'notes-a', folder)).owns).toBe(true);
     }, 120_000);
 
+    // Value: protects=a source whose local_path is absolute only on another OS (a Windows drive path read on POSIX) proves no ownership
+    //   to the commit-anchor and repoint guards either; fails_when=either guard resolves the foreign path against the cwd (pathResolve
+    //   treats it as relative on POSIX), so a matching cwd advances or repoints that source; why_new=the case above seeds only ".";
+    //   seam=none; no_claim=Windows hosts (the path is absolute there)
+    test.skipIf(process.platform === 'win32')('a Windows-absolute local_path on POSIX proves no ownership to the commit-anchor and repoint guards', async () => {
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-w', 'notes-w', $1)", ['C:\\brain-example']);
+      const { ownsSourceSyncAnchor, sourceCommitAnchorAllowed } = await import('../src/core/sync-anchor.ts');
+      expect(await sourceCommitAnchorAllowed(engine, 'notes-w', folder)).toEqual({ owns: false, configured: 'C:\\brain-example' });
+      expect(await sourceCommitAnchorAllowed(engine, 'notes-w', join(folder, 'C:\\brain-example'))).toEqual({ owns: false, configured: 'C:\\brain-example' });
+      expect(await ownsSourceSyncAnchor(engine, 'notes-w', join(folder, 'C:\\brain-example'))).toEqual({ owns: false, configured: 'C:\\brain-example' });
+    }, 120_000);
+
+    // Value: protects=a default source whose row was set to an absolute directory while the legacy sync.repo_path is still "." keeps
+    //   advancing its sync position (the relative global key no longer outranks the row); fails_when=sourceCommitAnchorAllowed reads
+    //   the relative global key first and refuses, so every sync of the repaired source re-imports from the old commit; why_new=the
+    //   ownership cases above use non-default sources; seam=none; no_claim=the default repo_path repoint (ownsGlobalSyncAnchor, #7646)
+    test('default with an absolute row and a relative sync.repo_path still advances its commit anchor', async () => {
+      await engine.setConfig('sync.repo_path', '.');
+      await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [folder]);
+      const { sourceCommitAnchorAllowed } = await import('../src/core/sync-anchor.ts');
+      expect(await sourceCommitAnchorAllowed(engine, 'default', folder)).toEqual({ owns: true, configured: folder });
+      await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+      expect(await sourceCommitAnchorAllowed(engine, 'default', folder)).toEqual({ owns: false, configured: '.' });
+    }, 120_000);
+
     // Value: protects=the remote sources_resolve_path read and the fence census never treat a relative local_path as the host's cwd;
     //   fails_when=resolveSourcePaths realpaths "." (the cwd's Git repo answers) or the census walks the cwd's files;
     //   why_new=the reader cases above cover write and maintenance roots, not these two reads; seam=none; no_claim=the MCP transport
