@@ -21,6 +21,7 @@ import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { runPersistenceEffects } from '../src/core/persistence/effects.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
 import { acquireWorktree } from '../src/core/persistence/ownership.ts';
+import { writeGitHold } from '../src/core/persistence/sync-holds.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { resolveManagedSyncContext } from '../src/core/persistence/sync-discovery.ts';
 import { ADOPTION_BATCH, applyGitConversion, applyMixedConversion, CONVERSION_GROUP_MAX, planGitConversion, planMixedConversion } from '../src/core/persistence/git-conversion.ts';
@@ -448,6 +449,31 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     const settled = await revisions(engine);
     expect((await performManagedSync(engine, OPTS)).status).toBe('up_to_date');
     expect(await revisions(engine)).toEqual(settled);
+  }, { databaseUrl, setup }), 180_000);
+
+  test('#7618: a refusal only the apply\'s recheck catches keeps the holds the plan would have cleared', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await databaseOnlyEdit(engine, 'notes/ahead', 'Written to the database alone.');
+    // notes/same: declared database-only, its row equal to its committed file, and held. The plan places nothing there.
+    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(
+      "UPDATE pages SET database_only_reason='db_only' WHERE source_id='default' AND slug='notes/same'"), TEST_WRITE_ATTRIBUTION));
+    const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'");
+    await engine.transaction(tx => writeGitHold(tx, { source_id: 'default', incarnation, path: 'notes/same.md', source_path: 'notes/same.md', slug: 'notes/same',
+      page_id: null, code: 'concurrent_write', message: 'Held while another writer moved the page.', upstream_version: null, observed_at: new Date().toISOString(),
+      run_id: 'run-1', mode: 'managed', meta: { recovery_version: 1 } }));
+    const base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ adopt: { count: 1 }, holds: { count: 1, unplaced: { count: 1 } }, discard: { count: 0 } });
+    // After the first group commits, a database edit lands on the held page: Git's import would now overwrite it.
+    installFaultHook(async point => { if (point === 'conversion:group_committed') await databaseOnlyEdit(engine, 'notes/same', 'A late database edit.'); });
+    try {
+      await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'git_conversion_blocked', detail: 'git_overwrites_database' });
+    } finally { installFaultHook(undefined); }
+    expect(await holds(engine)).toEqual(['notes/same.md concurrent_write']);
+    expect(await strict(engine)).toBe(false);
+    expect(conversionCommits(root, base)).toHaveLength(1);
+    expect((await page(engine, 'notes/same'))!.body).toContain('A late database edit.');
   }, { databaseUrl, setup }), 180_000);
 
   test('work that lands after the strict-equivalent pass leaves the source strict and reports incomplete', () => managedBrain(async brain => {

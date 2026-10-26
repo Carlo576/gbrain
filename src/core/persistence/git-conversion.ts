@@ -27,9 +27,10 @@
  *     refuses (git_conversion_blocked, naming the categories) unless it is zero; there is no override.
  * The preview hash binds HEAD, the source incarnation and every planned item with its revision.
  *
- * The apply re-plans and refuses preview_changed on a different hash, adopts group by group (a crash leaves the source
- * non-strict and the rerun preview lists only what is left), clears the holds, retries or reclassifies the parked
- * effects, checks the strict level once more (an overwrite nobody accepted stops it), runs the full strict-equivalent
+ * The apply re-plans and refuses preview_changed on a different hash, adopts and withholds group by group (a crash leaves the source
+ * non-strict and the rerun preview lists only what is left), retries or reclassifies the parked effects, checks the
+ * strict level once more as it will read with the planned holds cleared (an overwrite nobody accepted stops it, and the
+ * holds stay), clears the holds, runs the full strict-equivalent
  * pass (SyncOpts.canonicalOverride, internal) and sets `canonical: git` last, in the transaction that records the
  * conversion. Writes can land between that pass and the flag, so it then runs one genuine strict pass and plans again:
  * only a plan with no work left is a completed conversion; otherwise the source stays strict (Git wins) and the
@@ -405,18 +406,23 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   if (plan.preview.discard.count) throw blockedError(plan.preview);
   const committed = await adoptGroups(engine, plan, previewCommand);
   const withheld = await withholdGroups(engine, plan, previewCommand);
-  let holdsCleared = 0;
-  for (const hold of plan.holds) {
-    if (await engine.transaction(tx => clearGitHold(tx, { sourceId, incarnation: plan.incarnation, path: hold.path, observedAt: hold.observed_at }))) holdsCleared++;
-  }
   const parked = await settleParked(engine, sourceId, plan.parked);
+  // The planned holds are cleared only once this check passes, so a refusal keeps them: a held path is judged as the
+  // strict pass will see it once its hold is cleared.
+  const held = new Set(plan.holds.map(hold => hold.path));
   const recheck = await readShadowLevel(engine, { sourceId, full: true, context: strictContext(plan.context) });
   const preview = { ...plan.preview, discard: emptyDiscard() };
   for (const entry of recheck?.paths ?? []) {
     const path = sourcePath(recheck!.scope, entry.path);
-    if (!entry.result.settled && !entry.result.inFlight && entry.result.gitWins && !plan.settled.has(path)) tally(preview.discard, 'git_overwrites_database', path);
+    if (plan.settled.has(path)) continue;
+    const result = held.has(path) ? classifySyncPath({ ...entry.state, hold: null }, { strict: true }) : entry.result;
+    if (!result.settled && !result.inFlight && result.gitWins) tally(preview.discard, 'git_overwrites_database', path);
   }
   if (preview.discard.count) throw blockedError(preview);
+  let holdsCleared = 0;
+  for (const hold of plan.holds) {
+    if (await engine.transaction(tx => clearGitHold(tx, { sourceId, incarnation: plan.incarnation, path: hold.path, observedAt: hold.observed_at }))) holdsCleared++;
+  }
   const processing = { noEmbed: opts.noEmbed, noExtract: opts.noExtract };
   const { performManagedSync } = await import('./sync-run.ts');
   passOrThrow(sourceId, await performManagedSync(engine, { sourceId, noPull: true, full: true, ...processing, canonicalOverride: 'git' }));
