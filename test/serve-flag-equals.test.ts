@@ -1,5 +1,6 @@
 /**
- * #7619 (real failure path): `gbrain serve` safety flags in the `--flag=value`
+ * #7619 (real failure path): `gbrain serve` safety flags (and the other
+ * commands below: auth, consent, schema, agent run) in the `--flag=value`
  * form over a real CLI process on a hermetic PGLite brain. Before the fix the
  * entry accepted these tokens and serve never read them: `--access=read-only`
  * and `--surface=verbs` served every write tool, `--token-ttl=59` and
@@ -197,9 +198,11 @@ describe('serve --flag=value', () => {
 
   // Value: protects=agent run never submits a job whose tool restriction was written with = after a token its parser does not read; fails_when=the --tools=read token reaches the prompt and the subagent job runs with every tool; why_new=in-process rows never checked the queue; seam=none; no_claim=the job's execution (it stays queued)
   test('agent run --json --tools=read refuses and enqueues no job', () => {
-    const r = cli(['agent', 'run', '--json', '--tools=read', '--detach', 'do X']);
-    expect(r.status).toBe(2);
-    expect(r.stdout + r.stderr).toContain('reads its flags before the prompt');
+    for (const args of [['agent', 'run', '--json', '--tools=read', '--detach', 'do X'], ['agent', 'run', '--json', '--tools=read', '--detach', '--', 'do X']]) {
+      const r = cli(args);
+      expect(r.status).toBe(2);
+      expect(r.stdout + r.stderr).toContain('reads its flags before the prompt');
+    }
     const jobs = cli(['jobs', 'list', '--json']);
     expect(jobs.status).toBe(0);
     expect(jobs.stdout).not.toContain('subagent');

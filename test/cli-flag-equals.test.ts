@@ -546,12 +546,17 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
 
   // Value: protects=an agent run flag written with = inside the prompt (after a token parseRunFlags does not read, such as --json or --yes, or after a prompt word) refuses instead of reaching the job as prompt text with the restriction dropped; fails_when=agent run --json --tools=read submits a job with every tool; why_new=the flag zone ends at the first token parseRunFlags does not read, and everything after it was passed through; seam=none; no_claim=two-argument flags after the prompt (parseRunFlags design, unchanged)
   test('agent run refuses its own = flag inside the prompt and names both escapes', async () => {
-    for (const [args, flag] of [[['run', '--json', '--tools=read', '--detach', 'do X'], '--tools'], [['run', '--yes', '--source=team-b', 'go'], '--source'], [['run', 'fix', 'the', '--model=opus', 'bug'], '--model'], [['run', '--model', 'opus', 'fix', '--tools=x'], '--tools'], [['run', '--detach', 'fix', '--model=opus'], '--model'], [['run', '--note', '--max-turns=2'], '--max-turns'], [['run', '--re: x=1', '--detach=true', 'and', 'more'], '--detach']] as const) {
+    for (const [args, flag] of [[['run', '--json', '--tools=read', '--detach', 'do X'], '--tools'], [['run', '--yes', '--source=team-b', 'go'], '--source'], [['run', 'fix', 'the', '--model=opus', 'bug'], '--model'], [['run', '--model', 'opus', 'fix', '--tools=x'], '--tools'], [['run', '--detach', 'fix', '--model=opus'], '--model'], [['run', '--note', '--max-turns=2'], '--max-turns'], [['run', '--re: x=1', '--detach=true', 'and', 'more'], '--detach'],
+      [['run', '--json', '--tools=read', '--detach', '--', 'do X'], '--tools'], [['run', '--yes', '--source=team-b', 'go', '--', 'x'], '--source'], [['run', '--json', '--tools=read, bash', 'fix'], '--tools']] as const) {
       const r = await cliOnlyFlagArgs('agent', [...args]);
       expect('refusal' in r && r.refusal.code).toBe('invalid_params');
       expect('refusal' in r && r.refusal.message).toContain(`${flag}=…`);
       expect('refusal' in r && r.refusal.message).toContain('reads its flags before the prompt');
-      expect('refusal' in r && r.refusal.suggestion).toContain('before the prompt, or put the prompt after --');
+      expect('refusal' in r && r.refusal.suggestion).toContain(flag === '--detach' ? '--detach before the prompt' : `${flag} <value> before the prompt`);
+      expect('refusal' in r && r.refusal.suggestion).toContain('or put -- before the prompt');
+    }
+    for (const args of [['run', 'fix', '--', '--tools=read'], ['run', '--json', '--', '--tools=read', 'text'], ['run', 'summarize', '--follow=up items in the thread', '--', 'x']]) {
+      expect(await argvFor('agent', args)).toEqual(args);
     }
   });
 
