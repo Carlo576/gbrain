@@ -37,7 +37,7 @@ import { materializedPage } from '../persistence/segmented-apply.ts';
 import { getWriteGateHold, releaseWriteGateHold, type WriteGateHold } from '../write-gate-store.ts';
 
 export const TRUST_RELEASE_OPERATION = 'trust_release';
-const DOOR_WAIT_MS = 60_000;
+export const DOOR_WAIT_MS = 60_000;
 
 interface ReleaseIntent { hold_id: number; last_seen_at: string; by: string; mode: 'append' | 'index-existing'; row_num?: number }
 
