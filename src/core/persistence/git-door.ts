@@ -28,12 +28,13 @@
  * once through publishGroup.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { OperationError, opError } from '../ops/contract.ts';
-import { commitMessage, git, gitBytes, gitFailure, ignoredTargetError, withSession, type GitSession } from './effect-git.ts';
+import { commitMessage, git, gitBytes, gitFailure, gitStepTimeoutMs, ignoredTargetError, withSession, type GitSession } from './effect-git.ts';
 import type { GitCommitNote } from './effect-model.ts';
 import { persistenceHome } from './identity.ts';
+import { ignoreCandidates } from './ignore-rules.ts';
 import { hashFile } from './large-file.ts';
 import type { FileRecoveryRecord, SqlEngine } from './model.ts';
 import { nativeFileTarget } from './native-file-target.ts';
@@ -80,7 +81,7 @@ export async function commitThroughDoor(root: string, files: { path: string; not
   doorTurns.set(key, turn);
   await prior;
   try {
-    return await withSession(root, undefined, writerLock ? { writerLock } : undefined, true, session => doorCommit(session, root, files));
+    return await withSession(root, undefined, writerLock ? { writerLock } : undefined, false, session => doorCommit(session, root, files));
   } catch (error) {
     if (!(error instanceof OperationError) || TYPED.has(error.code) || landedFailures.has(error)) throw error;
     const paths = files.map(file => relative(root, file.path).split(sep).join('/'));
@@ -170,9 +171,11 @@ async function doorCommit(session: GitSession, root: string, files: { path: stri
   if (symbolic.code !== 0) throw opError('git_detached_head', `${root} is on a detached HEAD, so the strict source's write has no branch to commit to; nothing was published.`,
     'Check out the branch the source tracks (git switch <branch>) on the brain host, then retry the write with a new request_id.');
   const branch = symbolic.stdout.trim();
-  const layout = await git(session, ['rev-parse', '--show-object-format', '--show-prefix']);
+  const layout = await git(session, ['rev-parse', '--show-object-format', '--show-prefix', '--git-path', 'index']);
   if (layout.code !== 0) throw gitFailure('Cannot inspect the canonical Git checkout.', 'git rev-parse failed.');
-  const [format, prefix = ''] = layout.stdout.split('\n');
+  const [format, prefix = '', indexPath = ''] = layout.stdout.split('\n');
+  const index = resolve(root, indexPath);
+  try { session.timeoutMs = gitStepTimeoutMs(statSync(index).size); } catch { /* the step floor stands */ }
   const algorithm = format === 'sha256' ? 'sha256' : 'sha1';
   const oidBytes = algorithm === 'sha256' ? 32 : 20;
 
@@ -254,7 +257,7 @@ async function doorCommit(session: GitSession, root: string, files: { path: stri
         }
         changed.push(target);
       }
-      if (fresh.length) await refuseIgnored(session, fresh);
+      if (fresh.length) await refuseIgnored(session, root, fresh);
       if (!changed.length) {
         const stale = await git(session, ['diff-index', '--cached', '--quiet', head, '--', ...targets.keys()]);
         if (stale.code !== 0) await syncIndex(session, root, prefix, [...targets.values()], head);
@@ -300,13 +303,19 @@ async function doorCommit(session: GitSession, root: string, files: { path: stri
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
 
-/** The new targets a .gitignore rule excludes (a negated rule matching last un-ignores) refuse as `git_target_ignored`. */
-async function refuseIgnored(session: GitSession, fresh: Target[]): Promise<void> {
+/**
+ * The new targets a .gitignore rule excludes (a negated rule matching last un-ignores) refuse as `git_target_ignored`.
+ * Only the targets some ignore rule could match (ignore-rules.ts) are asked of check-ignore.
+ */
+async function refuseIgnored(session: GitSession, root: string, fresh: Target[]): Promise<void> {
+  const candidates = new Set(await ignoreCandidates(root, fresh.map(target => target.rel)));
+  const asked = fresh.filter(target => candidates.has(target.rel));
+  if (!asked.length) return;
   // check-ignore takes no literal pathspecs; -n prints one line per path, in order, so no path is parsed back.
-  const matched = await git(session, ['check-ignore', '-v', '-n', '--', ...fresh.map(target => target.rel)], false);
-  if (matched.code !== 0 && matched.code !== 1) throw gitFailure('Cannot inspect the canonical Git target.', `git check-ignore failed for ${fresh.length} file(s).`);
+  const matched = await git(session, ['check-ignore', '-v', '-n', '--', ...asked.map(target => target.rel)], false);
+  if (matched.code !== 0 && matched.code !== 1) throw gitFailure('Cannot inspect the canonical Git target.', `git check-ignore failed for ${asked.length} file(s).`);
   const lines = matched.stdout.split('\n');
-  fresh.forEach((target, i) => {
+  asked.forEach((target, i) => {
     const rule = /^(.*):(\d+):(.*)$/.exec((lines[i] ?? '').split('\t')[0]!);
     if (rule && rule[3] && !rule[3].startsWith('!')) throw ignoredTargetError(target.rel, `${rule[1]}:${rule[2]}: ${rule[3]}`);
   });
