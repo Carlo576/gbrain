@@ -287,7 +287,7 @@ test/reranker-default-seam.test.ts	DEFAULT_RERANKER_MODEL seam (#3657, flipped v
 test/resolver.test.ts	RESOLVER.md trigger round-trip (D5/C)	2	readFileSync
 test/resolver.test.ts	Skill example-name validator (D13)	4	readFileSync
 test/retrieval-reflex-recipe-routing.test.ts	retrieval-reflex recipe routing is MECE with the query skill (#4292)	5	readFileSync
-test/runtime-version.test.ts	stated Bun floor	1	readFileSync
+test/runtime-version.test.ts	stated Bun floor	2	readFileSync
 test/schema-bootstrap-coverage.test.ts	(file-level)	15	source-surface-helper
 test/schema-pack-unify-types-handler.test.ts	#1575 unify-types worker dry-run default	1	source-surface-helper
 test/schema-pack/suggest.test.ts	runSuggest — source-text contract (structural)	1	readFileSync
@@ -334,7 +334,7 @@ test/scripts/nightly-issue.test.ts	nightly-watch incidents	9	readFileSync
 test/scripts/nightly-issue.test.ts	nightly-watch routing and guard	9	readFileSync
 test/scripts/nightly-issue.test.ts	operator messages carry docs anchors that resolve	1	readFileSync
 test/scripts/postgres-lane-coverage.test.ts	check-postgres-lane-coverage.ts	9	readFileSync
-test/scripts/postgres-unit-arms.test.ts	postgres-unit-arms list	12	readFileSync
+test/scripts/postgres-unit-arms.test.ts	postgres-unit-arms list	13	readFileSync
 test/scripts/promote-stable.test.ts	promote-stable.yml	2	readFileSync
 test/scripts/regen-all.test.ts	regen:all	5	readFileSync
 test/scripts/run-verify-parallel.test.ts	guard registration ⇒ execution coverage	1	readFileSync
