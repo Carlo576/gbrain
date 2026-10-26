@@ -12,7 +12,7 @@ import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { checkError } from '../check-fix.ts';
-import { GBRAIN_PINNED_FUNCTIONS, LEGACY_SEARCH_PATH_SETTINGS } from '../../../core/function-search-path.ts';
+import { PINNED_FUNCTION_NAMES, LEGACY_SEARCH_PATH_SETTINGS } from '../../../core/function-search-path.ts';
 
 /** The gbrain functions whose pinned search_path lacks a trailing pg_temp, and the ALTER that fixes each. */
 export async function functionSearchPathProblems(engine: BrainEngine): Promise<{ functions: string[]; fix: string[] }> {
@@ -20,7 +20,7 @@ export async function functionSearchPathProblems(engine: BrainEngine): Promise<{
     `SELECT p.oid::regprocedure::text AS sig, substr(c.setting, 13) AS path
        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL unnest(p.proconfig) AS c(setting)
       WHERE n.nspname = 'public' AND p.prokind = 'f' AND c.setting = ANY($1::text[]) AND p.proname = ANY($2::text[]) ORDER BY 1`,
-    [[...LEGACY_SEARCH_PATH_SETTINGS], [...GBRAIN_PINNED_FUNCTIONS]]);
+    [[...LEGACY_SEARCH_PATH_SETTINGS], [...PINNED_FUNCTION_NAMES]]);
   return {
     functions: rows.map(r => r.sig),
     fix: rows.map(r => `ALTER FUNCTION ${r.sig} SET search_path = ${r.path}, pg_temp;`),

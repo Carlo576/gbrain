@@ -18,7 +18,7 @@ import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { LATEST_VERSION, runMigrations } from '../../src/core/migrate.ts';
 import { derivationNeedles } from '../../src/core/page-body/segment-derive.ts';
 import { v277 } from '../../src/core/schema-migrations/v277-function-search-path-pg-temp.ts';
-import { GBRAIN_PINNED_FUNCTIONS } from '../../src/core/function-search-path.ts';
+import { PINNED_FUNCTION_NAMES } from '../../src/core/function-search-path.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const describeE2E = DATABASE_URL ? describe : describe.skip;
@@ -109,7 +109,7 @@ async function catalog(c: Sql) {
     triggers: triggers.map(t => ({ trigger: t.trigger, timing: t.timing })),
     pinned: paths.length,
     withoutTemp: paths.filter(p => !p.setting.endsWith(', pg_temp')).map(p => p.sig),
-    unlisted: paths.filter(p => !(GBRAIN_PINNED_FUNCTIONS as readonly string[]).includes(p.name)).map(p => p.sig),
+    unlisted: paths.filter(p => !(PINNED_FUNCTION_NAMES as readonly string[]).includes(p.name)).map(p => p.sig),
   };
 }
 

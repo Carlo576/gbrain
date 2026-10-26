@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { GBRAIN_PINNED_FUNCTIONS } from '../src/core/function-search-path.ts';
+import { PINNED_FUNCTION_NAMES } from '../src/core/function-search-path.ts';
 
 const PURGED_CLAIM = 'alice-example joined acme-example as cto';
 const WITHDRAWN_CLAIM = 'alice-example lives in city-a';
@@ -29,13 +29,13 @@ describe('function search_path ends in pg_temp on PGLite (#7632)', () => {
   }, 120_000);
   afterAll(async () => { await engine?.disconnect(); });
 
-  test('every function that pins a search_path ends it with pg_temp, none is SECURITY DEFINER, and each is in GBRAIN_PINNED_FUNCTIONS', async () => {
+  test('every function that pins a search_path ends it with pg_temp, none is SECURITY DEFINER, and each is in PINNED_FUNCTION_NAMES', async () => {
     const rows = await engine.executeRaw<{ name: string; sig: string; setting: string; secdef: boolean }>(
       `SELECT p.proname AS name, p.oid::regprocedure::text AS sig, s.setting, p.prosecdef AS secdef FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
          CROSS JOIN LATERAL unnest(p.proconfig) AS s(setting) WHERE n.nspname = 'public' AND s.setting LIKE 'search_path=%' ORDER BY 1`);
     expect(rows.length).toBeGreaterThanOrEqual(35);
     expect(rows.filter(r => !r.setting.endsWith(', pg_temp') || r.secdef).map(r => r.sig)).toEqual([]);
-    expect(rows.map(r => r.name).filter(name => !(GBRAIN_PINNED_FUNCTIONS as readonly string[]).includes(name))).toEqual([]);
+    expect(rows.map(r => r.name).filter(name => !(PINNED_FUNCTION_NAMES as readonly string[]).includes(name))).toEqual([]);
   });
 
   test('another application\'s function in public pinning the old search_path keeps it: boots and the migration leave it, and doctor does not name it', async () => {

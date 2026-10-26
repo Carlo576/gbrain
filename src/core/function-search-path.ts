@@ -21,7 +21,7 @@ export const LEGACY_SEARCH_PATH_SETTINGS = ['search_path=pg_catalog, public', 's
  * pinned function joins this list; the fresh-install tests (test/function-search-path-pglite.test.ts, and case 3 of
  * test/e2e/function-search-path-postgres.test.ts) fail until it does.
  */
-export const GBRAIN_PINNED_FUNCTIONS = [
+export const PINNED_FUNCTION_NAMES = [
   'auto_enable_rls', 'bump_page_generation_clock_fn', 'bump_page_generation_fn', 'enforce_minion_queue_protocol',
   'gbrain_advance_page_revision', 'gbrain_advance_tag_revision', 'gbrain_bump_trust_generation',
   'gbrain_clear_atom_page_state', 'gbrain_count_git_canonical_sources', 'gbrain_count_modifications', 'gbrain_forget_page_retrievals',
@@ -36,7 +36,7 @@ export const GBRAIN_PINNED_FUNCTIONS = [
 ] as const;
 
 /**
- * Appends pg_temp to the pinned search_path of every gbrain function (GBRAIN_PINNED_FUNCTIONS) in public the current
+ * Appends pg_temp to the pinned search_path of every gbrain function (PINNED_FUNCTION_NAMES) in public the current
  * role may alter that still pins `pg_catalog, public` or `pg_catalog`. A function the role does not own is
  * left as it was, and so is a procedure (ALTER FUNCTION refuses one, and gbrain installs none). Shared by the schema blob (its last statement, so a replay's CREATE OR REPLACE never leaves a function
  * without it), both engines' initSchema after migrations (a migration that re-creates a function resets its path, and
@@ -49,7 +49,7 @@ BEGIN
   FOR f IN SELECT p.oid::regprocedure AS sig, substr(c.setting, 13) AS path
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL unnest(p.proconfig) AS c(setting)
     WHERE n.nspname = 'public' AND p.prokind = 'f' AND c.setting IN (${LEGACY_SEARCH_PATH_SETTINGS.map(v => `'${v}'`).join(', ')})
-      AND p.proname IN (${GBRAIN_PINNED_FUNCTIONS.map(name => `'${name}'`).join(', ')})
+      AND p.proname IN (${PINNED_FUNCTION_NAMES.map(name => `'${name}'`).join(', ')})
       AND pg_has_role(current_user, p.proowner, 'USAGE')
     ORDER BY 1
   LOOP
