@@ -401,6 +401,24 @@ for (const backend of testBackends()) {
       expect(check?.message).toContain('gbrain sources set-path <id> <absolute-directory>');
     }, 120_000);
 
+    // /ship coverage audit (GBRA-207, #7630).
+    // Value: protects=doctor default_source_local_path stays ok when every live source path is absolute and only an archived source is relative;
+    //   fails_when=the relative-source query drops its isAbsolute filter or its archived exclusion, so every multi-source brain warns;
+    //   why_new=the two doctor cases above assert only the warn side; seam=none; no_claim=other doctor checks (only this check runs)
+    test('doctor default_source_local_path stays ok with absolute sources and a relative path only on an archived source', async () => {
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-7630-abs-')));
+      try {
+        await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [folder]);
+        await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', $1)", [repo]);
+        await engine.executeRaw("INSERT INTO sources (id, name, local_path, archived, archived_at) VALUES ('notes-b', 'notes-b', 'notes', true, now())");
+        const check = await defaultSourceLocalPathCheck(engine);
+        expect(check?.status).toBe('ok');
+        expect(check?.message).not.toContain('relative local_path');
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    }, 120_000);
+
     test('gbrain import of the cwd into a source whose local_path is "." does not stamp it fresh', async () => {
       await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.')");
       const { runImport } = await import('../src/commands/import.ts');
