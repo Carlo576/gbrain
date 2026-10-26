@@ -81,6 +81,8 @@ function checkout(files: number): string {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, `page-${i}.md`), pageBody(`Page ${i}`, `Body of page ${i}, with a few lines of ordinary text.\nSee also page ${(i * 7) % files}.`));
     }
+    mkdirSync(join(root, 'area-2', 'topic-3'), { recursive: true });
+    mkdirSync(join(root, 'area-1'), { recursive: true });
     writeFileSync(join(root, '.gitignore'), ['node_modules/', '*.log', '!keep.log', '.DS_Store', '/dist', '*.tmp', '.obsidian/workspace*', 'scratch/', '**/drafts/*.swp', ''].join('\n'));
     writeFileSync(join(root, 'area-1', '.gitignore'), '*.bak\n/private/\n');
     writeFileSync(join(root, 'area-2', 'topic-3', '.gitignore'), 'cache-*\n');
