@@ -357,6 +357,38 @@ for (const backend of testBackends()) {
       expect(receipt).toMatchObject({ state: 'conflict', error_code: 'page_identity_changed' });
     }, { setup, databaseUrl }), 180_000);
 
+    test('an append release keeps the held payload: kind, world visibility and valid_until reach the fence row and the facts row', () => managedBrain(async ({ engine, ctx, root }) => {
+      await seedPage(engine, ctx);
+      const ref = await holdRemember(engine, ctx);
+      await engine.executeRaw(`UPDATE write_gate_holds SET payload = payload || '{"kind":"preference","visibility":"world","valid_until":"2027-01-01"}'::jsonb WHERE id = $1`, [Number(ref.slice(1))]);
+      expect(await release(engine, ref)).toMatchObject({ status: 'released', tier: 'user_confirmed' });
+      const [row] = await engine.executeRaw<{ kind: string; visibility: string; valid_until: string | null; row_num: number | null }>(
+        `SELECT kind, visibility, to_char(valid_until, 'YYYY-MM-DD') AS valid_until, row_num FROM facts WHERE source_id='default' AND fact=$1`, [CLAIM]);
+      expect(row).toMatchObject({ kind: 'preference', visibility: 'world', valid_until: '2027-01-01' });
+      await settleManagedGitEffects(engine);
+      expect(fenceCells(readFileSync(file(root), 'utf8'))).toEqual([expect.objectContaining({ rowNum: Number(row!.row_num), kind: 'preference', visibility: 'world', validUntil: '2027-01-01' })]);
+    }, { setup, databaseUrl }), 180_000);
+
+    test('a release that ended without committing and whose hold was then dropped admits no new attempt: publish returns false, nothing written', () => managedBrain(async ({ engine, ctx }) => {
+      await seedPage(engine, ctx);
+      const ref = await holdRemember(engine, ctx);
+      const lift = `PERFORM set_config('gbrain.write_sources', '["default"]', true); PERFORM set_config('gbrain.git_protocol', '1', true);`;
+      await engine.executeRaw(`CREATE FUNCTION test_delete_page() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN ${lift} UPDATE pages SET deleted_at=now() WHERE source_id='default' AND slug=NEW.slug; RETURN NEW; END $$`);
+      await engine.executeRaw(`CREATE TRIGGER test_delete_page AFTER INSERT ON persistence_requests FOR EACH ROW
+        WHEN (NEW.operation = 'trust_release') EXECUTE FUNCTION test_delete_page()`);
+      expect((await release(engine, ref).then(() => null, (e: { code?: string }) => e))?.code).toBe('page_identity_changed');
+      await engine.executeRaw('DROP TRIGGER test_delete_page ON persistence_requests');
+      await engine.executeRaw(`DO $$ BEGIN ${lift} UPDATE pages SET deleted_at=NULL WHERE source_id='default' AND slug='${slug}'; END $$`);
+      const drop = await previewOwnerAction(engine, { action: 'drop', ref });
+      await applyOwnerAction(engine, { action: 'drop', ref }, { binding: drop.binding, confirmation: { via: 'tty' }, by: owner });
+
+      expect(await currentHoldStore().publish!(engine, Number(ref.slice(1)), 'owner-example')).toBe(false);
+      expect(await holdStatus(engine, ref)).toBe('dropped');
+      expect(await factRows(engine)).toEqual([]);
+      expect((await engine.executeRaw<{ state: string }>("SELECT state FROM persistence_requests WHERE operation='trust_release'")).map(r => r.state)).toEqual(['conflict']);
+    }, { setup, databaseUrl }), 180_000);
+
     test('a release whose request ended without committing can be released again once the cause is fixed: the retry admits a new attempt', () => managedBrain(async ({ engine, ctx, root }) => {
       await seedPage(engine, ctx);
       const ref = await holdRemember(engine, ctx);
