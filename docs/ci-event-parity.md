@@ -119,6 +119,9 @@ is a ceiling, not a budget: a run past it fails with `over_budget` instead of co
 Each cell writes its elapsed time as a share of its ceiling to the job summary, so drift
 shows long before a run fails.
 
+The Bun 1.4.0 rows in the tables below were measured before the floor moved to
+Bun 1.4.4 (#7644); that cell no longer runs.
+
 Measured on ubicloud-standard-4, full scope, run 39996381819:
 
 | Cell | Wall | Cross-boundary crashes | Process faults | 8 random seeds |
