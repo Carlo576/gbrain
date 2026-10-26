@@ -15,8 +15,8 @@
  * pages the keyword path returns, and lets vector-only pages fill the result
  * only up to `search.remote_page_cap` distinct pages in total. A query with
  * no lexical match still gets its top vector pages. An explicit `limit`, a
- * paged call (offset > 0), every trusted local caller and a delegated host
- * subagent tool call (`viaSubagent`) keep today's rows;
+ * paged call (offset > 0), every trusted local caller and a host subagent
+ * tool call (`viaSubagent`) that no remote client delegated keep today's rows;
  * `0` turns the cap off.
  */
 import type { OperationContext } from '../ops/contract.ts';
@@ -34,7 +34,7 @@ export interface RemotePageCapMeta {
 
 /** The cap for one call, or null when it does not apply. */
 export async function remotePageCap(ctx: OperationContext, p: Record<string, unknown>): Promise<number | null> {
-  if (ctx.remote === false || ctx.viaSubagent === true || p.limit || p.offset) return null;
+  if (ctx.remote === false || (ctx.viaSubagent === true && !ctx.auth) || p.limit || p.offset) return null;
   const raw = await ctx.engine.getConfig(REMOTE_PAGE_CAP_KEY).catch(() => null);
   const n = raw === null || raw.trim() === '' ? Number.NaN : Number(raw);
   const cap = Number.isInteger(n) && n >= 0 ? n : DEFAULT_REMOTE_PAGE_CAP;

@@ -74,6 +74,11 @@ describe('remotePageCap callers and the cap line', () => {
     expect(await remotePageCap({ remote: true, engine } as never, {})).toBe(DEFAULT_REMOTE_PAGE_CAP);
   });
 
+  test('a subagent job delegated by a remote OAuth client stays capped', async () => {
+    const auth = { token: '', clientId: 'client-example', principal: { kind: 'oauth_client', id: 'client-example' } };
+    expect(await remotePageCap({ remote: true, viaSubagent: true, auth, engine } as never, {})).toBe(DEFAULT_REMOTE_PAGE_CAP);
+  });
+
   test('the line names only the pages the cap left out, and the flag the reader passes', () => {
     const retrieval = { page_cap: { cap: 3, kept_pages: 3, dropped_pages: 9 } };
     expect(pageCapLine(retrieval)).toBe('[gbrain search] 9 more pages matched only by meaning and were left out (default remote cap 3). Pass limit to read them.');
