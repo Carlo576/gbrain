@@ -25,7 +25,7 @@ import { logVerbUsage, recordsFiring, type RecordsFiring } from '../core/verbs/u
 import { searchCountLine } from '../core/search/keyword-paging.ts';
 import { pageCapLine } from '../core/search/remote-page-cap.ts';
 import { dateLabelLine } from '../core/search/date-labels.ts';
-import { hiddenTakesNotice, localTranscriptsNotice, recallInteropNotices, wantsTranscriptHint } from '../core/interop-notices.ts';
+import { emptyRead, hiddenTakesNotice, localTranscriptsNotice, recallInteropNotices, wantsTranscriptHint } from '../core/interop-notices.ts';
 import { assertUnscopedReadReachesPages } from '../core/sources-not-readable.ts';
 import { hiddenToolHint, hiddenToolNext, hiddenToolRoute, type ToolConnection } from './hidden-tool-hint.ts';
 import { opAllowedForBoundClient } from '../core/ops/context.ts';
@@ -1077,7 +1077,6 @@ async function dispatchResolvedCall(
     enforceBoundClientOpAllowList(ctx.auth, op);
     // #5575 CEO-18: a floored connection only reaches read ops that enforce its floor.
     enforceReadTrustFloor(ctx.auth, op);
-    await assertUnscopedReadReachesPages(name, safeParams, ctx);
     // GBRA-156: a read op does not change what the hook reads, so it runs beside the handler (a degraded engine's reconnect stays the handler's).
     const earlyMeta = opts.metaHook && op.mutating === false && !isEngineDegraded(engine) ? runMetaHook(opts.metaHook, name, ctx) : undefined;
     const sharedStdio = ctx.transport === 'stdio' && !ctx.auth &&
@@ -1098,6 +1097,7 @@ async function dispatchResolvedCall(
         return op.handler(ctx, safeParams);
       })
       : await op.handler(ctx, safeParams);
+    if (emptyRead(name, result)) await assertUnscopedReadReachesPages(name, safeParams, ctx);
     // Hot memory built before a write (forget, remember, …) is never served after it, on every transport;
     // #6696 (A4): the write's receipt carries the capacity notices (60 s snapshot, at most hourly per scope).
     if (op.mutating) { invalidateHotMemoryForEngine(engine); notices.push(...await writeReceiptCapacityNotices(engine, ctx)); }

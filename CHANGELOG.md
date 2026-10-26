@@ -19,13 +19,13 @@ identifiers and attribution are available in the pre-removal Git revision
 | Situation | Before | Now |
 |---|---|---|
 | A remote `search` or `query` with no `limit`, embeddings on | the vector arm filled the mode's row limit with every page it could reach | every page with a keyword, title, alias or exact-identity match, plus pages found only by meaning up to 3 pages in total. A line after the results says how many were left out and that `limit` returns them; `_meta.retrieval.page_cap` counts them |
-| The same call with an explicit `limit`, a paged call (`offset`), or any local CLI call | | unchanged |
+| The same call with an explicit `limit`, a paged call (`offset`), or any CLI call on the brain host (a thin-client CLI call is remote, so it gets the cap; pass `--limit` for every row) | | unchanged |
 | A brain with no embedding model (keyword search) | | unchanged: every keyword match comes back |
 | Changing the cap | | `gbrain config set search.remote_page_cap <n>`; `0` turns it off |
-| An unscoped remote `search`, `query`, `recall` or `list_pages` from a connection with no source grant, when every source it reads holds no page and other sources do | `[]` with a `sources_not_readable` notice (kind degraded) | refused with `sources_not_readable` (class host_only). The fix runs on the brain host: `gbrain sources federate <source>`, with the source the user picks, or a grant for the token (`gbrain auth rescope --token <name> --sources <ids>`). It never names a source the connection cannot read |
+| An unscoped remote `search`, `query`, `recall` or `list_pages` from a connection with no source grant that comes back empty, when every source it reads holds no page (for `recall` and `query`, no world fact either) and other sources do | `[]` with a `sources_not_readable` notice (kind degraded) | refused with `sources_not_readable` (class host_only). The fix runs on the brain host: `gbrain sources federate <source>`, with the source the user picks, or a grant for the token (`gbrain auth rescope --token <name> --sources <ids>`). It never names a source the connection cannot read |
 | The same read when its sources hold pages that match nothing, or on a brain with no pages; any read from a token granted sources, an OAuth client, a bound connection, or one that names `source_id` or `source_ids` | | unchanged |
-| `gbrain sources add` without `--federated` or `--no-federated` on a brain where connections with no source grant read no page | a stderr warning | also `next: gbrain sources federate <id>` on stdout |
-| `gbrain sources add --json` | not available | `{id, name, local_path, remote_url, federated, next?}` on stdout; the human lines move to stderr |
+| `gbrain sources add` without `--federated` or `--no-federated` on a brain that is not managed, where connections with no source grant read no page | a stderr warning | also `next: gbrain sources federate <id>` on stdout |
+| `gbrain sources add --json` on a brain that is not managed (a managed brain prints its lifecycle receipt, as before) | not available | `{id, name, local_path, remote_url, federated, next?}` on stdout; the human lines move to stderr |
 
 Every vector path (the hybrid vector arm, the embedding-failure fallback and the `query` image branch) now has a test proving it reads only the sources the keyword path reads, for granted tokens and per-call `source_id`/`source_ids`, on PGLite and Postgres. No scope gap was found.
 

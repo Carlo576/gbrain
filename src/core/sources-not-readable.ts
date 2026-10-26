@@ -1,12 +1,13 @@
 /**
  * GBRA-156: `sources_not_readable`, the refusal of an unscoped remote read
- * whose readable sources hold no page while other sources hold pages.
+ * that came back empty because its readable sources hold no page (and, for
+ * recall and query, no world fact) while other sources hold pages.
  *
- * A connection with no source grant (a token minted without --sources, or
- * an unbound agent stdio connection) reads the default source plus the
+ * A connection with no source grant (a legacy token minted without --sources,
+ * whose hasSourceGrant is false, or an unbound agent stdio connection) reads the default source plus the
  * federated ones. A new source is not federated by default, so such a
  * connection could answer every search with an empty result that reads like
- * a clean miss. The read is refused before it runs instead, naming the host
+ * a clean miss. That empty answer is refused instead, naming the host
  * command that makes the pages readable without naming any source the
  * connection cannot read. A scope that holds pages but matched nothing, and a
  * brain where no source holds a page, read as before. A connection whose
@@ -27,17 +28,20 @@ function namesSources(params: Record<string, unknown>): boolean {
   return params.source_id !== undefined || (Array.isArray(ids) ? ids.length > 0 : typeof ids === 'string' && ids.trim() !== '');
 }
 
-/** Throws `sources_not_readable` before an unscoped remote read that can only come back empty. */
+/** Throws `sources_not_readable` for an empty unscoped remote read whose scope holds nothing it could read. */
 export async function assertUnscopedReadReachesPages(op: string, params: Record<string, unknown>, ctx: OperationContext): Promise<void> {
   if (ctx.remote === false || !UNSCOPED_READ_OPS.has(op) || namesSources(params)) return;
-  if (ctx.explicitReadBinding || ctx.auth?.allowedSources !== undefined || ctx.auth?.hasSourceGrant === true) return;
+  if (ctx.explicitReadBinding || (ctx.auth !== undefined && (ctx.auth.allowedSources !== undefined || ctx.auth.hasSourceGrant !== false))) return;
   let refuse = false;
   try {
     const scope = federatedSearchScope(ctx);
     const readable = scope.sourceIds ?? (scope.sourceId !== undefined ? [scope.sourceId] : null);
     if (!readable) return;
+    const readableFacts = op === 'recall' || op === 'query'
+      ? ` OR EXISTS (SELECT 1 FROM facts WHERE source_id = ANY($1::text[]) AND visibility = 'world')`
+      : '';
     const [row] = await ctx.engine.executeRaw<{ refuse: boolean }>(
-      `SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE source_id = ANY($1::text[]) AND deleted_at IS NULL) THEN false
+      `SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE source_id = ANY($1::text[]) AND deleted_at IS NULL)${readableFacts} THEN false
                    ELSE EXISTS (SELECT 1 FROM pages p JOIN sources s ON s.id = p.source_id
                                  WHERE p.deleted_at IS NULL AND s.archived IS NOT TRUE AND NOT (p.source_id = ANY($1::text[])))
               END AS refuse`,

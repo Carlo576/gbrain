@@ -460,7 +460,7 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
     `  federated: ${fed}${fed ? ' — appears in cross-source default search' : ' — only searched when explicitly named via --source'}`,
   );
   if (!fed && federated === null) console.error(`Warning: source "${id}" is not federated. A remote token or agent connection with no source grant cannot read its pages, so its searches answer empty for them. Run \`gbrain sources federate ${id}\` to let every such connection read it, or grant one token with \`gbrain auth rescope --token <name> --sources ${id}\`.`);
-  const next = !fed && federated === null ? await noGrantFloorNext(engine, id) : null;
+  const next = !fed && federated === null ? await noGrantFloorNext(engine, id).catch(() => null) : null;
   if (next) say(`  next: ${next.command} — ${next.why}`);
   if (ghKind || gKind) {
     say(`  sync: run \`gbrain sync --source ${id}\` once; after its first sync, autopilot keeps it synced on the autopilot interval.`);

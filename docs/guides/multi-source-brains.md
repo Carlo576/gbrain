@@ -124,8 +124,9 @@ all live in such sources would answer that connection's every search with an
 empty result that reads like a clean miss.
 
 So an unscoped `search`, `query`, `recall` or `list_pages` from such a
-connection is refused with `sources_not_readable` when the sources it reads
-hold no page at all while other sources on the brain hold pages. The refusal
+connection that comes back empty is refused with `sources_not_readable` when
+the sources it reads hold no page at all (for `recall` and `query`, no world fact either)
+while other sources on the brain hold pages. The refusal
 never names a source the connection cannot read. Its fix is host-side: the
 user picks the source these connections should read and the brain host runs
 `gbrain sources federate <source>`, or grants the connection its sources
@@ -138,10 +139,11 @@ sources, an OAuth client, a bound connection and a read that names
 call, never widens what it reads. Federating a source never shows its
 `visibility: private` pages to a remote connection.
 
-`gbrain sources add` warns on stderr when a new source is not federated, and
+On a brain that is not managed, `gbrain sources add` warns on stderr when a new source is not federated, and
 when the sources an unscoped connection reads hold no page it also prints the
 next step on stdout (`next: gbrain sources federate <id>`), and as `next`
-(`command`, `argv`, `why`) under `--json`.
+(`command`, `argv`, `why`) under `--json`. A managed brain's `sources add`
+prints its lifecycle receipt instead, without the warning or the next step.
 
 ### Explicit reads from a bound agent connection
 
