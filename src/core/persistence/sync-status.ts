@@ -420,7 +420,8 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const refreshRow = typeof source.refresh === 'string' ? JSON.parse(source.refresh) as RefreshProbeRow : source.refresh;
   const worktreeRefresh = refreshRow ? { refresh_id: refreshRow.id, state: refreshRow.state, updated_at: new Date(refreshRow.updated_at).toISOString(),
     ...await (await import('./worktree-refresh.ts')).refreshHolderReport(refreshRow) } : null;
-  const refreshFix = worktreeRefresh?.liveness !== 'live' ? worktreeRefresh?.fix ?? null : null;
+  // An orphaned or recovery_required refresh wedges the worktree, so its fix leads; one whose holder this host cannot probe is only the last fallback.
+  const refreshFix = worktreeRefresh?.liveness === 'orphaned' || worktreeRefresh?.state === 'recovery_required' ? worktreeRefresh.fix : null;
   // #6643: a knock-on or a superseded run is not a failure of its page: the resume re-freezes the entry.
   const selfHealing = liveError?.detail === 'knock_on' || liveError?.detail === 'run_replaced';
   const actionable = holds.filter(hold => !hold.needs_human && hold.safe_actions[0] !== 'none');
@@ -471,7 +472,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
       why: `Write request ${oldest.request.request_id} of this source is still ${oldest.request.state}${oldest.request.step ? ` (step ${oldest.request.step})` : ''}; a running owner finishes it on its own, and the next sync of this source drains it.` } satisfies Action
       : stateReason === 'status_unknown' ? { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `The oldest-blocker or recovery probe did not answer within ${SYNC_STATUS_PROBE_MS / 1000} s, so this status does not know the state (it is not reported synced). Rerun it after a short wait; gbrain doctor --json checks the database if it keeps timing out.` } satisfies Action
-      : gitPushHolds.find(hold => hold.conflict || hold.parked)?.fix ?? fenceHolds[0]?.fix ?? null),
+      : gitPushHolds.find(hold => hold.conflict || hold.parked)?.fix ?? fenceHolds[0]?.fix ?? (worktreeRefresh?.liveness === 'unknown' ? worktreeRefresh.fix : null)),
     state, reason: stateReason,
     oldest_blocker: oldest, recovery, checkpoint_blockers_read: detail ? { status: 'read' } : notRead('checkpoint blocker list'),
     cursors_read: detail ? { status: 'read' } : notRead('live cursor'), terminal_failures_read: detail ? { status: 'read' } : notRead('terminal-failure summary'),

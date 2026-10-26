@@ -20,7 +20,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -232,5 +232,23 @@ test('#7679: an orphan whose recorded holder is on another host is reported unkn
     await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_in_progress');
     expect((await f.refreshRows()).map(row => row.state)).toEqual(['syncing']);
     expect(await refreshWorktree(f.engine, f.alpha, { resume: true })).toMatchObject({ status: 'completed', refresh_id: orphan.id, target_head: target });
+  });
+}, 300_000);
+
+test('#7679: a plain refresh that cannot read the checkout HEAD leaves an orphaned syncing refresh as it is, and the next one adopts it', async () => {
+  // Ship audit (adversarial #1). Value: protects=an unattended plain refresh never escalates an orphan to recovery_required on a transient
+  // HEAD read failure (that state's advice resets the checkout behind members that already synced); fails_when=adoption runs recovery with an
+  // unreadable HEAD; why_new=no test read HEAD as unreadable during adoption; seam=.git/HEAD overwritten with garbage; no_claim=the recoverOne
+  // guard for a HEAD lost between adoption's read and recovery's read (a race window this test does not open).
+  for (const item of cases) await withKilledRefresh(item, async ({ f, target, orphan }) => {
+    const headFile = join(f.root, '.git', 'HEAD');
+    const saved = readFileSync(headFile, 'utf8');
+    writeFileSync(headFile, 'not a ref\n');
+    try {
+      await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_in_progress');
+      expect((await f.refreshRows() as Row[]).map(row => [row.state, row.outcome.previous_holder])).toEqual([['syncing', undefined]]);
+    } finally { writeFileSync(headFile, saved); }
+    expect(await refreshWorktree(f.engine, f.alpha)).toMatchObject({ recovered: { refresh_id: orphan.id, state: 'completed', status: 'completed' } });
+    expect(await f.lastCommit(f.alpha)).toBe(target);
   });
 }, 300_000);
