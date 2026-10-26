@@ -213,7 +213,7 @@ export function derivationHoldsClaimSql(d: string, needles: string, patterns: st
     LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
       UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
     WHERE CASE WHEN ${hasWordsSql('s.t', patterns)} THEN EXISTS (SELECT 1 FROM unnest(${needles}::text[]) k(n)
-      WHERE strpos(' ' || ${foldSql('gbrain_fact_normalize(s.t)')} || ' ', k.n) > 0) ELSE false END) ELSE false END`;
+      WHERE strpos(' ' || ${foldSql('public.gbrain_fact_normalize(s.t)')} || ' ', k.n) > 0) ELSE false END) ELSE false END`;
 }
 
 /**
@@ -223,7 +223,7 @@ export function derivationHoldsClaimSql(d: string, needles: string, patterns: st
  * that page's prose still says, and the next derivation would write it back.
  */
 export function derivationSweepScopeSql(d: string, p: string, pageIds: string): string {
-  return `(${d}.page_id = ANY(${pageIds}::int[]) OR ${p}.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
+  return `(${d}.page_id = ANY(${pageIds}::int[]) OR ${p}.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM public.page_body_manifest m
     WHERE m.page_id = ${d}.page_id AND m.occurrence_id = ${d}.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = ${d}.segment_sha256))`;
 }
 
@@ -236,7 +236,7 @@ export function derivationSweepScopeSql(d: string, p: string, pageIds: string): 
  * and otherwise waits a bounded time in a transaction that holds no other lock (segment-derive.ts continueDerivationPurges).
  */
 export function derivationScopeLockSql(sourceId: string): string {
-  return `hashtextextended('gbrain:derivation-scope:' || ${sourceId}, 0)`;
+  return `hashtextextended('gbrain:derivation-scope:'::text || ${sourceId}, 0::bigint)`;
 }
 
 /**
@@ -246,22 +246,48 @@ export function derivationScopeLockSql(sourceId: string): string {
  * on the sweep records. It reads them as its owner, so that writer is refused instead of storing the row; a role RLS
  * refuses never reaches it, so it learns nothing about a sweep.
  */
-export const DERIVATION_STORED_GUARD_SQL = `CREATE OR REPLACE FUNCTION gbrain_refuse_stored_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = ${GUARD_SEARCH_PATH} AS $func$
+export const DERIVATION_STORED_GUARD_FUNCTION_SQL = `CREATE OR REPLACE FUNCTION gbrain_refuse_stored_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = ${GUARD_SEARCH_PATH} AS $func$
 BEGIN
-  IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
+  IF EXISTS (SELECT 1 FROM public.page_segment_derivation_purges x JOIN public.pages p ON p.source_id = x.source_id
     WHERE p.id = NEW.page_id AND ${derivationSweepScopeSql('NEW', 'p', 'x.page_ids')}
       AND ${derivationHoldsClaimSql('NEW', 'x.needles', 'x.patterns')}) THEN
     RAISE EXCEPTION USING ERRCODE = 'P0001',
       MESSAGE = 'derivation_purge_pending: a fact purge''s sweep of stored derivation results is still running and this row holds its claim',
-      DETAIL = json_build_object('table', 'page_segment_derivations')::text;
+      DETAIL = json_build_object('table'::text, 'page_segment_derivations'::text)::text;
   END IF;
   RETURN NULL;
 END
 $func$ LANGUAGE plpgsql;
-${revokeExecuteSql('gbrain_refuse_stored_purging_derivation')}
-DROP TRIGGER IF EXISTS page_segment_derivations_refuse_stored_purging ON page_segment_derivations;
+${revokeExecuteSql('gbrain_refuse_stored_purging_derivation')}`;
+
+export const DERIVATION_STORED_GUARD_TRIGGER_SQL = `DROP TRIGGER IF EXISTS page_segment_derivations_refuse_stored_purging ON page_segment_derivations;
 CREATE TRIGGER page_segment_derivations_refuse_stored_purging AFTER INSERT OR UPDATE OF output, receipt ON page_segment_derivations
   FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_stored_purging_derivation();`;
+
+/**
+ * The scope-entry trigger function (#7632 definer): notes a page entering a running sweep's scope for every sweep of
+ * its source, as the owner, so a writer without a policy on the sweep records still notes it. It writes only
+ * page_segment_derivation_purge_pages, which has no trigger (a definer's write runs a table's triggers as the owner).
+ */
+export const DERIVATION_SCOPE_ENTRY_FUNCTION_SQL = `CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SECURITY DEFINER SET search_path = ${GUARD_SEARCH_PATH} AS $func$
+DECLARE
+  src TEXT;
+  page INTEGER;
+BEGIN
+  IF TG_TABLE_NAME = 'pages' THEN
+    src := NEW.source_id;
+    page := NEW.id;
+  ELSE
+    src := OLD.source_id;
+    page := OLD.page_id;
+  END IF;
+  PERFORM pg_advisory_xact_lock_shared(${derivationScopeLockSql('src')});
+  INSERT INTO public.page_segment_derivation_purge_pages (request_id, page_id)
+    SELECT x.request_id, page FROM public.page_segment_derivation_purges x WHERE x.source_id = src ON CONFLICT DO NOTHING;
+  RETURN NULL;
+END
+$func$ LANGUAGE plpgsql;
+${revokeExecuteSql('gbrain_mark_derivation_scope_entry')}`;
 
 /**
  * Per-segment derivation watermarks (migration v273): one row per page, pipeline and manifest occurrence, recording
@@ -284,7 +310,7 @@ CREATE TRIGGER page_segment_derivations_refuse_stored_purging AFTER INSERT OR UP
  * write, when its occurrence is retired or its page soft-deleted: the triggers on page_body_manifest and pages note the
  * page in page_segment_derivation_purge_pages for every sweep of the source, and the sweep checks those pages again
  * before it ends. The dropping trigger reads the sweep records as the writer, as RLS lets it; a row it passes unseen
- * that RLS accepts meets DERIVATION_STORED_GUARD_SQL, which reads them as its owner and refuses the write
+ * that RLS accepts meets DERIVATION_STORED_GUARD_FUNCTION_SQL, which reads them as its owner and refuses the write
  * (derivation_purge_pending). The scope-entry trigger reads and notes them as its owner (SECURITY DEFINER,
  * ../guard-definer.ts). A role RLS refuses meets neither definer, so it learns nothing about a sweep.
  *
@@ -340,25 +366,7 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purge_pages (
   page_id    INTEGER NOT NULL,
   PRIMARY KEY (request_id, page_id)
 );
-CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SECURITY DEFINER SET search_path = ${GUARD_SEARCH_PATH} AS $func$
-DECLARE
-  src TEXT;
-  page INTEGER;
-BEGIN
-  IF TG_TABLE_NAME = 'pages' THEN
-    src := NEW.source_id;
-    page := NEW.id;
-  ELSE
-    src := OLD.source_id;
-    page := OLD.page_id;
-  END IF;
-  PERFORM pg_advisory_xact_lock_shared(${derivationScopeLockSql('src')});
-  INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
-    SELECT x.request_id, page FROM page_segment_derivation_purges x WHERE x.source_id = src ON CONFLICT DO NOTHING;
-  RETURN NULL;
-END
-$func$ LANGUAGE plpgsql;
-${revokeExecuteSql('gbrain_mark_derivation_scope_entry')}
+${DERIVATION_SCOPE_ENTRY_FUNCTION_SQL}
 DROP TRIGGER IF EXISTS page_body_manifest_derivation_scope_retire ON page_body_manifest;
 CREATE TRIGGER page_body_manifest_derivation_scope_retire AFTER UPDATE OF gen_to ON page_body_manifest
   FOR EACH ROW WHEN (OLD.gen_to IS NULL AND NEW.gen_to IS NOT NULL AND OLD.staging_id IS NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
@@ -381,7 +389,8 @@ $func$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
 CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
   FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
-${DERIVATION_STORED_GUARD_SQL}`;
+${DERIVATION_STORED_GUARD_FUNCTION_SQL}
+${DERIVATION_STORED_GUARD_TRIGGER_SQL}`;
 
 /**
  * The segment tables hold page text (`page_segment_texts`, `page_body_staging_parts`) or a page's shape and

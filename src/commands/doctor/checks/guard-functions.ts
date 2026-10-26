@@ -2,9 +2,10 @@
  * guard_functions doctor check (#7632): the purge and withdrawal guards read their ledgers as their owner.
  *
  * Postgres only (PGLite has one role). Fails when one of the seven guards is not SECURITY DEFINER with search_path
- * `pg_catalog, public, pg_temp`, is executable by PUBLIC/anon/authenticated, or is owned by a role that does not
- * bypass RLS on a table it reads; when a raising guard's trigger still fires BEFORE ROW or the derivation guard's
- * AFTER ROW check is missing; or when any gbrain function's search_path still ends without pg_temp.
+ * `pg_catalog, pg_temp` (an older gbrain booting against the brain re-creates gbrain_mark_derivation_scope_entry as
+ * an invoker), is executable by PUBLIC/anon/authenticated, or is owned by a role that does not bypass RLS on a table it
+ * reads; when a guard's trigger is missing or fires BEFORE ROW; or when any gbrain function's search_path still ends
+ * without pg_temp.
  * Migration v276 makes every change the migrating role owns and names the rest on stderr: this check carries the SQL
  * for them, to run as the owning role. Read-only.
  */
@@ -13,8 +14,8 @@ import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { checkError } from '../check-fix.ts';
-import { AFTER_ROW_PURGE_TRIGGERS, DEFINER_GUARDS, GUARD_SEARCH_PATH, LEGACY_SEARCH_PATH_SETTINGS } from '../../../core/guard-definer.ts';
-import { DERIVATION_STORED_GUARD_SQL } from '../../../core/page-body/schema.ts';
+import { DEFINER_GUARDS, GUARD_SEARCH_PATH, LEGACY_SEARCH_PATH_SETTINGS } from '../../../core/guard-definer.ts';
+import { GUARD_FUNCTION_SQL, GUARD_TRIGGERS } from '../../../core/schema-migrations/v276-guard-triggers-security-definer.ts';
 
 interface GuardRow { fn: string; secdef: boolean; pinned: boolean; executable_by: string[]; owner: string; reads_under_rls: string[] }
 
@@ -38,7 +39,7 @@ export async function guardFunctionProblems(engine: BrainEngine): Promise<{ prob
   for (const g of guards) {
     if (!g.secdef || !g.pinned) {
       problems.push(`${g.fn}() is not SECURITY DEFINER with search_path ${GUARD_SEARCH_PATH}`);
-      fix.push(`ALTER FUNCTION ${g.fn}() SECURITY DEFINER SET search_path = ${GUARD_SEARCH_PATH};`);
+      fix.push(GUARD_FUNCTION_SQL[g.fn]!);
     }
     if (g.executable_by.length > 0) {
       problems.push(`${g.fn}() is executable by ${g.executable_by.join(', ')}`);
@@ -46,26 +47,26 @@ export async function guardFunctionProblems(engine: BrainEngine): Promise<{ prob
     }
     if (g.reads_under_rls.length > 0) {
       problems.push(`${g.fn}()'s owner ${g.owner} neither bypasses RLS nor owns ${g.reads_under_rls.join(', ')} unforced, so the guard reads them filtered`);
-      fix.push(`/* give ${g.fn}() an owner that bypasses RLS (ALTER FUNCTION ${g.fn}() OWNER TO <owner of the tables>), or ALTER ROLE ${g.owner} BYPASSRLS; */`);
+      fix.push(`/* give ${g.fn}() an owner that bypasses RLS and is not the role gbrain runs as, so that role stays under its policies: ALTER FUNCTION ${g.fn}() OWNER TO <that role>; */`);
     }
   }
-  const triggers = await engine.executeRaw<{ trigger: string; before: boolean }>(
-    `SELECT t.tgname AS trigger, (t.tgtype & 2) <> 0 AS before FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgname = ANY($1::text[])`,
-    [[...AFTER_ROW_PURGE_TRIGGERS.map(t => t.trigger), 'page_segment_derivations_refuse_stored_purging']]);
-  for (const t of AFTER_ROW_PURGE_TRIGGERS) {
-    if (!triggers.some(row => row.trigger === t.trigger && row.before)) continue;
-    problems.push(`${t.trigger} on ${t.table} still fires BEFORE ROW`);
-    fix.push(t.sql);
-  }
-  const [derivations] = await engine.executeRaw<{ present: boolean }>(`SELECT to_regclass('page_segment_derivations') IS NOT NULL AS present`);
-  if (derivations?.present && !triggers.some(row => row.trigger === 'page_segment_derivations_refuse_stored_purging' && !row.before)) {
-    problems.push('page_segment_derivations has no page_segment_derivations_refuse_stored_purging AFTER ROW check');
-    fix.push(DERIVATION_STORED_GUARD_SQL);
+  const triggers = await engine.executeRaw<{ table: string; trigger: string; before: boolean | null }>(
+    `SELECT t.name AS table, g.tgname AS trigger, (g.tgtype & 2) <> 0 AS before
+       FROM unnest($1::text[]) AS t(name) JOIN pg_class c ON c.oid = to_regclass(t.name)
+       LEFT JOIN pg_trigger g ON g.tgrelid = c.oid AND NOT g.tgisinternal AND g.tgname = ANY($2::text[])`,
+    [[...new Set(GUARD_TRIGGERS.map(t => t.table))], GUARD_TRIGGERS.map(t => t.trigger)]);
+  for (const t of GUARD_TRIGGERS) {
+    if (!triggers.some(row => row.table === t.table)) continue;
+    const row = triggers.find(r => r.trigger === t.trigger);
+    if (row && !row.before) continue;
+    problems.push(row ? `${t.trigger} on ${t.table} still fires BEFORE ROW` : `${t.table} has no ${t.trigger} AFTER check`);
+    fix.push(`${GUARD_FUNCTION_SQL[t.fn]}\n${t.sql}`);
   }
   const unpinned = await engine.executeRaw<{ sig: string; path: string }>(
     `SELECT p.oid::regprocedure::text AS sig, substr(c.setting, 13) AS path
        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL unnest(p.proconfig) AS c(setting)
-      WHERE n.nspname = 'public' AND c.setting = ANY($1::text[]) ORDER BY 1`, [[...LEGACY_SEARCH_PATH_SETTINGS]]);
+      WHERE n.nspname = 'public' AND c.setting = ANY($1::text[]) AND p.proname <> ALL($2::text[]) ORDER BY 1`,
+    [[...LEGACY_SEARCH_PATH_SETTINGS], DEFINER_GUARDS.map(g => g.fn)]);
   if (unpinned.length > 0) {
     problems.push(`${unpinned.length} function(s) pin search_path without pg_temp last (${unpinned.map(u => u.sig).join(', ')})`);
     fix.push(...unpinned.map(u => `ALTER FUNCTION ${u.sig} SET search_path = ${u.path}, pg_temp;`));

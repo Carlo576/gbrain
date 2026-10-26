@@ -18,6 +18,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
 import { FACT_WITHDRAWAL_SCHEMA_STATEMENTS } from '../src/core/facts/withdrawal-schema.ts';
+import { GUARD_SEARCH_PATH } from '../src/core/guard-definer.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
@@ -73,7 +74,7 @@ for (const kind of testBackends()) {
     const unpinned = () => engine.executeRaw<{ sig: string }>(`SELECT p.oid::regprocedure::text AS sig FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
       WHERE n.nspname = 'public' AND l.lanname = 'plpgsql' AND p.proname LIKE 'gbrain\\_%'
-        AND NOT (COALESCE(p.proconfig, '{}'::text[]) && ARRAY['search_path=pg_catalog, public', 'search_path=pg_catalog, public, pg_temp'])`);
+        AND NOT (COALESCE(p.proconfig, '{}'::text[]) && ARRAY['search_path=pg_catalog, public', 'search_path=pg_catalog, public, pg_temp', 'search_path=${GUARD_SEARCH_PATH}'])`);
     const searchPathMigration = MIGRATIONS.find(m => m.name.endsWith('function_search_path'))!;
     const rerunSearchPathMigration = async () => {
       expect(searchPathMigration).toBeDefined();

@@ -5836,28 +5836,36 @@ segmented chunk (`test/e2e/segmented-switch-off-write-role.test.ts`). With the
 policies above it creates segmented pages and sees only its sources' rows
 (`test/e2e/segmented-rls-scope.test.ts`).
 
-**Purge and withdrawal guards.** The seven guard functions that refuse purged content and
-keep withdrawn facts withdrawn read their ledgers (`fact_purges`, `fact_withdrawals`,
-`take_purges`, `page_purges` and the two derivation purge tables) as the role that owns
-them, which ran the migrations: they are `SECURITY DEFINER` with
-`search_path = pg_catalog, public, pg_temp` (migration v276, #7632). Before, they read
-under the writing role's RLS, so a write role with no policy on a ledger saw no purge
-and no withdrawal and stored the claim again. Nothing changes for an owner or a role
-that bypasses RLS, and `anon` / `authenticated` gain nothing: EXECUTE on the guards is
-revoked from them and from PUBLIC, and every guard that refuses a write fires `AFTER ROW`,
-after RLS has accepted the row. The derivation guard is split: its `BEFORE ROW` half
-still runs as the writing role and silently drops a row the role can see a running purge
-sweep would delete, as before, and an `AFTER ROW` definer
-(`gbrain_refuse_stored_purging_derivation`) refuses such a row that was stored anyway
-with `derivation_purge_pending`. A scoped write role with no policy on a ledger is now
-refused, with an error, where it was let through, and learns whether content it supplies
-itself is purged or withdrawn in a source it can already write; the guards also perform two fixed side effects for
-it as the owner (expiring the facts its own statement just inserted when they are
-withdrawn, and adding its page to a running derivation purge's page list). Every other
-gbrain function that pins a search_path now ends it with `pg_temp`. Where the migrating
-role does not own a guard or its table, the migration names it on stderr and leaves it;
-`gbrain doctor` (`guard_functions`) prints the SQL to run as the owner
-(`test/e2e/guard-definer-postgres.test.ts`).
+**Purge and withdrawal guards.** Seven guard functions read the purge and withdrawal
+ledgers (`fact_purges`, `fact_withdrawals`, `take_purges`, `page_purges` and the two
+derivation purge tables) as the role that owns them, which ran the migrations: they are
+`SECURITY DEFINER` with `search_path = pg_catalog, pg_temp` and name every gbrain table
+and function `public.`-qualified (migration v276, #7632). Before, the guards read under the
+writing role's RLS, so a write role with no policy on a ledger saw no purge and no
+withdrawal: it stored a purged claim again or saved a withdrawn fact active. Nothing
+changes for an owner, a role that bypasses RLS or a write role with policies on the
+ledgers, and `anon` / `authenticated` gain nothing: EXECUTE on the definers is revoked
+from them and from PUBLIC, every definer that refuses fires `AFTER ROW` or
+`AFTER STATEMENT`, after RLS has accepted the row, and with `public` off their path a
+role that may create functions in `public` cannot plant an overload the owner then runs.
+The guards that silently correct a row are unchanged and still run as the writing role:
+the derivation drop (`gbrain_refuse_purging_derivation`, `BEFORE ROW`), the
+withdrawn-fact stamp on update (`gbrain_preserve_fact_withdrawal`) and the insert guard
+(`gbrain_guard_inserted_facts`). A row they pass because the role cannot read a ledger
+meets a definer after RLS: `gbrain_refuse_stored_purging_derivation`
+(`derivation_purge_pending`), `gbrain_refuse_unguarded_inserted_facts`
+(`purged_content`, `fact_withdrawn`) or `gbrain_refuse_revived_withdrawn_fact`
+(`fact_withdrawn`). So a scoped write role with no policy on a ledger is now refused, with
+an error, where it was let through, and learns whether content it supplies itself is
+purged or withdrawn in a source it can already write; one guard also performs a fixed
+side effect for it as the owner (adding its page to a running derivation purge's page
+list). Every other gbrain function that pins a search_path now ends it with `pg_temp`.
+Where the migrating role does not own a guard or its table, the migration names it on
+stderr and leaves it; `gbrain doctor` (`guard_functions`) prints the SQL to run as the
+owner. An older gbrain binary booting against the brain re-creates
+`gbrain_mark_derivation_scope_entry` as an invoker and drops `pg_temp` from the functions
+its schema re-creates; `guard_functions` flags both, and the next boot of this release
+restores them (`test/e2e/guard-definer-postgres.test.ts`).
 
 **In engine-sql.** A read in a migrated domain takes a `ScopedRead` when it
 runs through this helper and a `LegacyUnscopedRead` when it runs on the pool

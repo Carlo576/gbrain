@@ -2257,7 +2257,7 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purge_pages (
   page_id    INTEGER NOT NULL,
   PRIMARY KEY (request_id, page_id)
 );
-CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $func$
+CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $func$
 DECLARE
   src TEXT;
   page INTEGER;
@@ -2269,9 +2269,9 @@ BEGIN
     src := OLD.source_id;
     page := OLD.page_id;
   END IF;
-  PERFORM pg_advisory_xact_lock_shared(hashtextextended('gbrain:derivation-scope:' || src, 0));
-  INSERT INTO page_segment_derivation_purge_pages (request_id, page_id)
-    SELECT x.request_id, page FROM page_segment_derivation_purges x WHERE x.source_id = src ON CONFLICT DO NOTHING;
+  PERFORM pg_advisory_xact_lock_shared(hashtextextended('gbrain:derivation-scope:'::text || src, 0::bigint));
+  INSERT INTO public.page_segment_derivation_purge_pages (request_id, page_id)
+    SELECT x.request_id, page FROM public.page_segment_derivation_purges x WHERE x.source_id = src ON CONFLICT DO NOTHING;
   RETURN NULL;
 END
 $func$ LANGUAGE plpgsql;
@@ -2292,13 +2292,13 @@ CREATE TRIGGER pages_derivation_scope_delete AFTER UPDATE OF deleted_at ON pages
 CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
-    WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
+    WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM public.page_body_manifest m
     WHERE m.page_id = NEW.page_id AND m.occurrence_id = NEW.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = NEW.segment_sha256))
       AND CASE WHEN replace(translate(lower(COALESCE(NEW.output::text, '') || ' ' || COALESCE(NEW.receipt::text, '')), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM (VALUES (NEW.output), (NEW.receipt)) doc(j),
     LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
       UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
     WHERE CASE WHEN replace(translate(lower(s.t), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM unnest(x.needles::text[]) k(n)
-      WHERE strpos(' ' || replace(translate(gbrain_fact_normalize(s.t), 'ς', 'σ'), 'i̇', 'i') || ' ', k.n) > 0) ELSE false END) ELSE false END) THEN
+      WHERE strpos(' ' || replace(translate(public.gbrain_fact_normalize(s.t), 'ς', 'σ'), 'i̇', 'i') || ' ', k.n) > 0) ELSE false END) ELSE false END) THEN
     RETURN NULL;
   END IF;
   RETURN NEW;
@@ -2307,19 +2307,19 @@ $func$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
 CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
   FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
-CREATE OR REPLACE FUNCTION gbrain_refuse_stored_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $func$
+CREATE OR REPLACE FUNCTION gbrain_refuse_stored_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $func$
 BEGIN
-  IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
-    WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
+  IF EXISTS (SELECT 1 FROM public.page_segment_derivation_purges x JOIN public.pages p ON p.source_id = x.source_id
+    WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM public.page_body_manifest m
     WHERE m.page_id = NEW.page_id AND m.occurrence_id = NEW.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = NEW.segment_sha256))
       AND CASE WHEN replace(translate(lower(COALESCE(NEW.output::text, '') || ' ' || COALESCE(NEW.receipt::text, '')), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM (VALUES (NEW.output), (NEW.receipt)) doc(j),
     LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
       UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
     WHERE CASE WHEN replace(translate(lower(s.t), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM unnest(x.needles::text[]) k(n)
-      WHERE strpos(' ' || replace(translate(gbrain_fact_normalize(s.t), 'ς', 'σ'), 'i̇', 'i') || ' ', k.n) > 0) ELSE false END) ELSE false END) THEN
+      WHERE strpos(' ' || replace(translate(public.gbrain_fact_normalize(s.t), 'ς', 'σ'), 'i̇', 'i') || ' ', k.n) > 0) ELSE false END) ELSE false END) THEN
     RAISE EXCEPTION USING ERRCODE = 'P0001',
       MESSAGE = 'derivation_purge_pending: a fact purge''s sweep of stored derivation results is still running and this row holds its claim',
-      DETAIL = json_build_object('table', 'page_segment_derivations')::text;
+      DETAIL = json_build_object('table'::text, 'page_segment_derivations'::text)::text;
   END IF;
   RETURN NULL;
 END

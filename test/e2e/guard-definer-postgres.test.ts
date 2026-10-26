@@ -20,6 +20,8 @@ import { LATEST_VERSION, runMigrations } from '../../src/core/migrate.ts';
 import { guardFunctionProblems } from '../../src/commands/doctor/checks/guard-functions.ts';
 import { derivationNeedles } from '../../src/core/page-body/segment-derive.ts';
 import { DerivationWriteRefused } from '../../src/core/page-body/derivations.ts';
+import { MEMORY_PURGE_GUARD_SQL } from '../../src/core/facts/purge-schema.ts';
+import { FACT_INSERT_GUARD_SQL } from '../../src/core/facts/insert-guard-schema.ts';
 import { v276 } from '../../src/core/schema-migrations/v276-guard-triggers-security-definer.ts';
 import { withEnv } from '../helpers/with-env.ts';
 
@@ -29,9 +31,13 @@ const describeE2E = DATABASE_URL ? describe : describe.skip;
 type Sql = ReturnType<typeof postgres>;
 type Outcome = { rows: Array<Record<string, unknown>> } | { code: string; message: string };
 
-const GUARDS = ['gbrain_guard_inserted_facts', 'gbrain_mark_derivation_scope_entry', 'gbrain_preserve_fact_withdrawal', 'gbrain_refuse_purged_fact',
-  'gbrain_refuse_purged_page', 'gbrain_refuse_purged_take', 'gbrain_refuse_stored_purging_derivation'];
-const STORED_GUARD = 'gbrain_refuse_stored_purging_derivation';
+const GUARDS = ['gbrain_mark_derivation_scope_entry', 'gbrain_refuse_purged_fact', 'gbrain_refuse_purged_page', 'gbrain_refuse_purged_take',
+  'gbrain_refuse_revived_withdrawn_fact', 'gbrain_refuse_stored_purging_derivation', 'gbrain_refuse_unguarded_inserted_facts'];
+/** The definer guards #7632 adds; the rest existed before as invokers. */
+const NEW_GUARDS = ['gbrain_refuse_revived_withdrawn_fact', 'gbrain_refuse_stored_purging_derivation', 'gbrain_refuse_unguarded_inserted_facts'];
+const GUARD_TRIGGER_NAMES = ['facts_refuse_purged', 'facts_refuse_revived_withdrawal', 'facts_refuse_unguarded_inserted', 'pages_refuse_purged',
+  'page_segment_derivations_refuse_stored_purging', 'takes_refuse_purged'];
+const DEFINER_PATH = ['search_path=pg_catalog, pg_temp'];
 const LEDGERS = ['fact_purges', 'fact_withdrawals', 'take_purges', 'page_purges', 'page_segment_derivation_purges', 'page_segment_derivation_purge_pages'];
 const API_ROLES = ['anon', 'authenticated'];
 
@@ -164,15 +170,22 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
     });
   });
 
-  test('2. a withdrawn claim stays withdrawn: row insert, deferred (statement) insert, and an update clearing expired_at', async () => {
+  test('2. a withdrawn claim stays withdrawn: an owner is stamped as before; a writer that cannot read the withdrawals is refused on a row insert, a deferred insert and an update clearing expired_at', async () => {
     await as(conn, WRITER, async run => {
-      expect(rowsOf(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe') RETURNING expired_at::text AS at`, [WITHDRAWN_CLAIM])))
-        .toEqual([{ at: withdrawnAt }]);
+      expect(failure(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe')`, [WITHDRAWN_CLAIM])))
+        .toMatchObject({ code: 'P0001', message: expect.stringContaining('fact_withdrawn:') });
       rowsOf(await run(`SET LOCAL gbrain.fact_withdrawal_stamp_deferred = 'on'`));
+      expect(failure(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe-deferred')`, [WITHDRAWN_CLAIM])))
+        .toMatchObject({ code: 'P0001', message: expect.stringContaining('fact_withdrawn:') });
+      rowsOf(await run('RESET ROLE'));
       const [deferred] = rowsOf(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe-deferred') RETURNING id`, [WITHDRAWN_CLAIM]));
       rowsOf(await run(`SET LOCAL gbrain.fact_withdrawal_stamp_deferred = 'off'`));
       expect(rowsOf(await run('SELECT expired_at::text AS at FROM facts WHERE id = $1', [deferred!.id]))).toEqual([{ at: withdrawnAt }]);
       rowsOf(await run('UPDATE facts SET expired_at = NULL, valid_until = NULL WHERE id = $1', [deferred!.id]));
+      expect(rowsOf(await run('SELECT expired_at::text AS at FROM facts WHERE id = $1', [deferred!.id]))).toEqual([{ at: withdrawnAt }]);
+      rowsOf(await run(`SET LOCAL ROLE ${WRITER}`));
+      expect(failure(await run('UPDATE facts SET expired_at = NULL, valid_until = NULL WHERE id = $1', [deferred!.id])))
+        .toMatchObject({ code: 'P0001', message: expect.stringContaining('fact_withdrawn:') });
       expect(rowsOf(await run('SELECT expired_at::text AS at FROM facts WHERE id = $1', [deferred!.id]))).toEqual([{ at: withdrawnAt }]);
     });
   });
@@ -217,7 +230,7 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
     await as(conn, WRITER, async run => {
       for (const ledger of LEDGERS) rowsOf(await run(`CREATE TEMP TABLE ${ledger} (LIKE public.${ledger})`));
       expect(failure(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe')`, [PURGED_CLAIM])).code).toBe('P0001');
-      expect(rowsOf(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe') RETURNING expired_at::text AS at`, [WITHDRAWN_CLAIM]))).toEqual([{ at: withdrawnAt }]);
+      expect(failure(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe')`, [WITHDRAWN_CLAIM]))).toMatchObject({ code: 'P0001', message: expect.stringContaining('fact_withdrawn:') });
       expect(failure(await run(`INSERT INTO pages (slug, type, title, compiled_truth, content_hash) VALUES ('notes/again-example', 'note', 't', 'x', $1)`, [PURGED_HASH])).code).toBe('P0001');
       expect(failure(await run(`INSERT INTO takes (page_id, row_num, claim, kind, holder) VALUES ($1, 1, $2, 'take', 'alice-example')`, [ids.takes, PURGED_TAKE])).code).toBe('P0001');
       const [held, heldOutput] = insertDerivation(JSON.stringify({ text: PURGED_CLAIM }));
@@ -277,7 +290,10 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
          FROM pg_proc p WHERE p.oid = ANY(SELECT to_regprocedure(g || '()') FROM unnest($1::text[]) g) ORDER BY 1`, [GUARDS, API_ROLES]);
     const triggers = await c.unsafe<Array<{ trigger: string; timing: string }>>(
       `SELECT tgname AS trigger, CASE WHEN (tgtype & 2) <> 0 THEN 'BEFORE' ELSE 'AFTER' END AS timing FROM pg_trigger WHERE NOT tgisinternal
-         AND tgname IN ('facts_refuse_purged', 'takes_refuse_purged', 'pages_refuse_purged', 'page_segment_derivations_refuse_purging', 'page_segment_derivations_refuse_stored_purging') ORDER BY 1`);
+         AND tgname = ANY($1::text[]) ORDER BY 1`, [[...GUARD_TRIGGER_NAMES, 'page_segment_derivations_refuse_purging']]);
+    const definers = await c.unsafe<Array<{ fn: string; config: string[] | null }>>(
+      `SELECT p.proname AS fn, p.proconfig AS config FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'public' AND p.prosecdef ORDER BY 1`);
     const pathsWithoutTemp = await c.unsafe<Array<{ sig: string }>>(
       `SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL unnest(p.proconfig) AS s(setting)
          WHERE n.nspname = 'public' AND s.setting LIKE 'search_path=%' AND s.setting NOT LIKE '%, pg_temp' ORDER BY 1`);
@@ -285,40 +301,46 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
       guards: guards.map(g => ({ fn: g.fn, secdef: g.secdef, config: g.config, executable_by: g.executable_by })),
       triggers: triggers.map(t => ({ trigger: t.trigger, timing: t.timing })),
       pathsWithoutTemp: pathsWithoutTemp.map(p => p.sig),
+      definers: definers.map(d => ({ fn: d.fn, config: d.config })),
     };
   }
 
   const EXPECTED = {
-    guards: GUARDS.map(fn => ({ fn, secdef: true, config: ['search_path=pg_catalog, public, pg_temp'], executable_by: [] })),
+    guards: GUARDS.map(fn => ({ fn, secdef: true, config: DEFINER_PATH, executable_by: [] })),
     triggers: [
       { trigger: 'facts_refuse_purged', timing: 'AFTER' },
+      { trigger: 'facts_refuse_revived_withdrawal', timing: 'AFTER' },
+      { trigger: 'facts_refuse_unguarded_inserted', timing: 'AFTER' },
       { trigger: 'page_segment_derivations_refuse_purging', timing: 'BEFORE' },
       { trigger: 'page_segment_derivations_refuse_stored_purging', timing: 'AFTER' },
       { trigger: 'pages_refuse_purged', timing: 'AFTER' },
       { trigger: 'takes_refuse_purged', timing: 'AFTER' },
     ],
     pathsWithoutTemp: [],
+    // Every SECURITY DEFINER function in public is one of the guards, with public off its path: a redefinition that
+    // puts public back, or a new definer, fails here.
+    definers: GUARDS.map(fn => ({ fn, config: DEFINER_PATH })),
   };
 
-  test('10a. after a fresh install: guards are definers pinned with pg_temp last, not executable by PUBLIC/anon/authenticated, raising triggers AFTER ROW, every pinned search_path ends in pg_temp', async () => {
+  test('10a. after a fresh install: guards are definers pinned to pg_catalog, pg_temp (the only definers in public), not executable by PUBLIC/anon/authenticated, raising triggers AFTER ROW, every pinned search_path ends in pg_temp', async () => {
     expect(await catalog(conn)).toEqual(EXPECTED);
   });
 
   /** Puts a brain back in the shape every brain had before #7632, at the version before it. */
+  /** Puts a brain back in the shape every brain had before #7632, at the version before it. */
   async function rewind(c: Sql): Promise<void> {
     await c.unsafe(`
-      ${GUARDS.filter(fn => fn !== STORED_GUARD).map(fn => `ALTER FUNCTION ${fn}() SECURITY INVOKER; GRANT EXECUTE ON FUNCTION ${fn}() TO PUBLIC, anon, authenticated;`).join('\n')}
+      ${MEMORY_PURGE_GUARD_SQL}
+      ${FACT_INSERT_GUARD_SQL}
+      GRANT EXECUTE ON FUNCTION gbrain_refuse_purged_fact(), gbrain_refuse_purged_take(), gbrain_refuse_purged_page() TO PUBLIC, anon, authenticated;
+      DROP TRIGGER facts_refuse_revived_withdrawal ON facts;
+      DROP FUNCTION gbrain_refuse_revived_withdrawn_fact();
+      DROP TRIGGER facts_refuse_unguarded_inserted ON facts;
+      DROP FUNCTION gbrain_refuse_unguarded_inserted_facts();
       DROP TRIGGER page_segment_derivations_refuse_stored_purging ON page_segment_derivations;
-      DROP FUNCTION ${STORED_GUARD}();
-      DROP TRIGGER facts_refuse_purged ON facts;
-      CREATE TRIGGER facts_refuse_purged BEFORE UPDATE OF fact, source_id, visibility, entity_slug ON facts FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purged_fact();
-      DROP TRIGGER takes_refuse_purged ON takes;
-      CREATE TRIGGER takes_refuse_purged BEFORE INSERT OR UPDATE OF claim, page_id ON takes FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purged_take();
-      DROP TRIGGER pages_refuse_purged ON pages;
-      CREATE TRIGGER pages_refuse_purged BEFORE INSERT OR UPDATE ON pages FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purged_page();
-      DROP TRIGGER page_segment_derivations_refuse_purging ON page_segment_derivations;
-      CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
-        FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
+      DROP FUNCTION gbrain_refuse_stored_purging_derivation();
+      ALTER FUNCTION gbrain_mark_derivation_scope_entry() SECURITY INVOKER SET search_path = pg_catalog, public;
+      GRANT EXECUTE ON FUNCTION gbrain_mark_derivation_scope_entry() TO PUBLIC, anon, authenticated;
       DO $$ DECLARE f RECORD; BEGIN
         FOR f IN SELECT p.oid::regprocedure AS sig, substr(s.setting, 13) AS path FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                   CROSS JOIN LATERAL unnest(p.proconfig) AS s(setting) WHERE n.nspname = 'public' AND s.setting LIKE 'search_path=%, pg_temp' LOOP
@@ -370,7 +392,7 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
       const { value, stderr } = await capturingStderr(() => runMigrations(notOwner));
       expect(value.current).toBe(LATEST_VERSION);
       for (const fn of GUARDS) expect(stderr).toContain(`${fn}()`);
-      for (const trigger of ['facts_refuse_purged', 'takes_refuse_purged', 'pages_refuse_purged', 'page_segment_derivations_refuse_stored_purging']) expect(stderr).toContain(trigger);
+      for (const trigger of GUARD_TRIGGER_NAMES) expect(stderr).toContain(trigger);
       expect(stderr).toContain('left as they were');
       // Generated by gstack /ship coverage audit (#7642).
       // Value: protects=v276 names on stderr every non-guard function whose search_path it could not finish with pg_temp;
@@ -431,7 +453,7 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
       await engine.connect({ database_url: url });
       expect(await guardFunctionProblems(engine)).toEqual({
         problems: [`gbrain_refuse_purged_page()'s owner ${weakOwner} neither bypasses RLS nor owns page_purges unforced, so the guard reads them filtered`],
-        fix: [`/* give gbrain_refuse_purged_page() an owner that bypasses RLS (ALTER FUNCTION gbrain_refuse_purged_page() OWNER TO <owner of the tables>), or ALTER ROLE ${weakOwner} BYPASSRLS; */`],
+        fix: ['/* give gbrain_refuse_purged_page() an owner that bypasses RLS and is not the role gbrain runs as, so that role stays under its policies: ALTER FUNCTION gbrain_refuse_purged_page() OWNER TO <that role>; */'],
       });
       await as(conn, WRITER, async run => {
         expect(rowsOf(await run(insertPurgedPage, [PURGED_HASH]))).toEqual([{ stored: 1 }]);
@@ -486,16 +508,16 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
     try {
       await rewind(brain.conn);
       await brain.conn.unsafe(`GRANT USAGE, CREATE ON SCHEMA public TO ${migrator}; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${migrator};
-        ${GUARDS.filter(fn => fn !== STORED_GUARD).map(fn => `ALTER FUNCTION ${fn}() OWNER TO ${migrator};`).join('\n')}`);
+        ${GUARDS.filter(fn => !NEW_GUARDS.includes(fn)).map(fn => `ALTER FUNCTION ${fn}() OWNER TO ${migrator};`).join('\n')}`);
       const asMigrator = new URL(brain.url);
       asMigrator.username = migrator;
       asMigrator.password = 'migrator';
       await engine.connect({ database_url: asMigrator.toString() });
       const { value, stderr } = await capturingStderr(() => runMigrations(engine));
       expect(value.current).toBe(LATEST_VERSION);
-      for (const fn of [...exposed, STORED_GUARD]) expect(stderr).toContain(`${fn}()`);
+      for (const fn of [...exposed, ...NEW_GUARDS]) expect(stderr).toContain(`${fn}()`);
       const after = await catalog(brain.conn);
-      expect(after.guards.map(g => [g.fn, g.secdef])).toEqual(GUARDS.filter(fn => fn !== STORED_GUARD).map(fn => [fn, !exposed.includes(fn)]));
+      expect(after.guards.map(g => [g.fn, g.secdef])).toEqual(GUARDS.filter(fn => !NEW_GUARDS.includes(fn)).map(fn => [fn, !exposed.includes(fn)]));
       expect(after.triggers.map(t => [t.trigger, t.timing])).toEqual([
         ['facts_refuse_purged', 'BEFORE'], ['page_segment_derivations_refuse_purging', 'BEFORE'], ['pages_refuse_purged', 'BEFORE'], ['takes_refuse_purged', 'BEFORE'],
       ]);
@@ -505,13 +527,14 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
     }
   }, 300_000);
 
-  test('16. owners, roles that bypass RLS and writers with policies on the sweep records still have the row dropped silently', async () => {
+  test('16. owners, roles that bypass RLS and writers with policies on the ledgers still have a derivation dropped and a withdrawn fact stamped silently', async () => {
     const bypass = `gbrain_test_guard_bypass_${suffix}`;
     const reader = `gbrain_test_guard_reader_${suffix}`;
     await admin!.unsafe(`CREATE ROLE ${bypass} NOLOGIN NOSUPERUSER BYPASSRLS; CREATE ROLE ${reader} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
     createdRoles.push(bypass, reader);
     await conn.unsafe(`GRANT USAGE ON SCHEMA public TO ${bypass}, ${reader};
       GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${bypass}, ${reader};
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${bypass}, ${reader};
       DO $$ DECLARE t RECORD; BEGIN
         FOR t IN SELECT c.oid::regclass AS rel FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                   WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relrowsecurity LOOP
@@ -522,6 +545,8 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
     for (const role of [owner!, bypass, reader]) {
       await as(conn, role, async run => {
         expect({ role, rows: rowsOf(await run(held, [ids.derived, 1, heldOutput])) }).toEqual({ role, rows: [] });
+        expect({ role, rows: rowsOf(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe') RETURNING expired_at::text AS at`, [WITHDRAWN_CLAIM])) })
+          .toEqual({ role, rows: [{ at: withdrawnAt }] });
       });
     }
     const engine = new PostgresEngine();
@@ -553,6 +578,68 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
       });
     } finally {
       await conn.unsafe('DROP POLICY gbrain_test_read_pages ON pages');
+    }
+  });
+
+  // A writer with CREATE on public (Supabase grants it to anon and authenticated) plants overloads of what the definer
+  // bodies call; each spy raises when it runs as anyone but the writer, so a definer that resolved it shows in the error.
+  test('18. overloads planted in public never run as the owner: hashtextextended, json_build_object, jsonb_path_query, gbrain_fact_fingerprint', async () => {
+    const spy = (signature: string, returns: string, call: string) => `CREATE FUNCTION public.${signature} RETURNS ${returns} LANGUAGE plpgsql AS $f$
+      BEGIN IF current_user <> '${WRITER}' THEN RAISE EXCEPTION 'spy % ran as %', '${signature.split('(')[0]}', current_user; END IF; ${call} END $f$`;
+    await conn.unsafe(`GRANT CREATE ON SCHEMA public TO ${WRITER}`);
+    try {
+      await as(conn, WRITER, async run => {
+        rowsOf(await run(spy('hashtextextended(a text, b integer)', 'bigint', 'RETURN pg_catalog.hashtextextended(a, b::bigint);')));
+        rowsOf(await run(spy('json_build_object(a text, b text, c text, d text)', 'json', 'RETURN pg_catalog.json_build_object(a, b, c, d);')));
+        rowsOf(await run(spy('jsonb_path_query(j jsonb, p text)', 'SETOF jsonb', 'RETURN QUERY SELECT pg_catalog.jsonb_path_query(j, p::jsonpath);')));
+        rowsOf(await run(spy('gbrain_fact_fingerprint(c character varying)', 'text', 'RETURN pg_catalog.md5(c);')));
+        const spied = (o: Outcome) => ('code' in o ? o.message : '').includes('spy ');
+        const softDelete = await run('UPDATE pages SET deleted_at = now() WHERE id = $1 RETURNING id', [ids.derived]);
+        expect({ softDelete: spied(softDelete) ? softDelete : 'ok' }).toEqual({ softDelete: 'ok' });
+        const page = failure(await run(`INSERT INTO pages (slug, type, title, compiled_truth, content_hash) VALUES ('notes/again-example', 'note', 't', 'x', $1)`, [PURGED_HASH]));
+        expect(page.message).toStartWith('purged_content:');
+        const fact = failure(await run(`INSERT INTO facts (fact, source) VALUES ($1, 'probe')`, [PURGED_CLAIM]));
+        expect(fact.message).toStartWith('purged_content:');
+        const [held, heldOutput] = insertDerivation(JSON.stringify({ text: PURGED_CLAIM }));
+        const derivation = failure(await run(held, [ids.takes, 3, heldOutput]));
+        expect(derivation.message).toStartWith('derivation_purge_pending:');
+      });
+    } finally {
+      await conn.unsafe(`REVOKE CREATE ON SCHEMA public FROM ${WRITER}`);
+    }
+  });
+
+  test('19. while a purge holds a source, a role RLS refuses gets the same 42501 inserting a fact into it as into a source that does not exist', async () => {
+    const holder = postgres(url, { max: 1, prepare: false, onnotice: () => {} });
+    const session = await holder.reserve();
+    try {
+      await session.unsafe(`BEGIN; SELECT id FROM sources WHERE id = 'default' FOR UPDATE`);
+      for (const role of API_ROLES) {
+        await as(conn, role, async run => {
+          rowsOf(await run(`SET LOCAL lock_timeout = '1s'`));
+          const insert = (source: string) => run(`INSERT INTO facts (fact, source, source_id) VALUES ('an unrelated claim', 'probe', $1)`, [source]);
+          const locked = failure(await insert('default'));
+          expect({ role, locked }).toEqual({ role, locked: failure(await insert('no-such-source-example')) });
+          expect(locked.code).toBe('42501');
+        });
+      }
+    } finally {
+      await session.unsafe('ROLLBACK').catch(() => {});
+      session.release();
+      await holder.end();
+    }
+  });
+
+  test('20. a purged take claim is refused for the owner on insert and update, and for a writer that cannot read take_purges on update', async () => {
+    const [{ owner }] = await conn.unsafe<Array<{ owner: string }>>('SELECT current_user AS owner');
+    for (const role of [owner!, WRITER]) {
+      await as(conn, role, async run => {
+        const purged = (o: Outcome) => ({ role, ...failure(o) });
+        const refusal = { role, code: 'P0001', message: expect.stringContaining('purged_content: this take claim was purged') };
+        if (role === owner) expect(purged(await run(`INSERT INTO takes (page_id, row_num, claim, kind, holder) VALUES ($1, 7, $2, 'take', 'alice-example')`, [ids.takes, PURGED_TAKE]))).toEqual(refusal);
+        const [take] = rowsOf(await run(`INSERT INTO takes (page_id, row_num, claim, kind, holder) VALUES ($1, 8, 'an unrelated take', 'take', 'alice-example') RETURNING id`, [ids.takes]));
+        expect(purged(await run('UPDATE takes SET claim = $1 WHERE id = $2', [PURGED_TAKE, take!.id]))).toEqual(refusal);
+      });
     }
   });
 });
