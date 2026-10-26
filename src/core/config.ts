@@ -1439,7 +1439,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.entity_anchoring', // entity-anchored retrieval for entity-scoped current-state query/search (default off; search/entity-anchor.ts)
   'search.query_facts_arm', // query adds matching active facts as rows in spare capacity (default on; search/facts-arm.ts)
   'search.temporal_fact_reserve', // temporal-cue queries reserve up to 15% of the token budget for question-ranked dated facts (default off; search/facts-arm.ts)
-  'search.query_facts_block', 'search.fact_source_pages', // GBRA-205, default off: a dated facts block (up to 22% of a query budget) ahead of the pages; matched facts' source conversations join the hits (search/facts-arm.ts)
+  'search.query_facts_block', 'search.fact_source_pages', // GBRA-205: a dated facts block (up to 22% of a query budget) ahead of the pages, default on; matched facts' source conversations join the hits, default off (search/facts-arm.ts)
   'search.page_rank_cut', // W5: whole_pages (default) | off — page unit + caller token_budget stops adding pages once their whole pages fill factor x the budget (search/page-rank-cut.ts)
   'search.page_rank_cut_factor', // W5: whole_pages target = factor x the budget (default 1.5)
   'think.return_unit',
