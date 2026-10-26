@@ -1823,7 +1823,7 @@ More: [docs/guides/write-refusals.md#git_protocol_required](../../docs/guides/wr
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A strict (canonical: git) write's file changed on disk while it was being committed, so nothing was committed and the write was not published. | The door commits exactly the bytes the write published, and checks the file's hash against them before and after Git stores it. An edit landing in between would otherwise be committed while the database records other content; recovery leaves the changed file as it is. | Retry the write with a new request_id once the file has settled. | agent | `repeat the read that failed` | 1 | no |
+| A strict (canonical: git) write's file changed on disk while it was being committed, so nothing was committed and the write was not published. | The door commits exactly the bytes the write published, and checks the file's hash against them before and after Git stores it. An edit landing in between would otherwise be committed while the database records other content; recovery leaves the changed file as it is. | The write is held in recovery (blocked reason unexpected_file_bytes) and the source's later writes wait behind it. Preview with gbrain repair stuck-recovery --source <id> --json, ask the user which version to keep, then apply --keep disk (the edit) or --keep prior with the preview's --expect hash. | agent | `repeat the read that failed` | 1 | no |
 
 ### git_target_ignored
 

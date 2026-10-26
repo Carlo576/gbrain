@@ -20,8 +20,9 @@
  * and after `hash-object -w` stores it (an edit landing during the write refuses `git_target_changed`), and each
  * target's index entry must equal HEAD's before the commit is built (a staged change of a target refuses
  * `git_index_conflict`, index untouched). After the branch moves, an entry someone staged meanwhile is left as it is
- * and the write reports that its commit landed. An entry still holding HEAD's first parent's version at that path counts
- * as clean: it is what an interrupted refresh after the door's own commit leaves, and its bytes are in history, so the
+ * and the write reports that its commit landed. An entry still holding the version the path's last commit replaced counts
+ * as clean, whatever commits of other paths landed since: it is what an interrupted refresh after the door's own commit
+ * leaves, and its bytes are in history, so the
  * next write (or a replay whose blob HEAD already holds) refreshes it and reports the paths (`onIndexRestored`, the
  * `git_index_restored` notice); any other staged entry refuses `git_index_conflict`.
  *
@@ -286,8 +287,8 @@ async function doorCommit(session: GitSession, root: string, files: DoorFile[], 
       const indexed = await readIndex(session, index, [...targets.values()]);
       const staged = [...targets.values()].filter(target => indexed.entries.get(target.rel) !== target.head);
       if (staged.length) {
-        const parent = await parentEntries(session, head, staged);
-        const foreign = staged.filter(target => indexed.entries.get(target.rel) !== parent.get(target.rel));
+        const replaced = await replacedEntries(session, head, staged);
+        const foreign = staged.filter(target => indexed.entries.get(target.rel) !== replaced.get(target.rel));
         if (foreign.length) throw indexConflict(root, foreign);
       }
       const restored = () => { if (staged.length) onIndexRestored?.(staged.map(target => target.rel)); };
@@ -366,10 +367,10 @@ function refuseChanged(root: string, targets: Iterable<Target>): void {
   const moved = [...targets].filter(target => { try { return hashFile(join(root, target.rel)) !== target.planned; } catch { return true; } }).map(target => target.rel);
   if (!moved.length) return;
   throw opError('git_target_changed', `${moved.join(', ')} in ${root} no longer holds the bytes this write published, so nothing was committed and the write was not published.`,
-    'Another process changed the file during the write; recovery leaves the changed file as it is. Retry the write with a new request_id once the file has settled.', { detail: moved.join(',') });
+    'Another process changed the file during the write; recovery leaves the changed file as it is and holds the write, so the source\'s later writes wait. Preview with gbrain repair stuck-recovery --source <id> --json, ask the user which version to keep, then apply --keep disk or --keep prior with the preview\'s --expect hash.', { detail: moved.join(',') });
 }
 
-/** Targets whose index entry differs from HEAD's and from its first parent's (a staged change, or a merge conflict) refuse as `git_index_conflict`. */
+/** Targets whose index entry differs from HEAD's and from the version their path's last commit replaced (a staged change, or a merge conflict) refuse as `git_index_conflict`. */
 function indexConflict(root: string, staged: Target[]): OperationError {
   const paths = staged.map(target => target.rel);
   return opError('git_index_conflict', `${paths.join(', ')} in ${root} has a staged change that is not committed, so this write committed nothing and the index was left as it was.`,
@@ -402,16 +403,25 @@ async function readIndex(session: GitSession, index: string, targets: Target[]):
   return { signature, entries };
 }
 
-/** The blob entries of the targets in `commit`'s first parent (none when it has no parent). */
-async function parentEntries(session: GitSession, commit: string, targets: Target[]): Promise<Map<string, string>> {
-  const listed = await git(session, ['ls-tree', '-z', `${commit}^`, '--', ...targets.map(target => target.rel)]);
+/**
+ * Each target's blob entry as it was before the last commit reachable from `commit` that changed its path (none when that
+ * commit added it, or the path was never committed): what the index still holds when that commit's refresh failed,
+ * whatever commits touching other paths landed since.
+ */
+async function replacedEntries(session: GitSession, commit: string, targets: Target[]): Promise<Map<string, string>> {
   const entries = new Map<string, string>();
-  if (listed.code !== 0) return entries;
-  for (const record of listed.stdout.split('\0')) {
-    const tab = record.indexOf('\t');
-    if (tab < 0) continue;
-    const [mode, type, oid] = record.slice(0, tab).split(' ');
-    if (type === 'blob') entries.set(record.slice(tab + 1), `${mode} ${oid}`);
+  for (const target of targets) {
+    const last = await git(session, ['rev-list', '-1', commit, '--', target.rel]);
+    const changed = last.stdout.trim();
+    if (last.code !== 0 || !changed) continue;
+    const listed = await git(session, ['ls-tree', '-z', `${changed}^`, '--', target.rel]);
+    if (listed.code !== 0) continue;
+    for (const record of listed.stdout.split('\0')) {
+      const tab = record.indexOf('\t');
+      if (tab < 0) continue;
+      const [mode, type, oid] = record.slice(0, tab).split(' ');
+      if (type === 'blob' && record.slice(tab + 1) === target.rel) entries.set(target.rel, `${mode} ${oid}`);
+    }
   }
   return entries;
 }

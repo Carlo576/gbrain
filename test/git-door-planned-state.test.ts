@@ -43,6 +43,7 @@ import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { runRepairCommand } from '../src/commands/repair.ts';
 import { maintenancePreflight, publishMaintenancePages } from '../src/core/persistence/prepared-maintenance.ts';
 import { durableGitRepo } from './helpers/git-publication.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { managedBrain, settleManagedGitEffects } from './helpers/managed-brain.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 
@@ -315,6 +316,47 @@ describe('door plumbing: the planned state', () => {
     expect(commit).toBe(git(root, 'rev-parse', 'HEAD'));
     expect(git(root, 'show', 'HEAD:notes/a.md')).toBe('second');
     expect(git(root, 'show', 'HEAD:notes/new.md')).toBe('second new');
+    expect(git(root, 'status', '--porcelain')).toBe('');
+  });
+
+  test('a file rewritten while hash-object stores it refuses git_target_changed, with nothing committed or staged', async () => {
+    const root = repo({ 'notes/a.md': 'a\n' });
+    const head = git(root, 'rev-parse', 'HEAD');
+    const bin = mkdtempSync(join(tmpdir(), 'gbrain-git-shim-'));
+    roots.push(bin);
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" hash-object -w "*) printf 'edited during hash\\n' > '${join(root, 'notes/a.md')}';; esac\nexec '${real}' "$@"\n`, { mode: 0o755 });
+    put(root, 'notes/a.md', 'planned\n');
+    await withEnv({ PATH: `${bin}:${process.env.PATH}` }, async () => {
+      expect(await refusal(commitThroughDoor(root, [{ path: join(root, 'notes/a.md'), planned: sha256('planned\n') }]))).toMatchObject({ code: 'git_target_changed' });
+    });
+    expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toBe('edited during hash\n');
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(head);
+    expect(git(root, 'diff', '--cached', '--name-only')).toBe('');
+  });
+
+  test('a stale entry the door left still counts as its own after other commits land, and the next write to that path restores it', async () => {
+    const root = repo({ 'notes/a.md': 'a\n', 'notes/q.md': 'q\n', 'other.md': 'o\n' });
+    const lock = join(root, '.git', 'index.lock');
+    doorSeams.beforeUpdateRef = () => { writeFileSync(lock, ''); };
+    put(root, 'notes/a.md', 'first\n'); put(root, 'notes/new.md', 'first new\n');
+    const landed = await refusal(commitThroughDoor(root, ['notes/a.md', 'notes/new.md'].map(path => ({ path: join(root, path), planned: sha256(readFileSync(join(root, path))) }))));
+    rmSync(lock);
+    delete doorSeams.beforeUpdateRef;
+    expect(landed).toMatchObject({ code: 'git_unavailable', message: expect.stringContaining('landed, but the index') });
+    const stale = git(root, 'rev-parse', 'HEAD^:notes/a.md');
+    put(root, 'notes/q.md', 'q door\n');
+    await commitThroughDoor(root, [{ path: join(root, 'notes/q.md'), planned: sha256('q door\n') }]);
+    put(root, 'other.md', 'o human\n');
+    git(root, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Human edit', '--', 'other.md');
+    expect(git(root, 'rev-parse', ':notes/a.md')).toBe(stale);
+    expect(git(root, 'ls-files', '--', 'notes/new.md')).toBe('');
+    put(root, 'notes/a.md', 'second\n'); put(root, 'notes/new.md', 'second new\n');
+    const restored: string[][] = [];
+    const commit = await commitThroughDoor(root, ['notes/a.md', 'notes/new.md'].map(path => ({ path: join(root, path), planned: sha256(readFileSync(join(root, path))) })), undefined, paths => restored.push(paths));
+    expect(restored).toEqual([['notes/a.md', 'notes/new.md']]);
+    expect(commit).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect(git(root, 'show', 'HEAD:notes/a.md')).toBe('second');
     expect(git(root, 'status', '--porcelain')).toBe('');
   });
 

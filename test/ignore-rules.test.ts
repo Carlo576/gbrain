@@ -16,11 +16,17 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gitChildEnv } from '../src/core/git-env.ts';
 import { ignoreCandidates, resetIgnoreCandidatesForTests, scanIndex } from '../src/core/persistence/ignore-rules.ts';
+import { withEnv } from './helpers/with-env.ts';
 
-const env = gitChildEnv();
-const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env }).trim();
+const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env: gitChildEnv() }).trim();
 const roots: string[] = [];
 afterEach(() => { resetIgnoreCandidatesForTests(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+/** Keeps the developer's global and system Git config and global ignore file out of the test: the filter reads what Git reads. */
+const hermetic = (fn: () => unknown) => () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-git-config-')));
+  roots.push(home);
+  return withEnv({ XDG_CONFIG_HOME: home, GIT_CONFIG_GLOBAL: join(home, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }, async () => { await fn(); });
+};
 
 function repo(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-ignore-rules-')));
@@ -36,7 +42,7 @@ function put(root: string, path: string, body = 'x\n'): void {
 /** The paths Git ignores among `paths`, from the checkout's own check-ignore (index included). */
 function gitIgnored(root: string, paths: string[]): Set<string> {
   try {
-    const out = execFileSync('git', ['-C', root, 'check-ignore', '-z', '--stdin'], { input: paths.map(path => path + '\0').join(''), env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const out = execFileSync('git', ['-C', root, 'check-ignore', '-z', '--stdin'], { input: paths.map(path => path + '\0').join(''), env: gitChildEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     return new Set(out.toString('utf8').split('\0').filter(Boolean));
   } catch (error) {
     if ((error as { status?: number }).status === 1) return new Set();
@@ -54,7 +60,7 @@ const RULES = ['notes', 'NOTES/', '*.log', '!keep.log', '*.tmp', '/dist', 'dist/
   '#notes', 'page.md   ', '\\#lit', 'x\\.md', '*', '!*.md', 'node_modules/', '.DS_Store', 'foo bar', 'é.md', '/a/', 'ab*c.md', 'Build/', '**', '!sub/', 'b/', '/notes/drafts/', 'NOTES', 'y.log'];
 
 describe('ignore filter', () => {
-  test('every path check-ignore ignores is returned for Git, over generated rule sets; many others are cleared', async () => {
+  test('every path check-ignore ignores is returned for Git, over generated rule sets; many others are cleared', hermetic(async () => {
     const next = random(7);
     const pick = <T>(list: T[]) => list[Math.floor(next() * list.length)]!;
     let cleared = 0, total = 0;
@@ -84,9 +90,9 @@ describe('ignore filter', () => {
       cleared += listed.length - candidates.size;
     }
     expect(cleared).toBeGreaterThan(total / 10);
-  }, 120_000);
+  }), 120_000);
 
-  test('an edit of a .gitignore, info/exclude or the excludes file, or a new core.excludesFile, is seen on the next call', async () => {
+  test('an edit of a .gitignore, info/exclude or the excludes file, or a new core.excludesFile, is seen on the next call', hermetic(async () => {
     const root = repo();
     put(root, 'notes/a.md'); put(root, '.gitignore', 'scratch/\n');
     git(root, 'add', '-A'); git(root, 'commit', '-qm', 'seed');
@@ -105,9 +111,9 @@ describe('ignore filter', () => {
     expect(await ignoreCandidates(root, ['notes/new.md'])).toEqual(['notes/new.md']);
     writeFileSync(excludes, '*.txt\n');
     expect(await ignoreCandidates(root, ['notes/new.md'])).toEqual([]);
-  });
+  }));
 
-  test('Git decides on a sparse checkout, a skip-worktree entry, a gitlink or symlinked directory on the path, and a version 4 gitlink', async () => {
+  test('Git decides on a sparse checkout, a skip-worktree entry, a gitlink or symlinked directory on the path, and a version 4 gitlink', hermetic(async () => {
     const root = repo();
     put(root, 'notes/a.md'); put(root, 'notes/b.md'); put(root, 'real/c.md');
     git(root, 'add', '-A'); git(root, 'commit', '-qm', 'seed');
@@ -127,9 +133,9 @@ describe('ignore filter', () => {
     expect(await ignoreCandidates(root, ['notes/new.md'])).toEqual(['notes/new.md']);
     git(root, 'update-index', '--force-remove', 'vendor/lib');
     expect(await ignoreCandidates(root, ['notes/new.md'])).toEqual([]);
-  });
+  }));
 
-  test('the index scan reads versions 2, 3 and 4 and names version 2 and 3 gitlinks', () => {
+  test('the index scan reads versions 2, 3 and 4 and names version 2 and 3 gitlinks', hermetic(() => {
     const root = repo();
     for (let i = 0; i < 50; i++) put(root, `dir-${i % 7}/${'long-name-'.repeat(i % 5)}page-${i}.md`);
     git(root, 'add', '-A'); git(root, 'commit', '-qm', 'seed');
@@ -145,13 +151,13 @@ describe('ignore filter', () => {
     git(root, 'update-index', '--force-remove', 'dir-3/module');
     expect(scanIndex(readFileSync(index), 20)).toEqual({ decidable: true, gitlinks: new Set() });
     expect(scanIndex(Buffer.from('not an index'), 20).decidable).toBe(false);
-  });
+  }));
 
   // Generated by /ship Step 7 coverage audit (gstack), test-only.
   // Value: protects=a core.excludesFile set in an included config file (a relative include.path) is read, and an edit of that file is seen;
   //   fails_when=the probe stops resolving include paths or watching included files, so a stale probe clears a path Git now ignores;
   //   why_new=excludes edits are tested only through .git/config; seam=none; no_claim=includeIf conditions (onbranch, gitdir) are not exercised
-  test('a core.excludesFile set through an included config file, and an edit of that file, is seen on the next call', async () => {
+  test('a core.excludesFile set through an included config file, and an edit of that file, is seen on the next call', hermetic(async () => {
     const root = repo();
     put(root, 'notes/a.md');
     git(root, 'add', '-A'); git(root, 'commit', '-qm', 'seed');
@@ -167,13 +173,13 @@ describe('ignore filter', () => {
     expect(await ignoreCandidates(root, ['notes/new.md'])).toEqual(['notes/new.md']);
     writeFileSync(included, `[core]\n\texcludesFile = ${text}\n`);
     expect(await ignoreCandidates(root, ['notes/new.md'])).toEqual([]);
-  });
+  }));
 
   // Generated by /ship Step 7 coverage audit (gstack), test-only.
   // Value: protects=a split index (entries and skip-worktree bits in the shared index file) is left to Git; fails_when=scanIndex accepts the
   //   required 'link' extension, so the filter decides without seeing the shared entries; why_new=sparse, skip-worktree and v4 are tested, a split
   //   index is not; seam=none; no_claim=a sparse index (sdir extension) is not exercised
-  test('a split index is left to Git', async () => {
+  test('a split index is left to Git', hermetic(async () => {
     const root = repo();
     put(root, 'notes/a.md');
     git(root, 'add', '-A'); git(root, 'commit', '-qm', 'seed');
@@ -183,5 +189,5 @@ describe('ignore filter', () => {
     expect(await ignoreCandidates(root, ['notes/new.md'])).toEqual(['notes/new.md']);
     git(root, 'update-index', '--no-split-index');
     expect(await ignoreCandidates(root, ['notes/new.md'])).toEqual([]);
-  });
+  }));
 });
