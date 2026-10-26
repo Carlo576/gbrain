@@ -10992,7 +10992,8 @@ folder treated that folder as the brain repo: it ran `git init`, committed
 everything in it and imported its markdown. Sync now refuses
 `sync_anchor_relative` (exit 3) before any Git probe, cost estimate or import,
 and nothing is changed. Doctor's `default_source_local_path` check warns on
-every source with a relative path.
+every source with a relative path, and on a relative `sync.repo_path` behind a
+default source with no path.
 
 Ask the user which directory holds the source, then do one of:
 
@@ -11010,12 +11011,16 @@ the database (`repo_not_found`, `no_repo_configured`), a captured file keeps
 no origin path, matching a folder to its source ignores the path, fence repair
 edits stored pages, managed activation refuses it (`source_changed`, detail
 `source_path_missing`), the dream, autopilot, per-phase and global
-maintenance cycles run only their database phases, `gbrain autopilot
+maintenance cycles and `gbrain maintain` run only their database phases,
+`sources set-path` and the write-through leak guard do not count it as
+another source's tree, `gbrain autopilot
 --install` asks for `--repo`, a remote `submit_job` for the source is
 refused, import does not count the folder as a configured root or stamp it
 fresh, and a managed brain does not record it as a managed root. A few other
 local commands may still read it from the folder they run in, so set the path
-first.
+first. A managed brain that ran before this fix may already have recorded the
+folders it ran from as managed roots; those records stay until an operator
+drains them (tracked in #7646).
 
 For `sync.repo_path`: `gbrain config set sync.repo_path <absolute-directory>`.
 `config set` refuses a relative value and writes nothing.

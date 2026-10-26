@@ -475,6 +475,41 @@ for (const backend of testBackends()) {
       expect(run?.files).toBe('none');
     }, 120_000);
 
+    // Value: protects=gbrain maintain cycles a stale source with a relative local_path without a brain directory (database phases only);
+    //   fails_when=maintain passes "." as brainDir, so the lint phase (fixes on by default) and other filesystem phases run in the cwd;
+    //   why_new=the dream/autopilot/phase handlers above are separate readers; seam=runCycle spied to record its options and run orphans only;
+    //   no_claim=what each filesystem phase would have written (none runs)
+    test('gbrain maintain cycles a stale relative-path source with no brain directory', async () => {
+      const cycle = await import('../src/core/cycle.ts');
+      const stale = new Date(Date.now() - 48 * 3_600_000).toISOString();
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path, config) VALUES ('notes-a', 'notes-a', '.', $1::jsonb)", [JSON.stringify({ last_full_cycle_at: stale })]);
+      await engine.putPage('notes/a-note', { type: 'note', title: 'A note', compiled_truth: 'A note in notes-a.', timeline: '' }, { sourceId: 'notes-a' });
+      const real = cycle.runCycle;
+      const seen: Array<{ sourceId?: string; brainDir: string | null }> = [];
+      const spy = spyOn(cycle, 'runCycle').mockImplementation(async (e, opts) => {
+        seen.push({ sourceId: opts.sourceId, brainDir: opts.brainDir ?? null });
+        return real(e, { ...opts, phases: ['orphans'] });
+      });
+      try {
+        const { runMaintain } = await import('../src/commands/maintain.ts');
+        await cli(() => runMaintain(engine, ['--safe', '--json']));
+      } finally { spy.mockRestore(); }
+      expect(seen.find(s => s.sourceId === 'notes-a')).toEqual({ sourceId: 'notes-a', brainDir: null });
+    }, 120_000);
+
+    // Value: protects=the repair command (sources set-path) and the #2018 write-through leak guard never treat a sibling's relative
+    //   local_path as the cwd's tree; fails_when=assertNoOverlappingPath or otherSourceOwning realpaths "." to the cwd, so set-path
+    //   refuses overlapping_path and default writes under sync.repo_path skip as another source's tree; why_new=no other case has a
+    //   relative sibling; seam=none; no_claim=company-brain admission (same helper)
+    test('a sibling with a relative local_path overlaps nothing: set-path to the cwd passes and the leak guard ignores it', async () => {
+      await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.')");
+      const { assertNoOverlappingPath } = await import('../src/core/sources-ops.ts');
+      expect(await assertNoOverlappingPath(engine, 'notes-a', folder).then(() => null, (error: { code?: string }) => error.code ?? String(error))).toBeNull();
+      const { otherSourceOwning } = await import('../src/core/write-through.ts');
+      expect(await otherSourceOwning(engine, 'default', join(folder, 'notes.md'))).toBeNull();
+    }, 120_000);
+
     test('gbrain import of the cwd into a source whose local_path is "." does not stamp it fresh', async () => {
       await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.')");
       const { runImport } = await import('../src/commands/import.ts');
@@ -491,7 +526,7 @@ describe('#7630: a stalled write\'s diagnosis matches its operation', () => {
     operation, state: 'failed', error_code: 'preparation_stalled', error_detail: null, recovery: null, blocked_reason: null, compacted: false, intent_kind: null })!;
   const mcp = { transport: 'stdio' as const, isCallable: () => false, preapproved: () => false };
 
-  for (const operation of ['remember', 'put_page']) {
+  for (const operation of ['remember', 'put_page', 'add_tag', 'add_link', 'add_timeline_entry', 'takes_add']) {
     test(`a foreground ${operation} that ended preparation_stalled inspects the writer and resubmits, never a sync`, () => {
       const verdict = receipt(operation);
       expect(verdict.action.argv).toEqual(['gbrain', 'sources', 'writer', 'status', '--source', 'default', '--json']);

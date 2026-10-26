@@ -294,6 +294,8 @@ export async function otherSourceOwning(engine: BrainEngine, sourceId: string, p
   const identity = (spelling: string) => { try { return canonicalFilesystemPath(msysToNativePath(spelling)); } catch { return null; } };
   const target = identity(path);
   return rows.find(row => {
+    // #7630: a relative local_path names whatever directory gbrain runs from, never a tree, so it owns nothing.
+    if (!isAbsolute(msysToNativePath(row.local_path))) return false;
     const other = identity(row.local_path);
     if (target === null || other === null) return true;
     const rel = relative(other, target);

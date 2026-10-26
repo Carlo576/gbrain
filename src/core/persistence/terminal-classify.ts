@@ -338,8 +338,9 @@ function schemaMissingVerdict(input: TerminalInput, code: string, origin: string
       why: `The write needed ${what}. Read-only: when doctor's schema_version reports the schema behind, run gbrain apply-migrations --yes as the database role that owns the gbrain tables and resubmit; when it is at head, its schema_missing_tables check names what is missing (gbrain repair missing-tables previews it).` } };
 }
 
-/** #7630: the foreground page and memory writes a caller resubmits; no sync replays them. */
-const RESUBMITTED_WRITES = new Set(['put_page', 'put_pages', 'capture', 'delete_page', 'restore_page', 'revert_version', 'edit_page', 'append_page', 'remember', 'forget']);
+/** #7630: the caller-submitted page and memory writes a caller resubmits; no sync replays them. */
+const RESUBMITTED_WRITES = new Set(['put_page', 'put_pages', 'capture', 'delete_page', 'restore_page', 'revert_version', 'edit_page', 'append_page', 'remember', 'forget',
+  'add_tag', 'remove_tag', 'add_link', 'remove_link', 'add_timeline_entry', 'takes_add', 'takes_update', 'takes_supersede', 'takes_resolve', 'takes_remove']);
 
 /**
  * #7630: a sync write (and a recorded sync fault, read as one) is stored as `submit_job`; its retry is the sync. A

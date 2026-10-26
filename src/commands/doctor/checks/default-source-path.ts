@@ -7,7 +7,8 @@
  * A null `default.local_path` is the DESIGNED fallback topology (pages nest
  * under sync.repo_path), so the check only warns when the fallback
  * demonstrably fails — see the helper's doc comment for the exact gates.
- * #7630: it also warns for every other source whose local_path is relative.
+ * #7630: it also warns on a relative default local_path or sync.repo_path and
+ * for every other source whose local_path is relative.
  *
  * Lives in the doctor module dir per the peeled-façade rule — new code goes
  * here, not back into doctor.ts. Returns null for the 'skip' verdict so the

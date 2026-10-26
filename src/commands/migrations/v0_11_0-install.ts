@@ -20,7 +20,7 @@
  * `autopilot_already_installed`, `install_failed`) for later readers.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, isAbsolute } from 'path';
 import { shellQuote } from '../../core/agent-output.ts';
 import { resolveAutopilotJob } from '../../core/autopilot-paths.ts';
 import { cliChildStdio } from '../../core/cli-force-exit.ts';
@@ -97,8 +97,10 @@ async function readRepoPaths(config: GBrainConfig | null): Promise<{ syncRepoPat
   if (!config) throw new Error('no brain configured');
   const { engine, close } = await connectMigrationEngine(config);
   try {
-    const syncRepoPath = (await engine.getConfig('sync.repo_path')) || null;
-    return { syncRepoPath, defaultSourcePath: syncRepoPath ? null : await defaultSourceLocalPath(engine) };
+    // #7630: a relative stored path names the upgrade's cwd, which the install no longer accepts; it counts as unset.
+    const absolute = (path: string | null) => path && isAbsolute(path) ? path : null;
+    const syncRepoPath = absolute(await engine.getConfig('sync.repo_path'));
+    return { syncRepoPath, defaultSourcePath: syncRepoPath ? null : absolute(await defaultSourceLocalPath(engine)) };
   } finally { await close(); }
 }
 

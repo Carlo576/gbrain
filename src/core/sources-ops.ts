@@ -39,7 +39,7 @@ import { managedPersistenceEnabled } from './persistence/ownership.ts';
  */
 
 import { existsSync, mkdirSync, renameSync, rmSync, lstatSync, realpathSync } from 'fs';
-import { join, dirname, basename, resolve as resolvePath } from 'path';
+import { join, dirname, basename, isAbsolute, resolve as resolvePath } from 'path';
 import { isPathContained, msysToNativePath } from './path-confine.ts';
 import { mkdirPrivate } from './atomic-write.ts';
 import { randomBytes } from 'crypto';
@@ -392,6 +392,8 @@ export async function assertNoOverlappingPath(
   const realPath = real(path);
   for (const other of others) {
     const b = other.local_path;
+    // #7630: a relative local_path names whatever directory gbrain runs from, never a tree, so it overlaps nothing.
+    if (!isAbsolute(b)) continue;
     if (overlaps(path, b) || overlaps(realPath, real(b))) {
       throw new SourceOpError(
         'overlapping_path',
