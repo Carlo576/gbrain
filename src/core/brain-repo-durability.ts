@@ -330,10 +330,10 @@ const NON_CONTENT_DIRS = new Set(['skills', 'scripts', 'node_modules']);
  * repo file must never break `sources harden`.
  */
 function resolveFilingRules(repoPath: string): { rules: FilingRulesDoc; from: string } {
-  for (const [dir, from] of [[join(repoPath, 'skills'), '`skills/_brain-filing-rules.json`'], [repoPath, '`_brain-filing-rules.json`']]) {
+  for (const dir of [join(repoPath, 'skills'), repoPath]) {
     try {
       const rules = loadFilingRules(dir);
-      if (rules) return { rules, from };
+      if (rules) return { rules, from: dir === repoPath ? '`_brain-filing-rules.json`' : '`skills/_brain-filing-rules.json`' };
     } catch { /* malformed — fall through */ }
   }
   const bundled = filingRulesDoc as FilingRulesDoc;
