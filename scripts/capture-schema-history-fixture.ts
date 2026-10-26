@@ -23,7 +23,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { LEGACY_EMBEDDING_CONFIG } from '../test/helpers/legacy-embedding-config.ts';
 import { diffCatalogSnapshots, formatCatalogDiffForFailure, snapshotCatalog, type CatalogQueryFn } from '../test/helpers/schema-diff.ts';
 import { FUNCTION_BODIES_SQL } from '../test/helpers/schema-catalog.ts';
-import { sameUpToOrChainParentheses } from '../test/helpers/schema-history.ts';
+import { sameUpToFlattenedBooleanChains } from '../test/helpers/schema-history.ts';
 
 type Query = (sql: string) => Promise<Array<Record<string, any>>>;
 type Engine = 'pglite' | 'postgres';
@@ -213,7 +213,7 @@ async function tableRows(query: Query): Promise<Record<string, string>> {
 async function fidelity(original: Query, restored: Query): Promise<string[]> {
   const problems: string[] = [];
   const catalogDiff = diffCatalogSnapshots(await snapshotCatalog(original as CatalogQueryFn), await snapshotCatalog(restored as CatalogQueryFn), { compareOrdinals: true })
-    .filter((d) => !(d.section === 'triggers' && d.kind === 'changed' && sameUpToOrChainParentheses(d.expected, d.actual)));
+    .filter((d) => !(d.section === 'triggers' && d.kind === 'changed' && sameUpToFlattenedBooleanChains(d.expected, d.actual)));
   if (catalogDiff.length > 0) problems.push(formatCatalogDiffForFailure(catalogDiff));
   const [a, b] = [await original(FUNCTION_BODIES_SQL), await restored(FUNCTION_BODIES_SQL)];
   if (JSON.stringify(a) !== JSON.stringify(b)) problems.push('function bodies differ');

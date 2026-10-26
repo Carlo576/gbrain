@@ -39,7 +39,8 @@ export const PERSISTENCE_REQUEST_ID_INDEX = { name: 'persistence_requests_reques
  * #7649: the write claims' foreground-commit probe (journal.ts `FOREGROUND_WAITING_ON`: a committed non-sync request on the
  * worktree after the `syncSeen` bound). After a restart the bound is 0, and with no index on (worktree, sequence) for committed
  * rows the probe walked the sequence key (or the heap) through every receipt, sync receipts included, on each claim. The
- * predicate is the probe's `state='committed' AND NOT SYNC_KIND(c)` written the same way, so the planner can use it. Postgres
+ * predicate is the probe's `state='committed' AND NOT SYNC_KIND(c)` written the same way, so the planner can use it; like the probe it
+ * also covers compacted receipts of any kind (their intent is NULL), so on a long-lived brain it holds most committed rows. Postgres
  * builds it CONCURRENTLY in the persistence_foreground_committed_index migration (`transaction: false`); PGLite inline.
  */
 export const PERSISTENCE_FOREGROUND_COMMITTED_INDEX_SQL = `CREATE INDEX IF NOT EXISTS persistence_requests_foreground_committed

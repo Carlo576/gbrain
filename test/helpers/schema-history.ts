@@ -13,7 +13,7 @@ export type SchemaHistoryEngine = 'pglite' | 'postgres';
 /** The first schema version with a fixture; the fixtures run contiguously from here to the newest one captured. */
 export const FIRST_SCHEMA_HISTORY_VERSION = 260;
 
-export const SCHEMA_HISTORY_DIR = resolve(import.meta.dir, '..', 'fixtures', 'schema-history');
+const SCHEMA_HISTORY_DIR = resolve(import.meta.dir, '..', 'fixtures', 'schema-history');
 
 export function schemaHistoryVersions(engine: SchemaHistoryEngine): number[] {
   return readdirSync(join(SCHEMA_HISTORY_DIR, engine))
@@ -40,10 +40,11 @@ type BooleanNode = { op: 'AND' | 'OR'; items: BooleanNode[] } | { text: string }
 const printBoolean = (node: BooleanNode): string => ('text' in node ? node.text : `(${node.items.map(printBoolean).join(` ${node.op} `)})`);
 
 /**
- * Canonical text of a SQL expression with nested AND/OR groups flattened
- * (`((a OR b) OR c)` and `(a OR b OR c)` print the same) and redundant
- * parentheses dropped, while a regrouping across AND and OR still prints
- * differently.
+ * Canonical text of a SQL expression: nested chains of the same AND or OR
+ * operator are flattened (`((a OR b) OR c)` and `(a OR b OR c)` print the
+ * same) and parentheses around a whole operand are dropped. Every other
+ * parenthesis is kept, so a regrouping across AND and OR, arithmetic grouping
+ * and call parentheses still print differently.
  */
 function canonicalBoolean(sql: string): string {
   const tokens = (sql.match(/'(?:[^']|'')*'|\(|\)|\bAND\b|\bOR\b|[^()'\s]+|\s+/gi) ?? []);
@@ -52,18 +53,19 @@ function canonicalBoolean(sql: string): string {
   const group = (op: 'AND' | 'OR', items: BooleanNode[]): BooleanNode => items.length === 1 ? items[0]
     : { op, items: items.flatMap(item => ('op' in item && item.op === op ? item.items : [item])) };
   const atom = (): BooleanNode => {
-    const parts: BooleanNode[] = [];
+    const parts: Array<{ node: BooleanNode; grouped: boolean }> = [];
     while (i < tokens.length && tokens[i] !== ')' && keyword(tokens[i]) !== 'AND' && keyword(tokens[i]) !== 'OR') {
       if (tokens[i] === '(') {
         i++;
-        parts.push(or());
+        parts.push({ node: or(), grouped: true });
         if (tokens[i] === ')') i++;
       } else {
-        if (tokens[i].trim()) parts.push({ text: tokens[i] });
+        if (tokens[i].trim()) parts.push({ node: { text: tokens[i] }, grouped: false });
         i++;
       }
     }
-    return parts.length === 1 ? parts[0] : { text: parts.map(printBoolean).join(' ') };
+    if (parts.length === 1) return parts[0].node;
+    return { text: parts.map(({ node, grouped }) => (grouped && 'text' in node ? `(${node.text})` : printBoolean(node))).join(' ') };
   };
   const and = (): BooleanNode => { const items = [atom()]; while (keyword(tokens[i]) === 'AND') { i++; items.push(atom()); } return group('AND', items); };
   const or = (): BooleanNode => { const items = [and()]; while (keyword(tokens[i]) === 'OR') { i++; items.push(and()); } return group('OR', items); };
@@ -77,10 +79,10 @@ function canonicalBoolean(sql: string): string {
 
 /**
  * A restored constraint trigger deparses its WHEN clause with nested OR chains
- * flattened (same expression, fewer parentheses). Parentheses that regroup AND
- * and OR still count.
+ * flattened (same expression, fewer parentheses). Only parentheses that nest a
+ * chain inside the same AND or OR operator are ignored; all others count.
  */
-export function sameUpToOrChainParentheses(expected: unknown, actual: unknown): boolean {
+export function sameUpToFlattenedBooleanChains(expected: unknown, actual: unknown): boolean {
   return canonicalBoolean(JSON.stringify(expected)) === canonicalBoolean(JSON.stringify(actual));
 }
 
@@ -94,7 +96,7 @@ export function sameUpToOrChainParentheses(expected: unknown, actual: unknown): 
 export function schemaHistoryDrift(fresh: InstalledSchema, upgraded: InstalledSchema): string {
   const drift = diffCatalogSnapshots(fresh.catalog, upgraded.catalog).filter((d) => {
     if (d.kind !== 'changed') return true;
-    if (d.section === 'triggers') return !sameUpToOrChainParentheses(d.expected, d.actual);
+    if (d.section === 'triggers') return !sameUpToFlattenedBooleanChains(d.expected, d.actual);
     if (d.section !== 'functions') return true;
     const { bodySha256: _e, ...expected } = d.expected as Record<string, unknown>;
     const { bodySha256: _a, ...actual } = d.actual as Record<string, unknown>;

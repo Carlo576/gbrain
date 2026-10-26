@@ -11,7 +11,7 @@ import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { dumpBrainSchema } from '../../scripts/capture-schema-history-fixture.ts';
 import { FUNCTION_BODIES_SQL, pgliteCatalogQuery } from '../helpers/schema-catalog.ts';
 import { diffCatalogSnapshots, snapshotCatalog } from '../helpers/schema-diff.ts';
-import { sameUpToOrChainParentheses } from '../helpers/schema-history.ts';
+import { sameUpToFlattenedBooleanChains } from '../helpers/schema-history.ts';
 import { withColdPglite } from '../helpers/with-snapshot.ts';
 
 let original: PGLiteEngine;
@@ -57,7 +57,7 @@ afterAll(async () => {
 
 test('a dumped brain restores to the same catalog, function bodies and rows', async () => {
   const diff = diffCatalogSnapshots(await snapshotCatalog(pgliteCatalogQuery(original)), await snapshotCatalog(pgliteCatalogQuery(restored)), { compareOrdinals: true })
-    .filter((d) => !(d.section === 'triggers' && d.kind === 'changed' && sameUpToOrChainParentheses(d.expected, d.actual)));
+    .filter((d) => !(d.section === 'triggers' && d.kind === 'changed' && sameUpToFlattenedBooleanChains(d.expected, d.actual)));
   expect(diff).toEqual([]);
   expect((await restored.db.query(FUNCTION_BODIES_SQL)).rows).toEqual((await original.db.query(FUNCTION_BODIES_SQL)).rows);
   for (const table of ['owners', 'items']) {
