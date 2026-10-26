@@ -421,6 +421,61 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
   });
 }, 600_000);
 
+test('7d. #7679 state matrix: an unreadable HEAD and pending worktree recovery never move an interrupted refresh the unattended paths cannot verify', async () => {
+  // Value: protects=a plain refresh leaves an orphan untouched (state, holder, previous_holder, HEAD) when git cannot read HEAD (refusing
+  // refresh_in_progress) or when publication/topology recovery is pending (refusing refresh_recovery_required, the blocker that must clear first);
+  // the owner scan aborts a dead drain whatever HEAD reads, never adopts an unverified HEAD for a fenced row, and leaves a lagging syncing row;
+  // fails_when=adoption runs recovery on a null HEAD (escalating to recovery_required) or ahead of the recovery gate, or precheck names the
+  // orphan instead of the pending recovery; why_new=7c covers readable HEADs with no pending recovery only; seam=.git/HEAD overwritten with
+  // garbage, a recovering topology change row naming the worktree; no_claim=the race where HEAD becomes unreadable between adoption's two reads.
+  type Kind = 'draining' | 'fenced_old' | 'fenced_target' | 'syncing_lagging' | 'recovery_required';
+  type Action = 'plain_head_unreadable' | 'scan_head_unreadable' | 'plain_recovery_pending';
+  const crashAt = { draining: 'drained', fenced_old: 'fenced', fenced_target: 'fenced', syncing_lagging: 'syncing', recovery_required: 'fenced' } as const;
+  const kinds: Kind[] = ['draining', 'fenced_old', 'fenced_target', 'syncing_lagging', 'recovery_required'];
+  const cells: Array<[Kind, Action]> = [
+    ...(['draining', 'fenced_old', 'syncing_lagging'] as Kind[]).map(kind => [kind, 'plain_head_unreadable'] as [Kind, Action]),
+    ...(['draining', 'fenced_old', 'syncing_lagging'] as Kind[]).map(kind => [kind, 'scan_head_unreadable'] as [Kind, Action]),
+    ...kinds.map(kind => [kind, 'plain_recovery_pending'] as [Kind, Action])];
+  for (const engine of engines) for (const [kind, action] of cells) await withRefreshFixture(engine, async f => {
+    const label = `${kind} x ${action}`;
+    const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
+    await expect(refreshWorktree(f.engine, f.alpha, { hooks: { boundary: point => { if (point === crashAt[kind]) throw new Error(`simulated crash at ${point}`); } } }))
+      .rejects.toThrow('simulated crash');
+    await disposePersistenceConsumer(f.engine);
+    const [orphan] = await f.refreshRows();
+    const state = kind === 'draining' ? 'draining' : kind === 'syncing_lagging' ? 'syncing' : kind === 'recovery_required' ? 'recovery_required' : 'fenced';
+    await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state=$2,completed_at=NULL WHERE id=$1::uuid`, [orphan.id, state]);
+    if (kind === 'fenced_target') git(f.root, 'merge', '-q', '--ff-only', target);
+    const head = f.head();
+    const settled = async () => (await f.refreshRows()).map(r => [r.state, r.outcome.previous_holder]);
+    if (action === 'plain_recovery_pending') {
+      await f.engine.executeRaw(`INSERT INTO persistence_topology_changes(principal_id,request_id,digest,operation,source_id,worktree_ids,state,recovery)
+        VALUES($1::uuid,$2::uuid,'example','reclone',$3,ARRAY[$4::uuid],'recovering',$5::text::jsonb)`,
+        [randomUUID(), randomUUID(), f.alpha, f.worktreeId, JSON.stringify({ worktreeId: f.worktreeId })]);
+      await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_recovery_required');
+      expect(await settled(), label).toEqual([[state, undefined]]);
+      expect(f.head(), label).toBe(head);
+      return;
+    }
+    const headFile = join(f.root, '.git', 'HEAD');
+    const saved = readFileSync(headFile, 'utf8');
+    writeFileSync(headFile, 'not a ref\n');
+    try {
+      if (action === 'plain_head_unreadable') {
+        const refused = await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_in_progress');
+        expect(refused.suggestion, label).toContain(`gbrain sources writer status --source ${f.alpha} --json`);
+        expect(await settled(), label).toEqual([[state, undefined]]);
+      } else {
+        const moved = await resumeWorktreeRefreshes(f.engine);
+        const expected = { draining: 'aborted', fenced_old: 'recovery_required', syncing_lagging: 'syncing' }[kind as 'draining' | 'fenced_old' | 'syncing_lagging'];
+        expect(moved, label).toBe(expected === state ? 0 : 1);
+        expect((await f.refreshRows()).map(r => r.state), label).toEqual([expected]);
+      }
+    } finally { writeFileSync(headFile, saved); }
+    expect(f.head(), label).toBe(head);
+  });
+}, 600_000);
+
 test('8. a queued git effect drains before fenced, and nothing on the worktree is claimed while fenced', () => each(async f => {
   f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
   await f.put(f.beta, 'notes/effect', page('Effect', 'Has a git effect.'));

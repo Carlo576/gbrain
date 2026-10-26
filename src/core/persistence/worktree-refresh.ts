@@ -234,11 +234,11 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
     throw refusal('refresh_recovery_required', stored.cause ?? `Refresh ${active.id} could not verify the checkout HEAD, so no refresh recovers it on its own.`,
       stored.fix ?? `gbrain sources writer status ${sourceId}, then gbrain sources refresh ${sourceId} --resume`, active.id);
   }
-  if (active) throw inProgress(`Refresh ${active.id} of this worktree is ${active.state}, held by ${describeHolder(holderOf(active))}; only one refresh per worktree runs at a time.`,
-    sourceId, active.id);
   if (binding.state !== 'active' || await worktreeRecoveryPending(engine, binding)) throw refusal('refresh_recovery_required',
     'Publication or topology recovery is pending on this worktree; the checkout must not move until it is recovered.',
     `gbrain sources writer status ${sourceId}, let the owner finish recovery, then gbrain sources refresh ${sourceId}`);
+  if (active) throw inProgress(`Refresh ${active.id} of this worktree is ${active.state}, held by ${describeHolder(holderOf(active))}; only one refresh per worktree runs at a time.`,
+    sourceId, active.id);
   const members = (await engine.executeRaw<{ source_id: string }>('SELECT source_id FROM persistence_source_bindings WHERE worktree_id=$1::uuid ORDER BY source_id',
     [binding.worktree_id])).map(row => row.source_id);
   await assertNoUnfinishedSync(engine, members);
@@ -575,7 +575,7 @@ async function hostRoot(engine: BrainEngine, worktreeId: string, hostId = localH
  */
 async function recoverOne(engine: BrainEngine, git: Git, row: WorktreeRefreshRow, root: string, unattended = false): Promise<WorktreeRefreshRow> {
   const head = await headOf(git, root);
-  if (head === null && unattended) throw inProgress(`Refresh ${row.id} is orphaned, but the checkout HEAD could not be read, so it stays ${row.state}; the next refresh retries it.`, row.source_ids[0], row.id);
+  if (head === null && unattended) throw inProgress(`Refresh ${row.id} is orphaned, but the checkout HEAD could not be read, so it stays ${row.state}; once git can read HEAD again, the next refresh retries it.`, row.source_ids[0], row.id);
   if (row.state === 'draining') {
     await engine.transaction(tx => transition(tx, row, ['draining'], 'aborted', { refusal: { code: 'refresh_interrupted', cause: 'The refreshing process stopped while draining; no merge was started.' } }));
   } else if (row.state === 'fenced' && head === row.old_head) {
@@ -621,7 +621,7 @@ export async function resumeWorktreeRefreshes(engine: BrainEngine, opts: { hostI
         if (after.state !== row.state) moved++;
       });
     } catch (error) {
-      // GBRA-130 A-34: one refresh's unexpected failure leaves that row for the next owner start and never stops the others or the topology scan.
+      // GBRA-130 A-34: one refresh's unexpected failure leaves that row for the next topology scan and never stops the others or the scan.
       if (!(error instanceof OperationError && ['write_pending', 'recovery_required', 'refresh_recovery_required', 'owner_unavailable'].includes(error.code))) {
         console.error(`[gbrain] worktree refresh ${row.id} (${row.source_ids.join(', ')}) did not converge at owner start (${String((error as { code?: unknown } | null)?.code ?? (error as Error)?.name ?? 'error')}); it stays ${row.state} and the owner's next topology scan retries it. Check it with gbrain sources writer status ${row.source_ids[0]}.`);
       }
@@ -713,17 +713,18 @@ async function resumeHeld(engine: BrainEngine, git: Git, sourceId: string, refre
  * #7679: a plain `gbrain sources refresh` that finds an active refresh whose lock no process holds (its refresher died,
  * for example a container replaced mid-refresh) finishes it through the `--resume` path instead of refusing
  * `refresh_in_progress` on every scheduled run. Returns null when there is nothing to adopt: no active row, a
- * `recovery_required` row (the user decides how to reset), a live holder (the lock stays busy for a second), or a
- * caller that is not the owner (the precheck refuses each case by name).
+ * `recovery_required` row (the user decides how to reset), publication or topology recovery pending on the worktree,
+ * a live holder (the lock stays busy for a second), a caller that is not the owner, or a checkout HEAD git cannot read
+ * (an unattended run never escalates on it); the precheck then refuses each case by name.
  */
 async function adoptOrphanedRefresh(engine: BrainEngine, sourceId: string): Promise<WorktreeRefreshResult | null> {
   if (!await managedPersistenceEnabled(engine)) return null;
   const hostId = existingLocalHostId();
   const binding = await getWorktreeBinding(engine, sourceId, hostId);
   if (!binding || !hostId || binding.owner_host_id !== hostId || !binding.local_path) return null;
-  if (binding.state !== 'active' || await worktreeRecoveryPending(engine, binding)) return null;
   const active = await readActiveRefresh(engine, binding.worktree_id);
   if (!active || active.state === 'recovery_required') return null;
+  if (binding.state !== 'active' || await worktreeRecoveryPending(engine, binding)) return null;
   // A holder recorded on another host is never adopted: this host's lock cannot say whether it is alive.
   if ((holderOf(active)?.host_id ?? hostId) !== hostId) return null;
   const lock = await acquireNativeLock(refreshLockPath(binding.worktree_id), { timeoutMs: 1000 });
