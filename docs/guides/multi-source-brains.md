@@ -139,7 +139,7 @@ sources, an OAuth client, a bound connection and a read that names
 call, never widens what it reads. Federating a source never shows its
 `visibility: private` pages to a remote connection.
 
-On a brain that is not managed, `gbrain sources add` warns on stderr when a new source is not federated, and
+On a brain that is not managed, `gbrain sources add` without `--federated` or `--no-federated` warns on stderr that the new source is not federated, and
 when the sources an unscoped connection reads hold no page it also prints the
 next step on stdout (`next: gbrain sources federate <id>`), and as `next`
 (`command`, `argv`, `why`) under `--json`. A managed brain's `sources add`
