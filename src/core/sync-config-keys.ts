@@ -136,7 +136,7 @@ export function syncKeySetNotice(key: string): { writes: boolean; lines: string[
 /** #7630: the `config set sync.repo_path` refusal for a relative value, or null when it may be stored. */
 export function syncRepoPathRefusal(value: string): string | null {
   if (isAbsolute(value)) return null;
-  return `[config] sync.repo_path must be an absolute directory (got '${value}'): a relative path names whatever directory gbrain runs from, and sync refuses it (sync_anchor_relative). Nothing was written.`;
+  return `sync.repo_path must be an absolute directory (got '${value}'): a relative path names whatever directory gbrain runs from, and sync refuses it (sync_anchor_relative). Nothing was written.`;
 }
 
 export async function handleSyncKeyConfig(engine: Pick<BrainEngine, 'getConfig' | 'executeRaw'>, action: 'get' | 'set', key: string): Promise<boolean> {
