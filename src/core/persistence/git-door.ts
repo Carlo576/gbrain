@@ -22,7 +22,8 @@
  * `git_index_conflict`, index untouched). After the branch moves, an entry someone staged meanwhile is left as it is
  * and the write reports that its commit landed. An entry still holding HEAD's first parent's version at that path counts
  * as clean: it is what an interrupted refresh after the door's own commit leaves, and its bytes are in history, so the
- * next write (or a replay whose blob HEAD already holds) refreshes it; any other staged entry refuses `git_index_conflict`.
+ * next write (or a replay whose blob HEAD already holds) refreshes it and reports the paths (`onIndexRestored`, the
+ * `git_index_restored` notice); any other staged entry refuses `git_index_conflict`.
  *
  * Recovery inverts for those writes: the recovery record names the HEAD it was prepared against (`door`), and a
  * publication that stopped after its commit landed keeps the committed file instead of restoring the prior bytes.
@@ -39,6 +40,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
+import type { Notice } from '../agent-output.ts';
 import { OperationError, opError } from '../ops/contract.ts';
 import { commitMessage, git, gitBytes, gitFailure, gitStepTimeoutMs, ignoredTargetError, withSession, type GitSession } from './effect-git.ts';
 import type { GitCommitNote } from './effect-model.ts';
@@ -90,7 +92,7 @@ export interface DoorFile {
  * its planned state or not at all. A target Git refuses, a file that no longer holds its plan, or a target with a
  * staged change throws, so the publication rolls back.
  */
-export async function commitThroughDoor(root: string, files: DoorFile[], writerLock?: NativeLockHandle): Promise<string | null> {
+export async function commitThroughDoor(root: string, files: DoorFile[], writerLock?: NativeLockHandle, onIndexRestored?: (paths: string[]) => void): Promise<string | null> {
   let key = resolve(root);
   try { key = realpathSync(root); } catch { /* the session reports a missing checkout */ }
   const prior = doorTurns.get(key) ?? Promise.resolve();
@@ -99,7 +101,7 @@ export async function commitThroughDoor(root: string, files: DoorFile[], writerL
   doorTurns.set(key, turn);
   await prior;
   try {
-    return await withSession(root, undefined, writerLock ? { writerLock } : undefined, false, session => doorCommit(session, root, files));
+    return await withSession(root, undefined, writerLock ? { writerLock } : undefined, false, session => doorCommit(session, root, files, onIndexRestored));
   } catch (error) {
     if (!(error instanceof OperationError) || TYPED.has(error.code) || landedFailures.has(error)) throw error;
     const paths = files.map(file => relative(root, file.path).split(sep).join('/'));
@@ -186,7 +188,7 @@ function stripspace(paragraph: string): string {
   return lines.join('\n');
 }
 
-async function doorCommit(session: GitSession, root: string, files: DoorFile[]): Promise<string> {
+async function doorCommit(session: GitSession, root: string, files: DoorFile[], onIndexRestored?: (paths: string[]) => void): Promise<string> {
   const symbolic = await git(session, ['symbolic-ref', '-q', 'HEAD']);
   if (symbolic.code !== 0) throw opError('git_detached_head', `${root} is on a detached HEAD, so the strict source's write has no branch to commit to; nothing was published.`,
     'Check out the branch the source tracks (git switch <branch>) on the brain host, then retry the write with a new request_id.');
@@ -288,8 +290,10 @@ async function doorCommit(session: GitSession, root: string, files: DoorFile[]):
         const foreign = staged.filter(target => indexed.entries.get(target.rel) !== parent.get(target.rel));
         if (foreign.length) throw indexConflict(root, foreign);
       }
+      const restored = () => { if (staged.length) onIndexRestored?.(staged.map(target => target.rel)); };
       if (!changed.length) {
         if (staged.length) await syncIndex(session, root, prefix, index, [...targets.values()], head, indexed);
+        restored();
         return head;
       }
 
@@ -324,6 +328,7 @@ async function doorCommit(session: GitSession, root: string, files: DoorFile[]):
       const moved = await git(session, ['update-ref', '-m', `commit: ${message[0]!.split('\n')[0]}`, branch, created, head]);
       if (moved.code === 0) {
         await syncIndex(session, root, prefix, index, [...targets.values()], created, indexed);
+        restored();
         return created;
       }
       if (attempt) throw new OperationError('git_unavailable', `${branch} in ${root} moved twice while this write was being committed, so it was not committed.`,
@@ -348,6 +353,12 @@ async function refuseIgnored(session: GitSession, root: string, fresh: Target[])
     const rule = /^(.*):(\d+):(.*)$/.exec((lines[i] ?? '').split('\t')[0]!);
     if (rule && rule[3] && !rule[3].startsWith('!')) throw ignoredTargetError(target.rel, `${rule[1]}:${rule[2]}: ${rule[3]}`);
   });
+}
+
+/** The notice a write carries when the door restored index entries an interrupted refresh after its own commit left behind. */
+export function indexRestoredNotice(paths: string[]): Notice {
+  return { code: 'git_index_restored', kind: 'info',
+    why: `gbrain restored index to HEAD after an interrupted door refresh for ${paths.join(', ')}: the index still held the version before an earlier gbrain commit (its update of the index had failed), so this write replaced that stale entry. Nothing was lost; the earlier version is in Git history.` };
 }
 
 /** The targets whose file no longer holds its planned state (its bytes, or no file for a removal) refuse as `git_target_changed`. */

@@ -10,6 +10,8 @@
  *   - D4's recovery record pauses every later write of the worktree until `gbrain repair stuck-recovery --keep disk`
  *     resolves it: the human's bytes stay on disk, the write ends failed, the queued write publishes, Git and the row
  *     keep the prior revision until the edit is committed, and a sync then imports it;
+ *   - a stale entry an interrupted refresh left (the version before the door's last commit) is restored by the next
+ *     write, whose receipt names the path (`persistence.git_index_restored`) and which emits the `git_index_restored` notice;
  *   - with no interference the planned blob commits and the index and status are clean;
  *   - plumbing: a file rewritten between plan and commit refuses with nothing committed or staged; a change staged
  *     after the pre-commit check and before the index refresh is left staged and the refusal says the commit landed; an
@@ -29,7 +31,8 @@ import { operations, type OperationContext } from '../src/core/operations.ts';
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
 import { publishMutation, type PublicationHooks } from '../src/core/persistence/coordinator.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
-import { commitThroughDoor, doorSeams } from '../src/core/persistence/git-door.ts';
+import { commitThroughDoor, doorSeams, indexRestoredNotice } from '../src/core/persistence/git-door.ts';
+import type { Notice } from '../src/core/agent-output.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
 import { admitWrite, claimNextWrite, getWriteRequestById } from '../src/core/persistence/journal.ts';
 import { getWorktreeBinding } from '../src/core/persistence/ownership.ts';
@@ -176,6 +179,20 @@ for (const backend of testBackends()) describe(`[${backend}] the door commits on
     expect(git(root, 'status', '--porcelain')).toBe('');
   }, { databaseUrl, setup }), 180_000);
 
+  test('a stale index entry from an interrupted door refresh is restored, and the receipt and notice name the path', () => managedBrain(async ({ engine, ctx, root }) => {
+    await committedPage(engine, ctx);
+    expect(await publish(engine, ctx, page('Second'))).toMatchObject({ state: 'committed' });
+    git(root, 'update-index', '--cacheinfo', `100644,${git(root, 'rev-parse', `HEAD^:${FILE}`)},${FILE}`);
+    const notices: Notice[] = [];
+    const result = await putPage.handler({ ...ctx, emitNotice: notice => notices.push(notice) }, { slug: SLUG, content: page('Third'),
+      expected_revision: (await engine.readPageSnapshot(SLUG, { sourceId: 'default' }))!.revision, request_id: randomUUID(), wait_ms: 30_000 }) as Record<string, any>;
+    expect(result).toMatchObject({ state: 'committed', persistence: { git_state: 'committed', git_commit: git(root, 'rev-parse', 'HEAD'), git_index_restored: [FILE] } });
+    expect(notices.filter(notice => notice.code === 'git_index_restored')).toEqual([{ code: 'git_index_restored', kind: 'info',
+      why: expect.stringContaining(`restored index to HEAD after an interrupted door refresh for ${FILE}`) }]);
+    expect(await standing(engine, root)).toEqual({ row: 'Third', head: 'Third', disk: 'Third', index: git(root, 'rev-parse', `HEAD:${FILE}`) });
+    expect(git(root, 'status', '--porcelain')).toBe('');
+  }, { databaseUrl, setup }), 120_000);
+
   test('with no interference the planned blob commits, and the index and status are clean', () => managedBrain(async ({ engine, ctx, root }) => {
     await committedPage(engine, ctx);
     const result = await publish(engine, ctx, page('Second'));
@@ -267,7 +284,11 @@ describe('door plumbing: the planned state', () => {
     expect(git(root, 'rev-parse', ':notes/a.md')).toBe(git(root, 'rev-parse', 'HEAD^:notes/a.md'));
     expect(git(root, 'ls-files', '--', 'notes/new.md')).toBe('');
     put(root, 'notes/a.md', 'second\n'); put(root, 'notes/new.md', 'second new\n');
-    const commit = await commitThroughDoor(root, ['notes/a.md', 'notes/new.md'].map(path => ({ path: join(root, path), planned: sha256(readFileSync(join(root, path))) })));
+    const restored: string[][] = [];
+    const commit = await commitThroughDoor(root, ['notes/a.md', 'notes/new.md'].map(path => ({ path: join(root, path), planned: sha256(readFileSync(join(root, path))) })), undefined, paths => restored.push(paths));
+    expect(restored).toEqual([['notes/a.md', 'notes/new.md']]);
+    expect(indexRestoredNotice(restored[0]!)).toEqual({ code: 'git_index_restored', kind: 'info',
+      why: expect.stringContaining('restored index to HEAD after an interrupted door refresh for notes/a.md, notes/new.md') });
     expect(commit).toBe(git(root, 'rev-parse', 'HEAD'));
     expect(git(root, 'show', 'HEAD:notes/a.md')).toBe('second');
     expect(git(root, 'show', 'HEAD:notes/new.md')).toBe('second new');
@@ -278,8 +299,12 @@ describe('door plumbing: the planned state', () => {
     const root = repo({ 'notes/a.md': 'a\n' });
     const commit = await publishAt(root, 'notes/a.md', 'door\n');
     git(root, 'update-index', '--cacheinfo', `100644,${git(root, 'rev-parse', `${commit}^:notes/a.md`)},notes/a.md`);
-    expect(await commitThroughDoor(root, [{ path: join(root, 'notes/a.md'), planned: sha256('door\n') }])).toBe(commit);
+    const restored: string[][] = [];
+    expect(await commitThroughDoor(root, [{ path: join(root, 'notes/a.md'), planned: sha256('door\n') }], undefined, paths => restored.push(paths))).toBe(commit);
+    expect(restored).toEqual([['notes/a.md']]);
     expect(git(root, 'status', '--porcelain')).toBe('');
+    expect(await commitThroughDoor(root, [{ path: join(root, 'notes/a.md'), planned: sha256('door\n') }], undefined, paths => restored.push(paths))).toBe(commit);
+    expect(restored).toHaveLength(1);
     put(root, 'notes/a.md', 'novel\n'); git(root, 'add', 'notes/a.md');
     const novel = git(root, 'rev-parse', ':notes/a.md');
     put(root, 'notes/a.md', 'door\n');
