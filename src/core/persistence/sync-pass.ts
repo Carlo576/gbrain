@@ -809,8 +809,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       spelling: legacySpelling.has(path) ? 'legacy' : twins.has(path),
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && live && (record ? pages.fullEpisode[at!] : undefined) !== input.pass.episodeFullId
         : input.full === true && live,
-      derivedCurrent: live && pages.derivedCurrent(at!),
-      fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
+      derivedCurrent: live && pages.derivedCurrent(at!), fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
       keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes),
       openWork: row && open.pageIds.has(Number(pages.id[at!])) || open.origins.has(origin),
     };
