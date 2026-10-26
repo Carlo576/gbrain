@@ -1,7 +1,8 @@
 /**
  * #7632: every migration run ends by putting pg_temp back on gbrain functions' search_path. That step is best-effort:
- * when it fails after the migrations committed (a lock it cannot take, a dropped connection), initSchema still
- * finishes, names the failure on stderr, and doctor's function_search_path check names what it left.
+ * when it fails after the migrations committed (a lock it cannot take, a dropped connection), the run (and so
+ * initSchema, apply-migrations and the upgrade preflight) still finishes, names the failure on stderr, and doctor's
+ * function_search_path check names what it left. runMigrations directly: initSchema returns early on a PGLite snapshot.
  */
 import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test';
 
@@ -13,7 +14,7 @@ mock.module(V277, () => ({ ...actual, hardenFunctionSearchPaths: async (engine: 
   throw new Error('canceling statement due to lock timeout');
 } }));
 const { PGLiteEngine } = await import('../src/core/pglite-engine.ts');
-const { LATEST_VERSION } = await import('../src/core/migrate.ts');
+const { LATEST_VERSION, runMigrations } = await import('../src/core/migrate.ts');
 
 describe('the search_path step after a migration run is best-effort (#7632)', () => {
   let engine: InstanceType<typeof PGLiteEngine>;
@@ -24,14 +25,14 @@ describe('the search_path step after a migration run is best-effort (#7632)', ()
   }, 120_000);
   afterAll(async () => { await engine?.disconnect(); });
 
-  test('initSchema finishes the upgrade and names the failed step when it throws', async () => {
+  test('the migration run finishes the upgrade and names the failed step when it throws', async () => {
     await engine.executeRaw(`ALTER FUNCTION gbrain_try_jsonb(text) SET search_path = pg_catalog, public`);
     await engine.executeRaw(`UPDATE config SET value = '${actual.v277.version - 1}' WHERE key = 'version'`);
     const write = process.stderr.write.bind(process.stderr);
     let stderr = '';
     process.stderr.write = ((chunk: string | Uint8Array) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
     try {
-      await engine.initSchema();
+      expect((await runMigrations(engine)).applied).toBe(1);
     } finally {
       process.stderr.write = write;
     }
