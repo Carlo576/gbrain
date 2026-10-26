@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { Glob } from 'bun';
 import { CLI_ONLY, cliOnlyFlagArgs, validateCommandFlags } from '../src/cli/main.ts';
 import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
-import { COMMAND_VALUES, END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, directEntryArgs, findUnknownFlag, knownSwitches } from '../src/cli/flag-equals.ts';
+import { COMMAND_VALUES, END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, directEntryArgs, findUnknownFlag, knownSwitches, splitFlagEquals } from '../src/cli/flag-equals.ts';
 import { CLI_COMMANDS } from '../src/cli/command-table.ts';
 import { SEARCH_SUBCOMMANDS } from '../src/cli/subcommands.ts';
 import { SYNC_FLAGS } from '../src/core/sync-flags.ts';
@@ -31,7 +31,6 @@ import { parseGoogleAttachmentsArgs } from '../src/commands/google-attachments.t
 import { parseGraduationArgs, routesToGraduation } from '../src/commands/migrate-graduation.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { parseAppendArgs } from '../src/cli/commands/append.ts';
-import { splitFlagEquals } from '../src/cli/flag-equals.ts';
 
 const PASSTHROUGH = new Set(['call', 'retrieval-upgrade']);
 

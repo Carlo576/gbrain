@@ -6,6 +6,8 @@
  * heartbeat rows, the service managers and the socket.
  */
 import { describe, expect, test } from 'bun:test';
+import { EQUALS_READERS } from '../src/cli/flag-equals.ts';
+import { parseGlobalFlags } from '../src/core/cli-options.ts';
 import {
   bunGlobalCopyOf, classifyGbrainCommand, collectHostProcesses, mismatchedBuilds, planRestart, restartProblems, runRestartSteps, supervisorRestartArgv, unverifiedBuilds, verifyRestart,
   type HostProcess, type ProcessSources, type RestartContext, type RestartExecutor, type WarmSocketState,
@@ -71,6 +73,13 @@ describe('supervisorRestartArgv', () => {
       start: ['gbrain', 'jobs', 'supervisor', 'start', '--detach', '--job-isolation=process', '--queue', 'ingest', '--json'],
       pid_file: null,
     });
+  });
+
+  test('keeps the global flags and every = value the supervisor applied', () => {
+    const argv = ['jobs', 'supervisor', 'start', '--brain=work', '--timeout=30s', '--queue', 'ingest', '--progress-interval=500'];
+    expect(parseGlobalFlags([...argv]).cliOpts.brain).toBe('work');
+    expect(supervisorRestartArgv(argv).start).toEqual(['gbrain', 'jobs', 'supervisor', 'start', '--detach', '--brain=work', '--timeout=30s', '--queue', 'ingest', '--progress-interval=500', '--json']);
+    for (const flag of EQUALS_READERS['jobs supervisor'] ?? []) expect(supervisorRestartArgv(['jobs', 'supervisor', 'start', `${flag}=x`]).start).toContain(`${flag}=x`);
   });
 });
 

@@ -302,7 +302,7 @@ export function findUnknownFlag(args: string[], legal: ReadonlySet<string>): str
   return null;
 }
 
-/** A command module's direct `bun run` entry, in main's order: global flags stripped and applied, the `=` rule (own `=` parsers pass through), and main's unknown-flag check with its envelope (legacy keys included). */
+/** auth.ts's direct `bun run` entry, in main's order: global flags stripped and applied, the `=` rule (`command sub` own `=` parsers pass through; auth has no whole-command own parser, strict spec or exempt path), and main's unknown-flag check with its envelope (legacy keys included). */
 export async function directEntryArgs(command: string, raw: string[]): Promise<{ args: string[] } | { refusal: OperationError; legacy?: Record<string, string> }> {
   const { cliOpts, rest } = parseGlobalFlags(raw);
   setCliOptions(cliOpts);

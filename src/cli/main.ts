@@ -1335,7 +1335,7 @@ export async function cliOnlyFlagArgs(command: string, subArgs: string[]): Promi
   return splitFlagEquals(command, subArgs);
 }
 
-/** call and config set take arbitrary values, and eval brainbench refuses unknown tokens with its own exit code; every other validation-exempt path (jobs submit, config get and unset) reads exact tokens. */
+/** call and config set take arbitrary values, and eval brainbench refuses unknown tokens with its own exit code; every other validation-exempt path (jobs submit, config get and unset) reads exact tokens, apart from the consent values EQUALS_READERS keeps for jobs submit. */
 function equalsExempt(command: string, subArgs: string[]): boolean {
   return command === 'call' || command === 'config' && subArgs[0] === 'set' || command === 'eval' && subArgs[0] === 'brainbench';
 }
