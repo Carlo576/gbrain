@@ -18,7 +18,7 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import { readManagedSyncFailures } from './sync-failures.ts';
-import { passFingerprint } from './sync-pass-row.ts';
+import { ABANDONED_REPORT_STREAK, passFingerprint } from './sync-pass-row.ts';
 import { passFailureKeys } from './sync-cursor-key.ts';
 import type { ManagedSyncFailure } from './sync-failures.ts';
 
@@ -57,8 +57,8 @@ export async function readBlockedManagedSyncs(engine: BrainEngine, sourceIds?: s
   // #7596: an open pass no recorded stop explains, whose drain lease no process renews: its process was killed or crashed.
   const open = readings.filter(reading => reading.row.value.telemetry.outcome === 'open' && !listed.some(blocked => blocked.source_id === reading.source_id));
   if (!open.length) return listed;
-  const [{ inspectLock, isLockHolderLive, syncLockId }, { DRAIN_LEASE_TTL_MINUTES }, { abandonedPasses }, { ABANDONED_REPORT_STREAK }] = await Promise.all([
-    import('../db-lock.ts'), import('./sync-lease.ts'), import('./sync-pass-status.ts'), import('./sync-pass-row.ts')]);
+  const [{ inspectLock, isLockHolderLive, syncLockId }, { DRAIN_LEASE_TTL_MINUTES }, { abandonedPasses }] = await Promise.all([
+    import('../db-lock.ts'), import('./sync-lease.ts'), import('./sync-pass-status.ts')]);
   const now = Date.now();
   for (const { source_id, row } of open) {
     const lock = await inspectLock(engine, syncLockId(source_id)).catch(() => undefined);

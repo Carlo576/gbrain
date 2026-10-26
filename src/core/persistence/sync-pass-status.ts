@@ -71,7 +71,7 @@ export function abandonedPasses(row: PassRow, now = Date.now(), interrupted?: bo
 /**
  * The state the newest pass puts the source in (design §9): never `synced` while it is open or ended unconverged, or while a
  * writeback its stamp recorded (`converged.writeback`) has a failed or parked Git effect (`writebackFailed`: that request). Null: nothing to add.
- * #7596 `interrupted`: no process holds the source's drain lease (`drainHolderLive`), so an open pass is one whose process
+ * #7596 `interrupted`: no process holds the source's drain lease (`readDrainLease`), so an open pass is one whose process
  * stopped without ending it (killed or crashed), not one still running: `pass_interrupted`.
  */
 export function passStatusState(row: PassRow, withheld: DeletesWithheld | null, writebackFailed: string | null = null, now = Date.now(), interrupted?: boolean): ['synced' | 'resumable' | 'blocked', PassStatusReason] | null {

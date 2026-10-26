@@ -97,10 +97,12 @@ describe.skipIf(!DATABASE_URL)('#7599 serve --access read-only on the session la
 
   test('a read-only serve holds no session-lane connection after startup or after a search, and runs no resident write duty', async () => {
     const s = await startServe('read-only');
+    // gstack-timing-ok: the contract is an absence (no session-lane connection ever opens); a read-write serve opens its 3 within this window
     await Bun.sleep(5_000);
     expect(await directConnections()).toBe(0);
     const found = await s.call(2, 'tools/call', { name: 'search', arguments: { query: WORD } });
     expect(JSON.stringify(found.result)).toContain('notes/alpha-example');
+    // gstack-timing-ok: absence again, after a search; a lazily opened session lane would appear within this window
     await Bun.sleep(2_000);
     expect(await directConnections()).toBe(0);
     expect(s.log()).toContain('[gbrain-serve] read-only: no persistence consumer, on-commit sync or sweep runs here');
@@ -108,11 +110,13 @@ describe.skipIf(!DATABASE_URL)('#7599 serve --access read-only on the session la
     await stopServe();
   }, 120_000);
 
-  test('a read-write serve keeps its 3-connection resident direct pool', async () => {
-    await startServe('full');
+  test('a read-write serve keeps its 3-connection resident direct pool and its notifier lease', async () => {
+    const s = await startServe('full');
     let n = 0;
     for (let i = 0; i < 60 && n < 3; i++) { n = await directConnections(); if (n < 3) await Bun.sleep(500); }
     expect(n).toBe(3);
+    for (let i = 0; i < 60 && !s.log().includes("owner of this host's notifier"); i++) await Bun.sleep(500);
+    expect(s.log()).toContain("owner of this host's notifier");
     await stopServe();
   }, 120_000);
 });

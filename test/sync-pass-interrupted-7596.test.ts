@@ -5,17 +5,17 @@
  * Doctor `managed_sync_blocked` listed nothing. An open pass with no process renewing the source's drain lease is now
  * `pass_interrupted` in status (with `interrupted` naming the pass and the dead holder) and in doctor.
  */
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { Check } from '../src/commands/doctor.ts';
 import { managedSyncBlockedEntry } from '../src/commands/doctor/checks/managed-sync-blocked.ts';
+import * as dbLock from '../src/core/db-lock.ts';
 import { syncLockId } from '../src/core/db-lock.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { readBlockedManagedSyncs } from '../src/core/persistence/sync-blocked.ts';
-import { drainHolderLive, type DrainHolder } from '../src/core/persistence/sync-lease.ts';
 import { abandonedPasses, passStatusNext, passStatusState } from '../src/core/persistence/sync-pass-status.ts';
 import { MANAGED_SYNC_PASS_OP, type PassRow } from '../src/core/persistence/sync-pass-row.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
@@ -29,16 +29,8 @@ const now = Date.parse('2026-10-25T12:00:00Z');
 const row = (outcome: string, streak: number | undefined, quietMs: number): PassRow => ({ updated_at: new Date(now - quietMs).toISOString(),
   value: { source_id: 's', incarnation: 'i', lease_token: 't', obligations: { baseline_commit: null, mismatch: {}, not_converged_streak: 0, faults: {}, ...(streak ? { abandoned_streak: streak } : {}) },
     telemetry: { pass_id: 'p', target: 'h', started_at: '', ended_at: null, kind: 'full', round: 0, outcome: outcome as never, stop_reason: null, candidates: 0, settled: 0, remaining: 0, counts: {}, duration_ms: null, timings_ms: {} } } });
-const holder = (beatAgoMs: number): DrainHolder => ({ kind: 'cli', id: null, host: 'host-a', pid: 4242, started_at: new Date(now - 600_000).toISOString(),
-  last_heartbeat_at: new Date(now - beatAgoMs).toISOString(), version: null, progress: null });
 
 describe('#7596: an open pass with no live drain-lease holder reads interrupted', () => {
-  test('a holder that stopped renewing the lease is not live', () => {
-    expect(drainHolderLive(holder(20_000), now)).toBe(true);
-    expect(drainHolderLive(holder(3 * 60_000), now)).toBe(false);
-    expect(drainHolderLive(null, now)).toBe(false);
-  });
-
   test('the first interrupted pass is resumable pass_interrupted and next is the plain sync', () => {
     const open = row('open', undefined, 10_000);
     expect(passStatusState(open, null, null, now, true)).toEqual(['resumable', 'pass_interrupted']);
@@ -91,6 +83,31 @@ for (const backend of testBackends()) {
     expect(status.live).toBeNull();
     expect(status.interrupted?.holder).toMatchObject({ pid: 4242 });
     expect(await blocked()).toEqual([expect.objectContaining({ code: 'pass_interrupted' })]);
+
+    // A lease that cannot be read decides nothing: the fresh open pass reads unfinished, and doctor lists nothing for it.
+    const lockRead = spyOn(dbLock, 'inspectLock').mockRejectedValue(new Error('lock read failed'));
+    try {
+      status = await readSyncStatus(engine, 'default', { detail: false });
+      expect(status.reason).toBe('pass_unfinished');
+      expect(status.interrupted).toBeNull();
+      expect(await blocked()).toEqual([]);
+    } finally { lockRead.mockRestore(); }
+
+    // Passes in a row keep stopping that way: status and doctor both read pass_abandoned, with the lock row left or released.
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,obligations,abandoned_streak}','1') WHERE op=$1`, [MANAGED_SYNC_PASS_OP]);
+    for (const release of [false, true]) {
+      if (release) await engine.executeRaw('DELETE FROM gbrain_cycle_locks WHERE id=$1', [syncLockId('default')]);
+      status = await readSyncStatus(engine, 'default', { detail: false });
+      expect([status.state, status.reason]).toEqual(['blocked', 'pass_abandoned']);
+      expect(status.interrupted).toMatchObject({ pass_id });
+      expect(await blocked()).toEqual([expect.objectContaining({ code: 'pass_abandoned', run_id: pass_id })]);
+    }
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=completed_keys #- '{0,obligations,abandoned_streak}' WHERE op=$1`, [MANAGED_SYNC_PASS_OP]);
+
+    // An interrupted pass stopped for over an hour fails doctor.
+    await engine.executeRaw(`UPDATE op_checkpoints SET updated_at=now()-interval '2 hours' WHERE op=$1`, [MANAGED_SYNC_PASS_OP]);
+    expect(await doctor()).toMatchObject({ name: 'managed_sync_blocked', status: 'fail' });
+    await lockRow(engine, '3 minutes', '-1 minute');
 
     // A holder that renewed the lease just now is a pass still running: not interrupted, not blocked.
     await lockRow(engine, '1 second', '2 minutes');
