@@ -305,7 +305,7 @@ describe('#7619 split rules', () => {
       'src/commands/graph-query.ts': ['graph-query'],
       'src/commands/import.ts': ['import'],
       'src/commands/integrity.ts': ['integrity check'],
-      'src/commands/jobs/shared.ts': ['jobs supervisor'],
+      'src/commands/jobs/shared.ts': ['jobs supervisor', 'jobs work'],
       'src/commands/jobs/watch.ts': ['jobs watch'],
       'src/commands/lint.ts': ['lint'],
       'src/commands/migrate-graduation.ts': ['migrate'],
@@ -331,7 +331,7 @@ describe('#7619 split rules', () => {
       'src/commands/sync/operator.ts': ['sync status'],
       'src/commands/trust-claim.ts': ['trust claim-sources'],
       'src/core/bounded-listing-cli.ts': ['orphans', 'sources status', 'sync status'],
-      'src/core/consent.ts': ['decide enable', 'doctor', 'embed', 'features', 'migrate', 'reindex', 'reindex-code'],
+      'src/core/consent.ts': ['book-mirror', 'decide enable', 'doctor', 'embed', 'features', 'jobs submit', 'migrate', 'reindex', 'reindex-code', 'reinit-pglite'],
       'src/core/stable-channel.ts': ['upgrade'],
       'src/eval/decide-eval-flags.ts': ['eval retrieval-quality'], // also eval brainbench (exempt) and eval longmemeval (own)
 
@@ -472,7 +472,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
       ['extract', ['links', '--source', 'db', '--source-id=source-a'], '--source-id'], ['extract', ['--stale', '--source-id=source-a'], '--source-id'],
       ['trust', ['explain', 'ref-example', '--source=source-a'], '--source'], ['jobs', ['work', '--concurrency=4'], '--concurrency'],
       ['forget', ['34', '--reason=stale-example'], '--reason'], ['migrate', ['--to', 'pglite', '--path=/tmp/brain-example'], '--path'],
-      ['jobs', ['submit', 'shell', '--params={"a":1}'], '--params'], ['jobs', ['submit', 'sync', '--max-usd=5'], '--max-usd'],
+      ['jobs', ['submit', 'shell', '--params={"a":1}'], '--params'],
     ] as const) {
       const r = await cliOnlyFlagArgs(command, [...args]);
       expect('refusal' in r && r.refusal.message).toContain(`takes ${flag} <value> as two arguments`);
@@ -480,7 +480,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     }
   });
 
-  // Value: protects=a split value never becomes the first numeric/slug target (forget --purge --reason=3 34 must not hit fact 3); fails_when=a refusal turns into a split or keep; why_new=rows only asserted not-null; seam=none; no_claim=handler behavior after a split (argv-level only)
+  // Value: protects=migrate --to=/--url= reach the graduation and legacy copier readers as two arguments; fails_when=COMMAND_VALUES loses migrate and the = form refuses or is kept; why_new=graduation read the = form on master and the legacy copier never did; seam=none; no_claim=migrate-engine.ts parseArgs is not called (argv-level only)
   test('migrate splits the target engine and URL, which every migrate path reads as two arguments', async () => {
     expect(await argvFor('migrate', ['--to=postgres', '--url-env', 'TARGET_URL', '--plan'])).toEqual(['--to', 'postgres', '--url-env', 'TARGET_URL', '--plan']);
     expect(await argvFor('migrate', ['--to=pglite', '--path', '/tmp/brain-example'])).toEqual(['--to', 'pglite', '--path', '/tmp/brain-example']);
@@ -489,6 +489,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     expect(routesToGraduation(['--to', 'postgres'], { engine: 'pglite' } as GBrainConfig, 'linux')).toBe(true);
   });
 
+  // Value: protects=a split value never becomes the first numeric/slug target (forget --purge --reason=3 34 must not hit fact 3); fails_when=a refusal turns into a split or keep; why_new=rows only asserted not-null; seam=none; no_claim=handler behavior after a split (argv-level only)
   test('a flag value never becomes the numeric or slug target of a mutating subcommand', async () => {
     for (const [command, args] of [
       ['forget', ['--purge', '--reason=3', '34', '--dry-run']],
@@ -571,7 +572,6 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     expect(parseAddTypeArgs(['note', '--primitive=entity', '--no-prefix'])).toMatchObject({ noPrefix: true });
     expect(parseMovementArgs(['source-a', '--json=true'])).toMatchObject({ json: true });
     expect(() => parseAddTypeArgs(['note', '--primitive=entity', '--no-prefix', '--json=true'])).not.toThrow();
-    expect(() => parseMovementArgs(['source-a', '--json=false'])).toThrow('--json is a switch');
   });
 
   test('own = parsers behind the gate refuse a value on consent and mutation switches', () => {

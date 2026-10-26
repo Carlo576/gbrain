@@ -64,6 +64,14 @@ describe('supervisorRestartArgv', () => {
     });
     expect(DEFAULT_SUP).toEqual({ stop: ['gbrain', 'jobs', 'supervisor', 'stop', '--json'], start: ['gbrain', 'jobs', 'supervisor', 'start', '--detach', '--json'], pid_file: null });
   });
+
+  test('drops the = values an older supervisor ignored, so the restart runs what it applied and this release does not refuse it', () => {
+    expect(supervisorRestartArgv(['jobs', 'supervisor', 'start', '--concurrency=4', '--pid-file=/tmp/sup-example.pid', '--job-isolation=process', '--queue', 'ingest', '--allow-shell-jobs=true'])).toEqual({
+      stop: ['gbrain', 'jobs', 'supervisor', 'stop', '--json'],
+      start: ['gbrain', 'jobs', 'supervisor', 'start', '--detach', '--job-isolation=process', '--queue', 'ingest', '--json'],
+      pid_file: null,
+    });
+  });
 });
 
 describe('collectHostProcesses', () => {

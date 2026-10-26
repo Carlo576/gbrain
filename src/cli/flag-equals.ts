@@ -64,6 +64,8 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   'beliefs changes': ['--since'],
   // beliefs-replay-purges.ts:14 flag() reads --x v and --x=v.
   'beliefs replay-purges': ['--archived-at', '--purge-mirror', '--from-url-env'],
+  // core/consent.ts:126 via consentGateOrExit (book-mirror.ts:431, args :440, effects paid); book-mirror reads no --max-* itself.
+  'book-mirror': ['--max-usd', '--max-cost'],
   // capture.ts:96 regex; every other = form is refused by capture's own parser (capture.ts:132).
   capture: ['--request-id', '--expected-revision'],
   // check-resolvable.ts:120 parseFlags.
@@ -75,7 +77,7 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   'code-refs': ['--limit', '--lang', '--source'],
   // compile-context.ts:74 flagValue (parseCompileFlags :88-115).
   'compile-context': ['--target', '--budget', '--include', '--out', '--source'],
-  // core/consent.ts:112 parseConsentFlags via enableConsent (decide.ts:348, effects paid); decide reads no --max-* itself.
+  // core/consent.ts:123 parseConsentFlags via enableConsent (decide.ts:348, effects paid); decide reads no --max-* itself.
   'decide enable': ['--max-usd', '--max-cost'],
   // doctor.ts:417 --scope=brain only (=-only); doctor/budget.ts:68 --tier/--budget-ms; cli/commands/doctor.ts:27 --tier (thin client);
   // doctor/registry.ts:332 --only; check-resolvable.ts:120 --skills-dir via doctor.ts:460; core/consent.ts:130 --expect (remediate-consent.ts:133).
@@ -86,7 +88,7 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   embed: ['--pace', '--pace-max-concurrency', '--max-usd', '--max-cost'],
   // eval-conversation-parser.ts:48-53 (main.ts handleCliOnly's eval conversation-parser branch and eval.ts:106 both reach it).
   'eval conversation-parser': ['--fixtures', '--min-recall'],
-  // eval/decide-eval-flags.ts:124 extractDecideEvalFlags via eval-retrieval-quality.ts:38.
+  // eval/decide-eval-flags.ts:122 extractDecideEvalFlags via eval-retrieval-quality.ts:38.
   'eval retrieval-quality': ['--decide', '--decide-provider', '--decide-calibration', '--decide-threshold', '--decide-force-on', '--decide-dataset'],
   // eval-takes-quality.ts:82 getFlag; union over run (:148-162) / trend (:200-201) / regress (:212-226); replay reads none.
   'eval takes-quality': ['--limit', '--cycles', '--budget-usd', '--slug-prefix', '--models', '--source', '--rubric-version', '--against', '--threshold'],
@@ -108,8 +110,12 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   import: ['--source', '--source-id'],
   // integrity.ts:857 extractFlag via cmdCheck (:306-307); integrity auto is STRICT.
   'integrity check': ['--limit', '--type'],
+  // core/consent.ts:126 via jobs/submit.ts:104 requireEmbedBackfillConsent, :128 requireReindexConsent, :294 authorizePaidSubmit (paid); submit's own parseFlag(--max-usd) (:286) reads only the separate `off`.
+  'jobs submit': ['--max-usd', '--max-cost'],
   // jobs/shared.ts:121 parseJobIsolationFlag via jobs/supervisor.ts:165.
   'jobs supervisor': ['--job-isolation'],
+  // jobs/shared.ts:121 parseJobIsolationFlag via jobs/work.ts:114.
+  'jobs work': ['--job-isolation'],
   // jobs/watch.ts:11 reads only --refresh-ms=N.
   'jobs watch': ['--refresh-ms'],
   // lint.ts:929 runLint.
@@ -133,8 +139,10 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   recall: ['--entity', '--source-id', '--question', '--budget-policy'],
   // reindex.ts:155-163 normalizeReindexArgs at entry (cli/commands/reindex.ts:12); --max-cost via core/consent.ts:126 (reindex-consent.ts:77).
   reindex: ['--type', '--limit', '--repo', '--workers', '--concurrency', '--max-usd', '--max-cost'],
-  // core/consent.ts:126 via reindex-code.ts:503 / reindex-code-delegate.ts:51 (paid); reindex-code reads no --max-usd itself.
-  'reindex-code': ['--max-usd'],
+  // core/consent.ts:126 via reindex-code.ts:503 / reindex-code-delegate.ts:51 (paid); the own --max-cost loop (reindex-code.ts:438) reads only the separate token and :521 takes the consent cap.
+  'reindex-code': ['--max-usd', '--max-cost'],
+  // core/consent.ts:130 --expect via consentGateOrExit (reinit-pglite.ts:109, plan_hash :119); parseArgs (:213) reads no --expect.
+  'reinit-pglite': ['--expect'],
   // resolvers.ts:172 extractFlag via cmdList (:66-67).
   'resolvers list': ['--cost', '--backend'],
   // routing-eval.ts:83 parseFlags.
@@ -170,7 +178,7 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   'skillpack diff': ['--workspace', '--skills-dir'],
   // skillpack/scaffold.ts:36 lane select + :73 --workspace=; harness lane skillpack/harness.ts:91-158 parseHarnessArgs (:364).
   'skillpack scaffold': ['--workspace', '--harness', '--persona', '--skill', '--dest', '--scope', '--skills'],
-  // skillpack/reference.ts:44 harness lane (strict-args.ts:105 makes the non-harness lane STRICT); harness.ts:542.
+  // skillpack/reference.ts:44 harness lane (strict-args.ts:102 makes the non-harness lane STRICT); harness.ts:542.
   'skillpack reference': ['--harness', '--persona', '--skill', '--dest', '--scope', '--workspace', '--skills'],
   // core/bounded-listing-cli.ts:15 via sources.ts:1213 runStatus (+ :1214 paged regex).
   'sources status': ['--limit', '--cursor'],
