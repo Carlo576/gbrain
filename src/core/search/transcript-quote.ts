@@ -10,13 +10,13 @@
  *     `[tool call: <name>, arguments omitted]`: an object typed tool_use,
  *     server_tool_use, mcp_tool_use, function_call, custom_tool_call,
  *     tool_call or toolCall, the value of a `tool_calls` array or a
- *     `function_call` object, and an XML-style function_calls, invoke or
- *     tool_use element (namespace prefix optional) with its parameter
- *     children. Results (function_results, tool_result) and prose that names
+ *     `function_call` or Gemini `functionCall` object, and an XML-style
+ *     function_calls, invoke, tool_use or tool_call element (namespace
+ *     prefix optional) with its parameter children. Results (function_results, tool_result) and prose that names
  *     a tag stay. The rest of the text is kept. A block cut by
  *     the start or end of the text (a chunk boundary) or by an evidence
  *     omission line is replaced up to that cut; an open-ended block never
- *     runs past the next message's anchor line, and a leading evidence date
+ *     runs past the next message's anchor line (LF or CRLF), and a leading evidence date
  *     header is kept. Work is linear in the text: past a scan budget the
  *     rest of a message is summarized (fails closed).
  *   - `fenceTranscriptText` wraps the text as quoted source material: a
@@ -42,14 +42,15 @@ const ANCHOR_RE = ANCHOR.regex;
 const ANCHOR_TEXT = ANCHOR.captures.text_group;
 /** The page date header evidence delivery may put first (evidence-date.ts pageDateHeader). */
 const DATE_HEADER_RE = /^\[observed [^\]\n]*\]\n/;
-const TRIGGER_RE = /"type"\s*:\s*"(?:tool_use|server_tool_use|mcp_tool_use|function_call|custom_tool_call|tool_call|toolCall)"|"(?:tool_calls|function_call)"\s*:\s*([[{])/g;
+const TRIGGER_RE = /"type"\s*:\s*"(?:tool_use|server_tool_use|mcp_tool_use|function_call|custom_tool_call|tool_call|toolCall)"|"(?:tool_calls|function_call|functionCall)"\s*:\s*([[{])/g;
 const NAME_RE = /^[A-Za-z0-9_.:/-]{1,64}$/;
 /** The optional namespace prefix of XML-style call tags. */
 const XML_PREFIX = '(?:' + ['ant', 'ml:'].join('') + ')?';
-const XML_TAG_RE = new RegExp(`<(/?)${XML_PREFIX}(function_calls|invoke|tool_use|parameter)\\b([^<>]*)>`, 'g');
+const XML_TAG_RE = new RegExp(`<(/?)${XML_PREFIX}(function_calls|invoke|tool_use|tool_call|parameter)\\b([^<>]*)>`, 'g');
+const XML_TOOL_CALL_JSON_RE = new RegExp(`<${XML_PREFIX}tool_call\\b[^<>]*>\\s*\\{`, 'g');
 const XML_INVOKE_NAME_RE = new RegExp(`<${XML_PREFIX}invoke\\b[^<>]*?\\bname\\s*=\\s*"([^"]*)"`, 'g');
 /** A call tag that is markup, not a mention in a sentence: it ends its line, the text, or runs into the next tag. */
-const ENDS_LINE_RE = /^[ \t]*(?:\n|$|<)/;
+const ENDS_LINE_RE = /^[ \t\r]*(?:\n|$|<)/;
 const CUT_MARKER = OMISSION.trimEnd();
 const MAX_CANDIDATES = 64;
 /** A segment's scan budget, in characters walked: this many per character plus a floor. Once spent, the rest of the message at each later trigger is summarized (fails closed). */
@@ -72,12 +73,13 @@ function anchorsOf(segment: string): Anchors {
   const a: Anchors = { lines: [], texts: [], ends: [] };
   let lineStart = 0;
   for (const line of segment.split('\n')) {
-    const m = ANCHOR_RE.exec(line);
+    const text = line.endsWith('\r') ? line.slice(0, -1) : line;
+    const m = ANCHOR_RE.exec(text);
     if (m) {
       let end = lineStart;
       while (end > (a.lines.at(-1) ?? 0) && /\s/.test(segment[end - 1]!)) end--;
       a.lines.push(lineStart);
-      a.texts.push(lineStart + line.length - (m[ANCHOR_TEXT] ?? '').length);
+      a.texts.push(lineStart + text.length - (m[ANCHOR_TEXT] ?? '').length);
       a.ends.push(end);
     }
     lineStart += line.length + 1;
@@ -210,7 +212,12 @@ function jsonEdits(segment: string): Edit[] {
 
 function xmlNames(block: string): string[] {
   const invoked = [...block.matchAll(XML_INVOKE_NAME_RE)].map(m => m[1]!);
-  const names = invoked.length > 0 ? invoked : [...block.matchAll(/<name>([^<]*)<\/name>/g)].map(m => m[1]!);
+  const children = invoked.length > 0 ? invoked : [...block.matchAll(/<name>([^<]*)<\/name>/g)].map(m => m[1]!);
+  const openers = children.length > 0 ? [] : [...block.matchAll(XML_TOOL_CALL_JSON_RE)];
+  const names = children.length > 0 ? children : openers.flatMap((m, i) => {
+    const brace = m.index + m[0].length - 1;
+    return scanJson(block, brace, { limit: openers[i + 1]?.index ?? block.length }).names;
+  });
   return [...new Set(names.filter(n => NAME_RE.test(n)))];
 }
 
@@ -250,7 +257,7 @@ function xmlEdits(segment: string): Edit[] {
       if (stack.length === 0) add(blockStart, after);
       continue;
     }
-    const markup = ENDS_LINE_RE.test(segment.slice(after, after + 64));
+    const markup = ENDS_LINE_RE.test(segment.slice(after, after + 64)) || (name === 'tool_call' && /^\s*\{/.test(segment.slice(after, after + 64)));
     const named = /\bname\s*=/.test(attrs);
     if (slash) { if (markup) add(floor(m.index), after); continue; }
     if (name === 'parameter') { if (named) { blockStart = floor(m.index); blockEnd = bound(segment, a, m.index); reset(name); } continue; }

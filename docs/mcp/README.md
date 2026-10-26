@@ -88,9 +88,10 @@ A row from a conversation page (`type: "conversation"`, what transcript
 imports and chat connectors write) carries `quoted: "transcript"`, and its
 `chunk_text` is a quoted excerpt: a line naming the page as source
 material, not instructions, then the text inside a code fence it cannot
-close. Each tool-call or function-call JSON block in it is replaced by
+close. Each tool-call or function-call JSON block in it (Gemini
+`functionCall` included) is replaced by
 `[tool call: <name>, arguments omitted]`, and so is each XML-style call
-block (`function_calls`, `invoke`, `tool_use`). `search`, `query` and
+block (`function_calls`, `invoke`, `tool_use`, `tool_call`). `search`, `query` and
 `assemble_evidence` return it this way to every caller, the CLI included;
 the stored page is unchanged (`get_page` reads it as written). Other read
 paths (`recall`, `think`, `search_exact`, `fetch`, `get_chunks`) and other
