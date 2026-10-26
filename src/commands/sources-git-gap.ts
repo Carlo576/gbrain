@@ -41,8 +41,8 @@ export type WorktreeState = typeof WORKTREE_STATES[number];
 /** One page as the census classified it, handed to a caller that plans per page (G8 conversion, persistence/git-conversion.ts). */
 export interface GitGapPage { id: string; slug: string; revision: string | null; path: string | null; state: PageState; segmented: boolean;
   declared?: DeclaredClass; worktree?: WorktreeState; headBlob?: string; databaseAlsoMoved?: boolean; unparseable?: UnparseableReason;
-  /** A declared page: whether its row records a file (`source_path`). */
-  recordsFile?: boolean }
+  /** A declared page: whether its row records a file (`source_path`), and the size of its committed blob. */
+  recordsFile?: boolean; headSize?: number }
 
 export interface GitGapSample { slug: string; path: string; state: PageState; fields?: string[]; declared?: DeclaredClass; basis?: 'import_record' | 'no_import_record'; worktree?: WorktreeState }
 
@@ -204,7 +204,7 @@ async function censusBatch(tx: BrainEngine, batch: Key[], census: GitGapCensus, 
       census.states.declared_database_only++;
       const oid = ctx.collect && blob && path ? await worktreeBlobOid(path, checkout!.head.format) : undefined;
       ctx.collect?.(collected(key, rel, 'declared_database_only', { declared, recordsFile: Boolean(key.source_path),
-        ...(blob ? { headBlob: blob.oid, worktree: oid === null ? 'deleted' : oid === blob.oid ? 'clean' : 'modified' } : {}) }));
+        ...(blob ? { headBlob: blob.oid, headSize: blob.size, worktree: oid === null ? 'deleted' : oid === blob.oid ? 'clean' : 'modified' } : {}) }));
       if (blob) { census.declared_with_head_blob++; note(census, ctx.sample, { slug: key.slug, path: rel!, state: 'declared_database_only', declared }); }
       else if (checkout) noFile.declared.push(key);
       continue;

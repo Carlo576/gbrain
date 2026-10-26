@@ -417,9 +417,10 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect(again.preview_hash).toBe(preview.preview_hash);
   }, { databaseUrl, setup }), 180_000);
 
-  test('#7618: a private page with a committed file withholds it: the removal is committed and the page stays live and unchanged', () => managedBrain(async brain => {
+  test('#7618: a private page that differs from its committed file withholds it: the removal is committed and the page stays live and unchanged', () => managedBrain(async brain => {
     const { engine, root } = brain;
     await committedPrivatePage(brain);
+    await databaseOnlyEdit(engine, 'notes/private', 'A private note, edited in the database.');
     const before = await pageRow(engine, 'notes/private'), base = git(root, 'rev-parse', 'HEAD');
     const { preview } = await planGitConversion(engine, 'default');
     expect(preview).toMatchObject({ declared: { by: { private: 1 } }, withhold: { count: 1, groups: 1, by: { file_committed: 1, file_absent: 0 }, sample: ['notes/private.md'] },
@@ -435,6 +436,23 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect((await performManagedSync(engine, OPTS)).status).toBe('up_to_date');
     expect(await revisions(engine)).toEqual(settled);
     expect((await pageRow(engine, 'notes/private')).deleted).toBe(false);
+  }, { databaseUrl, setup }), 180_000);
+
+  test('#7618: a private page equal to its committed file is settled: no withhold, no discard, and the file stays in HEAD', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await committedPrivatePage(brain);
+    // No import record, as a page imported before records were written has none: the strict level reads it unverified.
+    await dropImportRecord(engine, 'notes/private');
+    const before = await pageRow(engine, 'notes/private'), revision = (await page(engine, 'notes/private'))!.revision, base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ declared: { by: { private: 1 }, committed_equal: 1 }, withhold: { count: 0 }, discard: { count: 0 }, remaining: 0 });
+    const result = await applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING);
+    expect(result).toMatchObject({ status: 'converted', withheld: { pages: 0 }, after: { remaining: 0 } });
+    expect(await strict(engine)).toBe(true);
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(atHead(root, 'notes/private.md')).toBe('notes/private.md');
+    expect(await pageRow(engine, 'notes/private')).toEqual(before);
+    expect((await page(engine, 'notes/private'))!.revision).toBe(revision);
   }, { databaseUrl, setup }), 180_000);
 
   test('#7618 regression: converting never deletes a private page whose file was removed by hand', () => managedBrain(async brain => {
@@ -469,7 +487,7 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     const { engine, root } = brain;
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
     await databaseOnlyEdit(engine, 'notes/ahead', 'Written to the database alone.');
-    // notes/same: declared database-only, its row equal to its committed file, and held. The plan places nothing there.
+    // notes/same: declared database-only, its row equal to its committed file, and held. The plan settles it as equal.
     await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(
       "UPDATE pages SET database_only_reason='db_only' WHERE source_id='default' AND slug='notes/same'"), TEST_WRITE_ATTRIBUTION));
     const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'");
@@ -478,8 +496,8 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
       run_id: 'run-1', mode: 'managed', meta: { recovery_version: 1 } }));
     const base = git(root, 'rev-parse', 'HEAD');
     const { preview } = await planGitConversion(engine, 'default');
-    expect(preview).toMatchObject({ adopt: { count: 1 }, holds: { count: 1, unplaced: { count: 1 } }, discard: { count: 0 } });
-    // After the first group commits, a database edit lands on the held page: Git's import would now overwrite it.
+    expect(preview).toMatchObject({ adopt: { count: 1 }, declared: { committed_equal: 1 }, holds: { count: 1, unplaced: { count: 0 } }, discard: { count: 0 } });
+    // After the first group commits, a database edit lands on the held page: it no longer equals its file, and Git's import would overwrite it.
     installFaultHook(async point => { if (point === 'conversion:group_committed') await databaseOnlyEdit(engine, 'notes/same', 'A late database edit.'); });
     try {
       await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'git_conversion_blocked', detail: 'git_overwrites_database' });

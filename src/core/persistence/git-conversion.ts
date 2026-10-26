@@ -10,8 +10,10 @@
  *     writes the page's export view (readExportPage, withdrawals overlaid: exactly what the census compares) to its file
  *     and commits it with commitThroughDoor, one commit per group of CONVERSION_GROUP_MAX pages, under the worktree writer
  *     lock, which is dropped between groups. No row changes: the database already holds those bytes.
- *   - declared: database-only on purpose; nothing is written and nothing deleted.
- *   - withhold: a private, alias-private or lineage-private page whose row still records a file. The apply takes G7a's
+ *   - declared: database-only on purpose; nothing is written and nothing deleted. A declared page whose committed file
+ *     reads back equal to it (the census contract) keeps that file in HEAD and is settled: a strict import changes nothing.
+ *   - withhold: a private, alias-private or lineage-private page whose row still records a file that is absent from HEAD
+ *     or differs from it. The apply takes G7a's
  *     private transition: a committed file's removal goes through the door, then the row withholds its origin
  *     (withheld_source_path), so the strict pass leaves the page live; with no file at HEAD, only the row changes. Any
  *     other declared page with a committed file is a discard (git_overwrites_database), as Git's import would replace it.
@@ -30,7 +32,7 @@
  * The apply re-plans and refuses preview_changed on a different hash, adopts and withholds group by group (a crash leaves the source
  * non-strict and the rerun preview lists only what is left), retries or reclassifies the parked effects, checks the
  * strict level once more as it will read with the planned holds cleared (an overwrite nobody accepted stops it, and the
- * holds stay), clears the holds, runs the full strict-equivalent
+ * holds stay; a page settled as equal to its file that moved since is judged again), clears the holds, runs the full strict-equivalent
  * pass (SyncOpts.canonicalOverride, internal) and sets `canonical: git` last, in the transaction that records the
  * conversion. Writes can land between that pass and the flag, so it then runs one genuine strict pass and plans again:
  * only a plan with no work left is a completed conversion; otherwise the source stays strict (Git wins) and the
@@ -47,7 +49,7 @@ import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { inlineExportMarkdown, readExportPage, readExportPages, readExportWithdrawals, type ExportSnapshot } from '../export-snapshot.ts';
 import { scannerSlugRootMode, scannerSourcePath } from '../write-through.ts';
 import { censusGitGap, type GitGapCensus, type GitGapPage } from '../../commands/sources-git-gap.ts';
-import { compareInlineExportFile, ignoredPaths, type DeclaredClass, type ExportFileComparison } from './git-gap.ts';
+import { compareInlineExportFile, ignoredPaths, readBlobs, type DeclaredClass, type ExportFileComparison } from './git-gap.ts';
 import { commitThroughDoor } from './git-door.ts';
 import { currentVerifiedLocalWriter, localHostId } from './identity.ts';
 import { acquireWorktree, readManagedMode } from './ownership.ts';
@@ -71,6 +73,7 @@ export const CONVERSION_OP = 'git-canonical-conversion';
 const DOCS = 'docs/designs/GIT_CANONICAL_MEMORY.md#conversion';
 const SAMPLE = 20;
 const LOCK_WAIT_MS = 30_000;
+const MOVED_BATCH = 10_000;
 
 export const ADOPT_STATES = ['database_ahead', 'undeclared_database_only', 'worktree_only'] as const;
 export type AdoptState = typeof ADOPT_STATES[number];
@@ -116,7 +119,8 @@ export interface GitConversionPreview {
   pages: number;
   equal: number;
   adopt: Counted<AdoptState> & { action: 'commit_through_door'; groups: number };
-  declared: Counted<string> & { action: 'none' };
+  /** `committed_equal`: declared pages whose committed file reads back equal to the page, so the file stays in HEAD. */
+  declared: Counted<string> & { action: 'none'; committed_equal: number };
   git_wins: Counted<GitWinsReason> & { action: 'index_committed_blob' };
   /** G7a's private transition for a privacy-class page that still records a file: its file's removal is committed, then the row withholds its origin. */
   withhold: Counted<WithholdKind> & { action: 'commit_removal_and_withhold'; groups: number };
@@ -132,9 +136,13 @@ export interface GitConversionPreview {
   apply: string[];
 }
 
-/** `settled`: paths whose Git import replaces nothing (the census reads them equal, or the plan adopts, withholds or accepts them). */
+interface PageRevision { id: string; revision: string | null }
+/**
+ * `settled`: paths whose Git import replaces nothing (the census reads them equal, or the plan adopts, withholds or accepts
+ * them); `compared`: the paths settled because the page read equal to its committed file, with the revision compared.
+ */
 export interface GitConversionPlan { preview: GitConversionPreview; context: ManagedSyncContext; adopt: AdoptItem[]; withhold: WithholdItem[]; holds: HoldItem[]; parked: ParkedItem[];
-  settled: Set<string>; incarnation: string }
+  settled: Set<string>; compared: Map<string, PageRevision>; incarnation: string }
 
 const counted = <K extends string>(keys: readonly K[]): Counted<K> => ({ count: 0, by: Object.fromEntries(keys.map(key => [key, 0])) as Record<K, number>, sample: [] });
 const bump = (into: Record<string, number>, key: string) => { into[key] = (into[key] ?? 0) + 1; };
@@ -165,10 +173,11 @@ const strictContext = (context: ManagedSyncContext): ManagedSyncContext => ({ ..
 export async function planGitConversion(engine: BrainEngine, sourceId: string): Promise<GitConversionPlan> {
   const context = await resolveManagedSyncContext(engine, { sourceId, noPull: true, dryRun: true });
   const pages: GitGapPage[] = [];
-  const equal = new Set<string>();
-  const exported = new ExportChecks(context.root, await scannerSlugRootMode(engine, sourceId, context.root));
+  const equal = new Map<string, PageRevision>();
+  const mode = await scannerSlugRootMode(engine, sourceId, context.root);
+  const exported = new ExportChecks(context.root, mode);
   const census = await censusGitGap(engine, sourceId, { sample: 0, collect: (page, snapshot) => {
-    if (page.state === 'equal') { if (page.path) equal.add(page.path); return; }
+    if (page.state === 'equal') { if (page.path) equal.set(page.path, { id: page.id, revision: page.revision }); return; }
     pages.push(page);
     if (snapshot && page.state === 'database_ahead' && page.path && !page.segmented) exported.add(page.id, page.path, snapshot);
   } });
@@ -184,6 +193,9 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   const adopt: AdoptItem[] = [], withhold: WithholdItem[] = [], accepted = new Set<string>(), discarded = new Set<string>();
   const discard = (category: DiscardCategory, path: string) => { tally(preview.discard, category, path); discarded.add(path); };
   const gitWins = (reason: GitWinsReason, path: string) => { tally(preview.git_wins, reason, path); accepted.add(path); };
+  const declaredEqual = await equalDeclaredPaths(engine, sourceId, root, mode,
+    pages.filter(page => page.state === 'declared_database_only' && page.path && page.headBlob && !page.segmented));
+  preview.declared.committed_equal = declaredEqual.size;
   const holds = holdRecords.map(hold => holdItem(hold));
   for (const hold of holds) {
     tally(preview.holds, hold.side ? `${hold.code}:${hold.side}` : hold.code, hold.path);
@@ -202,7 +214,9 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
     switch (page.state) {
       case 'declared_database_only': {
         tally(preview.declared, page.declared!, path);
-        // A privacy class takes G7a's private transition; any other declared page with a committed file stays a discard (planIndex).
+        // A committed file equal to the page stays in HEAD (a strict import of it changes nothing). Otherwise a privacy class
+        // takes G7a's private transition, and any other declared page with a committed file stays a discard (planIndex).
+        if (page.path && declaredEqual.has(page.path)) continue;
         if (!isPrivacyClass(page.declared) || !page.path || (!page.headBlob && !page.recordsFile)) continue;
         if (page.worktree === 'modified') { discard('uncommitted_edit', path); bump(preview.discard.detail.uncommitted_edit, 'modified'); continue; }
         const disk = page.headBlob ? diskBytes(join(root, page.path)) : null;
@@ -241,7 +255,7 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   preview.parked_effects.count = parked.length;
   preview.parked_effects.retry = parked.filter(item => item.action === 'retry').length;
   preview.parked_effects.reclassify = parked.filter(item => item.action === 'reclassify').length;
-  const settled = new Set([...equal, ...adopt.map(item => item.path), ...withhold.map(item => item.path), ...accepted]);
+  const settled = new Set([...equal.keys(), ...declaredEqual, ...adopt.map(item => item.path), ...withhold.map(item => item.path), ...accepted]);
   const placed = new Set([...settled, ...discarded]);
   const unplaced = holds.filter(hold => !placed.has(hold.path));
   for (const hold of unplaced) bump(preview.holds.unplaced.by, hold.side ? `${hold.code}:${hold.side}` : hold.code);
@@ -257,14 +271,16 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
     discard: preview.discard.by.ignore_status_unknown ? preview.discard.by : { ...preview.discard.by, ignore_status_unknown: undefined },
     // Bound only when present, so the hash of a plan with nothing to withhold is the one earlier releases gave.
     withhold: withhold.length ? withhold.map(item => [item.id, item.revision, item.path, item.kind, item.disk]) : undefined,
+    declared_equal: declaredEqual.size ? pages.filter(page => page.path && declaredEqual.has(page.path)).map(page => [page.id, page.revision, page.path]) : undefined,
     holds: holds.map(hold => [hold.path, hold.code, hold.side, hold.observed_at]), parked: parked.map(item => [item.effect, item.action, item.codes]), index: preview.index });
   preview.apply = ['gbrain', 'sources', 'canonical', sourceId, '--to', 'git', '--apply', '--expect', preview.preview_hash];
-  return { preview, context, adopt, withhold, holds, parked, settled, incarnation };
+  const compared = new Map([...equal, ...pages.flatMap(page => page.path && declaredEqual.has(page.path) ? [[page.path, { id: page.id, revision: page.revision }] as const] : [])]);
+  return { preview, context, adopt, withhold, holds, parked, settled, compared, incarnation };
 }
 
 function emptyPreview(sourceId: string, context: ManagedSyncContext, census: GitGapCensus): GitConversionPreview {
   return { status: 'preview', source_id: sourceId, to: 'git', strict: context.source.config?.canonical === 'git', head: census.head, pages: census.pages, equal: census.states.equal,
-    adopt: { ...counted(ADOPT_STATES), action: 'commit_through_door', groups: 0 }, declared: { ...counted<string>([]), action: 'none' },
+    adopt: { ...counted(ADOPT_STATES), action: 'commit_through_door', groups: 0 }, declared: { ...counted<string>([]), action: 'none', committed_equal: 0 },
     git_wins: { ...counted(GIT_WINS_REASONS), action: 'index_committed_blob' }, withhold: { ...counted(WITHHOLD_KINDS), action: 'commit_removal_and_withhold', groups: 0 }, holds: { ...counted<string>([]), action: 'clear', unplaced: { count: 0, by: {} } },
     parked_effects: { count: 0, retry: 0, reclassify: 0, by_code: {} }, index: { imports: 0, deletes: 0 }, discard: emptyDiscard(), remaining: 0, preview_hash: '', apply: [] };
 }
@@ -335,6 +351,33 @@ async function planAdoption(engine: BrainEngine, sourceId: string, root: string,
     adopt.push({ id: page.id, source_id: sourceId, slug: page.slug, revision: page.revision, path, state, disk: disk ? sha256(disk) : null });
     tally(preview.adopt, state, path);
   }
+}
+
+/**
+ * The declared pages whose committed file reads back equal to the page's export view under the census contract (#7618): a
+ * strict import of that file changes nothing, so the conversion leaves the file in HEAD and the page settled. Read
+ * ADOPTION_BATCH at a time in read-only transactions.
+ */
+async function equalDeclaredPaths(engine: BrainEngine, sourceId: string, root: string, mode: Awaited<ReturnType<typeof scannerSlugRootMode>>,
+  pages: GitGapPage[]): Promise<Set<string>> {
+  const equal = new Set<string>();
+  if (!pages.length) return equal;
+  const withdrawals = await readExportWithdrawals(engine, sourceId);
+  for (let start = 0; start < pages.length; start += ADOPTION_BATCH) {
+    const batch = pages.slice(start, start + ADOPTION_BATCH);
+    const blobs = await readBlobs(root, batch.map(page => ({ oid: page.headBlob!, size: page.headSize ?? 0, mode: '100644' })));
+    if (!blobs) throw opError('storage_error', `Git could not read committed files of source ${sourceId}'s checkout, so nothing was planned.`,
+      `Check the checkout with git -C ${root} fsck, then preview again.`);
+    const snapshots = await engine.transaction(async tx => {
+      await tx.executeRaw('SET TRANSACTION READ ONLY');
+      return readExportPages(tx, batch.map(page => ({ ...page, source_id: sourceId })), withdrawals);
+    });
+    batch.forEach((page, i) => {
+      const comparison = compareInlineExportFile(blobs.get(page.headBlob!)!, scannerSourcePath(root, join(root, page.path!), mode), snapshots[i]!);
+      if (comparison.state === 'equal') equal.add(page.path!);
+    });
+  }
+  return equal;
 }
 
 /** A level path (Git-root relative) as the census names it (source-root relative). */
@@ -415,13 +458,15 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   const withheld = await withholdGroups(engine, plan, previewCommand);
   const parked = await settleParked(engine, sourceId, plan.parked);
   // The planned holds are cleared only once this check passes, so a refusal keeps them: a held path is judged as the
-  // strict pass will see it once its hold is cleared.
+  // strict pass will see it once its hold is cleared. A page the plan settled as equal to its file is judged again once it
+  // moved since (its equality no longer holds).
   const held = new Set(plan.holds.map(hold => hold.path));
+  const moved = await movedSincePlan(engine, sourceId, plan.compared);
   const recheck = await readShadowLevel(engine, { sourceId, full: true, context: strictContext(plan.context) });
   const preview = { ...plan.preview, discard: emptyDiscard() };
   for (const entry of recheck?.paths ?? []) {
     const path = sourcePath(recheck!.scope, entry.path);
-    if (plan.settled.has(path)) continue;
+    if (plan.settled.has(path) && !moved.has(path)) continue;
     const result = held.has(path) ? classifySyncPath({ ...entry.state, hold: null }, { strict: true }) : entry.result;
     if (!result.settled && !result.inFlight && result.gitWins) tally(preview.discard, 'git_overwrites_database', path);
   }
@@ -438,6 +483,20 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   passOrThrow(sourceId, await performManagedSync(engine, { sourceId, noPull: true, full: true, ...processing }));
   const after = (await planGitConversion(engine, sourceId)).preview;
   return { status: after.remaining === 0 ? 'converted' : 'incomplete', source_id: sourceId, head: after.head, committed, withheld, holds_cleared: holdsCleared, parked, after };
+}
+
+/** The paths of `compared` whose page has another revision than the plan compared, or is gone. */
+async function movedSincePlan(engine: BrainEngine, sourceId: string, compared: Map<string, PageRevision>): Promise<Set<string>> {
+  const moved = new Set<string>();
+  const entries = [...compared];
+  for (let start = 0; start < entries.length; start += MOVED_BATCH) {
+    const batch = entries.slice(start, start + MOVED_BATCH);
+    const rows = await engine.executeRaw<{ id: string; revision: string | null }>(`SELECT id::text AS id, knowledge_revision::text AS revision FROM pages
+      WHERE source_id=$1 AND deleted_at IS NULL AND id = ANY(string_to_array($2::text, ',')::bigint[])`, [sourceId, batch.map(([, page]) => page.id).join(',')]);
+    const live = new Map(rows.map(row => [row.id, row.revision]));
+    for (const [path, page] of batch) if (!live.has(page.id) || live.get(page.id) !== page.revision) moved.add(path);
+  }
+  return moved;
 }
 
 const PASS_DONE = new Set(['first_sync', 'synced', 'up_to_date']);
