@@ -20,9 +20,10 @@ identifiers and attribution are available in the pre-removal Git revision
 |---|---|---|
 | The owner releases a held fact whose entity page exists, on a managed brain | the fact was inserted as a database-only row; the page's file never held it, so the fact had no Git home | a new `trust_release` page write appends the fact as a row of the page's `## Facts` fence (the shared `prepareFenceFactAppend` door) and flips the hold in the same publication; the row is stamped `user_confirmed` with origin `trust_release`, the belief ledger records the hold as its cause, and the page keeps its trust tier |
 | The hold names an existing fence row (a fence-guard hold) | the release inserted a second, database-only twin next to the file's own row | the release indexes the existing row: one row, and the file is unchanged |
-| The hold is decided after the release was accepted | — | the release fails `preview_changed` and writes nothing; running the release again shows the hold's current state instead of releasing it |
+| The hold is decided after the release was accepted | — | the release fails `preview_changed` and writes nothing; running the release again asks for the confirmation and then refuses, because the hold was decided meanwhile |
 | A release ends without committing (for example its page was deleted while it ran) | — | once the cause is fixed, running the release again admits a new attempt; a release that committed is replayed, never written twice |
-| A release runs through a resident `gbrain serve` (PGLite) and the owner's write queue is slow | — | the CLI waits past the release's own 60-second wait, so a slow release ends with its pending write receipt instead of a lost acknowledgment |
+| A release runs through a resident `gbrain serve` (PGLite) and the owner's write queue is slow | — | the CLI waits 90 seconds for the owner instead of 30, past the release's own 60-second wait, so a release slowed by the write queue ends with its pending write receipt rather than a lost acknowledgment; `gbrain trust review --accept-all` lists such a release as pending with its poll command (exit 10) instead of "not applied" |
+| The owner confirms a release | — | the confirmation names the page the fact is written to (`<source>/<slug>`) |
 | The entity page is deleted or private, or the request is remote | — | the release refuses (remote: `confirmation_required`) and the fact stays held |
 
 ### What to watch for after you upgrade
