@@ -478,31 +478,43 @@ describe('review, explain and accept-all (CEO-2, DX-10, DX-15, DX-16)', () => {
     for (const slug of ['notes/bulk-a-example', 'notes/bulk-b-example']) expect((await pageRow(b, slug)).trust_tier).toBe('user_confirmed');
   }), 90_000);
 
-  test('accept-all reports a release still pending in the door as pending (exit 10 with its poll command), never as not applied', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+  // Value: protects=accept-all lists a release still pending in the door as pending with its poll command, never as
+  // "not applied"; a failure beside it exits 1; --accept-pending (GBRAIN_ACCEPT_PENDING) exits 0;
+  // fails_when=the pending/failed split or its exit precedence is dropped (red at e24695d43^: 'h7: not applied', exit 1);
+  // why_new=releases became journaled door writes that can outlive the door's wait; seam=a stub TrustBackend; no_claim=the --json envelope
+  test('accept-all reports a release still pending in the door as pending with its poll command; a failure beside it exits 1; --accept-pending exits 0', async () => {
     const requestId = randomUUID();
     const pending = Object.assign(new OperationError('write_pending', 'The write is accepted and is still pending.'),
       { writeRequest: { request_id: requestId, state: 'queued', retry_after_ms: 1000 } });
-    const backend = {
-      review: async () => ({ items: [{ kind: 'hold', ref: 'h7', source_id: 'default' }, { kind: 'hold', ref: 'h8', source_id: 'default' }] }),
-      explain: async () => [],
-      preview: async (input: OwnerActionInput) => ({ action: 'release', ref: input.ref, token: input.ref, command: `gbrain trust release ${input.ref}`, raises: true, binding: `b-${input.ref}`, summary: `Release held fact ${input.ref}` }),
-      apply: async (input: OwnerActionInput) => {
-        if (input.ref === 'h7') throw pending;
-        return { action: 'release', ref: 'h8', status: 'released', tier: 'user_confirmed' };
-      },
-    } as unknown as Parameters<typeof runTrustOwnerCommand>[0];
-    typesToken();
-    const lines: string[] = [];
-    const original = console.log;
-    console.log = (...args: unknown[]) => { lines.push(args.join(' ')); };
-    let exit: number | undefined;
-    try { await runTrustOwnerCommand(backend, 'review', ['--accept-all', '--from', 'default']); exit = currentExitCode(); }
-    finally { console.log = original; process.exitCode = 0; _resetCliExitVerdictForTests(); }
-    expect(lines.join('\n')).not.toContain('h7: not applied');
-    expect(lines.find(l => l.startsWith('h7:'))).toContain(requestId);
-    expect(lines.find(l => l.startsWith('h8:'))).toContain('released');
-    expect(exit).toBe(10);
-  }), 60_000);
+    const cases = [
+      { name: 'pending beside accepted', h8: 'released', env: {}, exit: 10 },
+      { name: 'pending beside failed', h8: 'fails', env: {}, exit: 1 },
+      { name: 'pending with --accept-pending', h8: 'released', env: { GBRAIN_ACCEPT_PENDING: '1' }, exit: 0 },
+    ] as const;
+    for (const c of cases) {
+      const backend = {
+        review: async () => ({ items: [{ kind: 'hold', ref: 'h7', source_id: 'default' }, { kind: 'hold', ref: 'h8', source_id: 'default' }] }),
+        explain: async () => [],
+        preview: async (input: OwnerActionInput) => ({ action: 'release', ref: input.ref, token: input.ref, command: `gbrain trust release ${input.ref}`, raises: true, binding: `b-${input.ref}`, summary: `Release held fact ${input.ref}` }),
+        apply: async (input: OwnerActionInput) => {
+          if (input.ref === 'h7') throw pending;
+          if (c.h8 === 'fails') throw new OperationError('page_not_found', 'The page is deleted; nothing was changed.');
+          return { action: 'release', ref: 'h8', status: 'released', tier: 'user_confirmed' };
+        },
+      } as unknown as Parameters<typeof runTrustOwnerCommand>[0];
+      const lines: string[] = [];
+      const exit = await withEnv({ GBRAIN_HOME: home, ...c.env }, async () => {
+        typesToken();
+        const original = console.log;
+        console.log = (...args: unknown[]) => { lines.push(args.join(' ')); };
+        try { await runTrustOwnerCommand(backend, 'review', ['--accept-all', '--from', 'default']); return currentExitCode(); }
+        finally { console.log = original; process.exitCode = 0; _resetCliExitVerdictForTests(); }
+      });
+      expect({ name: c.name, exit, notApplied: lines.some(l => l.startsWith('h7: not applied')) }).toEqual({ name: c.name, exit: c.exit, notApplied: false });
+      expect(lines.find(l => l.startsWith('h7:'))).toContain(requestId);
+      expect(lines.find(l => l.startsWith('h8:'))).toContain(c.h8 === 'fails' ? 'not applied' : 'released');
+    }
+  }, 60_000);
 
   test('the review listing is pinned (DX-16) and explain names tier, origin, receipts and activation', async () => withEnv({ GBRAIN_HOME: home }, async () => {
     const engine = engines[0]!;

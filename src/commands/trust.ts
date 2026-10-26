@@ -29,7 +29,9 @@ import {
 } from '../core/trust/review.ts';
 import { trustLabel } from '../core/trust/tier.ts';
 import { PENDING_WRITE_EXIT_CODE } from '../core/exit-codes.ts';
-import { pendingReceiptOf, pollCommand } from '../core/persistence/write-wait.ts';
+import { acceptPendingRequested, pendingReceiptOf, pollCommand } from '../core/persistence/write-wait.ts';
+import { getCliOptions } from '../core/cli-options.ts';
+import { cliRenderContext } from '../core/agent-output.ts';
 import { reportPersistenceCliError } from './persistence-delegate.ts';
 import { writeCliError } from '../cli/cli-error.ts';
 
@@ -167,7 +169,8 @@ async function acceptAll(backend: TrustBackend, args: string[], json: boolean): 
     try { accepted.push(await backend.apply(inputs[i]!, previews[i]!.binding, previews[i]!.raises)); }
     catch (error) {
       const receipt = pendingReceiptOf(error);
-      if (receipt) pending.push({ ref: previews[i]!.ref, request_id: receipt.request_id, poll: pollCommand(receipt.request_id) });
+      if (receipt) pending.push({ ref: previews[i]!.ref, request_id: receipt.request_id,
+        poll: pollCommand(receipt.request_id, (error as { fix?: { argv?: readonly string[] } }).fix, cliRenderContext().routing) });
       else failed.push({ ref: previews[i]!.ref, error: error instanceof OperationError ? error.toJSON() : String(error) });
     }
   }
@@ -178,7 +181,7 @@ async function acceptAll(backend: TrustBackend, args: string[], json: boolean): 
     for (const f of failed) console.log(`${f.ref}: not applied (${(f.error as { message?: string }).message ?? String(f.error)})`);
   }
   if (failed.length) setCliExitVerdict(1);
-  else if (pending.length) setCliExitVerdict(PENDING_WRITE_EXIT_CODE);
+  else if (pending.length && !acceptPendingRequested(getCliOptions().acceptPending)) setCliExitVerdict(PENDING_WRITE_EXIT_CODE);
 }
 
 /** Renders a refusal through the shared CLI envelope with its contract exit code (3 for consent refusals). */
