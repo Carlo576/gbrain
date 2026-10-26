@@ -10,6 +10,28 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.465.0] - 2026-10-26
+
+**On a managed brain, releasing a held fact (`gbrain trust release h<id>`) now writes it into its entity page's `## Facts` table through the page-write door, so the released fact lives in Git and a re-import keeps it, instead of a database-only row the file never had.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The owner releases a held fact whose entity page exists, on a managed brain | the fact was inserted as a database-only row; the page's file never held it, so the fact had no Git home | a new `trust_release` page write appends the fact as a row of the page's `## Facts` fence (the shared `prepareFenceFactAppend` door) and flips the hold in the same publication; the row is stamped `user_confirmed` with origin `trust_release`, the belief ledger records the hold as its cause, and the page keeps its trust tier |
+| The hold names an existing fence row (a fence-guard hold) | the release inserted a second, database-only twin next to the file's own row | the release indexes the existing row: one row, and the file is unchanged |
+| The hold is decided after the release was accepted | — | the release fails `preview_changed` and writes nothing; running the release again asks for the confirmation and then refuses, because the hold was decided meanwhile |
+| A release ends without committing (for example its page was deleted while it ran) | — | once the cause is fixed, running the release again admits a new attempt; a release that committed is replayed, never written twice |
+| A release runs through a resident `gbrain serve` (PGLite) and the owner's write queue is slow | — | the CLI waits 90 seconds for the owner instead of 30, past the release's own 60-second wait, so a release slowed by the write queue ends with its pending write receipt rather than a lost acknowledgment; `gbrain trust review --accept-all` lists such a release as pending with its poll command (exit 10; `--accept-pending` exits 0; a failed item still exits 1) instead of "not applied" |
+| The owner confirms a release | — | the confirmation names the fact's entity page (`<source>/<slug>`) |
+| The claim was forgotten (`gbrain forget`) or purged (`gbrain forget --purge`) before the owner releases its hold | — | the release refuses `fact_withdrawn` (or `purged_content` for a purged claim) and the fact stays held; a forgotten or purged claim is never written back into the page's `## Facts` table, including when it is forgotten while the release runs |
+| The entity page is deleted or private, or the request is remote | — | the release refuses (remote: `confirmation_required`) and the fact stays held |
+
+### What to watch for after you upgrade
+
+- A hold with no entity slug, or whose entity page does not exist, still releases database-only as before; unmanaged brains are unchanged.
+- Facts released by an earlier version are not moved into fences on upgrade; nothing is rewritten and there is no schema migration.
+
 ## [0.60.464.0] - 2026-10-26
 
 **A sync pass killed by an out-of-memory guard or a timeout now shows up in `gbrain sync status` and `gbrain doctor` instead of looking healthy. A read-only stdio serve no longer holds session-lane connections or runs the long-lived processes' write duties, so per-session serves can't starve them.**
