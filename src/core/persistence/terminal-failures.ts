@@ -282,6 +282,8 @@ export interface TerminalFailureQuery {
   code?: string;
   origin?: string;
   category?: string;
+  /** #7630: the receipt's operation; a sync-fault group's drill-down narrows by it. */
+  operation?: string;
 }
 export interface TerminalFailureRow {
   request_id: string; slug: string; operation: string; state: string; code: string; origin: string | null; category: TerminalCategory; public_category: PublicCategory;
@@ -290,9 +292,9 @@ export interface TerminalFailureRow {
 }
 export interface TerminalFailureGroup {
   code: string; origin: string | null; category: TerminalCategory; public_category: PublicCategory; rows: number; class: string; needs_human: boolean; human_reason?: string;
-  /** #7630: a sync fault's fix depends on its operation (a sync retries submit_job; a caller resubmits its own write), so those groups split by it. */
+  /** #7630: a sync fault's fix depends on its operation (a sync retries submit_job; a caller resubmits its own write), so those groups split by it and drill down by it. */
   operation?: string;
-  filter: { code: string; origin: string | null; category: TerminalCategory }; drill_down: string[]; fix: Action; samples: Array<Pick<TerminalFailureRow, 'request_id' | 'slug' | 'state' | 'ended_at' | 'inspect'>>;
+  filter: { code: string; origin: string | null; category: TerminalCategory; operation?: string }; drill_down: string[]; fix: Action; samples: Array<Pick<TerminalFailureRow, 'request_id' | 'slug' | 'state' | 'ended_at' | 'inspect'>>;
 }
 export type TerminalFailureListing = {
   status: 'ok'; source_id: string; window_days: number; window_clamped: boolean; state: 'unresolved' | 'all'; group_by: 'category' | null;
@@ -307,7 +309,7 @@ export const NO_ORIGIN = 'none';
 export function terminalFailuresArgv(q: TerminalFailureQuery, extra: Record<string, string | null | undefined> = {}): string[] {
   const argv = ['gbrain', 'sources', 'writer', 'failures', q.sourceId];
   const flags: Record<string, string | null | undefined> = { state: q.state === 'all' ? 'all' : null, 'group-by': q.groupBy ?? null, since: q.sinceDays ? `${q.sinceDays}d` : null,
-    category: q.category, code: q.code, origin: q.origin, limit: q.limit && q.limit !== 20 ? String(q.limit) : null, ...extra };
+    category: q.category, code: q.code, origin: q.origin, operation: q.operation, limit: q.limit && q.limit !== 20 ? String(q.limit) : null, ...extra };
   for (const [flag, value] of Object.entries(flags)) if (value) argv.push(`--${flag}`, value);
   return [...argv, '--json'];
 }
@@ -349,7 +351,7 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
       const disposition = row.error_code === SYNC_PASS_SUPERSEDED ? 'superseded' : dispositionOf(row.later_state ? { state: row.later_state, same_intent: row.same_intent === true } : null);
       const historical = !row.has_recovery && (disposition !== 'unknown' || v.historical);
       const matches = (!q.category || v.category === q.category) && (!q.code || v.code === q.code)
-        && (q.origin === undefined || (v.origin ?? NO_ORIGIN) === q.origin) && (state === 'all' || !historical);
+        && (q.origin === undefined || (v.origin ?? NO_ORIGIN) === q.origin) && (!q.operation || row.operation === q.operation) && (state === 'all' || !historical);
       if (matches) out.push({ request_id: row.request_id, slug: row.slug, operation: row.operation, state: row.state, code: v.code, origin: v.origin, category: v.category, public_category: v.public_category, class: v.class,
         safe_actions: v.safe_actions, needs_human: v.needs_human, ...(v.human_reason ? { human_reason: v.human_reason } : {}), disposition, blocking: row.has_recovery, historical,
         compacted: row.compacted, ended_at: row.ended_at, cursor: row.sequence, ...(v.root_request_id ? { root_request_id: v.root_request_id } : {}),
@@ -371,14 +373,14 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
   }
   const groups = new Map<string, TerminalFailureGroup>();
   for (const row of out) {
-    const operation = row.category === 'sync_fault' && row.operation !== 'submit_job' ? row.operation : undefined;
+    const operation = row.category === 'sync_fault' ? row.operation : undefined;
     const key = `${row.code}\0${row.origin ?? ''}\0${row.category}${operation === undefined ? '' : `\0${operation}`}`;
     let g = groups.get(key);
     if (!g) {
-      const filter = { code: row.code, origin: row.origin, category: row.category };
+      const filter = { code: row.code, origin: row.origin, category: row.category, ...(operation === undefined ? {} : { operation }) };
       groups.set(key, g = { code: row.code, origin: row.origin, category: row.category, ...(operation === undefined ? {} : { operation }), public_category: row.public_category, rows: 0, class: row.class, needs_human: row.needs_human,
         ...(row.human_reason ? { human_reason: row.human_reason } : {}), filter, fix: row.fix, samples: [],
-        drill_down: terminalFailuresArgv({ sourceId: q.sourceId, state: q.state, sinceDays: q.sinceDays, category: row.category, code: row.code, origin: row.origin ?? NO_ORIGIN }) });
+        drill_down: terminalFailuresArgv({ sourceId: q.sourceId, state: q.state, sinceDays: q.sinceDays, category: row.category, code: row.code, origin: row.origin ?? NO_ORIGIN, operation }) });
     }
     g.rows++;
     if (g.samples.length < 3) g.samples.push({ request_id: row.request_id, slug: row.slug, state: row.state, ended_at: row.ended_at, inspect: row.inspect });

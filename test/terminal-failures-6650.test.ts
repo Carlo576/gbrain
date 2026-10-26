@@ -26,6 +26,7 @@ import { terminalFailuresCheck } from '../src/commands/doctor/checks/persistence
 import { categorizeCheck } from '../src/core/doctor-categories.ts';
 import { WAVE_CHECKS } from '../src/commands/doctor/wave-checks.ts';
 import { runRemoteDoctorTier } from '../src/commands/doctor/remote-tier.ts';
+import { renderWriterFailures } from '../src/commands/sources-writer-failures.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 
 let engine: BrainEngine;
@@ -399,17 +400,27 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     await seed({ slug: 'notes/s', operation: 'submit_job', state: 'failed', code: 'preparation_stalled' });
     await seed({ slug: 'notes/p', operation: 'put_page', state: 'failed', code: 'preparation_stalled' });
     await seed({ slug: 'notes/r', operation: 'remember', state: 'failed', code: 'preparation_stalled' });
+    await seed({ slug: 'notes/t1', operation: 'takes_supersede', state: 'failed', code: 'preparation_stalled' });
+    await seed({ slug: 'notes/t2', operation: 'takes_resolve', state: 'failed', code: 'preparation_stalled' });
     const grouped = await readTerminalFailures(engine, { sourceId: SOURCE, groupBy: 'category' });
     if (grouped.status !== 'ok') throw new Error('unknown');
     const stalled = grouped.groups!.filter(g => g.code === 'preparation_stalled');
-    expect(stalled.map(g => g.operation ?? null).sort()).toEqual([null, 'put_page', 'remember'].sort());
-    expect(stalled.find(g => g.operation === undefined)!.fix.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
-    for (const op of ['put_page', 'remember']) {
+    expect(stalled.map(g => g.operation ?? '').sort()).toEqual(['put_page', 'remember', 'submit_job', 'takes_resolve', 'takes_supersede']);
+    expect(stalled.find(g => g.operation === 'submit_job')!.fix.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
+    for (const op of ['put_page', 'remember', 'takes_supersede', 'takes_resolve']) {
       const g = stalled.find(x => x.operation === op)!;
       expect(g.rows).toBe(1);
       expect(g.fix.argv).toEqual(['gbrain', 'sources', 'writer', 'status', '--source', SOURCE, '--json']);
       expect(g.fix.why).toContain(`resubmit the same ${op}`);
     }
+    for (const g of stalled) {
+      expect(g.drill_down).toContain('--operation');
+      const rows = await readTerminalFailures(engine, { sourceId: SOURCE, ...g.filter, origin: g.filter.origin ?? 'none' });
+      if (rows.status !== 'ok') throw new Error('unknown');
+      expect(rows.rows!.map(r => r.operation)).toEqual([g.operation ?? '']);
+    }
+    const table = renderWriterFailures(grouped, false).split('\n');
+    for (const op of ['submit_job', 'takes_supersede', 'takes_resolve']) expect(table.some(l => /^\s+\d+\s/.test(l) && l.includes(' preparation_stalled ') && l.includes(` ${op} `))).toBe(true);
   });
 
   test('a read past its statement deadline is unknown, and doctor says health is unknown', async () => {
