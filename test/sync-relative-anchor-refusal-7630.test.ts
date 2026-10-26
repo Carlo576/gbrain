@@ -227,6 +227,7 @@ for (const backend of testBackends()) {
       await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
       expect(await clearConnectorLocalPath(engine, 'default')).toEqual({ prior: '.', connector: false });
       expect((await engine.executeRaw<{ local_path: string | null }>("SELECT local_path FROM sources WHERE id='default'"))[0]!.local_path).toBeNull();
+      expect(await clearConnectorLocalPath(engine, 'default')).toEqual({ prior: null, connector: false });
       await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [folder]);
       expect((await clearConnectorLocalPath(engine, 'default').catch(error => error)).code).toBe('invalid_params');
       expect((await engine.executeRaw<{ local_path: string | null }>("SELECT local_path FROM sources WHERE id='default'"))[0]!.local_path).toBe(folder);
@@ -235,6 +236,9 @@ for (const backend of testBackends()) {
       expect((await clearConnectorLocalPath(engine, 'notes-w').catch(error => error)).code).toBe('invalid_params');
       expect((await defaultSourceLocalPathCheck(engine))?.message ?? '').not.toContain('notes-w');
       await engine.executeRaw("DELETE FROM sources WHERE id='notes-w'");
+      await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", ['C:\\brain-example']);
+      expect((await defaultSourceLocalPathCheck(engine))?.message ?? '').not.toContain('relative path');
+      await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [folder]);
       // Value: protects=a relative local_path whose source has a canonical owner binding is never cleared (writer_transfer_required);
       //   fails_when=the relative-path clear is moved ahead of the binding check; why_new=sources-set-path-clear covers only a bound
       //   connector; seam=none; no_claim=a real activated managed brain (the binding row is inserted directly)
@@ -532,7 +536,7 @@ for (const backend of testBackends()) {
         const check = await defaultSourceLocalPathCheck(engine);
         expect(check?.status).toBe('warn');
         expect(check?.message).toContain('source "notes-a" has the relative local_path "."');
-        expect(check?.message).toContain('default-source pages are saved to the database only');
+        expect(check?.message).toContain('pages of every source with no local_path (the default source and any `.sources/<id>` source) are saved to the database only');
         expect(check?.message).not.toContain('own working tree');
         expect(check?.message).not.toContain('write through sync.repo_path');
         expect(check?.message).not.toContain('notes-b');

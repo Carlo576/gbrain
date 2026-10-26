@@ -419,6 +419,10 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     const flat = await readTerminalFailures(engine, { sourceId: SOURCE, limit: 50 });
     if (flat.status !== 'ok') throw new Error('unknown');
     for (const g of stalled) for (const s of g.samples) expect(flat.rows!.find(r => r.request_id === s.request_id)!.fix).toEqual(g.fix);
+    expect(flat.rows!.find(r => r.slug === 'notes/mi')!.operation).toBe('managed_file_import');
+    const putPages = await readTerminalFailures(engine, { sourceId: SOURCE, operation: 'put_page', limit: 50 });
+    if (putPages.status !== 'ok') throw new Error('unknown');
+    expect(putPages.rows!.map(r => r.slug)).toEqual(['notes/p']);
     for (const op of ['put_page', 'remember', 'takes_supersede', 'takes_resolve']) {
       const g = stalled.find(x => x.operation === op)!;
       expect(g.rows).toBe(1);

@@ -85,7 +85,7 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
     `${relative.map(row => `source "${row.id}" has the relative local_path "${row.local_path}"`).join('; ')}, which names whatever directory ` +
     'gbrain runs from, so sync refuses it (sync_anchor_relative). Ask the user which directory holds its files, then run ' +
     '`gbrain sources set-path <id> <absolute-directory>`, or clear the pointer with `gbrain sources set-path <id> --clear`.' +
-    (blockedByRelative ? ' Until then, default-source pages are saved to the database only, not written under sync.repo_path.' : '');
+    (blockedByRelative ? ' Until then, pages of every source with no local_path (the default source and any `.sources/<id>` source) are saved to the database only, not written under sync.repo_path.' : '');
   return {
     name: 'default_source_local_path',
     status: relative.length > 0 || assessment.status === 'skip' ? 'warn' : assessment.status,

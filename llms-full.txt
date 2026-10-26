@@ -11014,8 +11014,8 @@ edits stored pages, managed activation refuses it (`source_changed`, detail
 maintenance cycles and `gbrain maintain` run only their database phases,
 `sources set-path` does not count it as another source's tree, the
 write-through leak guard counts a live source's relative path as owning any
-tree (so a `default` source with no `local_path` saves its pages to the
-database only, `source_repo_belongs_to_other_source`, until that path is set
+tree (so every source with no `local_path`, the `default` source and any
+`.sources/<id>` source, saves its pages to the database only, `source_repo_belongs_to_other_source`, until that path is set
 or cleared), `gbrain autopilot
 --install` asks for `--repo`, a remote `submit_job` for the source is
 refused, import does not count the folder as a configured root or stamp it

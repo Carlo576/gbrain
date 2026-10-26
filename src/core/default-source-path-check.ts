@@ -34,7 +34,7 @@
  * npm-squat-check.ts / pglite-leftovers-check.ts. The gathering wrapper
  * lives on the doctor surface (doctor/checks/default-source-path.ts).
  */
-import { isAbsolute } from 'path';
+import { isAbsolute, posix, win32 } from 'path';
 
 export interface DefaultSourcePathInput {
   /** The `default` sources row, or undefined when no such row exists. */
@@ -68,7 +68,7 @@ export function assessDefaultSourcePath(
     // integrity.
     return { status: 'skip', message: '' };
   }
-  if (defaultSource.local_path && !isAbsolute(defaultSource.local_path)) {
+  if (defaultSource.local_path && !posix.isAbsolute(defaultSource.local_path) && !win32.isAbsolute(defaultSource.local_path)) {
     return {
       status: 'warn',
       message:
@@ -89,9 +89,9 @@ export function assessDefaultSourcePath(
       status: 'warn',
       message:
         `default source has no local_path and sync.repo_path is the relative path "${repoPath}", which names whatever ` +
-        'directory gbrain runs from, so sync refuses it (sync_anchor_relative) and default-source page writes skip the ' +
-        'repository. Ask the user which directory holds the brain, then run ' +
-        '`gbrain config set sync.repo_path <absolute-directory>`.',
+        'directory gbrain runs from, so default-source page writes skip the repository. Ask the user which directory holds ' +
+        'the brain, then run `gbrain sources set-path default <absolute-directory>` (or ' +
+        '`gbrain config set sync.repo_path <absolute-directory>`).',
     };
   }
   // null local_path — the designed fallback topology. Only warn when the

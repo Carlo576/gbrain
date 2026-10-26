@@ -282,7 +282,7 @@ export interface TerminalFailureQuery {
   code?: string;
   origin?: string;
   category?: string;
-  /** #7630: the receipt's operation; a sync-fault group's drill-down narrows by it. */
+  /** #7630: the receipt's operation, or a reconcile or managed put_page's intent kind (`faultOperation`); `--operation` narrows by it. */
   operation?: string;
 }
 export interface TerminalFailureRow {
@@ -326,7 +326,6 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
   const out: TerminalFailureRow[] = [];
   // #6712 PR 2: the oldest admission per drift group, so the group's file-drift fix selects every page in it with one concrete --since.
   const driftSince = new Map<string, string>();
-  const faultOperationOf = new Map<string, string>();
   let cursor = q.before ?? null, scanned = 0, exhausted = false;
   const want = q.groupBy ? MAX_SCAN : limit + 1;
   while (out.length < want && scanned < MAX_SCAN && !exhausted) {
@@ -353,8 +352,7 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
       const historical = !row.has_recovery && (disposition !== 'unknown' || v.historical);
       const matches = (!q.category || v.category === q.category) && (!q.code || v.code === q.code)
         && (q.origin === undefined || (v.origin ?? NO_ORIGIN) === q.origin) && (!q.operation || faultOperation(row.operation, row.intent_kind) === q.operation) && (state === 'all' || !historical);
-      if (matches) faultOperationOf.set(row.request_id, faultOperation(row.operation, row.intent_kind));
-      if (matches) out.push({ request_id: row.request_id, slug: row.slug, operation: row.operation, state: row.state, code: v.code, origin: v.origin, category: v.category, public_category: v.public_category, class: v.class,
+      if (matches) out.push({ request_id: row.request_id, slug: row.slug, operation: faultOperation(row.operation, row.intent_kind), state: row.state, code: v.code, origin: v.origin, category: v.category, public_category: v.public_category, class: v.class,
         safe_actions: v.safe_actions, needs_human: v.needs_human, ...(v.human_reason ? { human_reason: v.human_reason } : {}), disposition, blocking: row.has_recovery, historical,
         compacted: row.compacted, ended_at: row.ended_at, cursor: row.sequence, ...(v.root_request_id ? { root_request_id: v.root_request_id } : {}),
         inspect: { argv: terminalInspectArgv(row.request_id), consent: [], actor: 'agent', requires_exclusive: false, why: 'The receipt with its diagnosis and structured fix, read-only.' },
@@ -375,7 +373,7 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
   }
   const groups = new Map<string, TerminalFailureGroup>();
   for (const row of out) {
-    const operation = row.category === 'sync_fault' ? faultOperationOf.get(row.request_id) : undefined;
+    const operation = row.category === 'sync_fault' ? row.operation : undefined;
     const key = `${row.code}\0${row.origin ?? ''}\0${row.category}${operation === undefined ? '' : `\0${operation}`}`;
     let g = groups.get(key);
     if (!g) {
