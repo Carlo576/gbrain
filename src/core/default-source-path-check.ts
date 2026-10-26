@@ -34,7 +34,7 @@
  * npm-squat-check.ts / pglite-leftovers-check.ts. The gathering wrapper
  * lives on the doctor surface (doctor/checks/default-source-path.ts).
  */
-import { isAbsolute, posix, win32 } from 'path';
+import { posix, win32 } from 'path';
 
 export interface DefaultSourcePathInput {
   /** The `default` sources row, or undefined when no such row exists. */
@@ -84,7 +84,7 @@ export function assessDefaultSourcePath(
       message: `default source local_path is set: ${defaultSource.local_path}`,
     };
   }
-  if (repoPath && !isAbsolute(repoPath)) {
+  if (repoPath && !posix.isAbsolute(repoPath) && !win32.isAbsolute(repoPath)) {
     return {
       status: 'warn',
       message:

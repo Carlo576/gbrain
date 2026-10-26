@@ -36,7 +36,8 @@ failures (read-only) lists the source's write receipts that ended without commit
 (failed, conflict, cancelled) plus any still holding a recovery record, newest first, each
 with its class, safe actions, whether a person decides, its disposition (superseded,
 already_written, duplicate or unknown), an inspect command and its fix. --group-by category
-groups them on code, origin and category, each group with its exact drill-down filter.
+groups them on code, origin and category (a sync_fault group also on its operation), each
+group with its exact drill-down filter; --operation <op> keeps one write operation.
 A full page prints truncated with the next command (--before <cursor>). Unresolved rows by
 default; --state all adds resolved and historical ones. Human table by default, JSON with --json.
 Inspect status first. movement proves that managed sync data moves over a window

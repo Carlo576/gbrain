@@ -248,7 +248,7 @@ A spike warns only on its own: when at least `persistence.terminal_failures.spik
 ```bash
 gbrain doctor --only persistence_terminal_failures --json      # blockers, unresolved, historical, the fix
 gbrain sync status --source <id>                               # the same summary for one source, with BLOCKING lines
-gbrain sources writer failures <id> --group-by category        # groups on code + origin + category, each with its drill-down
+gbrain sources writer failures <id> --group-by category        # groups on code + origin + category (+ operation for a sync_fault), each with its drill-down
 gbrain sources writer failures <id> --category owner_exception --code storage_error --origin owner_exception --json
 gbrain write-request <request> --json                          # one receipt: write_error_reason, suggestion, diagnosis.fix
 ```

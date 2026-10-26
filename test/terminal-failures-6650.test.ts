@@ -454,6 +454,25 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     for (const op of ['submit_job', 'takes_supersede', 'takes_resolve']) expect(table.some(l => /^\s+\d+\s/.test(l) && l.includes(' preparation_stalled ') && l.includes(` ${op} `))).toBe(true);
   });
 
+  // #7630: --operation narrows every category, so every group's drill-down carries it and lists exactly the group's rows.
+  test('--group-by category with --operation keeps the operation in every group drill-down', async () => {
+    await seed({ slug: 'notes/a', operation: 'put_page', state: 'failed', code: 'storage_error' });
+    await seed({ slug: 'notes/b', operation: 'submit_job', state: 'failed', code: 'storage_error' });
+    await seed({ slug: 'notes/c', operation: 'put_page', state: 'failed', code: 'preparation_stalled' });
+    await seed({ slug: 'notes/d', operation: 'submit_job', state: 'failed', code: 'preparation_stalled' });
+    const grouped = await readTerminalFailures(engine, { sourceId: SOURCE, groupBy: 'category', operation: 'put_page' });
+    if (grouped.status !== 'ok') throw new Error('unknown');
+    expect(grouped.groups!.map(g => g.code).sort()).toEqual(['preparation_stalled', 'storage_error']);
+    for (const g of grouped.groups!) {
+      expect(g.drill_down[g.drill_down.indexOf('--operation') + 1]).toBe('put_page');
+      const parsed = parsePersistenceAdminArgs('writer', g.drill_down.slice(3));
+      const rows = await runPersistenceAdministration(engine, parsed.operation, parsed.params) as TerminalFailureListing;
+      if (rows.status !== 'ok') throw new Error('unknown');
+      expect(rows.rows!.length).toBe(g.rows);
+      expect(rows.rows!.map(r => r.operation)).toEqual(['put_page']);
+    }
+  });
+
   test('a read past its statement deadline is unknown, and doctor says health is unknown', async () => {
     await seed({ slug: 'notes/x', state: 'failed', code: 'storage_error', compacted: true });
     const slow = new Proxy(engine, { get(target, key) {

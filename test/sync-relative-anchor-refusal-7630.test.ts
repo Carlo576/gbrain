@@ -439,6 +439,8 @@ for (const backend of testBackends()) {
       expect(check?.status).toBe('warn');
       expect(check?.message).toContain('sync.repo_path is the relative path "."');
       expect(check?.message).toContain('gbrain config set sync.repo_path <absolute-directory>');
+      expect(check?.message).toContain('gbrain sources set-path default <absolute-directory>');
+      expect(check?.message).not.toContain('sync refuses it');
     }, 120_000);
 
     // Value: protects=a successful sync of another source never runs .gitignore upkeep on the cwd's Git repo through a stored relative root;
