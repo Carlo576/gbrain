@@ -57,6 +57,7 @@ import { PENDING_IMPORT, SYNC_HELD } from '../persistence/pending-import.ts';
 import { FACTS_ENTITY_MOVED_MESSAGES, isEntityMovedRefusal } from '../persistence/verb-errors.ts';
 import { MAX_FILE_REFUSAL_RETRIES } from '../persistence/facts-maintenance.ts';
 import { factsAbsorbWriteKey, factsRetryDeadCommand } from '../facts/dead-absorb-retry.ts';
+import { readFactsBackstopJobPage } from '../persistence/effect-facts.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
 import { dispositionOf, PAGE_REMOVAL_OPERATIONS, supersessionOrderSql, supersessionSql } from '../persistence/terminal-classify.ts';
@@ -91,7 +92,7 @@ async function factExtractions(engine: BrainEngine, sourceIds: string[], rows: F
   if (!digests.length) return extractions;
   for (const row of await engine.executeRaw<ExtractionRequest>(`SELECT source_id, intent->>'inputDigest' AS input_digest, slug, state, error_code, error_message,
       intent->>'batchKey' AS batch_key FROM persistence_requests WHERE operation='extract_facts' AND source_id = ANY($1::text[])
-      AND intent->>'kind'='managed_facts_entity' AND intent->>'inputDigest' = ANY($2::text[])`, [sourceIds, digests])) {
+      AND NOT compacted AND intent IS NOT NULL AND intent->>'kind'='managed_facts_entity' AND intent->>'inputDigest' = ANY($2::text[])`, [sourceIds, digests])) {
     const key = extractionKey(row.source_id, row.input_digest);
     extractions.set(key, [...(extractions.get(key) ?? []), row]);
   }
@@ -118,30 +119,34 @@ function previewCommand(scope: RepairScope): string {
  * recovered by resetting that job once it is dead: its retry re-admits them at the entity page's current revision with
  * no model call, once the cause clears. Only an extraction whose open entity requests are all moved-entity refusals (the
  * entity walk) or all held-file refusals (the file walk) is re-admitted by one retry. A mixed extraction, a batch whose
- * follow-ups were refused too, an entity page replaced since, a job that completed or is gone, a writer-guard refusal
- * and a batch with no page write would replay the refusal or have no job to retry: those are extracted again.
+ * follow-ups were refused too, an entity page replaced since, a job that completed or is gone, a source page written
+ * again since the job's page write (the retry skips it as superseded), a writer-guard refusal and a batch with no page
+ * write would replay the refusal or have no job to retry: those are extracted again. While the job still runs (a walk in
+ * progress leaves follow-ups open), an entity page that is still the admitted one is listed `pending:`.
  */
 async function factsRecovery(engine: BrainEngine, write: FailedWrite, extractions: Map<string, ExtractionRequest[]>): Promise<string> {
   const origin = (write.intent.origin as { slug?: string } | null | undefined)?.slug;
   const job = typeof write.intent.originalRequestId === 'string' ? write.intent.originalRequestId : null;
   const extractAgain = `re-extract: gbrain call extract_facts again on the current text of ${origin ?? 'the source turn'} with a new request_id (one model call)`;
   if (!job || write.state !== 'conflict') return extractAgain;
+  const [page] = await engine.executeRaw<{ id: string }>('SELECT id::text FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [write.source_id, write.slug]);
+  if (!page && write.page_id !== null) return `not recoverable: entity page ${write.slug} was deleted after these facts were admitted`;
+  if ((page?.id ?? null) !== write.page_id) return `${extractAgain}; entity page ${write.slug} was replaced after these facts were admitted, so a job retry replays the refusal`;
+  const key = factsAbsorbWriteKey(job);
+  const [run] = await engine.executeRaw<{ status: string; data: Record<string, unknown> }>("SELECT status, data FROM minion_jobs WHERE name='facts-absorb' AND idempotency_key=$1 ORDER BY id DESC LIMIT 1", [key]);
+  if (run && run.status !== 'dead' && run.status !== 'completed' && run.status !== 'cancelled') return `pending: its facts-absorb job (${key}) is ${run.status}; preview again once it ends`;
   const open = (extractions.get(extractionKey(write.source_id, write.intent.inputDigest)) ?? []).filter(row => row.state !== 'committed');
   if (!open.every(isEntityMovedRefusal) && !open.every(row => row.error_code === 'source_changed')) {
     return `${extractAgain}; its extraction also holds refusals one job retry does not re-admit together`;
   }
-  if (write.error_code === 'revision_conflict') {
-    const [page] = await engine.executeRaw<{ id: string }>('SELECT id::text FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [write.source_id, write.slug]);
-    if (!page && write.page_id !== null) return `not recoverable: entity page ${write.slug} was deleted after these facts were admitted`;
-    if ((page?.id ?? null) !== write.page_id) return `${extractAgain}; entity page ${write.slug} was replaced after these facts were admitted, so a job retry replays the refusal`;
-    if (new Set(open.filter(row => row.slug === write.slug).map(row => row.batch_key)).size > MAX_FILE_REFUSAL_RETRIES) {
-      return `${extractAgain}; its follow-up batches were refused as well, so a job retry replays the refusal`;
-    }
+  if (new Set(open.filter(row => row.slug === write.slug).map(row => row.batch_key)).size > MAX_FILE_REFUSAL_RETRIES) {
+    return `${extractAgain}; its follow-up batches were refused as well, so a job retry replays the refusal`;
   }
-  const key = factsAbsorbWriteKey(job);
-  const [run] = await engine.executeRaw<{ status: string }>("SELECT status FROM minion_jobs WHERE name='facts-absorb' AND idempotency_key=$1 ORDER BY id DESC LIMIT 1", [key]);
-  if (run && run.status !== 'dead' && run.status !== 'completed' && run.status !== 'cancelled') return `pending: its facts-absorb job (${key}) is ${run.status}; preview again once it ends`;
   if (run?.status !== 'dead') return `${extractAgain}; its facts-absorb job ${run ? `is ${run.status}` : 'is gone'}, so gbrain facts retry-dead has no dead job to reset`;
+  const source = await readFactsBackstopJobPage(engine, run.data);
+  if ('skipped' in source && (source.skipped === 'superseded' || source.skipped === 'page_missing')) {
+    return `${extractAgain}; ${origin ?? 'the source page'} changed after the page write its facts-absorb job extracts, so a job retry skips it`;
+  }
   return `recover: ${factsRetryDeadCommand('--reset', key)} (the next facts_drain pass retries the page's facts-absorb job, which re-admits the retained facts without a model call${write.error_code === 'source_changed' ? ' once the file check passes' : ''})`;
 }
 

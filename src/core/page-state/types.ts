@@ -78,15 +78,15 @@ export interface PageSnapshot {
   bodyGeneration?: number;
 }
 
+/** A stale expected revision; stored on receipts (#7602 matches it for fact entity requests refused before the fix). */
+export const PAGE_CHANGED_AFTER_READ_MESSAGE = 'The page changed after it was read. Read its current revision before retrying.';
+
 /**
  * The three revision refusals. `expectedRevision` is the caller's precondition: a revision (stale → `revision_conflict`),
  * `null` for an asserted-absent page another writer created (→ `revision_conflict`), or `undefined` when the caller
  * supplied none and the page exists (#5385 → `revision_required`: the caller's omission, not a race, so a client
  * can read the page and resubmit instead of treating it as contention).
  */
-/** A stale expected revision; stored on receipts (#7602 matches it for fact entity requests refused before the fix). */
-export const PAGE_CHANGED_AFTER_READ_MESSAGE = 'The page changed after it was read. Read its current revision before retrying.';
-
 export class PageRevisionConflictError extends Error {
   readonly code: 'revision_conflict' | 'revision_required' | 'revision_backfill_pending';
   constructor(readonly expectedRevision: string | null | undefined, readonly currentRevision: string | null) {

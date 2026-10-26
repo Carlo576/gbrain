@@ -327,7 +327,8 @@ export async function prepareManagedFactsSession(ctx: FactsBackstopCtx,
  * GBRA-130 A-36: codes one entity request ends on for reasons of its own page (changed, segmented, fence or content
  * refused). Automatic extraction reports them under `refused` and keeps the committed entities' counts. A file-check
  * refusal (`source_changed`) and a withdrawal refusal are not among them: they keep the batch refused, so the
- * follow-up walks (#6048, #6506) re-admit their retained facts once the cause clears.
+ * follow-up walks (#6048, #6506) re-admit their retained facts once the cause clears. An automatic extraction follows a
+ * `revision_conflict` whose entity page moved (#7602, followEntityMoves) before it reports it.
  */
 const ENTITY_REFUSAL_CODES: ReadonlySet<string> = new Set(['revision_conflict', 'invalid_fence', 'target_fence_malformed', 'page_body_segmented',
   'invalid_params', 'page_identity_changed', 'page_not_found', 'request_too_large', 'payload_too_large']);
