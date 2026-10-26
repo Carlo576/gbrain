@@ -31,6 +31,7 @@ import { withTrustPromotion } from '../persistence/context.ts';
 import { digest } from '../persistence/digest.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { prepareFenceFactAppend } from '../facts/fence-fact-append.ts';
+import { assertFactNotWithdrawn } from '../facts/single-prepare.ts';
 import { FENCE_SOURCE_DEFAULT } from '../facts/extract-from-fence.ts';
 import { parseFactsFence } from '../facts-fence.ts';
 import { materializedPage } from '../persistence/segmented-apply.ts';
@@ -153,6 +154,8 @@ export async function prepareTrustReleaseMutation(engine: BrainEngine, row: Writ
     source_session: str(p.source_session), confidence: 1, valid_from: str(p.valid_from) ? new Date(String(p.valid_from)) : new Date(),
     valid_until: str(p.valid_until) ? new Date(String(p.valid_until)) : null, embedding: null, embedding_model: null,
   };
+  const claim = { fact: fact.fact, kind: fact.kind ?? 'fact', visibility: fact.visibility ?? 'private', entity_slug: fact.entity_slug ?? null };
+  await assertFactNotWithdrawn(engine, row.source_id, claim);
   const append = await prepareFenceFactAppend(engine, row, config, snapshot, intent.mode === 'index-existing'
     ? { mode: 'index-existing', rowNum: intent.row_num!, fact, pendingTier: 'user_confirmed' }
     : { fact, pendingTier: 'user_confirmed' });
@@ -173,7 +176,7 @@ export async function prepareTrustReleaseMutation(engine: BrainEngine, row: Writ
   return {
     ...(page ?? {}), observedRevision: snapshot.revision,
     trust: { tier: 'user_confirmed', origin: { channel: 'trust_release', ...(hold.request_id ? { request_id: hold.request_id } : {}) } },
-    validate: async tx => { await lockHold(tx); await page?.validate?.(tx); },
+    validate: async tx => { await lockHold(tx); await assertFactNotWithdrawn(tx, row.source_id, claim); await page?.validate?.(tx); },
     apply: tx => withTrustPromotion(tx, 'user_confirmed', async () => {
       if (!(await releaseWriteGateHold(tx, intent.hold_id, intent.by))) throw decidedMeanwhile(intent.hold_id);
       const { id, pageReceipt } = await append.apply(tx);
