@@ -348,6 +348,18 @@ for (const backend of testBackends()) {
     // Value: protects=a page deleted after the release request was admitted ends the request in conflict (page_not_found, legacy page_identity_changed); the hold stays held, no fact row;
     // fails_when=prepareTrustReleaseMutation drops its deleted/recreated page identity check; why_new=only a hold decided meanwhile was raced, never the page;
     // seam=none; no_claim=a page recreated under the slug (same check, other branch); the deletion is a raw SQL stand-in for a concurrent delete_page
+    test('a held fact with no entity releases database-only on a managed brain: no door request', () => managedBrain(async ({ engine, ctx }) => {
+      await enableTrustProtections(engine);
+      let ref = '';
+      try { await operationsByName.remember.handler(ctx, { fact: CLAIM, provenance: 'email', content_origin: 'tool_output', request_id: randomUUID() }); }
+      catch (e) { ref = JSON.parse((e as { detail: string }).detail).hold_ref; }
+      expect(ref).toMatch(/^h\d+$/);
+      expect(await release(engine, ref)).toMatchObject({ status: 'released', tier: 'user_confirmed' });
+      expect(await holdStatus(engine, ref)).toBe('released');
+      expect(await factRows(engine)).toEqual([expect.objectContaining({ trust_tier: 'user_confirmed', entity_slug: null, row_num: null, source_markdown_slug: null })]);
+      expect(await engine.executeRaw("SELECT id FROM persistence_requests WHERE operation='trust_release'")).toEqual([]);
+    }, { setup, databaseUrl }), 180_000);
+
     test('an entity page deleted while the release is in flight ends the request in conflict (page_not_found): the fact stays held', () => managedBrain(async ({ engine, ctx }) => {
       await seedPage(engine, ctx);
       const ref = await holdRemember(engine, ctx);
