@@ -1402,5 +1402,12 @@ export async function runAuth(args: string[]): Promise<void> {
 // Direct-script entry point — only runs when this file is invoked as the main module
 // (e.g. `bun run src/commands/auth.ts ...`). When imported by cli.ts, this block is skipped.
 if (import.meta.main) {
-  await runAuth(process.argv.slice(2));
+  const { splitFlagEquals } = await import('../cli/flag-equals.ts');
+  const argv = await splitFlagEquals('auth', process.argv.slice(2));
+  if ('refusal' in argv) {
+    const { exitCliError } = await import('../cli/cli-error.ts');
+    exitCliError(argv.refusal, 'auth');
+  } else {
+    await runAuth(argv.args);
+  }
 }

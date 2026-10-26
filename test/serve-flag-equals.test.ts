@@ -95,7 +95,7 @@ describe('serve --flag=value', () => {
   test('auth create --scopes=read refuses and mints no token', () => {
     const r = cli(['auth', 'create', 'bot-example', '--scopes=read']);
     expect(r.status).toBe(2);
-    expect(r.stderr).toContain('reads --scopes only as a separate argument');
+    expect(r.stderr).toContain('takes --scopes <value> as two arguments');
     expect(r.stderr).toContain('--scopes <value>');
     const list = cli(['auth', 'list']);
     expect(list.status).toBe(0);
@@ -109,7 +109,7 @@ describe('serve --flag=value', () => {
     expect(existsSync(join(brainDir, 'brain.pglite'))).toBe(true);
     for (const [args, message] of [
       [['reinit-pglite', '--yes=n'], 'Write --yes on its own'],
-      [['forget', '--purge', '--reason=3', '34', '--yes'], 'reads --reason only as a separate argument'],
+      [['forget', '--purge', '--reason=3', '34', '--yes'], 'takes --reason <value> as two arguments'],
     ] as const) {
       const r = cli([...args]);
       expect(r.status).toBe(2);
@@ -118,6 +118,24 @@ describe('serve --flag=value', () => {
     }
     expect(readdirSync(brainDir).sort()).toEqual(before);
     expect(cli(['auth', 'list']).status).toBe(0);
+  });
+
+  test('the direct auth.ts entry and a bare -- refuse --scopes=read too', () => {
+    const direct = spawnSync('bun', ['--no-env-file', 'run', 'src/commands/auth.ts', 'create', 'bot-direct-example', '--scopes=read'], { cwd: process.cwd(), env, encoding: 'utf8', input: '', timeout: 30_000 });
+    expect(direct.status).toBe(2);
+    expect(direct.stderr).toContain('--scopes=…');
+    const dashed = cli(['auth', 'create', '--', 'bot-dashed-example', '--scopes=read']);
+    expect(dashed.status).toBe(2);
+    const list = cli(['auth', 'list']);
+    expect(list.stdout + list.stderr).not.toContain('bot-direct-example');
+    expect(list.stdout + list.stderr).not.toContain('bot-dashed-example');
+  });
+
+  test('serve -- --access=read-only still narrows to read-only', async () => {
+    const r = cli(['serve', '--http', '--port', '0', '--', '--access=read-only']);
+    expect(r.status).not.toBe(0);
+    expect(r.status).not.toBeNull();
+    expect(r.stderr).toContain('gbrain auth rescope-token <name> --operations');
   });
 
   test('--help still answers when an = token would refuse', () => {

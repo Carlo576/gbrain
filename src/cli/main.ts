@@ -41,8 +41,8 @@ import type { Operation, OperationContext } from '../core/operations.ts';
 import { currentCliWriteWait } from '../core/persistence/write-wait.ts';
 import { isScopeErrorCode } from '../core/error-catalogue.ts';
 import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict, writeStdoutFinal } from '../core/cli-force-exit.ts';
-import { loadCuratedHelp, printCuratedHelp } from './help/render.ts';
-import { EQUALS_TOKEN, OWN_EQUALS_PARSERS, knownSwitches, splitFlagEquals } from './flag-equals.ts';
+import { printCuratedHelp } from './help/render.ts';
+import { OWN_EQUALS_PARSERS, splitFlagEquals } from './flag-equals.ts';
 import { printHelp } from './top-help.ts';
 import { curatedFlagError } from './help/validate.ts';
 import { cliCommandOf, exitCliError, exitOnRepairFailed, unknownFlagError, usageError, writeCliError, writeCliNotice, writeFatalCliError } from './cli-error.ts';
@@ -421,7 +421,7 @@ async function main() {
   // NOT a free-text search for the literal word "modes". Free-text
   // `gbrain search "<query>"` falls through to the cheap-hybrid `search` op
   // below (T4). Preserves the v0.41.6.0 read-only connect+dispatch timeout.
-  if (command === 'search' && ['modes', 'stats', 'tune', 'diagnose'].includes(subArgs[0] ?? '')) {
+  if (command === 'search' && SEARCH_DASHBOARD_SUBCOMMANDS.includes(subArgs[0] ?? '')) {
     const { withTimeout, OperationTimeoutError } = await import('../core/timeout.ts');
     const isDiagnose = subArgs[0] === 'diagnose';
     // Gap-closure wave [OV6]: thin clients route the read-only dashboard
@@ -1324,10 +1324,19 @@ export function validateCommandFlags(command: string, subArgs: string[]): string
   return null; // unknown command — the dispatcher's own error handles it
 }
 
+/** `search` subcommands main() dispatches by hand before the op lane; they read their flags as exact tokens. */
+const SEARCH_DASHBOARD_SUBCOMMANDS = ['modes', 'stats', 'tune', 'diagnose'];
+
 /** #7619: the argv a CLI_ONLY handler receives, `--flag=value` split or refused (cli/flag-equals.ts); commands with their own `=`-aware parser keep it. */
 export async function cliOnlyFlagArgs(command: string, subArgs: string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
-  if (!CLI_ONLY.has(command) || flagValidationExempt(command, subArgs) || strictSpecFor(command, subArgs) || OWN_EQUALS_PARSERS.has(command) || OWN_EQUALS_PARSERS.has(`${command} ${subArgs[0]}`) || !subArgs.some(a => EQUALS_TOKEN.test(a))) return { args: subArgs };
-  return splitFlagEquals(command, subArgs, await loadCuratedHelp(command), await knownSwitches());
+  const handParsedSearch = command === 'search' && SEARCH_DASHBOARD_SUBCOMMANDS.includes(subArgs[0] ?? '');
+  if (!CLI_ONLY.has(command) && !handParsedSearch || equalsExempt(command, subArgs) || strictSpecFor(command, subArgs) || OWN_EQUALS_PARSERS.has(command) || OWN_EQUALS_PARSERS.has(`${command} ${subArgs[0]}`)) return { args: subArgs };
+  return splitFlagEquals(command, subArgs);
+}
+
+/** call and config set take arbitrary values, and eval brainbench refuses unknown tokens with its own exit code; every other validation-exempt path (jobs submit, config get and unset) reads exact tokens. */
+function equalsExempt(command: string, subArgs: string[]): boolean {
+  return command === 'call' || command === 'config' && subArgs[0] === 'set' || command === 'eval' && subArgs[0] === 'brainbench';
 }
 
 /** CLI_ONLY lane: token scan against the generated legal set. */
