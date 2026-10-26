@@ -354,6 +354,8 @@ describe('#7619 split rules', () => {
       'src/core/sync-reconcile.ts': 'git child argv',
       'src/core/sync-upstream.ts': 'git child argv',
       'src/core/tailscale.ts': 'tailscale child argv',
+      'src/mcp/surface.ts': 'serve --access/--surface parsers read both forms (#7603); the entry splits the = form first',
+      'src/core/direct-pool-profile.ts': 'pool profile reads serve --access in both forms from the raw argv before the gate',
       'src/core/workspace-push.ts': 'git child argv',
       'src/eval/longmemeval/via-operation.ts': 'git child argv',
     };
