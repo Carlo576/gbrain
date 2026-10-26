@@ -372,7 +372,8 @@ export async function resolvePageWriteTarget(
   const recordedUri = pathRows[0]?.source_uri ?? null;
 
   if (sourceLocalPath) {
-    if (!existsSync(sourceLocalPath) || !statSync(sourceLocalPath).isDirectory()) {
+    // #7630: a relative local_path (a legacy ".") names whatever directory gbrain runs from, never the source's tree.
+    if (!isAbsolute(sourceLocalPath) || !existsSync(sourceLocalPath) || !statSync(sourceLocalPath).isDirectory()) {
       return { ok: false, skipped: 'repo_not_found' };
     }
     filePath = recordedPath
@@ -386,7 +387,7 @@ export async function resolvePageWriteTarget(
     if (!repoPath) {
       return { ok: false, skipped: 'no_repo_configured' };
     }
-    if (!existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
+    if (!isAbsolute(repoPath) || !existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
       return { ok: false, skipped: 'repo_not_found' };
     }
     const pageRoot = sourceId === 'default' ? repoPath : join(repoPath, '.sources', sourceId);

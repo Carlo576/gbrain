@@ -9,6 +9,10 @@
  * a raw `git rev-parse` failure or the legacy anchor self-heal that would
  * `git init` the directory. gbrain never initializes Git on the user's behalf;
  * the refusal names `git init` only as something to ask the user about.
+ *
+ * #7630: a relative stored anchor (`sources.local_path` or `sync.repo_path`
+ * such as ".") is refused `sync_anchor_relative` first, because it names
+ * whatever directory gbrain runs from.
  */
 import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -100,9 +104,10 @@ export function syncAnchorRelativeError(sourceId: string | undefined, anchor: st
   }
   return opError('sync_anchor_relative', `Sync refused: source "${sourceId}" has the relative local_path "${anchor}".`,
     `Ask the user which directory holds this source's files and run gbrain sources set-path ${sourceId} <absolute-directory>, or clear the pointer with gbrain sources set-path ${sourceId} --clear.`,
-    { why, fix: { argv: ['gbrain', 'sources', 'set-path', sourceId, '--clear'], consent: [], actor: 'user', ask_user: true, requires_exclusive: false,
-      user_message: `Source "${sourceId}" has the relative path "${anchor}" as its directory, so sync cannot tell which folder it belongs to and refused. Clear the pointer (gbrain sources set-path ${sourceId} --clear), or tell me the absolute directory that holds its files (gbrain sources set-path ${sourceId} <absolute-directory>).`,
-      why: 'Clears only the relative pointer: no file or page changes. Sync of this source then refuses until gbrain sources set-path names an absolute directory.',
+    { why, fix: { argv: ['gbrain', 'sources', 'set-path', sourceId, '<dir>'], consent: [], actor: 'user', ask_user: true, requires_exclusive: false,
+      inputs: [{ name: 'dir', how: "The absolute path of the directory that holds this source's files, from the user; never the current directory by default." }],
+      user_message: `Source "${sourceId}" has the relative path "${anchor}" as its directory, so sync cannot tell which folder it belongs to and refused. Which directory holds its files? I'll point the source there (gbrain sources set-path ${sourceId} <absolute-directory>). If it has no directory, I can clear the pointer instead (gbrain sources set-path ${sourceId} --clear).`,
+      why: 'Points the source at an absolute directory; it only updates the pointer, no file or page changes. This works on a managed brain too, where --clear refuses a source with a canonical owner.',
       verify: { argv: ['gbrain', 'sources', 'status', sourceId, '--json'] } } });
 }
 
@@ -114,7 +119,7 @@ export async function assertSyncAnchorAbsolute(engine: BrainEngine, opts: { sour
   throw syncAnchorRelativeError(opts.sourceId, anchor);
 }
 
-/** Refuse a sync whose root is a gbrain-owned content directory (no-op when sync applies). */
+/** Refuse a sync whose root is a relative stored anchor or a gbrain-owned content directory (no-op when sync applies). */
 export async function assertSyncApplicable(engine: BrainEngine, opts: { sourceId?: string; repoPath?: string }): Promise<void> {
   await assertSyncAnchorAbsolute(engine, opts);
   const dir = await syncContentDirectory(engine, opts);

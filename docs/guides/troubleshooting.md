@@ -844,7 +844,15 @@ Ask the user which directory holds the source, then do one of:
 - `gbrain sources set-path <id> --clear` clears the relative pointer. It changes
   no file or page. A `default` source with no path writes through
   `sync.repo_path` (the designed fallback), and its sync refuses until a path
-  is set again.
+  is set again. On a managed brain, a source with a canonical owner refuses
+  `--clear` (`writer_transfer_required`); point it at its directory instead.
+
+Until the path is absolute, nothing else treats the folder gbrain runs from as
+the source either: page write-through skips the file (`repo_not_found`), the
+dream and autopilot cycles run only their database phases, `gbrain autopilot
+--install` asks for `--repo`, a remote `submit_job` for the source is
+refused, import does not count the folder as a configured root, and a managed
+brain does not record it as a managed root.
 
 For `sync.repo_path`: `gbrain config set sync.repo_path <absolute-directory>`.
 

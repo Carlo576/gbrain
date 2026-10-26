@@ -45,7 +45,7 @@
 
 import { withAdmissionOrigin } from './persistence/admission-origin.ts';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, statSync, realpathSync } from 'fs';
-import { join } from 'path';
+import { isAbsolute, join } from 'path';
 import { gbrainPath, loadConfig } from './config.ts';
 import type { BrainEngine } from './engine.ts';
 import { createProgress, type ProgressReporter } from './progress.ts';
@@ -1224,7 +1224,8 @@ export async function resolveSourceForDir(
     const matched: string[] = [];
     for (const row of candidates) {
       try {
-        if (realpathSync(row.local_path) === realDir) matched.push(row.id);
+        // #7630: a relative path realpaths against the cwd, so it would match whatever directory gbrain runs from.
+        if (isAbsolute(row.local_path) && realpathSync(row.local_path) === realDir) matched.push(row.id);
       } catch {
         // Stale/unreadable registered path — not a match, keep scanning.
       }
