@@ -357,6 +357,12 @@ for (const backend of testBackends()) {
       expect(receipt).toMatchObject({ state: 'conflict', error_code: 'page_identity_changed' });
     }, { setup, databaseUrl }), 180_000);
 
+    test('the release preview names the page whose facts the release writes', () => managedBrain(async ({ engine, ctx }) => {
+      await seedPage(engine, ctx);
+      const ref = await holdRemember(engine, ctx);
+      expect((await previewOwnerAction(engine, { action: 'release', ref })).summary).toContain(`default/${slug}`);
+    }, { setup, databaseUrl }), 180_000);
+
     test('an append release keeps the held payload: kind, world visibility and valid_until reach the fence row and the facts row', () => managedBrain(async ({ engine, ctx, root }) => {
       await seedPage(engine, ctx);
       const ref = await holdRemember(engine, ctx);
