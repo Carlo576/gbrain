@@ -556,6 +556,8 @@ test('#6712 wave: a refresh completes once every member synced to a descendant o
   expect((await f.refreshRows()).map(r => r.state)).toEqual(['completed']);
   expect((await f.put(f.alpha, 'notes/after-descendant', page('After', 'admitted'))).state ?? 'committed').toBe('committed');
   // A refresh left in syncing (its process died) whose members already synced past the target completes on --resume.
+  // #7679: the owner scan would complete it on its own, so the consumer is stopped to leave it to --resume.
+  await disposePersistenceConsumer(f.engine);
   const [row] = await f.refreshRows();
   await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state='syncing',completed_at=NULL WHERE id=$1::uuid`, [row.id]);
   expect(await refreshWorktree(f.engine, f.alpha, { resume: true })).toMatchObject({ status: 'completed', refresh_id: row.id });
