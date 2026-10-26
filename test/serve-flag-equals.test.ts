@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -89,6 +89,35 @@ describe('serve --flag=value', () => {
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('--judge is a switch and takes no value');
     expect(r.stderr).not.toContain('cannot be combined');
+  });
+
+  // Value: protects=auth create --scopes=read exits 2 and mints no token (never a full-access one); fails_when=--scopes=… is dropped or kept and auth create runs; why_new=in-process rows never ran the handler or checked the token table; seam=none; no_claim=the separate-form --scopes path (PGLite brain)
+  test('auth create --scopes=read refuses and mints no token', () => {
+    const r = cli(['auth', 'create', 'bot-example', '--scopes=read']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('reads --scopes only as a separate argument');
+    expect(r.stderr).toContain('--scopes <value>');
+    const list = cli(['auth', 'list']);
+    expect(list.status).toBe(0);
+    expect(list.stdout + list.stderr).not.toContain('bot-example');
+  });
+
+  // Value: protects=--yes=n refuses instead of consenting and a split value never retargets forget; brain left intact; fails_when=the entry drops or splits these tokens; why_new=in-process rows never checked the brain afterwards; seam=none; no_claim=a fact-level purge check (no facts in the hermetic brain)
+  test('reinit-pglite --yes=n and forget --purge --reason=3 34 refuse before touching the brain', () => {
+    const brainDir = join(home, '.gbrain');
+    const before = readdirSync(brainDir).sort();
+    expect(existsSync(join(brainDir, 'brain.pglite'))).toBe(true);
+    for (const [args, message] of [
+      [['reinit-pglite', '--yes=n'], 'Write --yes on its own'],
+      [['forget', '--purge', '--reason=3', '34', '--yes'], 'reads --reason only as a separate argument'],
+    ] as const) {
+      const r = cli([...args]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain(message);
+      expect(r.stdout).toBe('');
+    }
+    expect(readdirSync(brainDir).sort()).toEqual(before);
+    expect(cli(['auth', 'list']).status).toBe(0);
   });
 
   test('--help still answers when an = token would refuse', () => {

@@ -196,13 +196,33 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     }
   });
 
+  // Value: protects=a split value never becomes the first numeric/slug target (forget --purge --reason=3 34 must not hit fact 3); fails_when=a refusal turns into a split or keep; why_new=rows only asserted not-null; seam=none; no_claim=handler behavior after a split (argv-level only)
   test('a flag value never becomes the numeric or slug target of a mutating subcommand', async () => {
     for (const [command, args] of [
       ['forget', ['--purge', '--reason=3', '34', '--dry-run']], ['forget', ['--purge', '--source=7', '34', '--yes', '--request-id', 'r1']],
       ['edge-proposals', ['accept', '--limit=3', '7']], ['edge-proposals', ['accept', '--row=3', '7']],
       ['decide', ['proposals', 'accept', '--limit=3', '7']],
       ['loops', ['drop', '--note=7', '12']], ['pages', ['unpurge', '--source-id=people/alice-example', 'people/bob-example']],
-    ] as const) expect(await refusalFor(command, [...args])).not.toBeNull();
+      ['takes', ['propose', '--accept', '7', '--weight=3']],
+    ] as const) {
+      const token = args.find(a => a.includes('='))!;
+      const r = await cliOnlyFlagArgs(command, [...args]);
+      expect('refusal' in r && r.refusal.code).toBe('invalid_params');
+      expect('refusal' in r && r.refusal.message).toContain(`${token.split('=')[0]}=…`);
+      expect('refusal' in r && r.refusal.message).not.toContain(token);
+    }
+  });
+
+  // Value: protects=-y=<v> never reaches a handler as -y/--yes consent; fails_when=EQUALS_TOKEN or the split widens to single-dash and -y=n becomes -y + n; why_new=only --yes=n rows existed; seam=none; no_claim=entry refusal of -y=<v> (it is kept and ignored, see audit finding)
+  test('a short -y=value is never turned into consent', async () => {
+    for (const [command, args] of [
+      ['reinit-pglite', ['-y=n']], ['reinit-pglite', ['-y=yes']], ['cache', ['clear', '-y=true']], ['reindex-code', ['-y=1']],
+    ] as const) {
+      const r = await cliOnlyFlagArgs(command, [...args]);
+      if ('refusal' in r) continue;
+      expect(r.args).not.toContain('-y');
+      expect(r.args).not.toContain('--yes');
+    }
   });
 
   test('subcommands with their own = parser get their argv unchanged', async () => {
