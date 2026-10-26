@@ -11,7 +11,9 @@
  * The publication transaction marks the hold released and writes the fact at user_confirmed (origin `trust_release`,
  * under the promotion capability); the page keeps its tier. The hold is locked and rechecked in `validate`, and a
  * hold decided meanwhile refuses `preview_changed` with nothing written. The request id derives from the hold and the
- * state the owner approved (its last_seen_at), so a retry of the same approval replays one receipt.
+ * state the owner approved (its last_seen_at), so a retry of the same approval replays one receipt while it is pending or
+ * committed; a request that ended without committing (the page was deleted meanwhile, its file was held) leaves the next
+ * retry a fresh attempt, so the owner can release again once the cause is fixed.
  *
  * Every other hold returns null and takes the transactional database-only release in owner-actions.ts: an unmanaged
  * brain, a held take, a hold with no entity slug, or one whose page is missing (GBRA-190 G4 owns that class). A
@@ -23,7 +25,7 @@ import type { GBrainConfig } from '../config.ts';
 import type { OperationContext } from '../ops/contract.ts';
 import { opError } from '../ops/contract.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
-import type { WriteRequest } from '../persistence/model.ts';
+import { isTerminal, type WriteRequest } from '../persistence/model.ts';
 import { pageIdentityError } from '../persistence/page-identity.ts';
 import { withTrustPromotion } from '../persistence/context.ts';
 import { digest } from '../persistence/digest.ts';
@@ -71,9 +73,14 @@ export async function submitTrustRelease(engine: BrainEngine, holdId: number, by
   assertPersistenceAccepting(engine);
   await initializeLocalPersistence(ctx);
   const principal = await requestPrincipalForContext(ctx);
-  const key = digest({ operation: TRUST_RELEASE_OPERATION, sourceId: hold.source_id, hold: hold.id, last_seen_at: hold.last_seen_at });
-  const requestId = `${key.slice(0, 8)}-${key.slice(8, 12)}-4${key.slice(13, 16)}-a${key.slice(17, 20)}-${key.slice(20, 32)}`;
-  const prior = await getWriteRequest(engine, principal, requestId);
+  let requestId = '';
+  let prior: WriteRequest | null = null;
+  for (let attempt = 0; ; attempt++) {
+    const key = digest({ operation: TRUST_RELEASE_OPERATION, sourceId: hold.source_id, hold: hold.id, last_seen_at: hold.last_seen_at, ...(attempt ? { attempt } : {}) });
+    requestId = `${key.slice(0, 8)}-${key.slice(8, 12)}-4${key.slice(13, 16)}-a${key.slice(17, 20)}-${key.slice(20, 32)}`;
+    prior = await getWriteRequest(engine, principal, requestId);
+    if (!prior || prior.state === 'committed' || !isTerminal(prior)) break;
+  }
   if (prior) { writeResponse(await waitForWrite(engine, prior, cfg, 60_000)); return true; }
   if (hold.status !== 'held') return false;
   const ref = `${hold.source_id}/${target.slug}`;
