@@ -119,9 +119,9 @@ function previewCommand(scope: RepairScope): string {
  * recovered by resetting that job once it is dead: its retry re-admits them at the entity page's current revision with
  * no model call, once the cause clears. Only an extraction whose open entity requests are all moved-entity refusals (the
  * entity walk) or all held-file refusals (the file walk) is re-admitted by one retry. A mixed extraction, a batch whose
- * follow-ups were refused too, an entity page replaced since, a job that completed or is gone, a source page written
- * again since the job's page write (the retry skips it as superseded), a writer-guard refusal and a batch with no page
- * write would replay the refusal or have no job to retry: those are extracted again. While the job still runs (a walk in
+ * follow-ups were refused too, an entity page replaced since, a job that completed or is gone, a page write the job's
+ * own page check now skips (written again since, or a narrowed writer grant), a writer-guard refusal and a batch with
+ * no page write would replay the refusal or have no job to retry: those are extracted again. While the job still runs (a walk in
  * progress leaves follow-ups open), an entity page that is still the admitted one is listed `pending:`.
  */
 async function factsRecovery(engine: BrainEngine, write: FailedWrite, extractions: Map<string, ExtractionRequest[]>): Promise<string> {
@@ -144,12 +144,13 @@ async function factsRecovery(engine: BrainEngine, write: FailedWrite, extraction
   }
   if (run?.status !== 'dead') return `${extractAgain}; its facts-absorb job ${run ? `is ${run.status}` : 'is gone'}, so gbrain facts retry-dead has no dead job to reset`;
   const source = await readFactsBackstopJobPage(engine, run.data);
-  if ('skipped' in source && (source.skipped === 'superseded' || source.skipped === 'page_missing')) {
-    return `${extractAgain}; ${origin ?? 'the source page'} changed after the page write its facts-absorb job extracts, so a job retry skips it`;
+  if ('skipped' in source) {
+    return source.skipped === 'superseded' || source.skipped === 'page_missing'
+      ? `${extractAgain}; ${origin ?? 'the source page'} changed after the page write its facts-absorb job extracts, so a job retry skips it`
+      : `${extractAgain}; a job retry would skip the page write (${source.skipped}), so gbrain facts retry-dead cannot recover it`;
   }
   return `recover: ${factsRetryDeadCommand('--reset', key)} (the next facts_drain pass retries the page's facts-absorb job, which re-admits the retained facts without a model call${write.error_code === 'source_changed' ? ' once the file check passes' : ''})`;
 }
-
 
 /** The command that produces an owner-internal write again, from current content. */
 function producerCommand(producer: string, sourceId: string): string {

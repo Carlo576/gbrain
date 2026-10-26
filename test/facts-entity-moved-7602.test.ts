@@ -269,6 +269,25 @@ for (const backend of testBackends()) {
     expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call); ${loser.slug} changed after the page write its facts-absorb job extracts, so a job retry skips it`]);
   }, { databaseUrl }), 120_000);
 
+  // Value: protects=a dead job whose page write its own retry would skip for a reason other than a newer write (here the writer's
+  // grant no longer covers the source page) is listed for re-extraction, not the reset; fails_when=factsRecovery offers recover: for
+  // any skip but superseded/page_missing; why_new=the row above covers superseded only; seam=the grant is narrowed by SQL on the
+  // writer row; no_claim=does not run the reset job
+  test(`#7602 [${backend}]: a refusal whose page write its job would skip (writer grant narrowed) is listed for re-extraction`, () => managedBrain(async brain => {
+    const { engine } = brain;
+    const { move, loser } = await setup(brain, 1);
+    const before = await loser.session();
+    before.entityMoveRetry = false;
+    const race = raceEntityReads(engine, 1, move);
+    expect((await publishManagedFacts(engine, before, loser.backstop, [fact(CLAIM_B)], 'private', loser.slug).catch(error => error).finally(race.restore)).code).toBe('revision_conflict');
+    const key = await factsAbsorbJob(engine, loser, 'dead');
+    expect((await factsListing(engine)).map(entry => entry.detail?.split(' (')[0])).toEqual([`recover: gbrain facts retry-dead --reset '${key}'`]);
+    const [writer] = await engine.executeRaw<{ principal_kind: string; principal_id: string }>('SELECT principal_kind, principal_id FROM persistence_requests WHERE id=$1::uuid', [loser.write]);
+    expect(writer!.principal_kind).toBe('local_cli');
+    expect(await engine.executeRaw("UPDATE persistence_local_writers SET grant_ceiling = jsonb_set(COALESCE(grant_ceiling, '{}'::jsonb), '{slugPrefixes}', '[\"people/\"]'::jsonb) WHERE id=$1::uuid RETURNING id", [writer!.principal_id])).toHaveLength(1);
+    expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call); a job retry would skip the page write (permission_denied), so gbrain facts retry-dead cannot recover it`]);
+  }, { databaseUrl }), 120_000);
+
   // Value: protects=repair failed-writes offers the job reset only for a dead facts-absorb job, and the reset's replay publishes the
   // retained facts; fails_when=a waiting or completed job is listed with retry-dead (a command that finds no dead job), or the replay
   // does not publish; why_new=the rows above never list a recoverable refusal; seam=the job's status is set by SQL; no_claim=does not
@@ -349,6 +368,39 @@ for (const backend of testBackends()) {
     expect(await claimB(engine)).toEqual([]);
     expect((await factsListing(engine)).map(entry => [entry.class, entry.detail])).toEqual([['producer_owned',
       're-extract: gbrain call extract_facts again on the current text of the source turn with a new request_id (one model call)']]);
+  }, { databaseUrl }), 120_000);
+
+  // Value: protects=the stored moved-entity refusal texts stay the ones pre-fix and current receipts carry, so a reword cannot
+  // silently stop the walk and the repair preview from matching stored rows; fails_when=any FACTS_ENTITY_MOVED_MESSAGES entry is
+  // reworded, dropped or reordered without a decision about stored receipts; why_new=the rows below iterate the list itself;
+  // seam=none; no_claim=does not prove every thrower uses these constants
+  test(`#7602 [${backend}]: the stored moved-entity refusal texts are frozen`, () => {
+    expect([...FACTS_ENTITY_MOVED_MESSAGES]).toEqual(['The fact entity changed after extraction admission.', 'The fact entity changed during preparation.',
+      'The fact deduplication state changed before publication.', 'The page changed during preparation.',
+      'The page changed after it was read. Read its current revision before retrying.']);
+  });
+
+  // Value: protects=a revision_conflict whose stored message is not a moved-entity text (the source page changed) is neither
+  // re-admitted by the walk nor listed by repair; fails_when=the predicate widens to every revision_conflict and re-admits facts
+  // whose source page moved; why_new=every other row stores a moved-entity text; seam=the stored message is set by SQL;
+  // no_claim=does not reproduce the source-page refusal path itself
+  test(`#7602 [${backend}]: a revision_conflict stored with the source-page text is not followed or listed`, () => managedBrain(async brain => {
+    const { engine } = brain;
+    const { move, loser } = await setup(brain, 1);
+    const before = await loser.session();
+    before.entityMoveRetry = false;
+    const race = raceEntityReads(engine, 1, move);
+    expect((await publishManagedFacts(engine, before, loser.backstop, [fact(CLAIM_B)], 'private', loser.slug).catch(error => error).finally(race.restore)).code).toBe('revision_conflict');
+    await engine.transaction(async tx => {
+      await declarePersistenceProtocol(tx);
+      expect(await tx.executeRaw("UPDATE persistence_requests SET error_message='The source page changed during fact extraction.' WHERE operation='extract_facts' AND slug=$1 AND state='conflict' RETURNING id", [TARGET])).toHaveLength(1);
+    });
+    await factsAbsorbJob(engine, loser, 'dead');
+    const requests = await entityRequests(engine);
+    expect((await resumeManagedFacts(engine, await loser.session()).catch(error => error)).code).toBe('revision_conflict');
+    expect(await entityRequests(engine)).toEqual(requests);
+    expect(await claimB(engine)).toEqual([]);
+    expect(await factsListing(engine)).toEqual([]);
   }, { databaseUrl }), 120_000);
 
   // Value: protects=a refusal stored with any moved-entity message (the admission, preparation, deduplication and coordinator kinds,
@@ -545,6 +597,43 @@ for (const backend of testBackends()) {
     expect({ inserted: result.inserted, refused: result.refused?.map(row => [row.slug, row.code]) }).toEqual({ inserted: 1, refused: [[OTHER, 'revision_conflict']] });
     expect(await claimB(engine)).toEqual([{ fact: CLAIM_B, source_markdown_slug: TARGET }]);
     expect(await engine.executeRaw('SELECT fact FROM facts WHERE fact=$1', [CLAIM_OTHER])).toEqual([]);
+  }, { databaseUrl }), 120_000);
+
+  // Value: protects=the entity walk stops when the moved requests it would follow carry different embedding signatures, and follows
+  // them once they match; fails_when=the sameSignature check is dropped and facts embedded under another model are admitted under
+  // the first request's signature; why_new=every other #7602 row retains one null signature; seam=none; no_claim=the second
+  // signature is stamped onto a stored receipt by SQL (one admission never mixes them)
+  test(`#7602 [${backend}]: moved requests whose retained embedding signatures differ are not followed until they match`, () => managedBrain(async brain => {
+    const { engine, ctx } = brain;
+    const { move, loser } = await setup(brain, 1);
+    await put(ctx, OTHER, 'company');
+    const before = await loser.session();
+    before.entityMoveRetry = false;
+    const race = raceEntityReads(engine, 1, async n => {
+      await move(n);
+      const other = (await engine.readPageSnapshot(OTHER, { sourceId: 'default' }))!;
+      await submitPageMutation(ctx, { operation: 'put_page', params: { slug: OTHER, request_id: randomUUID(), expected_revision: other.revision,
+        content: `---\ntype: company\ntitle: Example\n---\n${BODY} (moved)\n` } });
+    });
+    expect((await publishManagedFacts(engine, before, loser.backstop, [{ ...fact(CLAIM_OTHER), entity_slug: OTHER }, fact(CLAIM_B)], 'private', loser.slug)
+      .catch(error => error).finally(race.restore)).code).toBe('revision_conflict');
+    const requests = () => engine.executeRaw<{ slug: string; state: string; error_code: string | null }>(`SELECT slug, state, error_code FROM persistence_requests
+      WHERE operation='extract_facts' AND slug = ANY($1::text[]) AND intent->>'origin' LIKE '%chats/source-loser%' ORDER BY sequence`, [[OTHER, TARGET]]);
+    expect(await requests()).toEqual([{ slug: OTHER, state: 'conflict', error_code: 'revision_conflict' }, { slug: TARGET, state: 'conflict', error_code: 'revision_conflict' }]);
+    const signature = (value: unknown) => engine.transaction(async tx => {
+      await declarePersistenceProtocol(tx);
+      expect(await tx.executeRaw(`UPDATE persistence_requests SET intent=jsonb_set(intent, '{embedding}', $2::text::jsonb) WHERE operation='extract_facts'
+        AND slug=$1 AND state='conflict' AND intent->>'origin' LIKE '%chats/source-loser%' RETURNING id`, [OTHER, JSON.stringify(value)])).toHaveLength(1);
+    });
+    const published = () => engine.executeRaw<{ fact: string }>('SELECT fact FROM facts WHERE fact = ANY($1::text[]) ORDER BY fact', [[CLAIM_OTHER, CLAIM_B]]);
+    await signature({ model: 'openai:text-embedding-3-small', dimensions: 1536 });
+    const stopped = await resumeManagedFacts(engine, await loser.session()).catch(error => error);
+    expect([stopped.code, stopped.retryable]).toEqual(['revision_conflict', false]);
+    expect(await requests()).toHaveLength(2);
+    expect(await published()).toEqual([]);
+    await signature(null);
+    expect((await resumeManagedFacts(engine, await loser.session()))?.inserted).toBe(2);
+    expect((await published()).map(row => row.fact).sort()).toEqual([CLAIM_OTHER, CLAIM_B].sort());
   }, { databaseUrl }), 120_000);
 
   test(`#7602 [${backend}]: the facts-absorb job that lost the race completes in one attempt with one model call`, () => managedBrain(async brain => {
