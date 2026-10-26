@@ -1731,6 +1731,14 @@ Reasons: `no_file_form`, `declared_target`, `facts_lane`.
 
 More: [docs/guides/write-refusals.md#git_home_required](../../docs/guides/write-refusals.md#git_home_required)
 
+### git_index_conflict
+
+<a id="git_index_conflict"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A strict (canonical: git) write found a staged change of its path that is not committed, so it committed nothing and left the index as it was. | The door commits a path only while the checkout's index entry for it equals HEAD's. Committing over a staged change would overwrite it in the index or publish it under a gbrain commit, so the person who staged it decides first. | Commit the staged change, or unstage it (git restore --staged -- <path> keeps the file on disk), then retry the write with a new request_id. git diff --cached --name-only -- <path> prints nothing once it is resolved. | user | `repeat the read that failed` | 1 | no |
+
 ### git_index_locked
 
 <a id="git_index_locked"></a>
@@ -1808,6 +1816,14 @@ More: [docs/guides/write-refusals.md#git_protocol_required](../../docs/guides/wr
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The canonical commit is durable locally; its push will retry. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
+
+### git_target_changed
+
+<a id="git_target_changed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A strict (canonical: git) write's file changed on disk while it was being committed, so nothing was committed and the write was not published. | The door commits exactly the bytes the write published, and checks the file's hash against them before and after Git stores it. An edit landing in between would otherwise be committed while the database records other content; recovery leaves the changed file as it is. | Retry the write with a new request_id once the file has settled. | agent | `repeat the read that failed` | 1 | no |
 
 ### git_target_ignored
 
