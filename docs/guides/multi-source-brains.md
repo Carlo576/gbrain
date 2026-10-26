@@ -196,7 +196,9 @@ only in source-a."*
 A shared brain often holds one source per member or project, with one bot
 answering for several people. Give each member their own token, granted only
 the sources that member may read, and send each member's requests with that
-member's token:
+member's token. This is the supported production setup today: one
+`serve-http` API key per member, each with its own source grant. The server
+never learns who is asking from the request itself.
 
 ```bash
 gbrain auth create bot-alice-example
