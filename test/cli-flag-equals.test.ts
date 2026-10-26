@@ -15,6 +15,7 @@ import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
 import { END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, knownSwitches } from '../src/cli/flag-equals.ts';
 import { SYNC_FLAGS } from '../src/core/sync-flags.ts';
 import { strictSpecFor } from '../src/cli/strict-args.ts';
+import { surfaceFileSource } from './helpers/source-surface.ts';
 import { loadCuratedHelp } from '../src/cli/help/render.ts';
 import { parseAccessFlag, parseSurfaceFlag } from '../src/mcp/surface.ts';
 import { parseMovementArgs } from '../src/commands/sources-writer-movement.ts';
@@ -80,6 +81,7 @@ describe('#7619 table: every registered CLI_ONLY flag', () => {
       const legal = CLI_FLAG_REGISTRY[command];
       if (!legal || PASSTHROUGH.has(command) || OWN_EQUALS_PARSERS.has(command)) continue;
       for (const flag of legal) {
+        if (EQUALS_READERS[command]?.includes(flag)) continue;
         for (const value of ['', '--x', '-y', '-h']) {
           if (await refusalFor(command, [`${flag}=${value}`]) === null) wrong.push(`${command} ${flag}=${value} accepted`);
         }
@@ -113,10 +115,19 @@ describe('#7619 split rules', () => {
     }
   });
 
-  test('a reader path refuses an empty or flag-like = value instead of keeping it', async () => {
-    expect(await refusalFor('skillpack', ['sync', '--workspace='])).toContain('the value is empty or looks like a flag');
-    expect(await refusalFor('recall', ['--source-id=--json'])).toContain('the value is empty or looks like a flag');
-    expect(await argvFor('skillpack', ['sync', '--workspace=/w'])).toEqual(['sync', '--workspace=/w']);
+  test('after a bare -- the handler reads past, an unregistered or misspelled = token refuses', async () => {
+    expect(await refusalFor('auth', ['create', 'agent-a', '--', '--Scopes=read'])).toContain('not a flag of this command');
+    expect(await refusalFor('serve', ['--', '--Access=read-only'])).toContain('not a flag of this command');
+    expect(await refusalFor('serve', ['--', '--definitely-not-a-flag=x'])).toContain('--definitely-not-a-flag=…');
+    expect(await argvFor('frontmatter', ['validate', '--', '--Path=x.md'])).toEqual(['validate', '--', '--Path=x.md']);
+  });
+
+  test('a true/false word on a switch with no table entry never suggests the value form', async () => {
+    for (const [command, args] of [['transcripts', ['recover', 'codex', '--apply=false']], ['trust', ['claim-sources', '--accept-all=no']], ['dream', ['--unsafe-bypass-dream-guard=off']]] as const) {
+      const message = await refusalFor(command, [...args]);
+      expect(message).toContain('takes no true/false value');
+      expect(message).not.toContain('<value>');
+    }
   });
 
   test('sources pull --path= refuses instead of falling through to the engine route', async () => {
@@ -124,7 +135,7 @@ describe('#7619 split rules', () => {
   });
 
   test('the = gate list matches the hand-dispatched search dashboard subcommands', () => {
-    const src = readFileSync('src/cli/main.ts', 'utf8');
+    const src = surfaceFileSource('cli', 'src/cli/main.ts');
     const dispatch = /command === 'search' && (\[[^\]]+\])\.includes\(subArgs\[0\] \?\? ''\)/.exec(src)?.[1];
     const gate = /const SEARCH_DASHBOARD_SUBCOMMANDS = (\[[^\]]+\]);/.exec(src)?.[1];
     expect(dispatch).toBeDefined();

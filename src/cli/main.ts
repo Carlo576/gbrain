@@ -399,6 +399,12 @@ async function main() {
       printCliOnlyHelp(command);
       return;
     }
+  }
+  // #7619: after the help printers that run no handler, so a handler never sees an = token the gate refuses.
+  const flagArgs = await cliOnlyFlagArgs(command, subArgs);
+  if ('refusal' in flagArgs) exitCliError(flagArgs.refusal, command);
+  subArgs = flagArgs.args;
+  if (helpRequested) {
     // Self-help members whose handler answers --help before it touches the
     // engine. Without this they fall through to the normal dispatch, which
     // connects first — so `gbrain models --help` on a machine with no brain
@@ -406,10 +412,6 @@ async function main() {
     // unreachable. That is the state a reader is most likely to be in.
     if (await printSelfHelpWithoutEngine(command, subArgs)) return;
   }
-  // #7619: after the help block, so only a path that printed help skips the = gate.
-  const flagArgs = await cliOnlyFlagArgs(command, subArgs);
-  if ('refusal' in flagArgs) exitCliError(flagArgs.refusal, command);
-  subArgs = flagArgs.args;
 
   // #6114: destructive subcommands refuse a token they would ignore (exit 2) before dispatch.
   const strictRefusal = helpRequested ? null : strictArgsRefusal(command, subArgs);

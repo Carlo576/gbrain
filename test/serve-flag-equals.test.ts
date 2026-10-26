@@ -151,6 +151,20 @@ describe('serve --flag=value', () => {
     }
   });
 
+  test('the direct auth.ts entry refuses an unknown flag instead of minting a full-access token', () => {
+    const direct = spawnSync('bun', ['--no-env-file', 'run', 'src/commands/auth.ts', 'create', 'bot-typo-example', '--Scopes=read'], { cwd: process.cwd(), env, encoding: 'utf8', input: '', timeout: 30_000 });
+    expect(direct.status).toBe(2);
+    expect(direct.stderr).toContain('unknown flag --Scopes');
+    expect(cli(['auth', 'list']).stdout).not.toContain('bot-typo-example');
+  });
+
+  test('a self-help handler never runs on the help path with an = token the gate refuses', () => {
+    const r = cli(['connectors', 'auth', 'chatgpt', '--token=placeholder-example', '--help']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('--token=…');
+    expect(r.stderr).not.toContain('placeholder-example');
+  });
+
   test('the direct auth.ts entry runs auth with the separate form', () => {
     const direct = spawnSync('bun', ['--no-env-file', 'run', 'src/commands/auth.ts', 'create', 'bot-direct-ok-example', '--scopes', 'read'], { cwd: process.cwd(), env, encoding: 'utf8', input: '', timeout: 30_000 });
     expect(direct.status).toBe(0);

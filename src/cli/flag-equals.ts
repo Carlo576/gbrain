@@ -12,8 +12,12 @@
  *    the value (`--dry-run=true` would write). Without the command's own
  *    table, that cross-command evidence picks the bare-switch message, so
  *    `--yes=n` is never answered with `--yes <value>`;
- *  - refuse an empty value or one that looks like a flag (`-y`, `--x`), on
- *    reader paths too (`--workspace=` with an unset variable);
+ *  - refuse a true/false word (`--apply=false`) with the bare-switch fix
+ *    even without the command's own table, so it never suggests
+ *    `--apply false`, which turns the switch on;
+ *  - after a bare `--` the handler reads past, refuse an `=` token that is
+ *    not a registered flag: the unknown-flag validator stops at `--`;
+ *  - refuse an empty value or one that looks like a flag (`-y`, `--x`);
  *  - keep the token where the handler on this path reads the `=` form
  *    (EQUALS_READERS, keyed by command or `command sub`);
  *  - split `--flag value` when the command's own table declares a value;
@@ -215,36 +219,52 @@ export function knownSwitches(): Promise<ReadonlySet<string>> {
 const EQUALS_TOKEN = /^(--[a-z0-9][a-z0-9-]*|-[A-Za-z])=([\s\S]*)$/;
 
 export async function splitFlagEquals(command: string, args: readonly string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
-  if (!args.some(a => EQUALS_TOKEN.test(a))) return { args: [...args] };
+  if (!args.some(a => /^-[^=\s]*=/.test(a))) return { args: [...args] };
   const legal = CLI_FLAG_REGISTRY[command];
   const readers = [...EQUALS_READERS[command] ?? [], ...EQUALS_READERS[`${command} ${args[0]}`] ?? []];
   let types: Map<string, string> | undefined;
   const out: string[] = [];
+  let pastDashDash = false;
   for (let i = 0; i < args.length; i++) {
     const token = args[i]!;
     if (token === '--' && END_OF_OPTIONS.has(`${command} ${args[0]}`)) return { args: [...out, ...args.slice(i)] };
+    pastDashDash ||= token === '--';
     const m = EQUALS_TOKEN.exec(token);
     const flag = m?.[1];
     if (flag !== undefined && !flag.startsWith('--')) {
       return { refusal: usageError(`gbrain ${command}: \`${flag}=…\`: a short flag takes no =.`, `Write ${flag} on its own, or ${flag} <value> with the value as the next argument.`) };
     }
     const registered = flag !== undefined && (!legal || legal.includes(flag) || flag.startsWith('--no-') && legal.includes(`--${flag.slice(5)}`));
-    const value = m?.[2] ?? '';
-    const flagLike = value === '' || /^-[-A-Za-z]/.test(value);
-    if (!m || !registered || readers.includes(flag) && !flagLike) { out.push(token); continue; }
+    const unvalidated = pastDashDash && !registered && /^--[^=\s]+=/.exec(token);
+    if (unvalidated) return { refusal: usageError(`gbrain ${command}: \`${unvalidated[0]}…\`: not a flag of this command, and its handler reads flags after --.`, 'Check the spelling: flags are lowercase words joined by hyphens.') };
+    if (!m || !registered || readers.includes(flag)) { out.push(token); continue; }
+    const value = m[2]!;
     if (flag === '--json' && value === 'true') { out.push(flag); continue; }
     types ??= new Map((await loadCuratedHelp(command))?.flags.map(f => [f.name, f.type]));
     const own = types.get(flag) ?? (command === 'sync' ? (SYNC_FLAGS as Record<string, { arity: string }>)[flag]?.arity : undefined);
     const isSwitch = own !== undefined ? own === 'boolean' : flag.startsWith('--no-') || COMMAND_SWITCHES[command]?.includes(flag) || (await knownSwitches()).has(flag);
     const refusal = isSwitch
       ? [`${flag} is a switch and takes no value`, `Write ${flag} on its own, or leave it out.`]
-      : flagLike
+      : value === '' || /^-[-A-Za-z]/.test(value)
         ? [`the value is empty or looks like a flag`, `Write ${flag} <value> with the value as the next argument.`]
-        : own === undefined
+        : own === undefined && /^(true|false|yes|no|y|n|on|off)$/i.test(value)
+          ? [`${flag} takes no true/false value`, `Write ${flag} on its own to turn it on, or leave it out to turn it off.`]
+          : own === undefined
           ? [`this command takes ${flag} <value> as two arguments`, `Write ${flag} <value>, or ${flag} on its own if it is a switch.`]
           : null;
     if (refusal) return { refusal: usageError(`gbrain ${command}: \`${flag}=…\`: ${refusal[0]}.`, refusal[1]!) };
     out.push(flag, value);
   }
   return { args: out };
+}
+
+/** A command module's direct `bun run` entry: main's pass-through for own `=` parsers, the `=` rule, and main's unknown-flag check (which stops at `--`). */
+export async function directEntryArgs(command: string, raw: string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
+  if (OWN_EQUALS_PARSERS.has(`${command} ${raw[0]}`)) return { args: raw };
+  const split = await splitFlagEquals(command, raw);
+  if ('refusal' in split) return split;
+  const legal = new Set(CLI_FLAG_REGISTRY[command]);
+  const end = split.args.indexOf('--');
+  const unknown = split.args.slice(0, end < 0 ? undefined : end).map(a => /^--[^=\s]+/.exec(a)?.[0]).find(f => f && !legal.has(f) && !(f.startsWith('--no-') && legal.has(`--${f.slice(5)}`)));
+  return unknown ? { refusal: usageError(`gbrain ${command}: unknown flag ${unknown}.`, `Run gbrain ${command} --help for the flags it takes.`) } : split;
 }
