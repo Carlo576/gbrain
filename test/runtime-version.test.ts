@@ -12,7 +12,9 @@
  * that a refusal throws, not what it tells the user.
  */
 import { describe, expect, spyOn, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MINIMUM_BUN_VERSION, SECURE_BUN_VERSION, assertSupportedBun, exitOnUnsupportedBun, unsupportedBunMessage } from '../src/core/runtime-version.ts';
 import { checkBunRuntime } from '../src/commands/doctor/checks/upgrade-health.ts';
@@ -124,5 +126,27 @@ describe('stated Bun floor', () => {
     expect(pkg.engines.bun).toBe(`>=${MINIMUM_BUN_VERSION}`);
     const cloud = readFileSync(join(root, 'templates/bootstrap/cloud-setup-script.sh'), 'utf8');
     expect(/Bun\.semver\.satisfies\(Bun\.version, ">=([\d.]+)"\)/.exec(cloud)?.[1]).toBe(MINIMUM_BUN_VERSION);
+  });
+
+  test('the cloud setup script stops before cloning when the Bun npm installed is below the floor', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gb-cloud-bun-'));
+    try {
+      const bin = join(dir, 'bin');
+      const prefix = join(dir, 'prefix');
+      mkdirSync(join(prefix, 'bin'), { recursive: true });
+      mkdirSync(bin);
+      const tool = (path: string, body: string) => { writeFileSync(path, `#!/bin/sh\n${body}`); chmodSync(path, 0o755); };
+      const oldBun = '[ "$1" = --version ] && echo 1.4.3 && exit 0\nexit 1\n';
+      tool(join(bin, 'bun'), oldBun);
+      tool(join(prefix, 'bin', 'bun'), oldBun);
+      tool(join(bin, 'npm'), `[ "$1 $2" = "prefix -g" ] && echo '${prefix}'\nexit 0\n`);
+      tool(join(bin, 'git'), 'echo fake-git-called >&2\nexit 97\n');
+      const r = spawnSync('bash', [join(root, 'templates/bootstrap/cloud-setup-script.sh')], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, encoding: 'utf8' });
+      expect(r.stderr).not.toContain('fake-git-called');
+      expect(r.stderr).toContain('did not report 1.4.4 or newer');
+      expect(r.status).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

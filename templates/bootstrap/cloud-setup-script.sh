@@ -14,7 +14,7 @@ if [ -z "$GBRAIN_BUN" ] || ! bun_ok "$GBRAIN_BUN"; then
   npm install -g bun
   GBRAIN_BUN="$(npm prefix -g)/bin/bun"
   # `gbrain --version` below answers on any Bun, so check the floor here.
-  bun_ok "$GBRAIN_BUN" || { echo "gbrain: npm installed Bun $("$GBRAIN_BUN" --version), below the 1.4.4 minimum" >&2; exit 1; }
+  bun_ok "$GBRAIN_BUN" || { echo "gbrain: the Bun npm installed ($GBRAIN_BUN) did not report 1.4.4 or newer" >&2; exit 1; }
 fi
 export PATH="$(dirname "$GBRAIN_BUN"):$PATH"
 
