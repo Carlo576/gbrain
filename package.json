@@ -243,7 +243,7 @@
     "@electric-sql/pglite"
   ],
   "engines": {
-    "bun": ">=1.4.0"
+    "bun": ">=1.4.4"
   },
   "license": "MIT",
   "version": "0.60.468.0",

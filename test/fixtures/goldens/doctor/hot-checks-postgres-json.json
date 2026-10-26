@@ -285,7 +285,7 @@
           {
             "category": "ops",
             "elapsed_ms": "<volatile>",
-            "message": "Bun <bun-version> (minimum 1.4.0)",
+            "message": "Bun <bun-version> (minimum 1.4.4)",
             "name": "bun_runtime",
             "status": "ok"
           },
@@ -5032,7 +5032,7 @@
           {
             "category": "ops",
             "elapsed_ms": "<volatile>",
-            "message": "Bun <bun-version> (minimum 1.4.0)",
+            "message": "Bun <bun-version> (minimum 1.4.4)",
             "name": "bun_runtime",
             "status": "ok"
           },
