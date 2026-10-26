@@ -55,7 +55,7 @@ export interface ClassifyGbrainBinaryOptions {
 const REAL_REPO_MARKER = 'garrytan/gbrain';
 
 /** The documented install command (the `latest-stable` release ref). */
-export const GBRAIN_INSTALL_ARGV = ['bun', 'install', '-g', `github:${REAL_REPO_MARKER}#latest-stable`];
+const INSTALL_ARGV = ['bun', 'install', '-g', `github:${REAL_REPO_MARKER}#latest-stable`];
 
 /** #218 recovery: a Bun global install can skip the postinstall that applies schema migrations. */
 const SCHEMA_RECOVERY_ARGV = ['gbrain', 'apply-migrations', '--yes', '--no-autopilot-install'];
@@ -63,7 +63,7 @@ const SCHEMA_RECOVERY_ARGV = ['gbrain', 'apply-migrations', '--yes', '--no-autop
 /** The documented install/remediation path, reused in doctor output. */
 export const NPM_SQUAT_REMEDIATION =
   `Remove the unrelated package (\`bun remove -g gbrain\` or \`npm uninstall -g gbrain\`) ` +
-  `and install/upgrade only via the documented path: \`${GBRAIN_INSTALL_ARGV.join(' ')}\` ` +
+  `and install/upgrade only via the documented path: \`${INSTALL_ARGV.join(' ')}\` ` +
   `(or \`git clone https://github.com/${REAL_REPO_MARKER}.git && bun install && bun link\`). ` +
   `If the schema is then behind (#218), run \`${SCHEMA_RECOVERY_ARGV.join(' ')}\`.`;
 
@@ -227,7 +227,7 @@ function squatFix(foreign: ClassifiedGbrainBinary, realOnPath: boolean, bunGloba
   const viaBun = (bunRoot !== undefined && dir.startsWith(bunRoot)) || /[\\/]\.bun[\\/]install[\\/]global[\\/]/.test(dir);
   const verify = { argv: ['gbrain', 'doctor', '--only', 'npm_squat', '--json'] };
   const reinstall: Action = {
-    argv: GBRAIN_INSTALL_ARGV, consent: ['persistent_install'], actor: 'agent', requires_exclusive: false, verify,
+    argv: INSTALL_ARGV, consent: ['persistent_install'], actor: 'agent', requires_exclusive: false, verify,
     why: 'No real gbrain is left on PATH. This installs it from the latest-stable release ref, the only supported source.',
     then: {
       argv: SCHEMA_RECOVERY_ARGV, consent: [], actor: 'agent', requires_exclusive: false,
