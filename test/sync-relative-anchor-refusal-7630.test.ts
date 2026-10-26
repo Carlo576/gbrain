@@ -508,6 +508,35 @@ for (const backend of testBackends()) {
       expect(seen.find(s => s.sourceId === 'notes-a')).toEqual({ sourceId: 'notes-a', brainDir: null });
     }, 120_000);
 
+    // Value: protects=a cycle on a legacy "." default row refuses its sync phase even when run from the repo, instead of syncing on
+    //   the global anchors; fails_when=resolveSourceForDir finds no source and performSync advances the global sync.last_commit while
+    //   default's anchor stays stale; why_new=the cycle cases above never reach runPhaseSync with an absolute sync.repo_path; seam=none;
+    //   no_claim=the other cycle phases
+    test('a cycle on a legacy "." default row refuses its sync phase from the repo and leaves every anchor untouched', async () => {
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-7630-cycle-')));
+      try {
+        execSync('git init -q && git config user.email t@example.com && git config user.name T', { cwd: repo, stdio: 'pipe' });
+        writeFileSync(join(repo, 'note.md'), '---\ntype: note\ntitle: Note\n---\n\nA note in the brain repo.\n');
+        execSync('git add -A && git commit -q -m initial', { cwd: repo, stdio: 'pipe' });
+        await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+        await engine.setConfig('sync.repo_path', repo);
+        process.chdir(repo);
+        const { runCycle } = await import('../src/core/cycle.ts');
+        const report = await withEnv({ GBRAIN_HOME: home, GBRAIN_SOURCE: undefined }, () => runCycle(engine, { brainDir: repo, phases: ['sync'], pull: false }));
+        const phase = report.phases.find(p => p.phase === 'sync')!;
+        expect(phase.status).toBe('fail');
+        expect(phase.code).toBe('sync_anchor_relative');
+        expect(phase.fix?.next).toBe('ask_user');
+        expect(phase.fix?.argv).toEqual(['gbrain', 'sources', 'set-path', 'default', '<dir>']);
+        expect(await engine.getConfig('sync.last_commit')).toBeFalsy();
+        expect(await engine.executeRaw("SELECT local_path, last_commit FROM sources WHERE id='default'")).toEqual([{ local_path: '.', last_commit: null }]);
+        expect(await pageCount()).toBe(0);
+      } finally {
+        process.chdir(folder);
+        rmSync(repo, { recursive: true, force: true });
+      }
+    }, 120_000);
+
     // Value: protects=the repair command (sources set-path) never treats a sibling's relative local_path as the cwd's tree, and the
     //   #2018 write-through leak guard fails closed on it wherever gbrain runs; fails_when=assertNoOverlappingPath realpaths "." to the
     //   cwd, so set-path refuses overlapping_path, or otherSourceOwning ignores the relative sibling (or matches it only when run from
