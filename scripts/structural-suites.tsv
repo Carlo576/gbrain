@@ -202,6 +202,7 @@ test/gbrain-owned-page-types.test.ts	#5881 gbrain-owned page types are declared 
 test/get-page-federated-scope.test.ts	#2555 get_chunks federated scope	5	source-surface-helper
 test/get-page-federated-scope.test.ts	#4275 alias hop scope: archived sources, include_deleted, fuzzy precedence, grant precedence	5	source-surface-helper
 test/grant-execution-prerequisites.test.ts	execution prerequisite table	1	readFileSync
+test/guard-definer-source.test.ts	guard definitions keep SECURITY DEFINER (#7632)	2	readFileSync
 test/harness-onboarding.test.ts	harness identity and private handoff	6	readFileSync
 test/hook-command.serial.test.ts	user-prompt	18	source-surface-helper
 test/hook-push-spawn-env.test.ts	spawnDetachedPush env handoff	2	readFileSync
