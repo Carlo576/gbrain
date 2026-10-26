@@ -299,7 +299,7 @@ describe('#7619 split rules', () => {
       'src/commands/eval-conversation-parser.ts': ['eval conversation-parser'],
       'src/commands/eval-takes-quality.ts': ['eval takes-quality'],
       'src/commands/export.ts': ['export'],
-      'src/commands/forget-purge.ts': ['forget'],
+      'src/commands/forget-purge.ts': ['forget', 'forget --purge'],
       'src/commands/frontmatter-install-hook.ts': ['frontmatter install-hook'],
       'src/commands/frontmatter.ts': ['frontmatter validate', 'frontmatter audit'],
       'src/commands/graph-query.ts': ['graph-query'],
@@ -492,7 +492,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
   // Value: protects=a split value never becomes the first numeric/slug target (forget --purge --reason=3 34 must not hit fact 3); fails_when=a refusal turns into a split or keep; why_new=rows only asserted not-null; seam=none; no_claim=handler behavior after a split (argv-level only)
   test('a flag value never becomes the numeric or slug target of a mutating subcommand', async () => {
     for (const [command, args] of [
-      ['forget', ['--purge', '--reason=3', '34', '--dry-run']],
+      ['forget', ['--reason=3', '34']],
       ['edge-proposals', ['accept', '--limit=3', '7']], ['edge-proposals', ['accept', '--row=3', '7']],
       ['decide', ['proposals', 'accept', '--limit=3', '7']],
       ['loops', ['drop', '--note=7', '12']], ['pages', ['unpurge', '--source-id=people/alice-example', 'people/bob-example']],
@@ -504,6 +504,17 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
       expect('refusal' in r && r.refusal.message).toContain(`${token.split('=')[0]}=…`);
       expect('refusal' in r && r.refusal.message).not.toContain(token);
     }
+  });
+
+  test('forget --purge keeps --reason= whole, so its value never becomes the purge target', async () => {
+    expect(await cliOnlyFlagArgs('forget', ['--purge', '--reason=3', '34', '--dry-run'])).toEqual({ args: ['--purge', '--reason=3', '34', '--dry-run'] });
+  });
+
+  test('repos runs the sources handler, so it keeps the = forms sources keeps', async () => {
+    expect(await cliOnlyFlagArgs('repos', ['status', '--limit=5'])).toEqual({ args: ['status', '--limit=5'] });
+    expect(await cliOnlyFlagArgs('repos', ['connect', '--url=https://a.example'])).toEqual({ args: ['connect', '--url=https://a.example'] });
+    const r = await cliOnlyFlagArgs('repos', ['add', 'x', '--path=/tmp/x']);
+    expect('refusal' in r && r.refusal.message).toContain('--path=…');
   });
 
   test('a short flag with = refuses instead of being ignored or taken as consent', async () => {

@@ -98,6 +98,8 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   features: ['--max-usd', '--max-cost'],
   // recall.ts:1183-1188 runForget (plain) and forget-purge.ts:44 flagValue (:114-123, purge); --match is purge-only, ignored by plain forget in any form.
   forget: ['--request-id', '--source', '--match'],
+  // forget-purge.ts:131 flagValue --reason (runForgetPurge, routed on --purge at recall.ts:1170); plain forget reads only the separate token (recall.ts:1181).
+  'forget --purge': ['--reason'],
   // frontmatter.ts:356 runValidate.
   'frontmatter validate': ['--path'],
   // frontmatter.ts:667 runAudit.
@@ -195,6 +197,9 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   upgrade: ['--channel'],
 };
 
+/** Commands that run another command's handler on the same argv (`repos` is runSources, cli/commands/repos.ts:18): the = rule reads the target's keys. */
+export const READER_ALIASES: Readonly<Record<string, string>> = { repos: 'sources' };
+
 /**
  * Commands and subcommands whose handler parses `--flag value` and
  * `--flag=value` itself on every path, refusing `=` on its own switches:
@@ -242,8 +247,9 @@ const EQUALS_TOKEN = /^(--[a-z0-9][a-z0-9-]*|-[A-Za-z])=([\s\S]*)$/;
 export async function splitFlagEquals(command: string, args: readonly string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
   if (!args.some(a => /^-[^=\s]*=/.test(a))) return { args: [...args] };
   const legal = CLI_FLAG_REGISTRY[command];
-  const sub = command === 'sync' && args[0] !== 'unblock' && args[0] !== 'trigger' && args.includes('--status') ? 'status' : args[0];
-  const readers = [...EQUALS_READERS[command] ?? [], ...EQUALS_READERS[`${command} ${sub}`] ?? []];
+  const keyed = READER_ALIASES[command] ?? command;
+  const sub = command === 'sync' && args[0] !== 'unblock' && args[0] !== 'trigger' && args.includes('--status') ? 'status' : command === 'forget' && args.includes('--purge') ? '--purge' : args[0];
+  const readers = [...EQUALS_READERS[keyed] ?? [], ...EQUALS_READERS[`${keyed} ${sub}`] ?? []];
   let types: Map<string, string> | undefined;
   const out: string[] = [];
   const where = args[0] && !args[0].startsWith('-') ? `gbrain ${command} ${args[0]}` : `gbrain ${command}`;

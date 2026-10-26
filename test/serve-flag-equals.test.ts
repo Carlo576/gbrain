@@ -102,14 +102,14 @@ describe('serve --flag=value', () => {
     expect(list.stdout + list.stderr).not.toContain('bot-example');
   });
 
-  // Value: protects=--yes=n refuses instead of consenting and a split value never retargets forget; brain left intact; fails_when=the entry drops or splits these tokens; why_new=in-process rows never checked the brain afterwards; seam=none; no_claim=a fact-level purge check (no facts in the hermetic brain)
-  test('reinit-pglite --yes=n and forget --purge --reason=3 34 refuse before touching the brain', () => {
+  // Value: protects=--yes=n refuses instead of consenting and a split value never retargets plain forget (it reads --reason only as two arguments; the purge path keeps the = token whole); brain left intact; fails_when=the entry drops or splits these tokens; why_new=in-process rows never checked the brain afterwards; seam=none; no_claim=a fact-level purge check (no facts in the hermetic brain)
+  test('reinit-pglite --yes=n and forget --reason=3 34 refuse before touching the brain', () => {
     const brainDir = join(home, '.gbrain');
     const before = readdirSync(brainDir).sort();
     expect(existsSync(join(brainDir, 'brain.pglite'))).toBe(true);
     for (const [args, message] of [
       [['reinit-pglite', '--yes=n'], 'Write --yes on its own'],
-      [['forget', '--purge', '--reason=3', '34', '--yes'], 'takes --reason <value> as two arguments'],
+      [['forget', '--reason=3', '34'], 'takes --reason <value> as two arguments'],
     ] as const) {
       const r = cli([...args]);
       expect(r.status).toBe(2);

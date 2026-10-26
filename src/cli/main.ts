@@ -42,7 +42,7 @@ import { currentCliWriteWait } from '../core/persistence/write-wait.ts';
 import { isScopeErrorCode } from '../core/error-catalogue.ts';
 import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict, writeStdoutFinal } from '../core/cli-force-exit.ts';
 import { printCuratedHelp } from './help/render.ts';
-import { OWN_EQUALS_PARSERS, findUnknownFlag, splitFlagEquals } from './flag-equals.ts';
+import { OWN_EQUALS_PARSERS, READER_ALIASES, findUnknownFlag, splitFlagEquals } from './flag-equals.ts';
 import { printHelp } from './top-help.ts';
 import { curatedFlagError } from './help/validate.ts';
 import { cliCommandOf, exitCliError, exitOnRepairFailed, unknownFlagError, usageError, writeCliError, writeCliNotice, writeFatalCliError } from './cli-error.ts';
@@ -1330,8 +1330,8 @@ export function validateCommandFlags(command: string, subArgs: string[]): string
 
 /** #7619: the argv a CLI_ONLY handler receives, `--flag=value` split or refused (cli/flag-equals.ts); commands with their own `=`-aware parser keep it. */
 export async function cliOnlyFlagArgs(command: string, subArgs: string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
-  const handParsedSearch = command === 'search' && (SEARCH_SUBCOMMANDS as readonly string[]).includes(subArgs[0] ?? '');
-  if (!CLI_ONLY.has(command) && !handParsedSearch || equalsExempt(command, subArgs) || strictSpecFor(command, subArgs) || OWN_EQUALS_PARSERS.has(command) || OWN_EQUALS_PARSERS.has(`${command} ${subArgs[0]}`)) return { args: subArgs };
+  const handParsedSearch = command === 'search' && (SEARCH_SUBCOMMANDS as readonly string[]).includes(subArgs[0] ?? ''), keyed = READER_ALIASES[command] ?? command;
+  if (!CLI_ONLY.has(command) && !handParsedSearch || equalsExempt(command, subArgs) || strictSpecFor(command, subArgs) || OWN_EQUALS_PARSERS.has(keyed) || OWN_EQUALS_PARSERS.has(`${keyed} ${subArgs[0]}`)) return { args: subArgs };
   return splitFlagEquals(command, subArgs);
 }
 
