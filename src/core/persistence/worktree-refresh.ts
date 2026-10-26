@@ -102,6 +102,12 @@ function assertRefreshOwner<B extends { owner_host_id: string | null; local_path
 }
 const writerStatusFix = (why: string, sourceId?: string): Action => readFix(why,
   { argv: ['gbrain', 'sources', 'writer', 'status', ...(sourceId ? ['--source', sourceId] : []), '--json'] });
+/** #7685: `refresh_in_progress` carries a structured fix: the writer status read that says whether the holder is alive and, for an orphan, names `--resume`. */
+function inProgress(cause: string, fix: string, sourceId: string, refreshId?: string): OperationError {
+  const error = refusal('refresh_in_progress', cause, fix, refreshId);
+  error.fix = writerStatusFix(`Shows the active refresh's holder and liveness, read-only: a live one finishes on its own; an orphaned one names gbrain sources refresh ${sourceId} --resume, which the next plain refresh also runs by itself.`, sourceId);
+  return error;
+}
 const q = (value: string) => /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 
 /** Hardened git: no prompts, no user hooks, untranslated output, bounded. */
@@ -223,8 +229,8 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
   assertRefreshOwner(binding, sourceId, 'move its checkout');
   const root = binding.local_path;
   const active = await readActiveRefresh(engine, binding.worktree_id);
-  if (active) throw refusal('refresh_in_progress', `Refresh ${active.id} of this worktree is ${active.state}, held by ${describeHolder(holderOf(active))}; only one refresh per worktree runs at a time.`,
-    `gbrain sources refresh ${sourceId} --resume`, active.id);
+  if (active) throw inProgress(`Refresh ${active.id} of this worktree is ${active.state}, held by ${describeHolder(holderOf(active))}; only one refresh per worktree runs at a time.`,
+    `gbrain sources refresh ${sourceId} --resume`, sourceId, active.id);
   if (binding.state !== 'active' || await worktreeRecoveryPending(engine, binding)) throw refusal('refresh_recovery_required',
     'Publication or topology recovery is pending on this worktree; the checkout must not move until it is recovered.',
     `gbrain sources writer status ${sourceId}, let the owner finish recovery, then gbrain sources refresh ${sourceId}`);
@@ -450,7 +456,7 @@ async function refreshOnce(engine: BrainEngine, sourceId: string, opts: RefreshO
       return { ...base, status: blocked.length ? 'sync_blocked' : 'already_current', synced, ...(blocked.length ? { sync_blocked: blocked, next: blocked.map(b => b.resume).join(' ; ') } : {}) };
     }
     const refreshLock = await acquireNativeLock(refreshLockPath(plan.binding.worktree_id), { timeoutMs: 1000 });
-    if (!refreshLock) throw refusal('refresh_in_progress', 'Another process is refreshing this worktree right now.', `gbrain sources refresh ${sourceId} --resume`);
+    if (!refreshLock) throw inProgress('Another process is refreshing this worktree right now.', `gbrain sources refresh ${sourceId} --resume`, sourceId);
     try {
       const principal = await topologyPrincipal(engine);
       const row = await fenceDraining(engine, sourceId, plan, principal);
@@ -639,7 +645,7 @@ async function resumeOrAbandon(engine: BrainEngine, sourceId: string, opts: Refr
     old_head: null, target_head: null, upstream_ref: null, preserved_uncommitted: [], synced: [], next: `gbrain sources refresh ${sourceId}` };
   if (!active) return empty;
   const lock = await acquireNativeLock(refreshLockPath(binding.worktree_id), { timeoutMs: 1000 }).catch(() => null as NativeLockHandle | null);
-  if (!lock) throw refusal('refresh_in_progress', `Refresh ${active.id} is still running in another process.`, `Wait for it, then gbrain sources refresh ${sourceId} --resume`, active.id);
+  if (!lock) throw inProgress(`Refresh ${active.id} is still running in another process.`, `Wait for it, then gbrain sources refresh ${sourceId} --resume`, sourceId, active.id);
   try {
     return await withGit(async git => {
       const head = await headOf(git, root);

@@ -70,8 +70,9 @@ export function printRefreshOutcome(outcome: { result: WorktreeRefreshResult } |
   }
   const error = outcome.error;
   // F0's legacy refusal keys stay (its `fix` is the stored command string); the v1 envelope keys ride beside them (D1).
+  // #7685: a refusal that carries a structured fix (argv, actor, ask_user) emits it as the v1 `fix`; the prose stays in `suggestion`.
   const env = toAgentError(error, { transport: 'cli', command: 'sources refresh', render: cliRenderContext() });
-  const refusal = { status: 'refused', code: error.code, cause: error.message, fix: error.suggestion ?? null, docs: error.docs ?? null,
+  const refusal = { status: 'refused', code: error.code, cause: error.message, fix: error.fix && env.fix ? env.fix : error.suggestion ?? null, docs: error.docs ?? null,
     ...(error.detail ? { detail: error.detail } : {}),
     error: env.error, message: env.message, suggestion: env.suggestion, docs_cmd: env.docs_cmd, class: env.class, retryable: env.retryable,
     contract_version: env.contract_version };

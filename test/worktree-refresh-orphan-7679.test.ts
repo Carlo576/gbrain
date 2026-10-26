@@ -26,6 +26,8 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { runSourcesRefresh } from '../src/commands/sources-refresh.ts';
+import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
@@ -165,6 +167,13 @@ test('#7679: a live refresh is never stolen: owner recovery, a plain refresh and
           const refused = await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_in_progress');
           expect(refused.message).toContain(`pid ${process.pid}`);
           await refusedWith(refreshWorktree(f.engine, f.alpha, { resume: true }), 'refresh_in_progress');
+          // #7685: the --json refusal carries the structured fix: the writer status read that reports the holder's liveness.
+          const printed: string[] = [];
+          const log = console.log;
+          console.log = (line: string) => { printed.push(line); };
+          try { await runSourcesRefresh(f.engine, [f.alpha, '--json']); } finally { console.log = log; _resetCliExitVerdictForTests(); process.exitCode = 0; }
+          expect(JSON.parse(printed.join('\n'))).toMatchObject({ status: 'refused', code: 'refresh_in_progress',
+            fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', f.alpha, '--json'], next: 'run', actor: 'agent' } });
           const [row] = await f.refreshRows() as Row[];
           expect(row).toMatchObject({ id: held.id, state: 'syncing' });
           expect(row.outcome.holder).toEqual(held.outcome.holder);

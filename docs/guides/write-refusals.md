@@ -536,7 +536,11 @@ source has synced to its target, and the next plain `gbrain sources refresh`
 on the owner host finishes any other one the same way `--resume` does, then
 refreshes. A refresh whose process is still running is never taken over.
 `gbrain sources writer status` and `gbrain sync status` show who holds each
-refresh and whether it is orphaned. Doctor
+refresh and whether it is orphaned. With `--json`, a refresh refusal that
+carries a structured next step (`refresh_diverged`'s consent-gated publish,
+`refresh_in_progress`'s writer status read, a git read failure) prints it as the
+v1 `fix` object (`argv`, `next`, `actor`), with the prose in `suggestion`;
+any other refusal keeps the stored command string in `fix`. Doctor
 reports `worktree_refresh_stuck` for a refresh active longer than 15 minutes,
 with the resume command.
 

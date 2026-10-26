@@ -223,6 +223,25 @@ test('4b. Q1: the diverged refusal names the keep-checkout publish; running it, 
   expect((await f.engine.getPage('two', { sourceId: f.alpha }))?.compiled_truth ?? (await f.engine.getPage('alpha/two', { sourceId: f.alpha }))?.compiled_truth).toContain('Upstream side.');
 }), 120_000);
 
+test('4e. #7685: sources refresh --json emits the diverged refusal\'s structured fix (argv, next, actor) as the v1 fix, prose in suggestion', () => each(async f => {
+  f.push('alpha/two.md', page('Alpha two', 'Upstream side.'));
+  writeFileSync(join(f.root, 'beta/local.md'), page('Local', 'A local commit nobody pushed.'));
+  git(f.root, 'add', 'beta/local.md'); git(f.root, 'commit', '-qm', 'local only');
+  const out: string[] = [];
+  const log = console.log;
+  _resetCliExitVerdictForTests();
+  console.log = (line: string) => { out.push(line); };
+  try { await runSourcesRefresh(f.engine, [f.alpha, '--json']); } finally { console.log = log; }
+  try {
+    const refusal = JSON.parse(out.join('\n'));
+    expect(refusal).toMatchObject({ status: 'refused', code: 'refresh_diverged', contract_version: 1,
+      fix: { argv: ['gbrain', 'git', 'commit-push', '--push-only', '--keep-checkout', '--path', f.root, '--json'], next: 'ask_user', actor: 'user' } });
+    expect(refusal.fix.user_message).toContain(f.alpha);
+    expect(refusal.suggestion).toContain('1 local commit(s)');
+    expect(currentExitCode()).toBe(1);
+  } finally { _resetCliExitVerdictForTests(); process.exitCode = 0; }
+}), 120_000);
+
 test('4c. Q1: commit-push on the managed checkout commits only the named page path, fetches and pushes nothing, and keeps other dirt', () => each(async f => {
   git(f.root, 'config', 'user.name', 'Example'); git(f.root, 'config', 'user.email', 'example@example.invalid');
   writeFileSync(join(f.root, 'beta/agent.md'), page('Agent', 'Written by an agent script.'));
