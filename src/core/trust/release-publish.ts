@@ -37,6 +37,7 @@ import { materializedPage } from '../persistence/segmented-apply.ts';
 import { getWriteGateHold, releaseWriteGateHold, type WriteGateHold } from '../write-gate-store.ts';
 
 export const TRUST_RELEASE_OPERATION = 'trust_release';
+const DOOR_WAIT_MS = 60_000;
 
 interface ReleaseIntent { hold_id: number; last_seen_at: string; by: string; mode: 'append' | 'index-existing'; row_num?: number }
 
@@ -84,7 +85,7 @@ export async function submitTrustRelease(engine: BrainEngine, holdId: number, by
     prior = await getWriteRequest(engine, principal, requestId);
     if (!prior || prior.state === 'committed' || !isTerminal(prior)) break;
   }
-  if (prior) { writeResponse(await waitForWrite(engine, prior, cfg, 60_000)); return true; }
+  if (prior) { writeResponse(await waitForWrite(engine, prior, cfg, DOOR_WAIT_MS)); return true; }
   if (hold.status !== 'held') return false;
   const ref = `${hold.source_id}/${target.slug}`;
   if (snapshot.page.deleted_at) {
@@ -117,7 +118,7 @@ export async function submitTrustRelease(engine: BrainEngine, holdId: number, by
     pageId: snapshot.page.id, requestId, callerIntent: { ...intent }, intent: { ...intent }, authority,
     worktreeId: binding?.worktree_id ?? null, topologyGeneration: binding?.topology_generation ?? null,
   });
-  writeResponse(await waitForWrite(engine, row, cfg, 60_000));
+  writeResponse(await waitForWrite(engine, row, cfg, DOOR_WAIT_MS));
   return true;
 }
 
