@@ -15,6 +15,15 @@
  * published entries (`update-index --cacheinfo` / `--force-remove`): `git status` shows them clean, a later commit from
  * that index keeps them, and every other entry, staged or not, is left as it was.
  *
+ * Each file comes with its planned state (`DoorFile.planned`): the sha256 of the bytes the publication wrote there, or
+ * null for a removal. The door commits exactly that state or nothing. The file on disk must hash to the plan before
+ * and after `hash-object -w` stores it (an edit landing during the write refuses `git_target_changed`), and each
+ * target's index entry must equal HEAD's before the commit is built (a staged change of a target refuses
+ * `git_index_conflict`, index untouched). After the branch moves, an entry someone staged meanwhile is left as it is
+ * and the write reports that its commit landed. A write whose path already holds the planned blob at HEAD only refreshes
+ * an index entry still holding the parent commit's version (the door's own interrupted refresh); any other staged
+ * entry refuses `git_index_conflict`.
+ *
  * Recovery inverts for those writes: the recovery record names the HEAD it was prepared against (`door`), and a
  * publication that stopped after its commit landed keeps the committed file instead of restoring the prior bytes.
  * The request is queued again; its replay finds the file already holding the bytes it publishes, committed, and
@@ -64,15 +73,24 @@ export const doorSeams: { beforeUpdateRef?: (root: string, attempt: number) => P
 
 const doorTurns = new Map<string, Promise<void>>();
 /** Refusals that keep their own code: the checkout's state, not the commit, stopped the write. */
-const TYPED = new Set(['git_detached_head', 'git_branch_unborn', 'git_index_locked', 'git_index_stale']);
+const TYPED = new Set(['git_detached_head', 'git_branch_unborn', 'git_index_locked', 'git_index_stale', 'git_target_changed', 'git_index_conflict']);
 const landedFailures = new WeakSet<object>();
+
+/** One published file of a door commit and the state the commit must give its path. */
+export interface DoorFile {
+  path: string;
+  /** The planned state: the sha256 of the bytes the publication wrote at `path`, or null for a removal. */
+  planned: string | null;
+  note?: GitCommitNote;
+}
 
 /**
  * Commits the published files of one publication under the caller's writer lock and returns the commit HEAD then
- * names (the commit that holds these bytes, also when every path was already committed). A target Git refuses throws,
- * so the publication rolls back and recovery restores the prior bytes.
+ * names (the commit that holds these bytes, also when every path was already committed). Each path is committed in
+ * its planned state or not at all. A target Git refuses, a file that no longer holds its plan, or a target with a
+ * staged change throws, so the publication rolls back.
  */
-export async function commitThroughDoor(root: string, files: { path: string; note?: GitCommitNote }[], writerLock?: NativeLockHandle): Promise<string | null> {
+export async function commitThroughDoor(root: string, files: DoorFile[], writerLock?: NativeLockHandle): Promise<string | null> {
   let key = resolve(root);
   try { key = realpathSync(root); } catch { /* the session reports a missing checkout */ }
   const prior = doorTurns.get(key) ?? Promise.resolve();
@@ -94,7 +112,9 @@ export async function commitThroughDoor(root: string, files: { path: string; not
 }
 
 interface TreeEntry { mode: string; oid: Buffer }
-interface Target { rel: string; name: string; dir: string; note?: GitCommitNote; mode?: string; oid?: string }
+interface Target { rel: string; name: string; dir: string; planned: string | null; note?: GitCommitNote; mode?: string; oid?: string; head?: string }
+/** The index entries of the targets (`<mode> <oid>`, or `unmerged`) and the index file's identity when they were read. */
+interface IndexSnapshot { signature: string; entries: Map<string, string> }
 
 const TREE_MODE = '40000';
 const latin1 = (text: string) => Buffer.from(text, 'utf8').toString('latin1');
@@ -166,7 +186,7 @@ function stripspace(paragraph: string): string {
   return lines.join('\n');
 }
 
-async function doorCommit(session: GitSession, root: string, files: { path: string; note?: GitCommitNote }[]): Promise<string> {
+async function doorCommit(session: GitSession, root: string, files: DoorFile[]): Promise<string> {
   const symbolic = await git(session, ['symbolic-ref', '-q', 'HEAD']);
   if (symbolic.code !== 0) throw opError('git_detached_head', `${root} is on a detached HEAD, so the strict source's write has no branch to commit to; nothing was published.`,
     'Check out the branch the source tracks (git switch <branch>) on the brain host, then retry the write with a new request_id.');
@@ -184,10 +204,11 @@ async function doorCommit(session: GitSession, root: string, files: { path: stri
     const rel = relative(root, nativeFileTarget(root, file.path, 'git_target_unsafe')).split(sep).join('/');
     const full = `${prefix}${rel}`;
     const slash = full.lastIndexOf('/');
-    const target = targets.get(rel) ?? { rel, dir: slash < 0 ? '' : full.slice(0, slash), name: latin1(full.slice(slash + 1)) };
+    const target = targets.get(rel) ?? { rel, dir: slash < 0 ? '' : full.slice(0, slash), name: latin1(full.slice(slash + 1)), planned: file.planned };
     target.note ??= file.note;
     targets.set(rel, target);
   }
+  refuseChanged(root, targets.values());
   const present = [...targets.values()].filter(target => existsSync(join(root, target.rel)));
   if (present.length) {
     const hashed = await git(session, ['hash-object', '-w', '--', ...present.map(target => target.rel)]);
@@ -196,6 +217,7 @@ async function doorCommit(session: GitSession, root: string, files: { path: stri
     present.forEach((target, i) => { target.oid = oids[i]; target.mode = lstatSync(join(root, target.rel)).mode & 0o111 ? '100755' : '100644'; });
   }
   let fileModeTrusted: boolean | undefined;
+  refuseChanged(root, targets.values());
 
   const temp = join(persistenceHome(), 'door');
   mkdirSync(temp, { recursive: true, mode: 0o700 });
@@ -243,6 +265,7 @@ async function doorCommit(session: GitSession, root: string, files: { path: stri
       for (const target of targets.values()) {
         const dir = dirs.get(target.dir)!;
         const before = dir.found.get(target.name);
+        target.head = before && before.mode !== TREE_MODE ? `${before.mode} ${before.oid.toString('hex')}` : undefined;
         if (target.oid) {
           if (!before || before.mode === TREE_MODE) fresh.push(target);
           if (before && /^100[0-7]{3}$/.test(before.mode) && target.mode !== before.mode) {
@@ -258,11 +281,17 @@ async function doorCommit(session: GitSession, root: string, files: { path: stri
         changed.push(target);
       }
       if (fresh.length) await refuseIgnored(session, root, fresh);
+      const indexed = await readIndex(session, index, [...targets.values()]);
+      const staged = [...targets.values()].filter(target => indexed.entries.get(target.rel) !== target.head);
       if (!changed.length) {
-        const stale = await git(session, ['diff-index', '--cached', '--quiet', head, '--', ...targets.keys()]);
-        if (stale.code !== 0) await syncIndex(session, root, prefix, [...targets.values()], head);
+        if (!staged.length) return head;
+        const parent = await parentEntries(session, head, staged);
+        const foreign = staged.filter(target => indexed.entries.get(target.rel) !== parent.get(target.rel));
+        if (foreign.length) throw indexConflict(root, foreign);
+        await syncIndex(session, root, prefix, index, [...targets.values()], head, indexed);
         return head;
       }
+      if (staged.length) throw indexConflict(root, staged);
 
       // The trees are rebuilt bottom-up: an emptied directory leaves its parent, the rest are written and linked.
       const written: { path: string; oid: string }[] = [];
@@ -294,7 +323,7 @@ async function doorCommit(session: GitSession, root: string, files: { path: stri
       await doorSeams.beforeUpdateRef?.(root, attempt);
       const moved = await git(session, ['update-ref', '-m', `commit: ${message[0]!.split('\n')[0]}`, branch, created, head]);
       if (moved.code === 0) {
-        await syncIndex(session, root, prefix, [...targets.values()], created);
+        await syncIndex(session, root, prefix, index, [...targets.values()], created, indexed);
         return created;
       }
       if (attempt) throw new OperationError('git_unavailable', `${branch} in ${root} moved twice while this write was being committed, so it was not committed.`,
@@ -321,21 +350,87 @@ async function refuseIgnored(session: GitSession, root: string, fresh: Target[])
   });
 }
 
+/** The targets whose file no longer holds its planned state (its bytes, or no file for a removal) refuse as `git_target_changed`. */
+function refuseChanged(root: string, targets: Iterable<Target>): void {
+  const moved = [...targets].filter(target => { try { return hashFile(join(root, target.rel)) !== target.planned; } catch { return true; } }).map(target => target.rel);
+  if (!moved.length) return;
+  throw opError('git_target_changed', `${moved.join(', ')} in ${root} no longer holds the bytes this write published, so nothing was committed and the write was not published.`,
+    'Another process changed the file during the write; recovery leaves the changed file as it is. Retry the write with a new request_id once the file has settled.', { detail: moved.join(',') });
+}
+
+/** Targets whose index entry differs from HEAD's (a staged change, or a merge conflict) refuse as `git_index_conflict`. */
+function indexConflict(root: string, staged: Target[]): OperationError {
+  const paths = staged.map(target => target.rel);
+  return opError('git_index_conflict', `${paths.join(', ')} in ${root} has a staged change that is not committed, so this write committed nothing and the index was left as it was.`,
+    'Commit the staged change, or unstage it (git restore --staged -- <path> keeps the file on disk), then retry the write with a new request_id.', {
+      detail: paths.join(','),
+      fix: { ask_user: true, argv: ['git', '-C', root, 'restore', '--staged', '--', ...paths], consent: [], actor: 'user', requires_exclusive: false,
+        why: 'The door commits a path only while its index entry equals HEAD\'s, so a staged change is never overwritten or committed under a gbrain commit. Unstaging keeps the file on disk; committing it publishes that change.',
+        user_message: `${paths.join(', ')} in ${root} has a staged change that is not committed, so gbrain did not commit its write there. Commit the staged change, or unstage it (its bytes stay on disk), then retry the write?`,
+        verify: { argv: ['git', '-C', root, 'diff', '--cached', '--name-only', '--', ...paths] } },
+    });
+}
+
+const indexSignature = (index: string) => {
+  try { const stat = statSync(index, { bigint: true }); return `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`; } catch { return ''; }
+};
+
+/** The index entries of the targets, keyed by path relative to the root; the signature is read first, so a later match proves no rewrite. */
+async function readIndex(session: GitSession, index: string, targets: Target[]): Promise<IndexSnapshot> {
+  const signature = indexSignature(index);
+  const listed = await git(session, ['ls-files', '-s', '-z', '--', ...targets.map(target => target.rel)]);
+  if (listed.code !== 0) throw gitFailure('Cannot read the canonical Git index.', `git ls-files failed for ${targets.length} file(s).`);
+  const entries = new Map<string, string>();
+  for (const record of listed.stdout.split('\0')) {
+    const tab = record.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, oid, stage] = record.slice(0, tab).split(' ');
+    const path = record.slice(tab + 1);
+    entries.set(path, stage === '0' && !entries.has(path) ? `${mode} ${oid}` : 'unmerged');
+  }
+  return { signature, entries };
+}
+
+/** The blob entries of the targets in `commit`'s first parent (none when it has no parent). */
+async function parentEntries(session: GitSession, commit: string, targets: Target[]): Promise<Map<string, string>> {
+  const listed = await git(session, ['ls-tree', '-z', `${commit}^`, '--', ...targets.map(target => target.rel)]);
+  const entries = new Map<string, string>();
+  if (listed.code !== 0) return entries;
+  for (const record of listed.stdout.split('\0')) {
+    const tab = record.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, type, oid] = record.slice(0, tab).split(' ');
+    if (type === 'blob') entries.set(record.slice(tab + 1), `${mode} ${oid}`);
+  }
+  return entries;
+}
+
 /**
  * Points the checkout's index entries of the targets at `commit`'s (a removed target leaves the index) and touches no
- * other entry. A failure here comes after the commit landed, so it says so instead of claiming nothing was published.
+ * other entry. An entry that changed since `seen` was read (someone staged it during the write) is left as it is. A
+ * failure here comes after the commit landed, so it says so instead of claiming nothing was published.
  */
-async function syncIndex(session: GitSession, root: string, prefix: string, targets: Target[], commit: string): Promise<void> {
-  const kept = targets.filter(target => target.oid), removed = targets.filter(target => !target.oid);
-  let failure = '';
+async function syncIndex(session: GitSession, root: string, prefix: string, index: string, targets: Target[], commit: string, seen: IndexSnapshot): Promise<void> {
+  let failure = '', restaged: Target[] = [];
   try {
-    const updated = await git(session, ['update-index', '--add', ...kept.flatMap(target => ['--cacheinfo', `${target.mode},${target.oid},${prefix}${target.rel}`]),
-      ...(removed.length ? ['--force-remove', '--', ...removed.map(target => target.rel)] : [])]);
-    if (updated.code === 0) return;
-    failure = updated.stderr.trim().slice(0, 300) || `exit ${updated.code}`;
+    if (indexSignature(index) !== seen.signature) {
+      const now = await readIndex(session, index, targets);
+      restaged = targets.filter(target => now.entries.get(target.rel) !== seen.entries.get(target.rel));
+    }
+    const synced = targets.filter(target => !restaged.includes(target));
+    const kept = synced.filter(target => target.oid), removed = synced.filter(target => !target.oid);
+    if (synced.length) {
+      const updated = await git(session, ['update-index', '--add', ...kept.flatMap(target => ['--cacheinfo', `${target.mode},${target.oid},${prefix}${target.rel}`]),
+        ...(removed.length ? ['--force-remove', '--', ...removed.map(target => target.rel)] : [])]);
+      if (updated.code !== 0) failure = updated.stderr.trim().slice(0, 300) || `exit ${updated.code}`;
+    }
   } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-  const error = opError('git_unavailable', `The strict source's commit ${commit.slice(0, 12)} landed, but the index of ${root} was not updated for ${targets.map(target => target.rel).join(', ')}.`,
-    `git update-index failed (${failure}). Git holds the write; until the index is refreshed, git status lists those paths as staged reversions and a commit made from that index would undo them. Run git reset -q -- <those paths> in that checkout on the brain host.`);
+  if (!failure && !restaged.length) return;
+  const error = failure
+    ? opError('git_unavailable', `The strict source's commit ${commit.slice(0, 12)} landed, but the index of ${root} was not updated for ${targets.map(target => target.rel).join(', ')}.`,
+      `git update-index failed (${failure}). Git holds the write; until the index is refreshed, git status lists those paths as staged reversions and a commit made from that index would undo them. Run git reset -q -- <those paths> in that checkout on the brain host.`)
+    : opError('git_unavailable', `The strict source's commit ${commit.slice(0, 12)} landed, but the index of ${root} was left as it was for ${restaged.map(target => target.rel).join(', ')}: a change was staged there during the write.`,
+      'Git holds the write, and the staged change was not overwritten; git diff --cached -- <path> in that checkout shows it against the new commit. Commit it, or unstage it with git restore --staged -- <path> (the file stays on disk).');
   landedFailures.add(error);
   throw error;
 }

@@ -150,6 +150,7 @@ function nextTarget(written: string[], files: number): string {
 
 async function doorPhase(files: number, traced: boolean) {
   const { commitThroughDoor } = await import('../../src/core/persistence/git-door.ts');
+  const { sha256 } = await import('../../src/core/persistence/digest.ts');
   const root = checkout(files);
   const trace = join(WORK, `trace-${process.pid}.jsonl`);
   rmSync(trace, { force: true });
@@ -162,9 +163,11 @@ async function doorPhase(files: number, traced: boolean) {
     for (let w = 0; w < WARMUP + WRITES; w++) {
       const rel = nextTarget(written, files);
       const path = join(root, `${rel}.md`);
-      writeFileSync(path, pageBody(rel, `Revision ${w} of ${rel}.`));
+      const body = pageBody(rel, `Revision ${w} of ${rel}.`);
+      writeFileSync(path, body);
+      const planned = sha256(body);
       const start = performance.now();
-      await commitThroughDoor(root, [{ path }]);
+      await commitThroughDoor(root, [{ path, planned }]);
       const ms = performance.now() - start;
       if (traced) {
         const read = readTrace(trace, offset);

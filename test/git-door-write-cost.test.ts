@@ -33,6 +33,7 @@ import { gitChildEnv } from '../src/core/git-env.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 import { runPersistenceEffects } from '../src/core/persistence/effects.ts';
 import { commitThroughDoor, doorSeams } from '../src/core/persistence/git-door.ts';
+import { hashFile } from '../src/core/persistence/large-file.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
 import { resetIgnoreCandidatesForTests } from '../src/core/persistence/ignore-rules.ts';
 import { acquireNativeLock, type NativeLockHandle } from '../src/core/persistence/native-lock.ts';
@@ -64,7 +65,7 @@ function put(root: string, path: string, body: string): void {
   writeFileSync(join(root, path), body);
   utimesSync(join(root, path), OLD, OLD);
 }
-const door = (root: string, ...paths: string[]) => commitThroughDoor(root, paths.map(path => ({ path: join(root, path) })));
+const door = (root: string, ...paths: string[]) => commitThroughDoor(root, paths.map(path => ({ path: join(root, path), planned: hashFile(join(root, path)) })));
 const refusal = (work: Promise<unknown>) => work.then(() => null, (error: { code?: string; message?: string; suggestion?: string }) => error);
 const changed = (root: string, commit: string) => lines(git(root, 'show', '--no-renames', '--name-only', '--format=', commit)).sort();
 
@@ -184,7 +185,7 @@ describe('door write cost', () => {
     const commits: (string | null)[] = [];
     for (let i = 0; i < 8; i++) {
       put(root, `notes/d${i}.md`, `door ${i}\n`);
-      commits.push(await underLock(lock => commitThroughDoor(root, [{ path: join(root, `notes/d${i}.md`) }], lock)));
+      commits.push(await underLock(lock => commitThroughDoor(root, [{ path: join(root, `notes/d${i}.md`), planned: hashFile(join(root, `notes/d${i}.md`)) }], lock)));
     }
     await outsider;
     expect(commits.every(commit => typeof commit === 'string')).toBe(true);
