@@ -611,8 +611,12 @@ function parseBaseTableColumns(sql: string): Map<string, Set<string>> {
  * to their inner identifier; literal-only expressions like `(slug, NULLS LAST)`
  * keep the bare column.
  *
- * Out of scope: WHERE-clause columns in partial indexes (rare in our schema;
- * those columns are always also referenced in the index column list itself).
+ * Partial-index WHERE predicates and INCLUDE lists count too: replaying
+ * `CREATE INDEX ... WHERE pending` on a brain whose table predates the
+ * `pending` column fails exactly like an indexed column does (#7645, the
+ * v266 `derived_generation_items_pending` wedge). Predicate identifiers are
+ * every bare word that is not a SQL keyword, a function name, a string
+ * literal or a cast's type.
  * Trigger function bodies are out of scope (they reference NEW.col / OLD.col
  * which the existing test file's strip-list handles separately).
  */
@@ -675,6 +679,19 @@ function parseIndexColumnReferences(sql: string): Array<{ table: string; column:
       }
       if (col && !/^(true|false|null|asc|desc)$/i.test(col)) {
         result.push({ table, column: col.toLowerCase() });
+      }
+    }
+
+    const statementEnd = sql.indexOf(';', i);
+    const tail = sql.slice(i, statementEnd < 0 ? undefined : statementEnd);
+    const predicate = tail.match(/\bWHERE\b([\s\S]*)$/i)?.[1];
+    const include = tail.match(/\bINCLUDE\s*\(([^)]*)\)/i)?.[1];
+    for (const expr of [predicate, include]) {
+      if (!expr) continue;
+      const bare = expr.replace(/'(?:[^']|'')*'/g, ' ').replace(/::\s*\w+(?:\s*\[\])?/g, ' ');
+      for (const word of bare.matchAll(/\b([a-z_]\w*)\b(?!\s*\()/gi)) {
+        if (/^(and|or|not|is|null|true|false|in|like|ilike|between|any|all|distinct|from)$/i.test(word[1])) continue;
+        result.push({ table, column: word[1].toLowerCase() });
       }
     }
   }
