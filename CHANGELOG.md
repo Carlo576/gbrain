@@ -10,6 +10,54 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.467.0] - 2026-10-26
+
+**`gbrain sync` no longer turns whatever folder you run it from into your brain when a source's stored directory is a relative path like `.`. It stops and asks which folder holds the brain.**
+
+Older setups could store a source's directory (or the legacy `sync.repo_path` setting) as `.`, which means "the folder gbrain happens to run in". Running `gbrain sync` from your home folder, a project checkout or a cron job's working directory then treated that folder as the brain: it Git-initialized it, committed everything in it as a baseline, and imported its markdown as pages. Sync now refuses such a path before touching anything. Every other command that used to read it the same way skips it or refuses it. Separately, a write such as `remember` or `put_page` that stalls now tells you how to inspect and resubmit it, instead of telling you to run a sync that would never retry it.
+
+### How to fix a brain this affects
+
+`gbrain doctor` (`default_source_local_path`) names every source with a relative directory. Point each one at its real folder, or clear it if the source has no folder:
+
+```bash
+gbrain sources set-path <source-id> /absolute/path/to/brain
+gbrain sources set-path <source-id> --clear        # a source with no checkout
+gbrain config set sync.repo_path /absolute/path/to/brain   # the legacy setting
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sync` (one source, `--all`, watch, the sync job, the dream, autopilot and maintenance cycles) with a relative stored directory | the folder it ran in became the brain: `git init`, a baseline commit of everything in it, an import of its markdown | refuses `sync_anchor_relative` (exit 3) before any Git command, cost estimate or import, and asks which directory holds the brain; nothing changes |
+| `gbrain sync --repo /absolute/dir` while the stored directory is `.` | the embedding cost estimate could fetch and walk the current folder | the estimate prices the `--repo` directory |
+| Page and fact writes, folder-to-source matching, fence repair, managed activation, `autopilot --install`, a remote `submit_job`, `gbrain sources resolve-path` | read the relative path as the current folder | skip the file (database only) or refuse until the path is set; `resolve-path` exits 3 |
+| `gbrain config set sync.repo_path .` | accepted | refused; give an absolute directory |
+| `gbrain sources set-path <id> --clear` on a filesystem source | connector sources only | also clears a relative directory on any source |
+| A foreground write (`remember`, `put_page`, `add_tag`, ...) ends `preparation_stalled` | told you to run `gbrain sync`, which never retries it | tells you to inspect the writer read-only (`gbrain sources writer status --source <id> --json`) and resubmit with a new request_id; managed writes say to rerun their command, and sync writes keep their sync retry |
+
+### Things to watch after you upgrade
+
+- While a source's directory is relative, its pages and those of any source without its own directory that write under `sync.repo_path` are saved to the database only. Doctor names the source that blocks them; setting the path restores file writes.
+- `gbrain sources writer failures` now reports a reconcile or managed `put_page` under its own operation (`canonical_reconcile` or `managed_*`). `--group-by category` splits by operation, and `--operation <op>` narrows a listing to one.
+- A stray `--path` on `gbrain dream`, `gbrain autopilot` or `gbrain agent` is now refused as an unknown flag. None of these commands ever read it.
+- Nothing rewrites your data on upgrade. Fixing a relative path is a command you run.
+
+### Itemized changes
+
+- `src/core/sync-applicability.ts`: `assertSyncAnchorAbsolute` and the `sync_anchor_relative` refusal, run first in `assertSyncApplicable` by every sync entry point; `src/core/sync-anchor.ts` never proves ownership from a relative anchor.
+- `src/commands/sync/run.ts`: the single-source and `--all` paths refuse before the embedding cost gate; the cost gate never prices a relative stored path.
+- `src/core/cycle.ts`: a cycle whose directory matches no source refuses its sync phase while `default`'s path is relative.
+- `src/core/write-through.ts`, `src/core/persistence/*`, `src/core/fence-repair/`, `src/core/minions/submission-authority.ts`, `src/commands/import.ts`, `src/commands/autopilot.ts`: the other readers skip or refuse a relative path; an absolute path written by another OS is not treated as relative by the write-through guard.
+- `src/commands/sources-set-path.ts`, `src/core/persistence/connector-path.ts`: `--clear` clears a relative path on any source.
+- `src/commands/doctor/checks/default-source-path.ts`, `src/core/default-source-path-check.ts`: doctor warns on every relative stored path and names the fix.
+- `src/core/persistence/terminal-classify.ts`, `src/core/persistence/terminal-failures.ts`, `src/commands/persistence-admin.ts`: stalled-write diagnoses by operation, and `--operation` on `gbrain sources writer failures`.
+- `docs/guides/troubleshooting.md#relative-source-path` and the error-code catalogue.
+- Tests: `test/sync-relative-anchor-refusal-7630.test.ts`, `test/sync-relative-anchor-cli-exit-7630.test.ts`, `test/e2e/sync-relative-anchor-refusal-7630-postgres.test.ts`.
+
+Reported by @avartan; fix also proposed in #7631 by @Masashi-Ono0611.
+
 ## [0.60.466.0] - 2026-10-26
 
 **A brain whose database is at schema v265 now upgrades instead of stopping with `column "pending" does not exist`, and on a brain with a large write journal each write claim is a quick index lookup again instead of a scan of the whole journal after every restart.**
