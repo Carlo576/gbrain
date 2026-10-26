@@ -164,8 +164,8 @@ export async function prepareTrustReleaseMutation(engine: BrainEngine, row: Writ
     const base = await materializedPage(engine, snapshot.page);
     const cell = [base.compiled_truth, base.timeline ?? ''].flatMap(text => parseFactsFence(text).facts).find(f => f.rowNum === intent.row_num);
     if (cell && ((cell.context ?? null) !== (str(p.context) ?? null) || (cell.source ?? FENCE_SOURCE_DEFAULT) !== (str(p.source) ?? FENCE_SOURCE_DEFAULT))) {
-      throw opError('fence_row_changed', `Fence row ${intent.row_num} of ${row.slug} was edited after h${hold.id} was held; nothing was changed and the fact stays held.`,
-        `The row's context or source no longer matches what h${hold.id} held, so releasing it would index content the owner did not review. Run gbrain trust review: the edit is held separately.`,
+      throw opError('fence_row_changed', `Fence row ${intent.row_num} of ${row.slug} was edited after h${hold.id} was held (held_row_edited); nothing was changed and the fact stays held.`,
+        `The row's context or source no longer matches what h${hold.id} held, so releasing it would index content the owner did not review, and releasing h${hold.id} again refuses the same way. Drop it (gbrain trust drop h${hold.id}); if the edit was itself held, gbrain trust review lists it separately.`,
         { reason: 'held_row_edited', detail: JSON.stringify({ slug: row.slug, row_num: intent.row_num, problem: 'held_row_edited' }) });
     }
   }

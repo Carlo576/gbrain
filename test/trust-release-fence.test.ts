@@ -165,6 +165,7 @@ for (const backend of testBackends()) {
       const error = await applyOwnerAction(engine, { action: 'release', ref: `h${first!.id}` }, { binding: preview.binding, confirmation: { via: 'tty' }, by: owner })
         .then(() => null, (e: { code?: string }) => e);
       expect(error?.code).toBe('fence_row_changed');
+      expect((error as { message?: string } | null)?.message).toContain('(held_row_edited)');
       expect(await holdStatus(engine, `h${first!.id}`)).toBe('held');
       expect(await factRows(engine)).toEqual([]);
 
