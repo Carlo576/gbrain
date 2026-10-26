@@ -463,4 +463,31 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
       await engine.disconnect();
     }
   }, 300_000);
+
+  test('15. a migrating role that owns the guards but not their tables leaves each raising guard an invoker while its trigger fires BEFORE ROW', async () => {
+    const brain = await supabaseShapedBrain();
+    const migrator = `gbrain_test_guard_fn_owner_${suffix}`;
+    await admin!.unsafe(`CREATE ROLE ${migrator} LOGIN PASSWORD 'migrator' NOSUPERUSER BYPASSRLS`);
+    createdRoles.push(migrator);
+    const engine = new PostgresEngine();
+    const exposed = ['gbrain_refuse_purged_fact', 'gbrain_refuse_purged_page', 'gbrain_refuse_purged_take', 'gbrain_refuse_purging_derivation'];
+    try {
+      await rewind(brain.conn);
+      await brain.conn.unsafe(`GRANT USAGE, CREATE ON SCHEMA public TO ${migrator}; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${migrator};
+        ${GUARDS.map(fn => `ALTER FUNCTION ${fn}() OWNER TO ${migrator};`).join('\n')}`);
+      const asMigrator = new URL(brain.url);
+      asMigrator.username = migrator;
+      asMigrator.password = 'migrator';
+      await engine.connect({ database_url: asMigrator.toString() });
+      const { value, stderr } = await capturingStderr(() => runMigrations(engine));
+      expect(value.current).toBe(LATEST_VERSION);
+      for (const fn of exposed) expect(stderr).toContain(`${fn}()`);
+      const after = await catalog(brain.conn);
+      expect(after.guards.map(g => [g.fn, g.secdef])).toEqual(GUARDS.map(fn => [fn, !exposed.includes(fn)]));
+      expect(after.triggers.every(t => t.timing === 'BEFORE' && !t.gated)).toBe(true);
+    } finally {
+      await engine.disconnect().catch(() => {});
+      await brain.conn.end();
+    }
+  }, 300_000);
 });

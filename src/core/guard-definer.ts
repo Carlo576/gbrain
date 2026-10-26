@@ -59,13 +59,13 @@ ${revokeExecuteSql(fn)}`;
 
 /** The raising guards, AFTER ROW so RLS WITH CHECK runs first. Same events and columns as before. */
 export const AFTER_ROW_PURGE_TRIGGERS = [
-  { table: 'facts', trigger: 'facts_refuse_purged', sql: `DROP TRIGGER IF EXISTS facts_refuse_purged ON facts;
+  { table: 'facts', trigger: 'facts_refuse_purged', fn: 'gbrain_refuse_purged_fact', sql: `DROP TRIGGER IF EXISTS facts_refuse_purged ON facts;
 CREATE TRIGGER facts_refuse_purged AFTER UPDATE OF fact, source_id, visibility, entity_slug ON facts
   FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purged_fact();` },
-  { table: 'takes', trigger: 'takes_refuse_purged', sql: `DROP TRIGGER IF EXISTS takes_refuse_purged ON takes;
+  { table: 'takes', trigger: 'takes_refuse_purged', fn: 'gbrain_refuse_purged_take', sql: `DROP TRIGGER IF EXISTS takes_refuse_purged ON takes;
 CREATE TRIGGER takes_refuse_purged AFTER INSERT OR UPDATE OF claim, page_id ON takes
   FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purged_take();` },
-  { table: 'pages', trigger: 'pages_refuse_purged', sql: `DROP TRIGGER IF EXISTS pages_refuse_purged ON pages;
+  { table: 'pages', trigger: 'pages_refuse_purged', fn: 'gbrain_refuse_purged_page', sql: `DROP TRIGGER IF EXISTS pages_refuse_purged ON pages;
 CREATE TRIGGER pages_refuse_purged AFTER INSERT OR UPDATE ON pages
   FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purged_page();` },
 ] as const;
