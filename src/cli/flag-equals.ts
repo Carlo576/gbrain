@@ -9,8 +9,11 @@
  *    table (curated help, the sync flag table), a `--no-` negation, the
  *    command's COMMAND_SWITCHES, or a name whose shared-op parameter or
  *    curated flag is boolean. Splitting turns the switch on and keeping drops
- *    the value (`--dry-run=true` would write);
- *  - refuse an empty value or one that looks like a flag (`-y`, `--x`);
+ *    the value (`--dry-run=true` would write). Without the command's own
+ *    table, that cross-command evidence picks the bare-switch message, so
+ *    `--yes=n` is never answered with `--yes <value>`;
+ *  - refuse an empty value or one that looks like a flag (`-y`, `--x`), on
+ *    reader paths too (`--workspace=` with an unset variable);
  *  - keep the token where the handler on this path reads the `=` form
  *    (EQUALS_READERS, keyed by command or `command sub`);
  *  - split `--flag value` when the command's own table declares a value;
@@ -27,8 +30,9 @@
  * which may be a credential. A short flag never takes `=` (`-y=n` is refused,
  * never taken as consent). OWN_EQUALS_PARSERS pass their argv through,
  * unregistered flags keep the token for the validator to name, and a bare
- * `--` ends the scan only where the handler honors it (END_OF_OPTIONS):
- * `serve` and `auth` read `--access` and `--scopes` after it.
+ * `--` ends the scan only on a path whose handler stops there (END_OF_OPTIONS,
+ * keyed by `command sub`): `serve`, `auth`, `frontmatter generate` and
+ * `questions` read flags after it.
  */
 import type { OperationError } from '../core/ops/contract.ts';
 import { CLI_FLAG_REGISTRY } from '../core/cli-flag-registry.generated.ts';
@@ -64,9 +68,9 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   // core/consent.ts:112 parseConsentFlags via enableConsent (decide.ts:348, effects paid); decide reads no --max-* itself.
   'decide enable': ['--max-usd', '--max-cost'],
   // doctor.ts:417 --scope=brain only (=-only); doctor/budget.ts:68 --tier/--budget-ms; cli/commands/doctor.ts:27 --tier (thin client);
-  // doctor/registry.ts:332 --only; check-resolvable.ts:120 --skills-dir via doctor.ts:460; core/consent.ts:131 --expect (remediate-consent.ts:133).
+  // doctor/registry.ts:332 --only; check-resolvable.ts:120 --skills-dir via doctor.ts:460; core/consent.ts:130 --expect (remediate-consent.ts:133).
   doctor: ['--scope', '--tier', '--budget-ms', '--only', '--skills-dir', '--expect'],
-  // edge-proposals.ts:81 flag() used only by list (:91,:93); other subs take the first numeric token as the id (:76).
+  // edge-proposals.ts:81 flag() used only by list (:91,:93); other subs take the first numeric token as the id (:86).
   'edge-proposals list': ['--status', '--limit'],
   // embed.ts:841 parsePaceArgs (--pace bare or =mode); core/consent.ts:126 via embed-consent.ts:129 and held-embedding.ts:234.
   embed: ['--pace', '--pace-max-concurrency', '--max-usd', '--max-cost'],
@@ -160,9 +164,9 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   'skillpack reference': ['--harness', '--persona', '--skill', '--dest', '--scope', '--workspace', '--skills'],
   // core/bounded-listing-cli.ts:15 via sources.ts:1213 runStatus (+ :1214 paged regex).
   'sources status': ['--limit', '--cursor'],
-  // sources-harden.ts:31 flagVal: runHarden (:83-84), runPull (:150-151).
+  // sources-harden.ts:31 flagVal: runHarden (:83-84), runPull (:150-151). `sources pull --path=` refuses: main.ts takes the database-free route only on the exact token.
   'sources harden': ['--branch', '--pat-file'],
-  'sources pull': ['--path', '--branch'],
+  'sources pull': ['--branch'],
   // status.ts:812 parseDeadlineFlag, :834 parseSectionFlag (runStatus :871-881).
   status: ['--section', '--deadline-ms'],
   // core/bounded-listing-cli.ts:15 via sync/operator.ts:167 holdsListing (+ :173 sized check).
@@ -194,8 +198,8 @@ export const COMMAND_SWITCHES: Readonly<Record<string, readonly string[]>> = {
   schema: ['--fields'],
 };
 
-/** Commands whose handler treats a bare `--` as the end of its options; everywhere else the scan continues past it. */
-export const END_OF_OPTIONS: ReadonlySet<string> = new Set(['agent', 'frontmatter', 'questions']);
+/** Paths (`command sub`) whose handler treats a bare `--` as the end of its options; everywhere else the scan continues past it. */
+export const END_OF_OPTIONS: ReadonlySet<string> = new Set(['agent run', 'frontmatter validate']);
 
 /** Switch evidence by name: shared-op boolean parameters (handler-free manifest) and boolean flags in any command's curated help. Loaded only when an `=` token needs it. */
 let switches: Promise<ReadonlySet<string>> | undefined;
@@ -218,22 +222,23 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const token = args[i]!;
-    if (token === '--' && END_OF_OPTIONS.has(command)) return { args: [...out, ...args.slice(i)] };
+    if (token === '--' && END_OF_OPTIONS.has(`${command} ${args[0]}`)) return { args: [...out, ...args.slice(i)] };
     const m = EQUALS_TOKEN.exec(token);
     const flag = m?.[1];
     if (flag !== undefined && !flag.startsWith('--')) {
       return { refusal: usageError(`gbrain ${command}: \`${flag}=…\`: a short flag takes no =.`, `Write ${flag} on its own, or ${flag} <value> with the value as the next argument.`) };
     }
     const registered = flag !== undefined && (!legal || legal.includes(flag) || flag.startsWith('--no-') && legal.includes(`--${flag.slice(5)}`));
-    if (!m || !registered || readers.includes(flag)) { out.push(token); continue; }
-    const value = m[2]!;
+    const value = m?.[2] ?? '';
+    const flagLike = value === '' || /^-[-A-Za-z]/.test(value);
+    if (!m || !registered || readers.includes(flag) && !flagLike) { out.push(token); continue; }
     if (flag === '--json' && value === 'true') { out.push(flag); continue; }
     types ??= new Map((await loadCuratedHelp(command))?.flags.map(f => [f.name, f.type]));
     const own = types.get(flag) ?? (command === 'sync' ? (SYNC_FLAGS as Record<string, { arity: string }>)[flag]?.arity : undefined);
     const isSwitch = own !== undefined ? own === 'boolean' : flag.startsWith('--no-') || COMMAND_SWITCHES[command]?.includes(flag) || (await knownSwitches()).has(flag);
     const refusal = isSwitch
       ? [`${flag} is a switch and takes no value`, `Write ${flag} on its own, or leave it out.`]
-      : value === '' || /^-[-A-Za-z]/.test(value)
+      : flagLike
         ? [`the value is empty or looks like a flag`, `Write ${flag} <value> with the value as the next argument.`]
         : own === undefined
           ? [`this command takes ${flag} <value> as two arguments`, `Write ${flag} <value>, or ${flag} on its own if it is a switch.`]

@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -136,6 +136,26 @@ describe('serve --flag=value', () => {
     expect(r.status).not.toBe(0);
     expect(r.status).not.toBeNull();
     expect(r.stderr).toContain('gbrain auth rescope-token <name> --operations');
+  });
+
+  // Value: protects=--help and a bare -- never let a write run with an = token the gate refuses; fails_when=the gate is skipped on help or stops at -- on a sub that reads past it; why_new=only serve (which prints help) was covered; seam=none; no_claim=other self-help handlers (one representative)
+  test('frontmatter generate --fix leaves the file untouched with --dry-run= behind --help or --', () => {
+    const notes = mkdtempSync(join(home, 'notes-'));
+    const page = join(notes, 'alpha.md');
+    writeFileSync(page, '# Alpha\n\nBody text.\n');
+    for (const tail of [['--dry-run=true', '--help'], ['--', '--dry-run=true']]) {
+      const r = cli(['frontmatter', 'generate', page, '--fix', '--include-catch-all', ...tail]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('--dry-run=…');
+      expect(readFileSync(page, 'utf8')).toBe('# Alpha\n\nBody text.\n');
+    }
+  });
+
+  test('the direct auth.ts entry runs auth with the separate form', () => {
+    const direct = spawnSync('bun', ['--no-env-file', 'run', 'src/commands/auth.ts', 'create', 'bot-direct-ok-example', '--scopes', 'read'], { cwd: process.cwd(), env, encoding: 'utf8', input: '', timeout: 30_000 });
+    expect(direct.status).toBe(0);
+    const list = cli(['auth', 'list']);
+    expect(list.stdout + list.stderr).toContain('bot-direct-ok-example');
   });
 
   test('--help still answers when an = token would refuse', () => {

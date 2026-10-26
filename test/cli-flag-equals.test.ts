@@ -12,8 +12,9 @@ import { readFileSync } from 'node:fs';
 import { Glob } from 'bun';
 import { CLI_ONLY, cliOnlyFlagArgs, validateCommandFlags } from '../src/cli/main.ts';
 import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
-import { EQUALS_READERS, OWN_EQUALS_PARSERS, knownSwitches } from '../src/cli/flag-equals.ts';
+import { END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, knownSwitches } from '../src/cli/flag-equals.ts';
 import { SYNC_FLAGS } from '../src/core/sync-flags.ts';
+import { strictSpecFor } from '../src/cli/strict-args.ts';
 import { loadCuratedHelp } from '../src/cli/help/render.ts';
 import { parseAccessFlag, parseSurfaceFlag } from '../src/mcp/surface.ts';
 import { parseMovementArgs } from '../src/commands/sources-writer-movement.ts';
@@ -79,7 +80,6 @@ describe('#7619 table: every registered CLI_ONLY flag', () => {
       const legal = CLI_FLAG_REGISTRY[command];
       if (!legal || PASSTHROUGH.has(command) || OWN_EQUALS_PARSERS.has(command)) continue;
       for (const flag of legal) {
-        if (EQUALS_READERS[command]?.includes(flag)) continue;
         for (const value of ['', '--x', '-y', '-h']) {
           if (await refusalFor(command, [`${flag}=${value}`]) === null) wrong.push(`${command} ${flag}=${value} accepted`);
         }
@@ -102,6 +102,33 @@ describe('#7619 split rules', () => {
     expect(await refusalFor('serve', ['--', '--source-guard=true'])).toContain('--source-guard is a switch');
     expect(await argvFor('agent', ['run', '--', 'tool', '--access=read-only', '-y=n'])).toEqual(['run', '--', 'tool', '--access=read-only', '-y=n']);
     expect(await argvFor('frontmatter', ['validate', '--', '--path=x.md'])).toEqual(['validate', '--', '--path=x.md']);
+    expect([...END_OF_OPTIONS].sort()).toEqual(['agent run', 'frontmatter validate']);
+    for (const [command, args, flag] of [
+      ['frontmatter', ['generate', 'notes/', '--fix', '--', '--dry-run=true'], '--dry-run'],
+      ['questions', ['pin', '--', 'what is x', '--source=source-a'], '--source'],
+      ['questions', ['list', '--', '--source=source-a'], '--source'],
+      ['agent', ['logs', '1', '--', '--since=1h'], '--since'],
+    ] as const) {
+      expect(await refusalFor(command, [...args])).toContain(`${flag}=…`);
+    }
+  });
+
+  test('a reader path refuses an empty or flag-like = value instead of keeping it', async () => {
+    expect(await refusalFor('skillpack', ['sync', '--workspace='])).toContain('the value is empty or looks like a flag');
+    expect(await refusalFor('recall', ['--source-id=--json'])).toContain('the value is empty or looks like a flag');
+    expect(await argvFor('skillpack', ['sync', '--workspace=/w'])).toEqual(['sync', '--workspace=/w']);
+  });
+
+  test('sources pull --path= refuses instead of falling through to the engine route', async () => {
+    expect(await refusalFor('sources', ['pull', '--path=/repo-example'])).toContain('takes --path <value> as two arguments');
+  });
+
+  test('the = gate list matches the hand-dispatched search dashboard subcommands', () => {
+    const src = readFileSync('src/cli/main.ts', 'utf8');
+    const dispatch = /command === 'search' && (\[[^\]]+\])\.includes\(subArgs\[0\] \?\? ''\)/.exec(src)?.[1];
+    const gate = /const SEARCH_DASHBOARD_SUBCOMMANDS = (\[[^\]]+\]);/.exec(src)?.[1];
+    expect(dispatch).toBeDefined();
+    expect(gate).toBe(dispatch);
   });
 
   test('an unknown flag keeps its token so the validator names it', async () => {
@@ -147,6 +174,22 @@ describe('#7619 split rules', () => {
     expect(await argvFor('export', ['--source=default', '--dir=out-example'])).toEqual(['--source=default', '--dir=out-example']);
     expect(await argvFor('skillpack', ['reference', '--harness=claude-code'])).toEqual(['reference', '--harness=claude-code']);
     expect(await argvFor('sources', ['status', '--limit=5'])).toEqual(['status', '--limit=5']);
+  });
+
+  test('every subcommand reader key keeps exactly its flags on its own path', async () => {
+    const wrong: string[] = [];
+    for (const [key, flags] of Object.entries(EQUALS_READERS)) {
+      const [command, sub] = key.split(' ') as [string, string | undefined];
+      if (!sub || OWN_EQUALS_PARSERS.has(command)) continue;
+      for (const flag of CLI_FLAG_REGISTRY[command] ?? []) {
+        if (strictSpecFor(command, [sub, `${flag}=v`])) continue;
+        const r = await cliOnlyFlagArgs(command, [sub, `${flag}=v`]);
+        const kept = 'args' in r && r.args.length === 2 && r.args[1] === `${flag}=v`;
+        const listed = flags.includes(flag) || (EQUALS_READERS[command]?.includes(flag) ?? false);
+        if (kept !== listed) wrong.push(`${key} ${flag}: ${kept ? 'kept but not listed' : 'listed but not kept'}`);
+      }
+    }
+    expect(wrong).toEqual([]);
   });
 
   test('a reader key covers only its own subcommand', async () => {

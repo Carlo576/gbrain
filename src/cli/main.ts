@@ -363,9 +363,7 @@ async function main() {
   // #7191: `search --exact` -> search-exact, before any ranked-search flag is parsed (cli/command-route.ts).
   const routed = routeCommand(command, args.slice(1));
   command = routed.command;
-  const flagArgs = helpRequested ? { args: routed.subArgs } : await cliOnlyFlagArgs(command, routed.subArgs);
-  if ('refusal' in flagArgs) exitCliError(flagArgs.refusal, command);
-  const subArgs = flagArgs.args;
+  let subArgs = routed.subArgs;
   dispatchedCommand = command;
   {
     const { directPoolProfileForCommand, setDirectPoolProfile } = await import('../core/direct-pool-profile.ts');
@@ -408,6 +406,10 @@ async function main() {
     // unreachable. That is the state a reader is most likely to be in.
     if (await printSelfHelpWithoutEngine(command, subArgs)) return;
   }
+  // #7619: after the help block, so only a path that printed help skips the = gate.
+  const flagArgs = await cliOnlyFlagArgs(command, subArgs);
+  if ('refusal' in flagArgs) exitCliError(flagArgs.refusal, command);
+  subArgs = flagArgs.args;
 
   // #6114: destructive subcommands refuse a token they would ignore (exit 2) before dispatch.
   const strictRefusal = helpRequested ? null : strictArgsRefusal(command, subArgs);
