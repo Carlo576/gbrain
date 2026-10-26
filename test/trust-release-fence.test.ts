@@ -142,6 +142,31 @@ for (const backend of testBackends()) {
       expect(await holdStatus(engine, `h${hold!.id}`)).toBe('released');
     }, { setup, databaseUrl }), 180_000);
 
+    test('a fence-guard hold whose row was edited after it was held refuses fence_row_changed: the edit is never indexed under the older approval', () => managedBrain(async ({ engine, ctx, root }) => {
+      await seedPage(engine, ctx);
+      await enableTrustProtections(engine);
+      const row = { rowNum: 1, claim: CLAIM, kind: 'fact' as const, confidence: 1, visibility: 'world' as const, notability: 'medium' as const,
+        validFrom: '2026-01-01', source: 'email', context: 'Approved context.', active: true };
+      const write = async (r: typeof row) => {
+        const current = await engine.readPageSnapshot(slug, { sourceId: 'default' });
+        await submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(), content_origin: 'tool_output', expected_revision: current!.revision,
+          content: `---\ntype: person\ntitle: Alice Example\n---\n\n# Alice Example\n\nBody.\n\n## Facts\n\n${renderFactsTable([r])}\n` } });
+        await settleManagedGitEffects(engine);
+      };
+      await write(row);
+      const [first] = await engine.executeRaw<{ id: number }>("SELECT id FROM write_gate_holds WHERE source_id='default' AND slug=$1 AND status='held'", [slug]);
+      expect(first).toBeDefined();
+      const preview = await previewOwnerAction(engine, { action: 'release', ref: `h${first!.id}` });
+      await write({ ...row, context: 'Edited context from a later external write.' });
+      expect(fenceCells(readFileSync(file(root), 'utf8')).map(f => f.context)).toEqual(['Edited context from a later external write.']);
+
+      const error = await applyOwnerAction(engine, { action: 'release', ref: `h${first!.id}` }, { binding: preview.binding, confirmation: { via: 'tty' }, by: owner })
+        .then(() => null, (e: { code?: string }) => e);
+      expect(error?.code).toBe('fence_row_changed');
+      expect(await holdStatus(engine, `h${first!.id}`)).toBe('held');
+      expect(await factRows(engine)).toEqual([]);
+    }, { setup, databaseUrl }), 180_000);
+
     test('a retry of the same approval replays one receipt: one request, one fact, one fence row', () => managedBrain(async ({ engine, ctx, root }) => {
       await seedPage(engine, ctx);
       const ref = await holdRemember(engine, ctx);

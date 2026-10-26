@@ -31,6 +31,9 @@ import { withTrustPromotion } from '../persistence/context.ts';
 import { digest } from '../persistence/digest.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { prepareFenceFactAppend } from '../facts/fence-fact-append.ts';
+import { FENCE_SOURCE_DEFAULT } from '../facts/extract-from-fence.ts';
+import { parseFactsFence } from '../facts-fence.ts';
+import { materializedPage } from '../persistence/segmented-apply.ts';
 import { getWriteGateHold, releaseWriteGateHold, type WriteGateHold } from '../write-gate-store.ts';
 
 export const TRUST_RELEASE_OPERATION = 'trust_release';
@@ -144,6 +147,15 @@ export async function prepareTrustReleaseMutation(engine: BrainEngine, row: Writ
   const append = await prepareFenceFactAppend(engine, row, config, snapshot, intent.mode === 'index-existing'
     ? { mode: 'index-existing', rowNum: Number(intent.row_num), fact, pendingTier: 'user_confirmed' }
     : { fact, pendingTier: 'user_confirmed' });
+  if (intent.mode === 'index-existing') {
+    const base = await materializedPage(engine, snapshot.page);
+    const cell = [base.compiled_truth, base.timeline ?? ''].flatMap(text => parseFactsFence(text).facts).find(f => f.rowNum === intent.row_num);
+    if (cell && ((cell.context ?? null) !== (str(p.context) ?? null) || (cell.source ?? FENCE_SOURCE_DEFAULT) !== (str(p.source) ?? FENCE_SOURCE_DEFAULT))) {
+      throw opError('fence_row_changed', `Fence row ${intent.row_num} of ${row.slug} was edited after h${hold.id} was held; nothing was changed and the fact stays held.`,
+        `The row's context or source no longer matches what h${hold.id} held, so releasing it would index content the owner did not review. Run gbrain trust review: the edit is held separately.`,
+        { reason: 'held_row_edited', detail: JSON.stringify({ slug: row.slug, row_num: intent.row_num, problem: 'held_row_edited' }) });
+    }
+  }
   const lockHold = async (tx: BrainEngine) => {
     await tx.executeRaw('SELECT id FROM write_gate_holds WHERE id = $1 FOR UPDATE', [intent.hold_id]);
     if (!current(await getWriteGateHold(tx, intent.hold_id))) throw decidedMeanwhile(intent.hold_id);
