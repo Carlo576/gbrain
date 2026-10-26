@@ -3,7 +3,7 @@ import type { BrainEngine } from '../engine.ts';
 import { migrationStatementTimeoutMs } from '../migration-timeout.ts';
 import { isLockTimeoutError } from '../retry-matcher.ts';
 import { resolveSchemaLockTimeoutMs, schemaLockBlockedError } from '../postgres-engine/schema-lock-timeout.ts';
-import { FUNCTION_SEARCH_PATH_HARDENING_SQL, LEGACY_SEARCH_PATH_SETTINGS } from '../function-search-path.ts';
+import { FUNCTION_SEARCH_PATH_HARDENING_SQL, GBRAIN_PINNED_FUNCTIONS, LEGACY_SEARCH_PATH_SETTINGS } from '../function-search-path.ts';
 
 // Applied by src/core/migrate.ts on the next initSchema(); see docs/ENGINES.md
 // ("Canonical schema sources") for when schema.sql or a TS fragment also changes.
@@ -31,7 +31,8 @@ export async function hardenFunctionSearchPaths(engine: BrainEngine, label: stri
   }
   const left = (await engine.executeRaw<{ sig: string }>(
     `SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-      WHERE n.nspname = 'public' AND p.prokind = 'f' AND p.proconfig && $1::text[] ORDER BY 1`, [[...LEGACY_SEARCH_PATH_SETTINGS]])).map(r => r.sig);
+      WHERE n.nspname = 'public' AND p.prokind = 'f' AND p.proconfig && $1::text[] AND p.proname = ANY($2::text[]) ORDER BY 1`,
+    [[...LEGACY_SEARCH_PATH_SETTINGS], [...GBRAIN_PINNED_FUNCTIONS]])).map(r => r.sig);
   if (left.length > 0) {
     process.stderr.write(`  ${label}: ${left.length} function(s) left without pg_temp on their search_path (${left.join(', ')}): `
       + 'ALTER FUNCTION needs the owner. Run gbrain doctor for the SQL to run as that role.\n');

@@ -1,4 +1,5 @@
 import { registerManagedFilesystemEngine } from './persistence/filesystem-guard.ts';
+import { FUNCTION_SEARCH_PATH_HARDENING_SQL, runMigrationsThenHarden } from './function-search-path.ts';
 import { writerStamp } from './persistence/writer-versions.ts';
 import { noteRequestConfigWrite, requestConfigRows, requestConfigValue } from './config-snapshot.ts';
 import { replaceDerivedLinks, replaceDerivedLinksBatch, type DerivedLinkBatchItem, type DerivedLinkOrigin, type DerivedLinkReplacementOptions } from './derived-links.ts';
@@ -1156,7 +1157,8 @@ export class PGLiteEngine implements BrainEngine {
     await this.applyForwardReferenceBootstrap();
     await this.db.exec(getPGLiteSchema(dims, model));
 
-    const { applied } = await (await import('./migrate.ts')).runMigrations(this); // engine-dynamic-import-ok: initSchema only, keeps the ~220 migration modules off every connect
+    const applied = await runMigrationsThenHarden(async () => (await import('./migrate.ts')).runMigrations(this), // engine-dynamic-import-ok: initSchema only, keeps the ~220 migration modules off every connect
+      () => this.db.exec(FUNCTION_SEARCH_PATH_HARDENING_SQL));
     if (applied > 0) {
       process.stderr.write(`  ${applied} migration(s) applied\n`);
     }

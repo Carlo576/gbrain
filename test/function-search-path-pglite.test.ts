@@ -5,6 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { GBRAIN_PINNED_FUNCTIONS } from '../src/core/function-search-path.ts';
 
 const PURGED_CLAIM = 'alice-example joined acme-example as cto';
 const WITHDRAWN_CLAIM = 'alice-example lives in city-a';
@@ -28,13 +29,29 @@ describe('function search_path ends in pg_temp on PGLite (#7632)', () => {
   }, 120_000);
   afterAll(async () => { await engine?.disconnect(); });
 
-  test('every function that pins a search_path ends it with pg_temp, and none is SECURITY DEFINER', async () => {
-    const rows = await engine.executeRaw<{ sig: string; setting: string; secdef: boolean }>(
-      `SELECT p.oid::regprocedure::text AS sig, s.setting, p.prosecdef AS secdef FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+  test('every function that pins a search_path ends it with pg_temp, none is SECURITY DEFINER, and each is in GBRAIN_PINNED_FUNCTIONS', async () => {
+    const rows = await engine.executeRaw<{ name: string; sig: string; setting: string; secdef: boolean }>(
+      `SELECT p.proname AS name, p.oid::regprocedure::text AS sig, s.setting, p.prosecdef AS secdef FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
          CROSS JOIN LATERAL unnest(p.proconfig) AS s(setting) WHERE n.nspname = 'public' AND s.setting LIKE 'search_path=%' ORDER BY 1`);
     expect(rows.length).toBeGreaterThanOrEqual(35);
     expect(rows.filter(r => !r.setting.endsWith(', pg_temp') || r.secdef).map(r => r.sig)).toEqual([]);
+    expect(rows.map(r => r.name).filter(name => !(GBRAIN_PINNED_FUNCTIONS as readonly string[]).includes(name))).toEqual([]);
   });
+
+  test('another application\'s function in public pinning the old search_path keeps it: boots and the migration leave it, and doctor does not name it', async () => {
+    const { functionSearchPathProblems } = await import('../src/commands/doctor/checks/function-search-path.ts');
+    const { v277 } = await import('../src/core/schema-migrations/v277-function-search-path-pg-temp.ts');
+    await engine.executeRaw(`CREATE FUNCTION public.app_example() RETURNS int LANGUAGE sql SET search_path = pg_catalog, public AS 'SELECT 1'`);
+    try {
+      await engine.initSchema();
+      await v277.handler!(engine);
+      expect(await functionSearchPathProblems(engine)).toEqual({ functions: [], fix: [] });
+      const [fn] = await engine.executeRaw<{ config: string[] }>(`SELECT proconfig AS config FROM pg_proc WHERE proname = 'app_example'`);
+      expect(fn!.config).toEqual(['search_path=pg_catalog, public']);
+    } finally {
+      await engine.executeRaw('DROP FUNCTION IF EXISTS public.app_example()');
+    }
+  }, 120_000);
 
   test('temp tables named like the ledgers hide nothing: purged writes are refused and a withdrawn fact is stamped', async () => {
     const attempt = (sql: string, params: unknown[]) => engine.executeRaw(sql, params).then(() => 'stored', (e: Error) => e.message.split(':')[0]);

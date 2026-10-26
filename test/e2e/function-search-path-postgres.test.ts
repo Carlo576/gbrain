@@ -18,6 +18,7 @@ import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { LATEST_VERSION, runMigrations } from '../../src/core/migrate.ts';
 import { derivationNeedles } from '../../src/core/page-body/segment-derive.ts';
 import { v277 } from '../../src/core/schema-migrations/v277-function-search-path-pg-temp.ts';
+import { GBRAIN_PINNED_FUNCTIONS } from '../../src/core/function-search-path.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const describeE2E = DATABASE_URL ? describe : describe.skip;
@@ -100,14 +101,15 @@ async function catalog(c: Sql) {
   const triggers = await c.unsafe<Array<{ trigger: string; timing: string }>>(
     `SELECT tgname AS trigger, CASE WHEN (tgtype & 2) <> 0 THEN 'BEFORE' ELSE 'AFTER' END AS timing FROM pg_trigger
       WHERE NOT tgisinternal AND tgname = ANY($1::text[]) ORDER BY 1`, [GUARD_TRIGGERS]);
-  const paths = await c.unsafe<Array<{ sig: string; setting: string }>>(
-    `SELECT p.oid::regprocedure::text AS sig, s.setting FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+  const paths = await c.unsafe<Array<{ name: string; sig: string; setting: string }>>(
+    `SELECT p.proname AS name, p.oid::regprocedure::text AS sig, s.setting FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
       CROSS JOIN LATERAL unnest(p.proconfig) AS s(setting) WHERE n.nspname = 'public' AND s.setting LIKE 'search_path=%' ORDER BY 1`);
   return {
     definers: definers.map(d => d.fn),
     triggers: triggers.map(t => ({ trigger: t.trigger, timing: t.timing })),
     pinned: paths.length,
     withoutTemp: paths.filter(p => !p.setting.endsWith(', pg_temp')).map(p => p.sig),
+    unlisted: paths.filter(p => !(GBRAIN_PINNED_FUNCTIONS as readonly string[]).includes(p.name)).map(p => p.sig),
   };
 }
 
@@ -211,6 +213,7 @@ describeE2E('a temp table or view named like a ledger hides nothing from the gua
     ]);
     expect(c.pinned).toBeGreaterThanOrEqual(35);
     expect(c.withoutTemp).toEqual([]);
+    expect(c.unlisted).toEqual([]);
   });
 
   test('4. a brain at the version before, migrated (no schema blob replay), ends the same, and doctor passes only after', async () => {
@@ -318,4 +321,23 @@ describeE2E('a temp table or view named like a ledger hides nothing from the gua
       await engine.disconnect();
     }
   }, 120_000);
+
+  test('8. an upgrade whose migrations re-create guard functions and then fail before v277 still leaves pg_temp on every pinned path', async () => {
+    const brain = await freshBrain();
+    const engine = new PostgresEngine();
+    try {
+      await brain.conn.unsafe(`DROP INDEX persistence_requests_foreground_committed;
+        CREATE TABLE persistence_requests_foreground_committed (x int);
+        UPDATE config SET value = '263' WHERE key = 'version';`);
+      await engine.connect({ database_url: brain.url });
+      const { value: failure } = await capturingStderr(() => engine.initSchema().then(() => null, (e: unknown) => e));
+      expect(failure).not.toBeNull();
+      const [version] = await brain.conn.unsafe<Array<{ value: string }>>(`SELECT value FROM config WHERE key = 'version'`);
+      expect(Number(version!.value)).toBeLessThan(v277.version);
+      expect((await catalog(brain.conn)).withoutTemp).toEqual([]);
+    } finally {
+      await engine.disconnect();
+      await brain.conn.end();
+    }
+  }, 300_000);
 });
