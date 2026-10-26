@@ -852,9 +852,9 @@ function installStdioLifecycle(
   // budget). SEPARATE timer from the parent watchdog, through the same
   // injectable deps.setInterval seam, unref'd per the serve convention so
   // it can never hold the process open. Cleared in beginShutdown. Kill
-  // switch: GBRAIN_SWEEP=0 (seam: opts.sweepEnabled). Chunk-level stdin
-  // 'data' granularity is sufficient — same rationale as armIdle below.
-  const sweepEnabled = !readOnlyServeSkipsResidentDuties(isReadOnlyServeArgs(args), engine.kind) && (opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0')); // #7599: no sweep in a read-only Postgres serve
+  // switch: GBRAIN_SWEEP=0 (seam: opts.sweepEnabled). Chunk-level stdin 'data' granularity is sufficient (see armIdle).
+  const lean = readOnlyServeSkipsResidentDuties(isReadOnlyServeArgs(args), engine.kind); // #7599: a read-only Postgres serve
+  const sweepEnabled = !lean && (opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0')); // runs no sweep
   if (sweepEnabled) {
     const runIdleSweep = opts.sweep ?? (async (e: BrainEngine) => {
       // #4409: the runner loads lazily here too — the sweep fires after
@@ -912,7 +912,7 @@ function installStdioLifecycle(
   }
 
   // Automatic facts drain (Lane D) and the #6317 movement watch: see installResidentTickers.
-  factsDrain = readOnlyServeSkipsResidentDuties(isReadOnlyServeArgs(args), engine.kind) ? null : installResidentTickers(engine, opts, deps, () => shuttingDown); // #7599: nor its resident tickers
+  factsDrain = lean ? null : installResidentTickers(engine, opts, deps, () => shuttingDown); // #7599: nor its resident tickers
 
   // Optional idle-timeout safety net. Default OFF; opt-in via
   // `--stdio-idle-timeout <seconds>`. The flag is for the rare case where

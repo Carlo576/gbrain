@@ -17,7 +17,8 @@ import { syncLockId } from '../src/core/db-lock.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { readBlockedManagedSyncs } from '../src/core/persistence/sync-blocked.ts';
 import { abandonedPasses, passStatusNext, passStatusState } from '../src/core/persistence/sync-pass-status.ts';
-import { MANAGED_SYNC_PASS_OP, type PassRow } from '../src/core/persistence/sync-pass-row.ts';
+import { MANAGED_SYNC_PASS_OP, type PassRow, readPassRow } from '../src/core/persistence/sync-pass-row.ts';
+import { liveSyncJob } from '../src/core/persistence/sync-movement.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
@@ -85,9 +86,12 @@ for (const backend of testBackends()) {
     expect(await blocked()).toEqual([expect.objectContaining({ code: 'pass_interrupted' })]);
 
     // A lease that cannot be read decides nothing: the fresh open pass reads unfinished, and doctor lists nothing for it.
+    const passRowNow = () => engine.executeRaw(`SELECT completed_keys, updated_at FROM op_checkpoints WHERE op=$1`, [MANAGED_SYNC_PASS_OP]);
+    const before = await passRowNow();
     const lockRead = spyOn(dbLock, 'inspectLock').mockRejectedValue(new Error('lock read failed'));
     try {
       status = await readSyncStatus(engine, 'default', { detail: false });
+      expect(await passRowNow()).toEqual(before);
       expect(status.reason).toBe('pass_unfinished');
       expect(status.interrupted).toBeNull();
       expect(await blocked()).toEqual([]);
@@ -109,6 +113,17 @@ for (const backend of testBackends()) {
     expect(await doctor()).toMatchObject({ name: 'managed_sync_blocked', status: 'fail' });
     await lockRow(engine, '3 minutes', '-1 minute');
 
+    // A killed sync job's lock row still names the job: no reader counts it as a live job (the autopilot's freshness skip reads liveSyncJob).
+    await engine.executeRaw('UPDATE gbrain_cycle_locks SET acquisition_token=gen_random_uuid() WHERE id=$1', [syncLockId('default')]);
+    await engine.executeRaw(`INSERT INTO minion_jobs(name,queue,status,submission_authority,data,max_attempts,max_stalled,lock_token,lock_until,started_at,remove_on_complete,remove_on_fail)
+      SELECT 'sync','gbrain-drain-lease','active','{"version":1,"kind":"application"}'::jsonb,$2::text::jsonb,1,0,acquisition_token::text,now()-interval '1 minute',now(),true,true
+      FROM gbrain_cycle_locks WHERE id=$1`, [syncLockId('default'), JSON.stringify({ sourceId: 'default', drain_lease_beacon: { kind: 'job', id: '4242' } })]);
+    expect(await liveSyncJob(engine, 'default')).toBeNull();
+    status = await readSyncStatus(engine, 'default', { detail: false });
+    expect([status.reason, status.live, status.live_job_id]).toEqual(['pass_interrupted', null, null]);
+    expect(status.interrupted?.holder).toMatchObject({ kind: 'job', id: '4242' });
+    await engine.executeRaw("DELETE FROM minion_jobs WHERE queue='gbrain-drain-lease'");
+
     // A holder that renewed the lease just now is a pass still running: not interrupted, not blocked.
     await lockRow(engine, '1 second', '2 minutes');
     status = await readSyncStatus(engine, 'default', { detail: false });
@@ -116,6 +131,23 @@ for (const backend of testBackends()) {
     expect(status.live).toMatchObject({ pid: 4242 });
     expect(status.interrupted).toBeNull();
     expect(await blocked()).toEqual([]);
+
+    // Resuming: a plain sync takes the dead holder's expired lock over and ends the pass, and after a second
+    // interrupted pass it also clears the streak. Nothing reads interrupted or abandoned afterwards.
+    const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'");
+    const resume = async () => {
+      const result = await performManagedSync(engine, { sourceId: 'default', noPull: true, noEmbed: true, noExtract: true });
+      const ended = (await readPassRow(engine, 'default', incarnation!))!;
+      expect([result.status, ended.value.telemetry.outcome, abandonedPasses(ended), passStatusState(ended, null)]).toEqual(['up_to_date', 'up_to_date', 0, null]);
+      expect(await engine.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1', [syncLockId('default')])).toHaveLength(0);
+      expect(await blocked()).toEqual([]);
+      expect((await readSyncStatus(engine, 'default', { detail: false })).interrupted).toBeNull();
+    };
+    await lockRow(engine, '3 minutes', '-1 minute');
+    await resume();
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(jsonb_set(completed_keys,'{0,telemetry,outcome}','"open"'),'{0,obligations,abandoned_streak}','1') WHERE op=$1`, [MANAGED_SYNC_PASS_OP]);
+    expect((await readSyncStatus(engine, 'default', { detail: false })).reason).toBe('pass_abandoned');
+    await resume();
   }, { databaseUrl, setup: ({ root }) => {
     git(root, ['init', '-q']);
     writeFileSync(join(root, 'a.md'), '---\ntype: concept\ntitle: a\n---\n\nA note about a.\n');

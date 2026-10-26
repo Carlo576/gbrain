@@ -57,13 +57,14 @@ export async function readBlockedManagedSyncs(engine: BrainEngine, sourceIds?: s
   // #7596: an open pass no recorded stop explains, whose drain lease no process renews: its process was killed or crashed.
   const open = readings.filter(reading => reading.row.value.telemetry.outcome === 'open' && !listed.some(blocked => blocked.source_id === reading.source_id));
   if (!open.length) return listed;
-  const [{ inspectLock, isLockHolderLive, syncLockId }, { DRAIN_LEASE_TTL_MINUTES }, { abandonedPasses }] = await Promise.all([
+  const [{ inspectLock, syncLockId }, { drainLeaseLive }, { abandonedPasses }] = await Promise.all([
     import('../db-lock.ts'), import('./sync-lease.ts'), import('./sync-pass-status.ts')]);
   const now = Date.now();
-  for (const { source_id, row } of open) {
-    const lock = await inspectLock(engine, syncLockId(source_id)).catch(() => undefined);
+  const locks = await Promise.all(open.map(({ source_id }) => inspectLock(engine, syncLockId(source_id)).catch(() => undefined)));
+  for (const [i, { source_id, row }] of open.entries()) {
+    const lock = locks[i];
     if (lock === undefined) continue;
-    const interrupted = !lock || !isLockHolderLive(lock, DRAIN_LEASE_TTL_MINUTES);
+    const interrupted = !lock || !drainLeaseLive(lock);
     const abandoned = abandonedPasses(row, now, interrupted) >= ABANDONED_REPORT_STREAK;
     if (interrupted || abandoned) listed.push({ source_id, code: abandoned ? 'pass_abandoned' : 'pass_interrupted', run_id: row.value.telemetry.pass_id, blocked_since: abandoned ? passStuckSince(row) : row.updated_at });
   }

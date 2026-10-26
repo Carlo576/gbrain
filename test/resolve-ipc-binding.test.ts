@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import net from 'node:net';
 import { once } from 'node:events';
 import { bindResolveIpcForServe } from '../src/mcp/resolve-ipc-binding.ts';
-import { readIpcSecret, requestSweepStatus, requestSyncStatus, resolveSocketPath, socketHasLiveListener } from '../src/core/context/resolve-ipc.ts';
+import { readIpcSecret, requestSweepStart, requestSweepStatus, requestSyncAbort, requestSyncNudge, requestSyncStart, requestSyncStatus, resolveSocketPath, socketHasLiveListener } from '../src/core/context/resolve-ipc.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { requestPersistenceCapabilities } from '../src/core/persistence/ipc.ts';
@@ -112,6 +112,10 @@ describe('bindResolveIpcForServe (#4474)', () => {
           const want = readOnly ? 'unsupported_kind' : 'unknown_job';
           expect((sync as { error?: string }).error).toBe(want);
           expect((sweep as { error?: string }).error).toBe(want);
+          if (!readOnly) continue;
+          for (const write of [requestSyncStart, requestSyncAbort, requestSyncNudge, requestSweepStart]) {
+            expect(((await write(binding.socketPath!, { secret } as never)) as { error?: string }).error).toBe('unsupported_kind');
+          }
         } finally {
           const closed = binding.server ? once(binding.server, 'close') : Promise.resolve();
           binding.close();

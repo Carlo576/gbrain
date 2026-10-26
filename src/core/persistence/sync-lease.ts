@@ -36,7 +36,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncResult } from '../../commands/sync.ts';
 import type { Action } from '../agent-output.ts';
-import { fenceLockRow, inspectLock, isLockHolderLive, LockStolenError, LockUnavailableError, syncLockId, withRefreshingLock } from '../db-lock.ts';
+import { fenceLockRow, inspectLock, isLockHolderLive, type LockSnapshot, LockStolenError, LockUnavailableError, syncLockId, withRefreshingLock } from '../db-lock.ts';
 import { currentRunDeadline, lastForwardProgressAt, noteCommittedProgress, noteForwardProgress } from '../forward-progress.ts';
 import { faultPoint } from './fault-points.ts';
 import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
@@ -120,7 +120,7 @@ export async function inFencedSlices<T>(engine: BrainEngine, sourceId: string, i
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : null;
 
-/** The live holder of a source's drain lease (kind and id from the row this module writes beside the lock), or null. */
+/** The holder of a source's drain lease (kind and id from the row this module writes beside the lock), live or not (`readDrainLease` says which), or null. */
 export async function readDrainHolder(engine: BrainEngine, sourceId: string): Promise<DrainHolder | null> {
   return (await readDrainLease(engine, sourceId))?.holder ?? null;
 }
@@ -138,8 +138,11 @@ export async function readDrainLease(engine: BrainEngine, sourceId: string): Pro
   const holder: DrainHolder = { kind: meta?.kind ?? 'unknown', id: meta?.id ?? null, host: snap.holder_host, pid: snap.holder_pid,
     started_at: iso(snap.acquired_at), last_heartbeat_at: iso(snap.last_refreshed_at), version: meta?.version ?? null,
     progress: await holderProgress(engine, sourceId, snap.acquired_at).catch(() => null) };
-  return { holder, live: isLockHolderLive(snap, DRAIN_LEASE_TTL_MINUTES) };
+  return { holder, live: drainLeaseLive(snap) };
 }
+
+/** #7596: whether the drain lease's holder still renews it: `isLockHolderLive` at the drain TTL, the one rule status and doctor read. */
+export const drainLeaseLive = (snap: LockSnapshot): boolean => isLockHolderLive(snap, DRAIN_LEASE_TTL_MINUTES);
 
 /**
  * The source's managed-sync commits since `since`, and its last commit, cursor save, (#6712 PR 4b, design v3.2 §3.7)

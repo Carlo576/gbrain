@@ -121,11 +121,12 @@ interface HoldRow { count: number | string | null; stalled: number | string | nu
 /**
  * #6706: the id of the active `sync` Minions job with a live lock that is draining `sourceId`, or null. Never rejects.
  * #6712 PR 1: a job drains under the source's drain lease, so its holder row names the job first; the job-table read
- * stays for a job an older gbrain started (it takes no lease). #7596 `liveHolder`: the holder a caller already read, null
- * when it read none still renewing the lease (a killed job's lock row names it until a takeover).
+ * stays for a job an older gbrain started (it takes no lease). #7596: a holder that stopped renewing the lease is not live (a
+ * killed job's lock row names it until a takeover); `liveHolder` is the live holder a caller already read that way, or null.
  */
 export async function liveSyncJob(engine: BrainEngine, sourceId: string, liveHolder?: DrainHolder | null): Promise<number | null> {
-  const holder = liveHolder !== undefined ? liveHolder : await (await import('./sync-lease.ts')).readDrainHolder(engine, sourceId).catch(() => null);
+  const holder = liveHolder !== undefined ? liveHolder
+    : await (await import('./sync-lease.ts')).readDrainLease(engine, sourceId).then(lease => lease?.live ? lease.holder : null, () => null);
   if (holder?.kind === 'job' && holder.id && /^\d+$/.test(holder.id)) return Number(holder.id);
   // The lease's beacon row (sync-lease.ts) is for older binaries; this build reads the lease holder above.
   const [row] = await engine.executeRaw<{ id: number | string }>(`SELECT id FROM minion_jobs WHERE name='sync' AND status='active' AND lock_until > now() AND queue <> 'gbrain-drain-lease'
