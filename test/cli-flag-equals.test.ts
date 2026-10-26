@@ -40,11 +40,13 @@ describe('#7619 table: every registered CLI_ONLY flag', () => {
         const r = await cliOnlyFlagArgs(command, [`${flag}=${value}`]);
         const expected = EQUALS_FORM_READERS[command]?.includes(flag) ? 'kept'
           : types.get(flag) === 'boolean' || flag.startsWith('--no-') ? 'refused' : 'split';
-        const got = 'refusal' in r ? 'refused'
-          : r.args.length === 1 && r.args[0] === `${flag}=${value}` ? 'kept'
-          : JSON.stringify(r.args) === JSON.stringify(await argvFor(command, [flag, value])) && r.args[0] === flag && r.args[1] === value ? 'split' : `other ${JSON.stringify(r.args)}`;
+        const args = 'refusal' in r ? null : r.args;
+        const bare = JSON.stringify(await argvFor(command, [flag, value]));
+        const got = args === null ? 'refused'
+          : args.length === 1 && args[0] === `${flag}=${value}` ? 'kept'
+          : JSON.stringify(args) === bare && args[0] === flag && args[1] === value ? 'split' : `other ${JSON.stringify(args)}`;
         if (got !== expected) wrong.push(`${command} ${flag}: expected ${expected}, got ${got}`);
-        if (got === 'split' && validateCommandFlags(command, r.args) !== null) wrong.push(`${command} ${flag}: split argv fails validation`);
+        if (got === 'split' && validateCommandFlags(command, args!) !== null) wrong.push(`${command} ${flag}: split argv fails validation`);
       }
     }
     expect(wrong).toEqual([]);
