@@ -6,7 +6,6 @@ import { dirname } from 'node:path';
 import { once } from 'node:events';
 import { constants } from 'node:os';
 import type { Readable, Writable } from 'node:stream';
-import { bunVersionMeets } from '../src/core/runtime-version.ts';
 
 const MAX_PENDING_CHARS = 64 * 1024;
 const SUMMARY_FAILURES = 50;
@@ -29,7 +28,7 @@ export interface CapturedFailure { file: string; test: string; arm: string; erro
  * run whose `bun test` banner is older than BUN_SPAWNSYNC_FIXED or missing.
  */
 export const BUN_SPAWNSYNC_POISONED = 'bun_spawnsync_poisoned';
-const BUN_SPAWNSYNC_FIXED = '1.4.3';
+const BUN_SPAWNSYNC_FIXED = [1, 4, 3];
 
 /**
  * Reads the live test output line by line and keeps the last 50 failures
@@ -110,7 +109,13 @@ export class FailureCollector {
   }
   /** Whether this run's Bun can carry oven-sh/bun#34069: older than the fix, or not named by the log. */
   private onAffectedBun(): boolean {
-    return bunVersionMeets(this.bunVersion, BUN_SPAWNSYNC_FIXED) !== true;
+    const v = /^(\d+)\.(\d+)\.(\d+)(-\S*)?$/.exec(this.bunVersion);
+    if (!v) return true;
+    for (let i = 0; i < 3; i++) {
+      const d = Number(v[i + 1]) - BUN_SPAWNSYNC_FIXED[i];
+      if (d !== 0) return d < 0;
+    }
+    return v[4] !== undefined;
   }
   /** The one-paragraph verdict for a poisoned run, Markdown; empty otherwise. */
   poisonedNote(): string {
