@@ -285,7 +285,7 @@
           {
             "category": "ops",
             "elapsed_ms": "<volatile>",
-            "message": "Bun <bun-version> (minimum 1.4.0)",
+            "message": "Bun <bun-version> (minimum 1.4.4)",
             "name": "bun_runtime",
             "status": "ok"
           },
@@ -1474,6 +1474,10 @@
                 },
                 {
                   "name": "persistence_requests_request_id",
+                  "state": "valid"
+                },
+                {
+                  "name": "persistence_requests_foreground_committed",
                   "state": "valid"
                 }
               ],
@@ -5021,7 +5025,7 @@
           {
             "category": "ops",
             "elapsed_ms": "<volatile>",
-            "message": "Bun <bun-version> (minimum 1.4.0)",
+            "message": "Bun <bun-version> (minimum 1.4.4)",
             "name": "bun_runtime",
             "status": "ok"
           },
@@ -6210,6 +6214,10 @@
                 },
                 {
                   "name": "persistence_requests_request_id",
+                  "state": "valid"
+                },
+                {
+                  "name": "persistence_requests_foreground_committed",
                   "state": "valid"
                 }
               ],

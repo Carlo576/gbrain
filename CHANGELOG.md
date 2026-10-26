@@ -10,6 +10,159 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.469.0] - 2026-10-26
+
+**`gbrain sync` no longer turns whatever folder you run it from into your brain when a source's stored directory is a relative path like `.`. It stops and asks which folder holds the brain.**
+
+Older setups could store a source's directory (or the legacy `sync.repo_path` setting) as `.`, which means "the folder gbrain happens to run in". Running `gbrain sync` from your home folder, a project checkout or a cron job's working directory then treated that folder as the brain: it Git-initialized it, committed everything in it as a baseline, and imported its markdown as pages. Sync now refuses such a path before touching anything. Every other command that used to read it the same way skips it or refuses it. Separately, a write such as `remember` or `put_page` that stalls now tells you how to inspect and resubmit it, instead of telling you to run a sync that would never retry it.
+
+### How to fix a brain this affects
+
+`gbrain doctor` (`default_source_local_path`) names every source with a relative directory. Point each one at its real folder, or clear it if the source has no folder:
+
+```bash
+gbrain sources set-path <source-id> /absolute/path/to/brain
+gbrain sources set-path <source-id> --clear        # a source with no checkout
+gbrain config set sync.repo_path /absolute/path/to/brain   # the legacy setting
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sync` (one source, `--all`, watch, the sync job, the dream, autopilot and maintenance cycles) with a relative stored directory | the folder it ran in became the brain: `git init`, a baseline commit of everything in it, an import of its markdown | refuses `sync_anchor_relative` (exit 3) before any Git command, cost estimate or import, and asks which directory holds the brain; nothing changes |
+| `gbrain sync --repo /absolute/dir` while the stored directory is `.` | the embedding cost estimate could fetch and walk the current folder | the estimate prices the `--repo` directory |
+| Page and fact writes, folder-to-source matching, fence repair, managed activation, `autopilot --install`, a remote `submit_job`, `gbrain sources resolve-path` | read the relative path as the current folder | skip the file (database only) or refuse until the path is set; `resolve-path` exits 3 |
+| `gbrain config set sync.repo_path .` | accepted | refused; give an absolute directory |
+| `gbrain sources set-path <id> --clear` on a filesystem source | connector sources only | also clears a relative directory on any source |
+| A foreground write (`remember`, `put_page`, `add_tag`, ...) ends `preparation_stalled` | told you to run `gbrain sync`, which never retries it | tells you to inspect the writer read-only (`gbrain sources writer status --source <id> --json`) and resubmit with a new request_id; managed writes say to rerun their command, and sync writes keep their sync retry |
+
+### Things to watch after you upgrade
+
+- While a source's directory is relative, its pages and those of any source without its own directory that write under `sync.repo_path` are saved to the database only. Doctor names the source that blocks them; setting the path restores file writes.
+- `gbrain sources writer failures` now reports a reconcile or managed `put_page` under its own operation (`canonical_reconcile` or `managed_*`). `--group-by category` splits by operation, and `--operation <op>` narrows a listing to one.
+- A stray `--path` on `gbrain dream`, `gbrain autopilot` or `gbrain agent` is now refused as an unknown flag. None of these commands ever read it.
+- A stored directory that is absolute only on another operating system (a Windows drive path read on Linux or macOS) is refused the same way; point it at this host's folder with `gbrain sources set-path <id> <absolute-directory>`.
+- Nothing rewrites your data on upgrade. Fixing a relative path is a command you run.
+
+### Itemized changes
+
+- `src/core/sync-applicability.ts`: `assertSyncAnchorAbsolute` and the `sync_anchor_relative` refusal, run first in `assertSyncApplicable` by every sync entry point; `src/core/sync-anchor.ts` never proves ownership from a relative anchor.
+- `src/commands/sync/run.ts`: the single-source and `--all` paths refuse before the embedding cost gate; the cost gate never prices a relative stored path.
+- `src/core/cycle.ts`: a cycle whose directory matches no source refuses its sync phase while `default`'s path is relative.
+- `src/core/write-through.ts`, `src/core/persistence/*`, `src/core/fence-repair/`, `src/core/minions/submission-authority.ts`, `src/commands/import.ts`, `src/commands/autopilot.ts`: the other readers skip or refuse a relative path; an absolute path written by another OS is not treated as relative by the write-through guard.
+- `src/commands/sources-set-path.ts`, `src/core/persistence/connector-path.ts`: `--clear` clears a relative path on any source.
+- `src/core/sources-ops.ts`: `gbrain sources remove` never deletes, and a re-clone refuses, a gbrain-managed clone whose stored path is relative, so neither can remove the folder you run it from.
+- `src/commands/doctor/checks/default-source-path.ts`, `src/core/default-source-path-check.ts`: doctor warns on every relative stored path and names the fix.
+- `src/core/persistence/terminal-classify.ts`, `src/core/persistence/terminal-failures.ts`, `src/commands/persistence-admin.ts`: stalled-write diagnoses by operation, and `--operation` on `gbrain sources writer failures`.
+- `docs/guides/troubleshooting.md#relative-source-path` and the error-code catalogue.
+- Tests: `test/sync-relative-anchor-refusal-7630.test.ts`, `test/sync-relative-anchor-cli-exit-7630.test.ts`, `test/e2e/sync-relative-anchor-refusal-7630-postgres.test.ts`.
+
+Reported by @avartan; fix also proposed in #7631 by @Masashi-Ono0611.
+
+## [0.60.468.0] - 2026-10-26
+
+**GBrain now requires Bun 1.4.4 or newer, so a sync or conversion pass over a TLS Postgres or connection pooler no longer grows until a memory guard kills it, and every supported runtime carries the Brotli fix for CVE-2026-111497.**
+
+On Bun 1.4.0 to 1.4.2 a postgres.js connection over TLS keeps every chunk it receives, so a long pass against a TLS database grew by about the bytes it read (#7644, #7596). Bun 1.4.3 fixed the leak and 1.4.4 adds the Brotli CVE fix, so the floor moves from 1.4.0 to 1.4.4. Compiled release binaries already embed Bun 1.4.4 and need nothing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Any `gbrain` command on Bun 1.4.0 to 1.4.3 (`serve`, `jobs work`, hooks, autopilot) | ran; 1.4.0 to 1.4.2 leaked TLS reads, and doctor warned about the CVE | exits 1 at startup with `GBrain requires Bun 1.4.4 or newer (found Bun <version>)` and the fix (`bun upgrade`, then restart GBrain); `gbrain --version` still answers |
+| `gbrain doctor` `bun_runtime` on an older Bun | warn | fail, naming the 1.4.4 minimum and the fix |
+| `gbrain upgrade` or autopilot on a source install whose host Bun is below 1.4.4 | upgraded | stops before swapping (autopilot holds) with the same fix |
+| Code importing gbrain as a library on an older Bun | ran | guarded outbound HTTP calls (URL checks, remote images, HTTP integrations) throw `UNSUPPORTED_RUNTIME` |
+| Cloud sandbox setup with a preinstalled older Bun | used it | installs a current Bun with npm and stops before cloning if that Bun is still below 1.4.4 |
+| In-agent setup (Grok Bot, Muse) from a helper that stages Bun below 1.4.4 | installed a runtime the CLI then refused | stops with `runtime_below_floor` before writing anything and prints the exact command to fetch the current helper and rerun |
+
+### What to watch for after you upgrade
+
+- Run `bun --version` on the brain host and on any source-installed thin client before upgrading gbrain. Below 1.4.4, run `bun upgrade` (or upgrade through the package manager that installed Bun), then restart GBrain. `skills/migrations/v0.60.468.0.md` walks an agent through it, including asking before changing the user's Bun.
+- A service that restarts gbrain on an older Bun (launchd, systemd) keeps exiting until Bun is upgraded.
+- There is no schema change and no config change.
+
+### Itemized changes
+
+- `src/core/runtime-version.ts`, `package.json` `engines.bun`: `MINIMUM_BUN_VERSION` and `SECURE_BUN_VERSION` are both 1.4.4; the CLI gate, doctor's `bun_runtime`, the guarded-HTTP check and the upgrade floor gate read them.
+- `src/core/behavior-change-notice.ts`: a `bun_floor_1_4_4` row tells existing installs about the new floor.
+- `src/core/agent-install/setup.ts`: in-agent setup checks the Bun in its bundle (the runtime the launcher is pinned to) against the floor before it writes anything (`test/agent-install-bun-floor.test.ts`).
+- `templates/bootstrap/cloud-setup-script.sh`: the preinstalled-Bun check uses the 1.4.4 floor and checks the npm-installed Bun before cloning.
+- CI: the Bun 1.4.0 matrix cells are gone from `test.yml`, `native-locks.yml`, `persistence-validation.yml`, `convergence-nightly.yml` and `promote-stable.yml`. The remaining `unit-postgres-arms` cell runs both the PGLite and Postgres arms, so the PGLite side of the `*.slow.test.ts` suites still runs on GitHub CI (guarded by `test/scripts/postgres-unit-arms.test.ts`). `docs/test-audit/2026-10-04/expected-deltas.tsv` records the moved receipt lane.
+- Bench and VM setup scripts, the System One Ubicloud runner and the stable-promotion workflow pin Bun 1.4.4.
+- `scripts/capture-test-log.ts`: the Bun spawnSync-poisoning diagnosis applies only to Bun below 1.4.3, and a log with no `bun test` banner is handled.
+- Docs: README, INSTALL_FOR_AGENTS, BOOTSTRAP_FOR_AGENTS, CONTRIBUTING, SECURITY, docs/TESTING and the key-files index state the 1.4.4 minimum; `skills/migrations/v0.60.468.0.md` is the upgrade note.
+- Tests: the doctor goldens, `test/runtime-version.test.ts` (1.4.0 to 1.4.3 refused, the CLI gate exits 1, the cloud script stops on an old npm Bun) and the CI matrix tests follow the new floor.
+
+## [0.60.467.0] - 2026-10-26
+
+**A CLI flag written as `--flag=value` is never silently ignored any more. Where a command reads that spelling, it applies; where it does not, the command stops with exit 2 and shows the spelling it reads, instead of running as if you had not passed the flag.**
+
+Security: many commands read only the two-argument spelling (`--flag value`) of a flag that flag validation accepted in either form, so the `=` form passed the check and was then dropped. The worst case was a scoped access token: `gbrain auth create <name> --scopes=read` minted a full-access token. A switch given a value had the same problem in reverse: `--yes=n` or `--dry-run=true` was read as if the value were not there. Now every `=` token on a command-line-only command is handled before the command runs: kept when the command reads the `=` form on that path, split into `--flag value` when the command's help declares a value, and refused with the two-argument fix otherwise. A switch never takes a value.
+
+### What changed
+
+| You run | Before | Now |
+|---|---|---|
+| `gbrain auth create <name> --scopes=read` | a full-access token | exit 2, no token; `--scopes read` works as before |
+| `--yes=n`, `--dry-run=true`, `--apply=false`, `-y=n` | the value was ignored and the switch was read as given or not given | exit 2: write the switch on its own, or leave it out |
+| a value flag the command's help declares, written with `=` (serve bind address, public URL, port, token lifetime and stdio idle timeout; sync interval, source and repository; import workers; autopilot install repository and supervisor; onboard and resumed doctor remediation spend caps; apply-migrations reviewed inventory and forced retry; migrate target engine and URL) | ignored | applies |
+| an `=` spelling the command reads itself (for example recall's source, the consent spending cap and plan hash) | worked | still works |
+| an `=` spelling the command does not read | ignored, and the command ran without it | exit 2 with the spelling to use |
+| `gbrain agent run "<prompt>" --detach=true` | read as prompt text; the job ran in follow mode | exit 2: write `--detach` on its own |
+| one of agent run's own flags written with `=` inside the prompt (`gbrain agent run fix the --model=opus bug`) | read as prompt text; the job ran without the flag | exit 2: write the flag before the prompt, or put `--` before the prompt to keep it as text |
+| free text that only looks like an `=` flag (`gbrain capture "-n=3 is the answer"`, anything after `--` in an agent run prompt) | passed to the command | still passed to the command |
+
+### What to watch for after you upgrade
+
+- Scripts that pass values with `=`: a value that used to be ignored now applies, and a spelling the command does not read now stops with exit 2. In particular a serve given an all-interfaces bind address with `=` now listens on every interface, and a public URL given with `=` now sets the OAuth issuer, so clients authorized under the old localhost issuer reconnect.
+- A few `=` spellings that only some paths of a command read now exit 2 with the two-argument fix: the stale-extraction source id of `gbrain extract`, the checkout path of the database-free `gbrain sources pull`, and the values of the managed `gbrain sources` lifecycle subcommands.
+- An agent run prompt that contains one of agent run's own flags written with `=` (for example `--model=` or `--tools=`) now exits 2. Write the flag before the prompt, or put `--` before the prompt to send it as text.
+- An upgrade restart of a `gbrain jobs supervisor` started with `=` values it ignored starts it again without them.
+
+### Itemized changes
+
+- `src/cli/flag-equals.ts` (new): `splitFlagEquals` (keep, split or refuse per token), `EQUALS_READERS` (paths whose handler reads the `=` form, keyed by command or `command sub`; `sync --status` reads as `sync status`, `forget --purge` is its own path, `repos` uses the `sources` keys through `READER_ALIASES`), `OWN_EQUALS_PARSERS`, `COMMAND_SWITCHES`, `COMMAND_VALUES`, `END_OF_OPTIONS`, `findUnknownFlag` (moved from `main.ts`) and `directEntryArgs` for the direct `bun run src/commands/auth.ts` entry. Tests: `test/cli-flag-equals.test.ts` (every registered flag of every command-line-only command), `test/serve-flag-equals.test.ts` (real CLI on a keyless PGLite brain: serve access and surface, token minting, destructive commands, schema add-type JSON output).
+- `src/cli/main.ts`: `cliOnlyFlagArgs` runs the gate once after routing and the handler-free help printers, before strict arguments, flag validation and dispatch, and also covers the hand-parsed `search` subcommands and the validation-exempt paths.
+- `src/commands/auth.ts`: the direct entry strips and applies the global flags and runs the same gate and unknown-flag check as `gbrain auth`.
+- `src/commands/schema-add-type.ts`, `src/commands/schema.ts`, `src/commands/sources-writer-movement.ts`, `src/commands/eval-longmemeval.ts`: their own parsers refuse a value on a switch; `schema add-type` and `sources writer movement` also take `--json=true` as the JSON switch.
+- `src/commands/agent.ts`: exports `RUN_VALUE_FLAGS` and `BOOLEAN_TAIL_FLAGS`, so the gate reads `agent run` where its parser reads flags (the leading flags and the trailing switches it hoists) and refuses agent run's own flags written with `=` inside the prompt, up to the first bare `--`.
+- `src/cli/strict-args.ts`: `strictSpecFor`, the one lookup of the strict spec for a subcommand, shared with the gate.
+- `src/core/upgrade-restart.ts`: the supervisor restart keeps global flags and `--job-isolation=` and drops the `=` values the older supervisor ignored. Test: `test/upgrade-restart.test.ts`.
+- `scripts/generate-flag-registry.ts`: the flag registry no longer picks up this module's flag tables. Test: `test/generate-flag-registry.test.ts`.
+
+## [0.60.466.0] - 2026-10-26
+
+**A brain whose database is at schema v265 now upgrades instead of stopping with `column "pending" does not exist`, and on a brain with a large write journal each write claim is a quick index lookup again instead of a scan of the whole journal after every restart.**
+
+Two upgrade problems are fixed. First, a brain at schema v265 could not reach any later release: the upgrade replays the current schema before running migrations, and one index in it filters on a column that only the next migration adds, so the replay failed before any migration ran and every retry failed the same way. Second, after a restart the write queue checked "has a foreground write committed on this worktree since I last looked?" with no index to answer it, so on a brain with hundreds of thousands of past write receipts each claim walked every receipt. Claims could overrun their claim phase, the queue grew, and sync looked stuck.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Upgrading a brain at schema v265 (Postgres or PGLite) | every upgrade attempt failed with `column "pending" does not exist` | the upgrade adds the missing column first (exactly as migration v266 defines it, no data changes), then migrates to the latest schema |
+| A write claim right after a restart, on a large journal | each claim scanned the journal (about 175 ms per claim on a test brain with ~590k receipts) | migration v276 adds the partial index `persistence_requests_foreground_committed`; the same claim takes under 1 ms |
+| The new index is missing or INVALID on a brain already at the latest schema | — | `gbrain doctor` (`persistence_request_indexes`) names it and says write claims can time out; `gbrain repair request-indexes` previews the fix and `--apply` rebuilds it |
+
+### What to watch for after you upgrade
+
+- On Postgres, migration v276 builds the index with `CREATE INDEX CONCURRENTLY`, so writes keep flowing; on a very large journal the build can take a while. If it is interrupted, `gbrain doctor` reports the INVALID index and `gbrain repair request-indexes --apply` rebuilds it. PGLite builds it inline.
+- The index also covers compacted receipts of every kind, so on a long-lived brain it holds most committed receipts.
+- Nothing rewrites your data. The v265 fix only adds a column with its default.
+
+### Itemized changes
+
+- `src/core/engine-sql/bootstrap.ts`: the forward-reference bootstrap probes `derived_generation_items` and its `pending` column and adds the column on a v265 brain before the schema replay (#7645).
+- `src/core/persistence/schema.ts`, `src/core/schema-migrations/v276-persistence-foreground-committed-index.ts`: `persistence_requests_foreground_committed` on `(worktree_id, sequence)`, with the write claims' committed-foreground predicate written the way the claim probe writes it; built online by v276 (transaction-free, `CONCURRENTLY` on Postgres, an INVALID leftover rebuilt) and listed among the request-table online indexes (#7649).
+- `src/core/repair/request-indexes.ts`, `src/commands/doctor/checks/persistence-requests.ts`: repair and doctor cover the new index; the doctor message names write claims.
+- `test/fixtures/schema-history/`, `scripts/capture-schema-history-fixture.ts`: a fresh brain as each release from schema v260 to v275 created it, for both engines, captured from that release's own code with a round-trip fidelity check. `test/schema-history-upgrade.slow.test.ts` (PGLite) and `test/e2e/schema-history-upgrade.test.ts` (Postgres) upgrade every fixture to the latest schema and compare the result with a fresh install, so the next missing forward reference fails a test instead of a user's upgrade.
+- `test/schema-bootstrap-coverage.test.ts`: the bootstrap coverage check now reads columns in partial-index `WHERE` predicates and `INCLUDE` lists.
+- Tests for the index: `test/migration-persistence-foreground-committed-index.test.ts`, `test/e2e/persistence-claim-committed-probe-7649-postgres.test.ts` (both claim paths use the index on a 160k-receipt Postgres journal).
+
+Reported by @glen-carlson (#7645) and @andreineacsu (#7649). Contributed by @Masashi-Ono0611.
+
 ## [0.60.465.0] - 2026-10-26
 
 **On a managed brain, releasing a held fact (`gbrain trust release h<id>`) now writes it into its entity page's `## Facts` table through the page-write door, so the released fact lives in Git and a re-import keeps it, instead of a database-only row the file never had.**
