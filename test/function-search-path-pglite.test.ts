@@ -54,11 +54,11 @@ describe('function search_path ends in pg_temp on PGLite (#7632)', () => {
 
   test('a procedure in public pinning the old search_path is left alone: boots and the migration still succeed, and doctor does not name it', async () => {
     const { functionSearchPathProblems } = await import('../src/commands/doctor/checks/function-search-path.ts');
-    const { v276 } = await import('../src/core/schema-migrations/v276-function-search-path-pg-temp.ts');
+    const { v277 } = await import('../src/core/schema-migrations/v277-function-search-path-pg-temp.ts');
     await engine.executeRaw(`CREATE PROCEDURE public.proc_example() LANGUAGE plpgsql SET search_path = pg_catalog, public AS $p$ BEGIN END $p$`);
     try {
       await engine.initSchema();
-      await v276.handler!(engine);
+      await v277.handler!(engine);
       expect(await functionSearchPathProblems(engine)).toEqual({ functions: [], fix: [] });
       const [proc] = await engine.executeRaw<{ config: string[] }>(`SELECT proconfig AS config FROM pg_proc WHERE proname = 'proc_example'`);
       expect(proc!.config).toEqual(['search_path=pg_catalog, public']);

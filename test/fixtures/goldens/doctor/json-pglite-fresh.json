@@ -1326,6 +1326,10 @@
               {
                 "name": "persistence_requests_request_id",
                 "state": "valid"
+              },
+              {
+                "name": "persistence_requests_foreground_committed",
+                "state": "valid"
               }
             ],
             "repair": "request-indexes"

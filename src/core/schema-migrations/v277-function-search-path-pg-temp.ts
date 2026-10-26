@@ -23,7 +23,7 @@ export async function hardenFunctionSearchPaths(engine: BrainEngine, label: stri
         await tx.executeRaw(`SET LOCAL statement_timeout = '${migrationStatementTimeoutMs()}'`);
         await tx.executeRaw(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
       }
-      await tx.runMigration(276, FUNCTION_SEARCH_PATH_HARDENING_SQL);
+      await tx.runMigration(277, FUNCTION_SEARCH_PATH_HARDENING_SQL);
     });
   } catch (error) {
     if (isLockTimeoutError(error)) throw schemaLockBlockedError({ step: `${label} search_path`, timeoutMs: lockTimeoutMs, sessions: null, sampledDuringWait: false });
@@ -39,11 +39,11 @@ export async function hardenFunctionSearchPaths(engine: BrainEngine, label: stri
   return left;
 }
 
-export const v276: Migration = {
-  version: 276,
+export const v277: Migration = {
+  version: 277,
   name: 'function_search_path_pg_temp',
   idempotent: true,
   transaction: false,
   sql: '',
-  handler: async engine => { await hardenFunctionSearchPaths(engine, 'v276'); },
+  handler: async engine => { await hardenFunctionSearchPaths(engine, 'v277'); },
 };

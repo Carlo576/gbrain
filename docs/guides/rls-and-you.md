@@ -265,7 +265,7 @@ so a same-named object in another schema can never change what the function
 reads or writes. `pg_temp` is named last because PostgreSQL otherwise searches the
 caller's temporary schema first for tables and views: a session, the owner included,
 could shadow a purge or withdrawal ledger a guard reads with an empty temporary one of
-the same name and store purged content again. On an older brain, migration v276 appends
+the same name and store purged content again. On an older brain, migration v277 appends
 `pg_temp` to every gbrain function it owns with `ALTER FUNCTION` (no body changes), and
 `gbrain doctor` (`function_search_path`) names any function it could not change, with the
 `ALTER FUNCTION` to run as its owner. This does not close the scoped-writer gap: on

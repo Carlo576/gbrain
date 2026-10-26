@@ -3,7 +3,7 @@
  *
  * Without it, a session's temp table or view named like a ledger (fact_purges, page_purges, take_purges,
  * fact_withdrawals) hides that ledger from the guard that reads it, and a purged or withdrawn write goes through.
- * Migration v276 appends pg_temp to every function the migrating role owns and names the rest on stderr; this check
+ * Migration v277 appends pg_temp to every function the migrating role owns and names the rest on stderr; this check
  * names each function still without it and the ALTER FUNCTION to run as its owner. ALTER FUNCTION ... SET changes
  * neither the owner nor the body, so the next boot's CREATE OR REPLACE still succeeds. Read-only.
  */
@@ -40,7 +40,7 @@ async function runFunctionSearchPath(ctx: DoctorContext): Promise<Check[]> {
         name: 'function_search_path',
         status: 'fail',
         message: `${functions.length} function(s) pin search_path without pg_temp last (${functions.join(', ')}), so a temp table or view named like a purge or withdrawal ledger hides it from the guard that reads it. `
-          + `Fix (as the role that owns each function; migration v276 did the ones the migrating role owned): ${fix.join(' ')}`,
+          + `Fix (as the role that owns each function; migration v277 did the ones the migrating role owned): ${fix.join(' ')}`,
       });
     }
   } catch (e) {
