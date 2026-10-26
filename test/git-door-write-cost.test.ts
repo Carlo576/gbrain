@@ -11,7 +11,12 @@
  *     executable keeps its bit, and `git status` afterwards shows only what it showed before;
  *   - the index entry the door stages is the oid hash-object returned for the bytes it committed, never a refresh of
  *     the work tree, so bytes changed after staging show as modified (the staged-oid check of the push scan relies on it);
- *   - external git commits racing the door never corrupt the index or lose a commit;
+ *   - external git commits made under the checkout writer lock (the lock every door caller holds) interleave with door
+ *     commits without losing a commit or an index entry, and git status stays clean; raw git commits racing the door
+ *     without that lock never lose a commit, a door refusal says whether its commit landed exactly when HEAD holds it,
+ *     and the index differs from HEAD only by an outsider's staged path whose commit failed or by a door path whose
+ *     commit is in HEAD but whose entry the race dropped (the door's update-index refused on index.lock, or git commit
+ *     -- <path>, which reads the index before it takes index.lock, wrote over it; only the writer lock closes that).
  *   - on both engines, a strict page under a rule added mid-session is declared git_ignored (no file, no commit), a mixed
  *     page there on a non-durable checkout is database-only, and a durable mixed page still parks its Git effect as
  *     git_target_ignored.
@@ -30,6 +35,7 @@ import { runPersistenceEffects } from '../src/core/persistence/effects.ts';
 import { commitThroughDoor, doorSeams } from '../src/core/persistence/git-door.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
 import { resetIgnoreCandidatesForTests } from '../src/core/persistence/ignore-rules.ts';
+import { acquireNativeLock, type NativeLockHandle } from '../src/core/persistence/native-lock.ts';
 import { durableGitRepo } from './helpers/git-publication.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -156,10 +162,43 @@ describe('door write cost', () => {
     expect(git(root, 'diff', '--cached', '--name-only')).toBe('');
   });
 
-  test('external git commits racing door commits never corrupt the index or lose a commit', async () => {
+  test('external git commits under the checkout writer lock never lose a door commit or its index entry', async () => {
+    const root = repo({ 'notes/a.md': 'a\n' });
+    const lockPath = `${root}-writer.lock`;
+    roots.push(lockPath);
+    const run = promisify(execFile);
+    const underLock = async <T>(work: (lock: NativeLockHandle) => Promise<T>): Promise<T> => {
+      const lock = await acquireNativeLock(lockPath, { timeoutMs: 30_000 });
+      if (!lock) throw new Error('the checkout writer lock stayed busy for 30 s');
+      try { return await work(lock); } finally { await lock.release(); }
+    };
+    const outsider = (async () => {
+      for (let i = 0; i < 8; i++) {
+        put(root, `outside/o${i}.md`, `outside ${i}\n`);
+        await underLock(async () => {
+          await run('git', ['-C', root, 'add', '--', `outside/o${i}.md`], { env, timeout: 20_000 });
+          await run('git', ['-C', root, 'commit', '-q', '-m', `outside ${i}`, '--', `outside/o${i}.md`], { env, timeout: 20_000 });
+        });
+      }
+    })();
+    const commits: (string | null)[] = [];
+    for (let i = 0; i < 8; i++) {
+      put(root, `notes/d${i}.md`, `door ${i}\n`);
+      commits.push(await underLock(lock => commitThroughDoor(root, [{ path: join(root, `notes/d${i}.md`) }], lock)));
+    }
+    await outsider;
+    expect(commits.every(commit => typeof commit === 'string')).toBe(true);
+    git(root, 'fsck', '--no-progress', '--no-dangling');
+    const paths = [...Array(8).keys()].flatMap(i => [`notes/d${i}.md`, `outside/o${i}.md`]).sort();
+    expect(lines(git(root, 'ls-tree', '-r', '--name-only', 'HEAD')).filter(path => path !== 'notes/a.md').sort()).toEqual(paths);
+    expect(lines(git(root, 'ls-files')).filter(path => path !== 'notes/a.md').sort()).toEqual(paths);
+    expect(git(root, 'status', '--porcelain')).toBe('');
+  }, 60_000);
+
+  test('raw git commits racing door commits without the writer lock never lose a commit or corrupt the index', async () => {
     const root = repo({ 'notes/a.md': 'a\n' });
     const run = promisify(execFile);
-    const landed: string[] = [], external: string[] = [];
+    const landed: string[] = [], external: string[] = [], refused: { path: string; message: string }[] = [];
     const outsider = (async () => {
       for (let i = 0; i < 8; i++) {
         put(root, `outside/o${i}.md`, `outside ${i}\n`);
@@ -167,22 +206,28 @@ describe('door write cost', () => {
           await run('git', ['-C', root, 'add', '--', `outside/o${i}.md`], { env, timeout: 20_000 });
           await run('git', ['-C', root, 'commit', '-q', '-m', `outside ${i}`, '--', `outside/o${i}.md`], { env, timeout: 20_000 });
           external.push(`outside/o${i}.md`);
-        } catch { /* the door held index.lock; this commit is skipped */ }
+        } catch { /* the door held index.lock or moved the branch; this commit is skipped */ }
       }
     })();
     for (let i = 0; i < 8; i++) {
       put(root, `notes/d${i}.md`, `door ${i}\n`);
-      const outcome = await door(root, `notes/d${i}.md`).then(commit => commit, (error: { code?: string }) => error);
-      if (typeof outcome === 'string') landed.push(`notes/d${i}.md`);
-      else expect(outcome).toMatchObject({ code: expect.stringMatching(/^(git_unavailable|git_index_locked)$/) });
+      const outcome = await door(root, `notes/d${i}.md`).then(commit => commit, (error: { code?: string; message: string }) => error);
+      if (typeof outcome === 'string') { landed.push(`notes/d${i}.md`); continue; }
+      expect(outcome).toMatchObject({ code: expect.stringMatching(/^(git_unavailable|git_index_locked)$/) });
+      refused.push({ path: `notes/d${i}.md`, message: outcome!.message });
     }
     await outsider;
     git(root, 'fsck', '--no-progress', '--no-dangling');
     const tree = new Set(lines(git(root, 'ls-tree', '-r', '--name-only', 'HEAD')));
     for (const path of [...landed, ...external]) expect(tree.has(path)).toBe(true);
     expect(landed.length).toBeGreaterThan(0);
-    const index = new Set(lines(git(root, 'ls-files')));
-    for (const path of landed) expect(index.has(path)).toBe(true);
+    for (const { path, message } of refused) expect({ path, saysLanded: message.includes('landed, but the index') }).toEqual({ path, saysLanded: tree.has(path) });
+    const inHead = [...landed, ...refused.map(({ path }) => path).filter(path => tree.has(path))];
+    for (const change of lines(git(root, 'diff', '--cached', '--name-status', 'HEAD'))) {
+      const [status, path] = change.split('\t');
+      if (status === 'A') expect(path!.startsWith('outside/') && !external.includes(path!)).toBe(true);
+      else expect({ status, doorCommitInHead: inHead.includes(path!) }).toEqual({ status: 'D', doorCommitInHead: true });
+    }
   }, 60_000);
 });
 
