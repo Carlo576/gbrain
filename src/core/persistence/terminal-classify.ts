@@ -346,7 +346,7 @@ function faultAction(code: string, input: TerminalInput): Action {
   const v = classifySyncFault({ code });
   if (v.safe_actions[0] === 'retry' && input.operation !== 'submit_job') {
     return inspect(input.source_id, `The ${input.operation} write ended ${code}; it was not part of a sync, so a sync does not retry it. `
-      + `Writer status names the step it stopped at and what held it, read-only. Once that clears, resubmit the same ${input.operation} with a new request_id.`);
+      + `Writer status names the step it stopped at and what held it, read-only. Once that clears, resubmit the same ${input.operation} with a new request_id (for a page an import or repair wrote, rerun that command).`);
   }
   if (v.safe_actions[0] === 'retry') return syncRetry(input.source_id, `The sync recorded ${code} (${v.class}); a rerun holds or retries it.`);
   return inspect(input.source_id, `The write ended ${code}; writer status names what holds it, read-only.`, v.human_reason);

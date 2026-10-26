@@ -293,6 +293,28 @@ for (const backend of testBackends()) {
       });
       expect(existsSync(join(folder, '.git'))).toBe(false);
     }, 120_000);
+
+    test('dream and the autopilot cycle run no filesystem phase against the cwd for a relative local_path or sync.repo_path', async () => {
+      await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+      await engine.setConfig('sync.repo_path', '.');
+      await withEnv({ GBRAIN_HOME: home, GBRAIN_SOURCE: undefined }, async () => {
+        const { runDream } = await import('../src/commands/dream.ts');
+        const scoped = await runDream(engine, ['--source', 'default', '--phase', 'lint', '--json']) as { brain_dir: string | null };
+        expect(scoped.brain_dir).toBeNull();
+        const unscoped = await runDream(engine, ['--phase', 'lint', '--json']) as { brain_dir: string | null };
+        expect(unscoped.brain_dir).toBeNull();
+
+        const { registerBuiltinHandlers } = await import('../src/commands/jobs.ts');
+        const handlers = new Map<string, (job: unknown) => Promise<{ report: { brain_dir: string | null } }>>();
+        await registerBuiltinHandlers({ register(name: string, fn: never) { handlers.set(name, fn); } } as never, engine);
+        const cycle = handlers.get('autopilot-cycle')!;
+        expect((await cycle({ data: { source_id: 'default', phases: ['recompute_emotional_weight'] }, signal: undefined })).report.brain_dir).toBeNull();
+        expect((await cycle({ data: { phases: ['recompute_emotional_weight'] }, signal: undefined })).report.brain_dir).toBeNull();
+        expect((await cycle({ data: { repoPath: '.', phases: ['recompute_emotional_weight'] }, signal: undefined })).report.brain_dir).toBeNull();
+      });
+      expect(existsSync(join(folder, '.git'))).toBe(false);
+      expect(await pageCount()).toBe(0);
+    }, 120_000);
   });
 }
 
