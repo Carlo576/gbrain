@@ -34,7 +34,10 @@
  * `--json=true` becomes `--json` (the agent contract's JSON spelling, read
  * the same way by jsonRequested). Refusals name `--flag=…`, never the value,
  * which may be a credential. A short flag never takes `=` (`-y=n` is refused,
- * never taken as consent). OWN_EQUALS_PARSERS pass their argv through. On a
+ * never taken as consent); a quoted argument with whitespace that only starts
+ * like one (`capture "-n=3 is the answer"`) is text. `agent run` stops the
+ * scan where parseRunFlags starts the prompt (the first word that is not a
+ * flag or a flag's value). OWN_EQUALS_PARSERS pass their argv through. On a
  * command with a registry row, unregistered flags keep the token for the
  * validator to name; on a path with none (the hand-parsed search
  * subcommands), every `=` token but `--json=true` refuses with a neutral
@@ -257,10 +260,11 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
   for (let i = 0; i < args.length; i++) {
     const token = args[i]!;
     if (token === '--' && END_OF_OPTIONS.has(`${command} ${args[0]}`)) return { args: [...out, ...args.slice(i)] };
+    if (command === 'agent' && args[0] === 'run' && i >= 1 && !token.startsWith('--') && !/^--[^=]+$/.test(args[i - 1]!)) return { args: [...out, ...args.slice(i)] };
     pastDashDash ||= token === '--';
     const m = EQUALS_TOKEN.exec(token);
     const flag = m?.[1];
-    if (flag !== undefined && !flag.startsWith('--')) {
+    if (flag !== undefined && !flag.startsWith('--') && !/\s/.test(token)) {
       return { refusal: usageError(`gbrain ${command}: \`${flag}=…\`: a short flag takes no =.`, `Write ${flag} on its own, or ${flag} <value> with the value as the next argument.`) };
     }
     const registered = flag !== undefined && (!legal || legal.includes(flag) || flag.startsWith('--no-') && legal.includes(`--${flag.slice(5)}`));

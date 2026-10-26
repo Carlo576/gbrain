@@ -528,6 +528,15 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     }
   });
 
+  // Value: protects=free text that only looks like an = flag reaches the handler (capture text, the agent run prompt), while the flag zone still refuses; fails_when=the scan reads quoted text or the prompt as flags, or stops before the flag zone ends; why_new=the short-flag and prompt rows only covered refusals; seam=none; no_claim=agent run's own parse after the gate (argv-level)
+  test('free text that only looks like an = flag is not scanned', async () => {
+    expect(await argvFor('capture', ['-n=3 is the answer'])).toEqual(['-n=3 is the answer']);
+    expect(await argvFor('agent', ['run', 'fix', 'the', '--model=opus', 'bug'])).toEqual(['run', 'fix', 'the', '--model=opus', 'bug']);
+    expect(await argvFor('agent', ['run', '--model', 'opus', 'fix', '--tools=x'])).toEqual(['run', '--model', 'opus', 'fix', '--tools=x']);
+    expect(await refusalFor('agent', ['run', '--model=opus', 'fix'])).toContain('--model=…');
+    expect(await refusalFor('agent', ['run', '--detach', '--tools=x', 'fix'])).toContain('--tools=…');
+  });
+
   test('the hand-parsed search subcommands refuse an = form without vouching for the flag', async () => {
     for (const [args, flag] of [[['modes', '--mdoe=balanced'], '--mdoe'], [['diagnose', 'q', '--target', 'x', '--source=source-a'], '--source'], [['stats', '--yes=n'], '--yes'], [['modes', '--dry-run=x'], '--dry-run'], [['stats', '--no-thing=x'], '--no-thing']] as const) {
       const r = await cliOnlyFlagArgs('search', [...args]);
