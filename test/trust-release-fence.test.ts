@@ -264,11 +264,22 @@ for (const backend of testBackends()) {
     // fails_when=validate stops locking and rechecking the hold (a re-gated hold is still held, so apply alone publishes it under the older approval);
     // why_new=the in-flight test decides the hold at admission, which preparation refuses before validate runs; seam=none (existing consumer:prepared fault point);
     // no_claim=a concurrent owner session or sync re-gating the hold (raw SQL from the fault hook stands in)
-    test('a hold re-gated or dropped after the release was prepared refuses preview_changed at publication and writes nothing', async () => {
-      for (const shape of ['re-gated', 'dropped'] as const) {
+    test('a hold re-gated or dropped after the release was prepared refuses preview_changed at publication and writes nothing (append and index-existing)', async () => {
+      for (const [mode, shape] of [['append', 're-gated'], ['append', 'dropped'], ['index-existing', 're-gated'], ['index-existing', 'dropped']] as const) {
         await managedBrain(async ({ engine, ctx, root }) => {
           await seedPage(engine, ctx);
-          const ref = await holdRemember(engine, ctx);
+          let ref: string;
+          if (mode === 'append') ref = await holdRemember(engine, ctx);
+          else {
+            await enableTrustProtections(engine);
+            const current = await engine.readPageSnapshot(slug, { sourceId: 'default' });
+            const row = { rowNum: 1, claim: CLAIM, kind: 'fact' as const, confidence: 1, visibility: 'world' as const, notability: 'medium' as const, validFrom: '2026-01-01', source: 'email', active: true };
+            await submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(), content_origin: 'tool_output', expected_revision: current!.revision,
+              content: `---\ntype: person\ntitle: Alice Example\n---\n\n# Alice Example\n\nBody.\n\n## Facts\n\n${renderFactsTable([row])}\n` } });
+            await settleManagedGitEffects(engine);
+            const [hold] = await engine.executeRaw<{ id: number }>("SELECT id FROM write_gate_holds WHERE source_id='default' AND slug=$1 AND status='held' AND payload ? 'row_num'", [slug]);
+            ref = `h${hold!.id}`;
+          }
           const id = Number(ref.slice(1));
           const before = readFileSync(file(root), 'utf8');
           let reached = 0;
@@ -279,7 +290,7 @@ for (const backend of testBackends()) {
               : "UPDATE write_gate_holds SET status='dropped', decided_at=now(), decided_by='owner:other' WHERE id = $1", [id]);
           });
           const error = await release(engine, ref).then(() => null, (e: { code?: string }) => e).finally(() => installFaultHook(undefined));
-          expect({ shape, reached, code: error?.code }).toEqual({ shape, reached: 1, code: 'preview_changed' });
+          expect({ mode, shape, reached, code: error?.code }).toEqual({ mode, shape, reached: 1, code: 'preview_changed' });
           expect(await holdStatus(engine, ref)).toBe(shape === 're-gated' ? 'held' : 'dropped');
           expect(await factRows(engine)).toEqual([]);
           const [receipt] = await engine.executeRaw<{ state: string; error_code: string }>("SELECT state, error_code FROM persistence_requests WHERE operation='trust_release'");
@@ -363,16 +374,17 @@ for (const backend of testBackends()) {
       expect((await previewOwnerAction(engine, { action: 'release', ref })).summary).toContain(`default/${slug}`);
     }, { setup, databaseUrl }), 180_000);
 
-    test('an append release keeps the held payload: kind, world visibility and valid_until reach the fence row and the facts row', () => managedBrain(async ({ engine, ctx, root }) => {
+    test('an append release keeps the held payload: kind, world visibility, source, context, valid_from and valid_until reach the fence row and the facts row', () => managedBrain(async ({ engine, ctx, root }) => {
       await seedPage(engine, ctx);
       const ref = await holdRemember(engine, ctx);
-      await engine.executeRaw(`UPDATE write_gate_holds SET payload = payload || '{"kind":"preference","visibility":"world","valid_until":"2027-01-01"}'::jsonb WHERE id = $1`, [Number(ref.slice(1))]);
+      await engine.executeRaw(`UPDATE write_gate_holds SET payload = payload || '{"kind":"preference","visibility":"world","valid_from":"2025-06-01","valid_until":"2027-01-01","context":"Held context."}'::jsonb WHERE id = $1`, [Number(ref.slice(1))]);
       expect(await release(engine, ref)).toMatchObject({ status: 'released', tier: 'user_confirmed' });
-      const [row] = await engine.executeRaw<{ kind: string; visibility: string; valid_until: string | null; row_num: number | null }>(
-        `SELECT kind, visibility, to_char(valid_until, 'YYYY-MM-DD') AS valid_until, row_num FROM facts WHERE source_id='default' AND fact=$1`, [CLAIM]);
-      expect(row).toMatchObject({ kind: 'preference', visibility: 'world', valid_until: '2027-01-01' });
+      const [row] = await engine.executeRaw<{ kind: string; visibility: string; source: string; context: string | null; valid_from: string; valid_until: string | null; row_num: number | null }>(
+        `SELECT kind, visibility, source, context, to_char(valid_from, 'YYYY-MM-DD') AS valid_from, to_char(valid_until, 'YYYY-MM-DD') AS valid_until, row_num FROM facts WHERE source_id='default' AND fact=$1`, [CLAIM]);
+      expect(row).toMatchObject({ kind: 'preference', visibility: 'world', source: 'email', context: 'Held context.', valid_from: '2025-06-01', valid_until: '2027-01-01' });
       await settleManagedGitEffects(engine);
-      expect(fenceCells(readFileSync(file(root), 'utf8'))).toEqual([expect.objectContaining({ rowNum: Number(row!.row_num), kind: 'preference', visibility: 'world', validUntil: '2027-01-01' })]);
+      expect(fenceCells(readFileSync(file(root), 'utf8'))).toEqual([expect.objectContaining({ rowNum: Number(row!.row_num), kind: 'preference', visibility: 'world',
+        source: 'email', context: 'Held context.', validFrom: '2025-06-01', validUntil: '2027-01-01' })]);
     }, { setup, databaseUrl }), 180_000);
 
     test('a release that ended without committing and whose hold was then dropped admits no new attempt: publish returns false, nothing written', () => managedBrain(async ({ engine, ctx }) => {
