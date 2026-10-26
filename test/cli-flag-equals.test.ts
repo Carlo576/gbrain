@@ -125,9 +125,10 @@ describe('#7619 split rules', () => {
 
   test('a true/false word on a switch with no table entry never suggests the value form', async () => {
     for (const [command, args] of [['transcripts', ['recover', 'codex', '--apply=false']], ['trust', ['claim-sources', '--accept-all=no']], ['dream', ['--unsafe-bypass-dream-guard=off']]] as const) {
-      const message = await refusalFor(command, [...args]);
-      expect(message).toContain('takes no true/false value');
-      expect(message).not.toContain('<value>');
+      const r = await cliOnlyFlagArgs(command, [...args]);
+      const text = 'refusal' in r ? `${r.refusal.message} ${r.refusal.suggestion}` : '';
+      expect(text).toContain('a value never turns it off');
+      expect(text).not.toContain('<value>');
     }
   });
 
@@ -153,6 +154,19 @@ describe('#7619 split rules', () => {
         expect(text).not.toContain('<value>');
       }
     }
+  });
+
+  test('a true/false word or 0/1 on a value flag with no table entry names the value reading too', async () => {
+    for (const [command, args] of [['sources', ['set-sync', 'default', 'off', '--expect=on']], ['jobs', ['work', '--concurrency=1']]] as const) {
+      const r = await cliOnlyFlagArgs(command, [...args]);
+      expect('refusal' in r && r.refusal.suggestion).toContain('put the value in the next argument');
+    }
+  });
+
+  test('the direct entry strips global flags and validates local-writer the way main does', async () => {
+    expect(await directEntryArgs('auth', ['list', '--quiet', '--timeout', '5s'])).toEqual({ args: ['list'] });
+    const r = await directEntryArgs('auth', ['local-writer', 'list', '--bogus']);
+    expect('refusal' in r && r.refusal.code).toBe('unknown_flag');
   });
 
   test('the direct entry refuses an unknown flag with the envelope main uses', async () => {

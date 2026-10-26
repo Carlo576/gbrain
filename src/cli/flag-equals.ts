@@ -12,10 +12,10 @@
  *    the value (`--dry-run=true` would write). Without the command's own
  *    table, that cross-command evidence picks the bare-switch message, so
  *    `--yes=n` is never answered with `--yes <value>`;
- *  - refuse a true/false word (`--apply=false`) with the bare-switch fix
- *    even without the command's own table, so it never suggests
- *    `--apply false`, which turns the switch on; a 0 or 1 there names both
- *    readings and says a value never turns a switch off;
+ *  - without the command's own table, refuse a true/false word or 0/1
+ *    (`--apply=false`) naming both readings, so it never suggests
+ *    `--apply false` (which turns a switch on) and says a value never turns
+ *    a switch off;
  *  - after a bare `--` the handler reads past, refuse an `=` token that is
  *    not a registered flag: the unknown-flag validator stops at `--`;
  *  - keep the token where the handler on this path reads the `=` form
@@ -46,6 +46,7 @@ import { unknownFlagError, usageError } from './cli-error.ts';
 import { loadCuratedHelp } from './help/render.ts';
 import { OPERATION_MANIFEST } from '../core/operation-manifest.generated.ts';
 import { SYNC_FLAGS } from '../core/sync-flags.ts';
+import { parseGlobalFlags, setCliOptions } from '../core/cli-options.ts';
 
 /**
  * Where the handler on a path reads the `=` form itself, keyed by command or
@@ -249,10 +250,8 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
       ? [`${flag} is a switch and takes no value`, `Write ${flag} on its own, or leave it out.`]
       : value === '' || /^-[-A-Za-z]/.test(value)
         ? [`the value is empty or looks like a flag`, `Write ${flag} <value> with the value as the next argument.`]
-        : own === undefined && /^(true|false|yes|no|y|n|on|off)$/i.test(value)
-          ? [`${flag} takes no true/false value`, `Write ${flag} on its own to turn it on, or leave it out to turn it off.`]
-          : own === undefined && /^[01]$/.test(value)
-          ? [`${flag} takes no 0/1 value after =`, `If ${flag} is a switch, write it on its own to turn it on, or leave it out to turn it off: a value never turns it off. If it takes a number, write ${flag} <number>.`]
+        : own === undefined && /^(true|false|yes|no|y|n|on|off|0|1)$/i.test(value)
+          ? [`write ${flag} on its own if it is a switch, or with its value as the next argument`, `If ${flag} is a switch, write it on its own to turn it on, or leave it out to turn it off: a value never turns it off. If it takes a value, put the value in the next argument.`]
           : own === undefined
           ? [`this command takes ${flag} <value> as two arguments`, `Write ${flag} <value>, or ${flag} on its own if it is a switch.`]
           : null;
@@ -282,10 +281,11 @@ export function findUnknownFlag(args: string[], legal: ReadonlySet<string>): str
   return null;
 }
 
-/** A command module's direct `bun run` entry: main's pass-through for own `=` parsers, the `=` rule, and main's unknown-flag check with its envelope (legacy keys included). */
+/** A command module's direct `bun run` entry, in main's order: global flags stripped and applied, the `=` rule (own `=` parsers pass through), and main's unknown-flag check with its envelope (legacy keys included). */
 export async function directEntryArgs(command: string, raw: string[]): Promise<{ args: string[] } | { refusal: OperationError; legacy?: Record<string, string> }> {
-  if (OWN_EQUALS_PARSERS.has(`${command} ${raw[0]}`)) return { args: raw };
-  const split = await splitFlagEquals(command, raw);
+  const { cliOpts, rest } = parseGlobalFlags(raw);
+  setCliOptions(cliOpts);
+  const split = OWN_EQUALS_PARSERS.has(`${command} ${rest[0]}`) ? { args: rest } : await splitFlagEquals(command, rest);
   if ('refusal' in split) return split;
   const unknown = findUnknownFlag(split.args, new Set(CLI_FLAG_REGISTRY[command]));
   if (!unknown) return split;
