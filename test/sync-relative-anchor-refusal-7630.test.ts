@@ -529,7 +529,12 @@ for (const backend of testBackends()) {
         expect(check?.message).toContain('source "notes-a" has the relative local_path "."');
         expect(check?.message).toContain('default-source pages are saved to the database only');
         expect(check?.message).not.toContain('own working tree');
+        expect(check?.message).not.toContain('write through sync.repo_path');
         expect(check?.message).not.toContain('notes-b');
+        await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('z-abs', 'z-abs', $1)", [repo]);
+        const both = await defaultSourceLocalPathCheck(engine);
+        expect(both?.message).toContain('source "notes-a" has the relative local_path "."');
+        expect(both?.message).toContain('"z-abs"\'s own working tree');
       } finally {
         rmSync(repo, { recursive: true, force: true });
       }
@@ -573,5 +578,13 @@ describe('#7630: a stalled write\'s diagnosis matches its operation', () => {
   test('a recorded sync fault and a sync page receipt keep the sync retry', () => {
     expect(classifyRecordedFault({ source_id: 'default', code: 'preparation_stalled' }).action.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
     expect(receipt('submit_job').action.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
+  });
+
+  test('a stalled canonical reconcile (a sync pass keep_db admission, stored as put_page) keeps the sync retry and names the manual rerun', () => {
+    const verdict = classifyTerminal({ request_id: '11111111-2222-4333-8444-555555555555', source_id: 'default', slug: 'notes/example', operation: 'put_page',
+      state: 'failed', error_code: 'preparation_stalled', error_detail: null, recovery: null, blocked_reason: null, compacted: false, intent_kind: 'canonical_reconcile' })!;
+    expect(verdict.action.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
+    expect(verdict.action.why).toContain('gbrain sources reconcile');
+    expect(verdict.action.why).not.toContain('new request_id');
   });
 });

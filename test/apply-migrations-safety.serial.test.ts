@@ -407,6 +407,18 @@ console.log('CHECK=' + JSON.stringify(autopilotInstallPendingCheck()));
     });
   }, 60_000);
 
+  for (const brain of [{ syncRepoPath: '.' }, { syncRepoPath: '.', defaultSourcePath: '.' }]) test(`install-only partials on a brain whose stored path is relative (${JSON.stringify(brain)}) are cleared and the migration completes`, async () => {
+    await postgresBrain(brain, async ({ ledger, calls, apply }) => {
+      const partial = (n: number) => JSON.stringify({ version: '0.11.0', ts: `2026-10-0${n}T00:00:00.000Z`, status: 'partial', phases: phaseRows(OLD_REFUSAL) });
+      writeFileSync(ledger, [partial(1), partial(2), partial(3)].join('\n') + '\n');
+      const run = apply(['--yes', '--migration', '0.11.0']);
+      expect(run.exitCode, run.stderr).toBe(0);
+      expect(run.stderr).toContain('Cleared the v0.11.0 wedge');
+      expect(entries(ledger).map(row => row.status)).toEqual(['partial', 'partial', 'partial', 'retry', 'complete']);
+      expect(calls()).not.toContain('autopilot');
+    });
+  }, 60_000);
+
   for (const [label, row, brain] of [
     ['partials that carry no phases', { status: 'partial' }, {}],
     ['partials that also failed another phase', { status: 'partial', phases: [...phaseRows(OLD_REFUSAL).slice(0, 4), { name: 'host', status: 'failed', detail: 'boom' }, ...phaseRows(OLD_REFUSAL).slice(5)] }, {}],

@@ -349,6 +349,9 @@ const RESUBMITTED_WRITES = new Set(['put_page', 'put_pages', 'capture', 'delete_
  */
 function faultAction(code: string, input: TerminalInput): Action {
   const v = classifySyncFault({ code });
+  if (v.safe_actions[0] === 'retry' && input.intent_kind === 'canonical_reconcile') {
+    return syncRetry(input.source_id, `The canonical reconcile recorded ${code} (${v.class}); the next sync re-admits a keep_db reconcile, and a \`gbrain sources reconcile\` run is retried by running it again.`);
+  }
   if (v.safe_actions[0] === 'retry' && input.operation !== 'submit_job' && !RESUBMITTED_WRITES.has(input.operation)) {
     return inspect(input.source_id, `The ${input.operation} operation ended ${code}; it was not part of a sync, so a sync does not retry it. Writer status names what holds it, read-only.`, v.human_reason);
   }

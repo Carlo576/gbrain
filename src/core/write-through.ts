@@ -284,9 +284,10 @@ export async function scannerSlugRootMode(engine: BrainEngine, sourceId: string,
  * #2018/#7203: the other source whose own working tree is `path` or contains
  * it, compared by filesystem identity, so a symlink, a trailing slash, or a
  * macOS case or /private alias still matches. A spelling that cannot be
- * resolved counts as a match: the leak guard fails closed.
+ * resolved counts as a match: the leak guard fails closed. `relativeOwns: false`
+ * leaves out live relative rows, for doctor to find an absolute owner beside them.
  */
-export async function otherSourceOwning(engine: BrainEngine, sourceId: string, path: string): Promise<string | null> {
+export async function otherSourceOwning(engine: BrainEngine, sourceId: string, path: string, relativeOwns = true): Promise<string | null> {
   const rows = await engine.executeRaw<{ id: string; local_path: string; archived: boolean }>(
     `SELECT id, local_path, archived IS TRUE AS archived FROM sources WHERE id <> $1 AND local_path IS NOT NULL AND local_path <> '' ORDER BY id`,
     [sourceId],
@@ -295,7 +296,7 @@ export async function otherSourceOwning(engine: BrainEngine, sourceId: string, p
   const target = identity(path);
   return rows.find(row => {
     // #7630: a live source's relative local_path names no known tree, so like any unresolvable spelling it counts as a match.
-    if (!isAbsolute(msysToNativePath(row.local_path))) return !row.archived;
+    if (!isAbsolute(msysToNativePath(row.local_path))) return relativeOwns && !row.archived;
     const other = identity(row.local_path);
     if (target === null || other === null) return true;
     const rel = relative(other, target);

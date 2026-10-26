@@ -57,11 +57,8 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
       }
       // Mirror resolvePageWriteTarget's #2018 leak guard: sync.repo_path
       // being another source's own working tree silently skips the write.
-      collidingSourceId = await otherSourceOwning(engine, 'default', repoPath);
-      if (collidingSourceId && relative.some(row => row.id === collidingSourceId)) {
-        blockedByRelative = true;
-        collidingSourceId = null;
-      }
+      blockedByRelative = relative.length > 0;
+      collidingSourceId = await otherSourceOwning(engine, 'default', repoPath, false);
       if (collidingSourceId) {
         const [shared] = await engine.executeRaw<{ n: number }>(
           `SELECT COUNT(*)::int AS n FROM pages a
@@ -92,6 +89,6 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
   return {
     name: 'default_source_local_path',
     status: relative.length > 0 || assessment.status === 'skip' ? 'warn' : assessment.status,
-    message: relativeNote ? [relativeNote, assessment.message].filter(Boolean).map(part => /[.!?]$/.test(part) ? part : `${part}.`).join(' ') : assessment.message,
+    message: relativeNote ? [relativeNote, blockedByRelative && assessment.status === 'ok' ? '' : assessment.message].filter(Boolean).map(part => /[.!?]$/.test(part) ? part : `${part}.`).join(' ') : assessment.message,
   };
 }
