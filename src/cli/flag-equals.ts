@@ -81,7 +81,7 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
   'edge-proposals list': ['--status', '--limit'],
   // embed.ts:841 parsePaceArgs (--pace bare or =mode); core/consent.ts:126 via embed-consent.ts:129 and held-embedding.ts:234.
   embed: ['--pace', '--pace-max-concurrency', '--max-usd', '--max-cost'],
-  // eval-conversation-parser.ts:48-53 (main.ts:2216 and eval.ts:106 both reach it).
+  // eval-conversation-parser.ts:48-53 (main.ts handleCliOnly's eval conversation-parser branch and eval.ts:106 both reach it).
   'eval conversation-parser': ['--fixtures', '--min-recall'],
   // eval/decide-eval-flags.ts:124 extractDecideEvalFlags via eval-retrieval-quality.ts:38.
   'eval retrieval-quality': ['--decide', '--decide-provider', '--decide-calibration', '--decide-threshold', '--decide-force-on', '--decide-dataset'],
@@ -194,7 +194,7 @@ export const EQUALS_READERS: Readonly<Record<string, readonly string[]>> = {
  * exact tokens.
  */
 export const OWN_EQUALS_PARSERS: ReadonlySet<string> = new Set([
-  'append', 'auth local-writer', 'eval longmemeval', 'git', 'migrate embeddings', 'repair', 'retrieval-upgrade', 'schema add-type', 'skillpack remove',
+  'append', 'auth local-writer', 'eval longmemeval', 'git', 'google attachments', 'migrate embeddings', 'repair', 'retrieval-upgrade', 'schema add-type', 'skillpack remove',
   'sources connect', 'sources inspect', 'sources reconcile', 'sources reset-upstream', 'sources writer',
   'takes add', 'takes remove', 'takes resolve', 'takes supersede', 'takes update',
 ]);
@@ -203,6 +203,8 @@ export const OWN_EQUALS_PARSERS: ReadonlySet<string> = new Set([
 export const COMMAND_SWITCHES: Readonly<Record<string, readonly string[]>> = {
   sync: ['--detail'],
   schema: ['--fields'],
+  dream: ['--unsafe-bypass-dream-guard'],
+  embed: ['--stale'],
 };
 
 /** Paths (`command sub`) whose handler treats a bare `--` as the end of its options; everywhere else the scan continues past it. */
@@ -252,6 +254,8 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
         ? [`the value is empty or looks like a flag`, `Write ${flag} <value> with the value as the next argument.`]
         : own === undefined && /^(true|false|yes|no|y|n|on|off|0|1)$/i.test(value)
           ? [`write ${flag} on its own if it is a switch, or with its value as the next argument`, `If ${flag} is a switch, write it on its own to turn it on, or leave it out to turn it off: a value never turns it off. If it takes a value, put the value in the next argument.`]
+          : !legal
+          ? [`gbrain ${command} ${args[0]} reads no = form`, `Check the flag in gbrain ${command} ${args[0]} --help, then write its value as the next argument.`]
           : own === undefined
           ? [`this command takes ${flag} <value> as two arguments`, `Write ${flag} <value>, or ${flag} on its own if it is a switch.`]
           : null;

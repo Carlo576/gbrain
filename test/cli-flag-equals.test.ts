@@ -7,7 +7,7 @@
  * handler receives; these tables run it over every registered flag of every
  * command.
  */
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { Glob } from 'bun';
 import { CLI_ONLY, cliOnlyFlagArgs, validateCommandFlags } from '../src/cli/main.ts';
@@ -15,6 +15,7 @@ import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
 import { END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, directEntryArgs, knownSwitches } from '../src/cli/flag-equals.ts';
 import { SEARCH_SUBCOMMANDS } from '../src/cli/subcommands.ts';
 import { SYNC_FLAGS } from '../src/core/sync-flags.ts';
+import { _resetCliOptionsForTest, getCliOptions } from '../src/core/cli-options.ts';
 import { strictSpecFor } from '../src/cli/strict-args.ts';
 import { surfaceFileSource } from './helpers/source-surface.ts';
 import { loadCuratedHelp } from '../src/cli/help/render.ts';
@@ -95,6 +96,8 @@ describe('#7619 table: every registered CLI_ONLY flag', () => {
 });
 
 describe('#7619 split rules', () => {
+  afterEach(() => _resetCliOptionsForTest());
+
   test('a value containing = splits at the first =', async () => {
     expect(await argvFor('serve', ['--public-url=https://brain.example.com/?a=b'])).toEqual(['--public-url', 'https://brain.example.com/?a=b']);
   });
@@ -124,7 +127,7 @@ describe('#7619 split rules', () => {
   });
 
   test('a true/false word on a switch with no table entry never suggests the value form', async () => {
-    for (const [command, args] of [['transcripts', ['recover', 'codex', '--apply=false']], ['trust', ['claim-sources', '--accept-all=no']], ['dream', ['--unsafe-bypass-dream-guard=off']]] as const) {
+    for (const [command, args] of [['transcripts', ['recover', 'codex', '--apply=false']], ['trust', ['claim-sources', '--accept-all=no']], ['maintain', ['--apply=off']]] as const) {
       const r = await cliOnlyFlagArgs(command, [...args]);
       const text = 'refusal' in r ? `${r.refusal.message} ${r.refusal.suggestion}` : '';
       expect(text).toContain('a value never turns it off');
@@ -165,8 +168,11 @@ describe('#7619 split rules', () => {
 
   test('the direct entry strips global flags and validates local-writer the way main does', async () => {
     expect(await directEntryArgs('auth', ['list', '--quiet', '--timeout', '5s'])).toEqual({ args: ['list'] });
+    expect(getCliOptions().quiet).toBe(true);
     const r = await directEntryArgs('auth', ['local-writer', 'list', '--bogus']);
     expect('refusal' in r && r.refusal.code).toBe('unknown_flag');
+    const own = ['local-writer', 'register', '--expected-epoch=1', '--scopes=read,write'];
+    expect(await directEntryArgs('auth', own)).toEqual({ args: own });
   });
 
   test('the direct entry refuses an unknown flag with the envelope main uses', async () => {
@@ -229,6 +235,7 @@ describe('#7619 split rules', () => {
     expect(await argvFor('call', ['x', '--y=true'])).toEqual(['x', '--y=true']);
     expect(await argvFor('edge-proposals', ['list', '--status=all', '--limit=5'])).toEqual(['list', '--status=all', '--limit=5']);
     expect(await argvFor('recall', ['--source-id=peer', '--json'])).toEqual(['--source-id=peer', '--json']);
+    expect(await argvFor('recall', ['--budget-policy='])).toEqual(['--budget-policy=']);
     expect(await argvFor('export', ['--source=default', '--dir=out-example'])).toEqual(['--source=default', '--dir=out-example']);
     expect(await argvFor('skillpack', ['reference', '--harness=claude-code'])).toEqual(['reference', '--harness=claude-code']);
     expect(await argvFor('sources', ['status', '--limit=5'])).toEqual(['status', '--limit=5']);
@@ -433,6 +440,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
       expect(CLI_FLAG_REGISTRY[command]).toContain(token.split('=')[0]!);
       const r = await cliOnlyFlagArgs(command, [...args]);
       expect('refusal' in r && r.refusal.code).toBe('invalid_params');
+      expect('refusal' in r && `${r.refusal.message} ${r.refusal.suggestion}`).not.toContain('<value>');
     }
   });
 
@@ -445,7 +453,6 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
       ['trust', ['explain', 'ref-example', '--source=source-a'], '--source'], ['jobs', ['work', '--concurrency=4'], '--concurrency'],
       ['forget', ['34', '--reason=stale-example'], '--reason'], ['migrate', ['--to=pglite'], '--to'],
       ['jobs', ['submit', 'shell', '--params={"a":1}'], '--params'], ['jobs', ['submit', 'sync', '--max-usd=5'], '--max-usd'],
-      ['search', ['diagnose', 'q', '--target', 'x', '--source=source-a'], '--source'],
     ] as const) {
       const r = await cliOnlyFlagArgs(command, [...args]);
       expect('refusal' in r && r.refusal.message).toContain(`takes ${flag} <value> as two arguments`);
@@ -479,6 +486,19 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
       expect('refusal' in r && r.refusal.message).toContain(`${args[0]!.slice(0, 2)}=…`);
       expect('refusal' in r && r.refusal.message).toContain('a short flag takes no =');
     }
+  });
+
+  test('the hand-parsed search subcommands refuse an = form without vouching for the flag', async () => {
+    for (const [args, flag] of [[['modes', '--mdoe=balanced'], '--mdoe'], [['diagnose', 'q', '--target', 'x', '--source=source-a'], '--source']] as const) {
+      const r = await cliOnlyFlagArgs('search', [...args]);
+      expect('refusal' in r && r.refusal.message).toContain(`${flag}=…`);
+      expect('refusal' in r && r.refusal.message).not.toContain(`takes ${flag}`);
+      expect('refusal' in r && r.refusal.suggestion).toContain(`gbrain search ${args[0]} --help`);
+    }
+  });
+
+  test('google attachments hands its = forms to its own parser', async () => {
+    expect(await argvFor('google', ['attachments', 'backfill', '--source=default', '--limit=5'])).toEqual(['attachments', 'backfill', '--source=default', '--limit=5']);
   });
 
   test('validation-exempt paths that read exact tokens refuse the = form', async () => {
@@ -521,6 +541,9 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     expect(() => parseAddTypeArgs(['note', '--primitive=entity', '--no-prefix=false'])).toThrow('--no-prefix is a switch');
     expect(() => parseAddTypeArgs(['note', '--primitive=entity', '--prefix=notes/', '--extractable=false'])).toThrow('--extractable is a switch');
     expect(parseAddTypeArgs(['note', '--primitive=entity', '--no-prefix'])).toMatchObject({ noPrefix: true });
+    expect(parseMovementArgs(['source-a', '--json=true'])).toMatchObject({ json: true });
+    expect(() => parseAddTypeArgs(['note', '--primitive=entity', '--no-prefix', '--json=true'])).not.toThrow();
+    expect(() => parseMovementArgs(['source-a', '--json=false'])).toThrow('--json is a switch');
   });
 
   test('OWN_EQUALS_PARSERS and the = option parsers match in both directions', () => {
@@ -529,7 +552,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
       'src/commands/eval-longmemeval.ts': 'eval longmemeval', 'src/commands/git.ts': 'git', 'src/commands/persistence-admin.ts': 'auth local-writer',
       'src/commands/repair.ts': 'repair', 'src/commands/schema-add-type.ts': 'schema add-type', 'src/commands/skillpack/harness.ts': 'skillpack remove',
       'src/commands/source-reconcile.ts': 'sources reconcile', 'src/commands/sources-reset-upstream.ts': 'sources reset-upstream',
-      'src/commands/sources-writer-movement.ts': 'sources writer', 'src/commands/takes-mutation.ts': 'takes add',
+      'src/commands/sources-writer-movement.ts': 'sources writer', 'src/commands/takes-mutation.ts': 'takes add', 'src/commands/google-attachments.ts': 'google attachments',
       // normalizeReindexArgs splits its own value flags; the entry refuses other = forms before it runs.
       'src/commands/reindex.ts': null,
       // Governs managed brains only: an unmanaged brain falls back to runSources, which reads exact tokens, so the entry rule applies.
@@ -537,18 +560,18 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     };
     const PARSER_OF: Record<string, string> = {
       append: 'src/cli/commands/append.ts', 'auth local-writer': 'src/commands/persistence-admin.ts', 'eval longmemeval': 'src/commands/eval-longmemeval.ts',
-      git: 'src/commands/git.ts', 'migrate embeddings': 'src/core/embedding-migration-cli.ts', 'retrieval-upgrade': 'src/core/embedding-migration-cli.ts',
+      git: 'src/commands/git.ts', 'google attachments': 'src/commands/google-attachments.ts', 'migrate embeddings': 'src/core/embedding-migration-cli.ts', 'retrieval-upgrade': 'src/core/embedding-migration-cli.ts',
       repair: 'src/commands/repair.ts', 'schema add-type': 'src/commands/schema-add-type.ts', 'skillpack remove': 'src/commands/skillpack/harness.ts',
       'sources connect': 'src/commands/company-brain-connect.ts', 'sources inspect': 'src/commands/company-brain-inspect.ts',
       'sources reconcile': 'src/commands/source-reconcile.ts', 'sources reset-upstream': 'src/commands/sources-reset-upstream.ts',
       'sources writer': 'src/commands/sources-writer-movement.ts', 'takes add': 'src/commands/takes-mutation.ts', 'takes remove': 'src/commands/takes-mutation.ts',
       'takes resolve': 'src/commands/takes-mutation.ts', 'takes supersede': 'src/commands/takes-mutation.ts', 'takes update': 'src/commands/takes-mutation.ts',
     };
-    const found = [...new Glob('src/commands/**/*.ts').scanSync('.')].filter(p => /\b(?:eq|equal|equals) = \w+\.indexOf\('='\)/.test(readFileSync(p, 'utf8'))).sort();
+    const found = [...new Glob('src/commands/**/*.ts').scanSync('.')].filter(p => /\b(?:eq|equal|equals) = \w+\.indexOf\('='\)|\.split\(\/=\(\.\*\)\/s\)/.test(readFileSync(p, 'utf8'))).sort();
     expect(found).toEqual(Object.keys(OWNERS).sort());
     for (const owner of Object.values(OWNERS)) if (owner) expect(OWN_EQUALS_PARSERS.has(owner)).toBe(true);
     expect([...OWN_EQUALS_PARSERS].sort()).toEqual(Object.keys(PARSER_OF).sort());
-    for (const path of Object.values(PARSER_OF)) expect(readFileSync(path, 'utf8')).toMatch(/indexOf\('='\)|\(\?:=\(\.\*\)\)/);
+    for (const path of Object.values(PARSER_OF)) expect(readFileSync(path, 'utf8')).toMatch(/indexOf\('='\)|\(\?:=\(\.\*\)\)|split\(\/=\(\.\*\)\/s\)/);
   });
 
   test("a command's own switch wins over a value of the same name elsewhere", async () => {

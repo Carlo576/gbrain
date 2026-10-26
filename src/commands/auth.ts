@@ -1403,11 +1403,8 @@ export async function runAuth(args: string[]): Promise<void> {
 // (e.g. `bun run src/commands/auth.ts ...`). When imported by cli.ts, this block is skipped.
 if (import.meta.main) {
   const { directEntryArgs } = await import('../cli/flag-equals.ts');
-  const argv = await directEntryArgs('auth', process.argv.slice(2));
-  if ('refusal' in argv) {
-    const { exitCliError } = await import('../cli/cli-error.ts');
-    exitCliError(argv.refusal, 'auth', { legacy: argv.legacy });
-  } else {
-    await runAuth(argv.args);
-  }
+  const { exitCliError } = await import('../cli/cli-error.ts');
+  const argv = await directEntryArgs('auth', process.argv.slice(2)).catch((e: unknown) => exitCliError(e, 'auth'));
+  if ('refusal' in argv) exitCliError(argv.refusal, 'auth', { legacy: argv.legacy });
+  else await runAuth(argv.args);
 }
