@@ -86,6 +86,6 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
   return {
     name: 'default_source_local_path',
     status: relative.length > 0 || assessment.status === 'skip' ? 'warn' : assessment.status,
-    message: [assessment.message, relativeNote].filter(Boolean).join(' '),
+    message: [relativeNote, assessment.message].filter(Boolean).map(part => /[.!?]$/.test(part) ? part : `${part}.`).join(' '),
   };
 }

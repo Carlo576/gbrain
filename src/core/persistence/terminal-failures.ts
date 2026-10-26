@@ -290,6 +290,8 @@ export interface TerminalFailureRow {
 }
 export interface TerminalFailureGroup {
   code: string; origin: string | null; category: TerminalCategory; public_category: PublicCategory; rows: number; class: string; needs_human: boolean; human_reason?: string;
+  /** #7630: a sync fault's fix depends on its operation (a sync retries submit_job; a caller resubmits its own write), so those groups split by it. */
+  operation?: string;
   filter: { code: string; origin: string | null; category: TerminalCategory }; drill_down: string[]; fix: Action; samples: Array<Pick<TerminalFailureRow, 'request_id' | 'slug' | 'state' | 'ended_at' | 'inspect'>>;
 }
 export type TerminalFailureListing = {
@@ -369,11 +371,12 @@ export async function readTerminalFailures(engine: BrainEngine, q: TerminalFailu
   }
   const groups = new Map<string, TerminalFailureGroup>();
   for (const row of out) {
-    const key = `${row.code}\0${row.origin ?? ''}\0${row.category}`;
+    const operation = row.category === 'sync_fault' && row.operation !== 'submit_job' ? row.operation : undefined;
+    const key = `${row.code}\0${row.origin ?? ''}\0${row.category}${operation === undefined ? '' : `\0${operation}`}`;
     let g = groups.get(key);
     if (!g) {
       const filter = { code: row.code, origin: row.origin, category: row.category };
-      groups.set(key, g = { code: row.code, origin: row.origin, category: row.category, public_category: row.public_category, rows: 0, class: row.class, needs_human: row.needs_human,
+      groups.set(key, g = { code: row.code, origin: row.origin, category: row.category, ...(operation === undefined ? {} : { operation }), public_category: row.public_category, rows: 0, class: row.class, needs_human: row.needs_human,
         ...(row.human_reason ? { human_reason: row.human_reason } : {}), filter, fix: row.fix, samples: [],
         drill_down: terminalFailuresArgv({ sourceId: q.sourceId, state: q.state, sinceDays: q.sinceDays, category: row.category, code: row.code, origin: row.origin ?? NO_ORIGIN }) });
     }

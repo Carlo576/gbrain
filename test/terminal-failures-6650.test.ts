@@ -393,6 +393,25 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     expect(filtered.rows!.map(r => r.request_id)).toEqual([opaque]);
   });
 
+  // #7630: a stalled sync receipt retries through sync while a stalled foreground write is resubmitted by its caller, so the
+  // grouped view splits a sync-fault group by operation and every group's fix fits each of its rows.
+  test('a preparation_stalled group splits sync receipts from foreground writes, each with its own fix', async () => {
+    await seed({ slug: 'notes/s', operation: 'submit_job', state: 'failed', code: 'preparation_stalled' });
+    await seed({ slug: 'notes/p', operation: 'put_page', state: 'failed', code: 'preparation_stalled' });
+    await seed({ slug: 'notes/r', operation: 'remember', state: 'failed', code: 'preparation_stalled' });
+    const grouped = await readTerminalFailures(engine, { sourceId: SOURCE, groupBy: 'category' });
+    if (grouped.status !== 'ok') throw new Error('unknown');
+    const stalled = grouped.groups!.filter(g => g.code === 'preparation_stalled');
+    expect(stalled.map(g => g.operation ?? null).sort()).toEqual([null, 'put_page', 'remember'].sort());
+    expect(stalled.find(g => g.operation === undefined)!.fix.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
+    for (const op of ['put_page', 'remember']) {
+      const g = stalled.find(x => x.operation === op)!;
+      expect(g.rows).toBe(1);
+      expect(g.fix.argv).toEqual(['gbrain', 'sources', 'writer', 'status', '--source', SOURCE, '--json']);
+      expect(g.fix.why).toContain(`resubmit the same ${op}`);
+    }
+  });
+
   test('a read past its statement deadline is unknown, and doctor says health is unknown', async () => {
     await seed({ slug: 'notes/x', state: 'failed', code: 'storage_error', compacted: true });
     const slow = new Proxy(engine, { get(target, key) {

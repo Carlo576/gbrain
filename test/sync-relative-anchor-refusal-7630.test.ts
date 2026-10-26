@@ -526,7 +526,7 @@ describe('#7630: a stalled write\'s diagnosis matches its operation', () => {
     operation, state: 'failed', error_code: 'preparation_stalled', error_detail: null, recovery: null, blocked_reason: null, compacted: false, intent_kind: null })!;
   const mcp = { transport: 'stdio' as const, isCallable: () => false, preapproved: () => false };
 
-  for (const operation of ['remember', 'put_page', 'add_tag', 'add_link', 'add_timeline_entry', 'takes_add']) {
+  for (const operation of ['remember', 'put_page', 'add_tag', 'add_link', 'add_timeline_entry', 'takes_add', 'forget_fact']) {
     test(`a foreground ${operation} that ended preparation_stalled inspects the writer and resubmits, never a sync`, () => {
       const verdict = receipt(operation);
       expect(verdict.action.argv).toEqual(['gbrain', 'sources', 'writer', 'status', '--source', 'default', '--json']);

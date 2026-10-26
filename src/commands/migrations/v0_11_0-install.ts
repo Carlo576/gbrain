@@ -106,14 +106,14 @@ async function readRepoPaths(config: GBrainConfig | null): Promise<{ syncRepoPat
 
 function skipWithoutRepo(defaultSourcePath: string | null): OrchestratorPhaseResult {
   if (autopilotInstalledForBrain()) {
-    return { name: 'install', status: 'skipped', reason: 'autopilot_already_installed', detail: 'sync.repo_path is unset and an autopilot is already installed for this brain; left as is' };
+    return { name: 'install', status: 'skipped', reason: 'autopilot_already_installed', detail: 'sync.repo_path is unset or relative and an autopilot is already installed for this brain; left as is' };
   }
   recordSkippedAutopilotInstall(defaultSourcePath);
   const command = autopilotInstallCommand(defaultSourcePath);
-  console.log(`No autopilot was installed: sync.repo_path is unset. Install it when you want background maintenance: ${command} `
+  console.log(`No autopilot was installed: sync.repo_path is unset or relative. Install it when you want background maintenance: ${command} `
     + `(recorded in ${pendingHostWorkPath()}; gbrain doctor shows it until an autopilot is installed)`);
   return {
-    name: 'install', status: 'skipped', reason: 'no_repo_path', detail: `sync.repo_path is unset, so the upgrade installed no autopilot. Install it: ${command}`,
+    name: 'install', status: 'skipped', reason: 'no_repo_path', detail: `sync.repo_path is unset or relative, so the upgrade installed no autopilot. Install it: ${command}`,
     ...(defaultSourcePath ? { argv: autopilotInstallArgv(defaultSourcePath) } : {}),
   };
 }
@@ -164,7 +164,7 @@ export async function clearRepoPathWedge(completed: readonly CompletedMigrationE
   const repo = await readRepoPaths(config).catch(() => null);
   if (!repo || repo.syncRepoPath) return false;
   appendCompletedMigration({ version: '0.11.0', status: 'retry', reason: 'phase_f_no_repo_path' });
-  console.error('Cleared the v0.11.0 wedge: every partial run failed only the autopilot install, and sync.repo_path is unset. '
+  console.error('Cleared the v0.11.0 wedge: every partial run failed only the autopilot install, and sync.repo_path is unset or relative. '
     + 'This version skips that install, so the migration runs again now.');
   return true;
 }
