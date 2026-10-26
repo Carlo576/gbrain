@@ -229,6 +229,11 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
   assertRefreshOwner(binding, sourceId, 'move its checkout');
   const root = binding.local_path;
   const active = await readActiveRefresh(engine, binding.worktree_id);
+  if (active?.state === 'recovery_required') {
+    const stored = (active.outcome.refusal ?? {}) as { cause?: string; fix?: string };
+    throw refusal('refresh_recovery_required', stored.cause ?? `Refresh ${active.id} could not verify the checkout HEAD, so no refresh recovers it on its own.`,
+      stored.fix ?? `gbrain sources writer status ${sourceId}, then gbrain sources refresh ${sourceId} --resume`, active.id);
+  }
   if (active) throw inProgress(`Refresh ${active.id} of this worktree is ${active.state}, held by ${describeHolder(holderOf(active))}; only one refresh per worktree runs at a time.`,
     `gbrain sources refresh ${sourceId} --resume`, sourceId, active.id);
   if (binding.state !== 'active' || await worktreeRecoveryPending(engine, binding)) throw refusal('refresh_recovery_required',
@@ -501,7 +506,7 @@ async function fenceDraining(engine: BrainEngine, sourceId: string, plan: Plan, 
       plan.oldHead, plan.targetHead, plan.upstreamRef, plan.preserved, JSON.stringify({ holder: refreshHolder() })]);
     return row;
   })).catch(error => {
-    if ((error as { code?: string }).code === '23505' && !classifyOriginUniqueViolation(error)) throw refusal('refresh_in_progress', 'Another refresh of this worktree started first.', `gbrain sources refresh ${sourceId} --resume`);
+    if ((error as { code?: string }).code === '23505' && !classifyOriginUniqueViolation(error)) throw inProgress('Another refresh of this worktree started first.', `gbrain sources refresh ${sourceId} --resume`, sourceId);
     throw error;
   });
 }
@@ -597,6 +602,7 @@ export async function resumeWorktreeRefreshes(engine: BrainEngine, opts: { hostI
   const host = opts.hostId ?? localHostId();
   const rows = await engine.executeRaw<WorktreeRefreshRow>(`SELECT f.* FROM persistence_worktree_refreshes f
     JOIN persistence_worktrees w ON w.id=f.worktree_id WHERE w.owner_host_id=$1::uuid AND f.state IN ('draining','fenced','merged','syncing')
+    AND (f.state<>'syncing' OR NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=ANY(f.source_ids) AND (s.last_commit IS NULL OR s.last_commit=f.old_head)))
     ORDER BY f.created_at LIMIT 16`, [host]);
   let moved = 0;
   for (const row of rows) {
@@ -645,7 +651,7 @@ async function resumeOrAbandon(engine: BrainEngine, sourceId: string, opts: Refr
     old_head: null, target_head: null, upstream_ref: null, preserved_uncommitted: [], synced: [], next: `gbrain sources refresh ${sourceId}` };
   if (!active) return empty;
   const lock = await acquireNativeLock(refreshLockPath(binding.worktree_id), { timeoutMs: 1000 }).catch(() => null as NativeLockHandle | null);
-  if (!lock) throw inProgress(`Refresh ${active.id} is still running in another process.`, `Wait for it, then gbrain sources refresh ${sourceId} --resume`, sourceId, active.id);
+  if (!lock) throw inProgress(`Refresh ${active.id} is still running in another process (${describeHolder(holderOf(active))}).`, `Wait for it, then gbrain sources refresh ${sourceId} --resume`, sourceId, active.id);
   try {
     return await withGit(async git => {
       const head = await headOf(git, root);
@@ -769,7 +775,7 @@ export async function refreshHolderReport(row: Pick<WorktreeRefreshRow, 'id' | '
     why: `Refresh ${row.id} could not verify the checkout HEAD, so nothing recovers it on its own. --resume changes nothing here: it prints the two ways out (reset to the start commit and --abandon, or to the upstream commit and --resume); resetting is destructive, so ask the user first.` } };
   if (liveness === 'live') return { ...base, auto_recovery: 'none', fix: null };
   if (liveness === 'orphaned') return { ...base, auto_recovery: 'next_refresh', fix: { argv: resume, consent: [], actor: 'agent', requires_exclusive: false, verify,
-    why: `No process holds refresh ${row.id}'s lock (its holder, ${describeHolder(holder)}, exited), so it is orphaned. The next gbrain sources refresh ${source} finishes it on its own through the --resume path`
+    why: `No process holds refresh ${row.id}'s lock (recorded holder: ${describeHolder(holder)}), so it is orphaned. The next gbrain sources refresh ${source} finishes it on its own through the --resume path`
       + `${row.state === 'syncing' ? ', and the owner completes it once every member has synced to its target' : ''}; --resume finishes it now.` } };
   return { ...base, auto_recovery: 'unknown', fix: { argv: verify.argv, consent: [], actor: 'host_admin', requires_exclusive: false,
     why: `Refresh ${row.id}'s lock lives on host ${holderHost ?? 'unknown'}, not this one, so only that host can tell whether ${describeHolder(holder)} is alive. Run this there; if it reports the refresh orphaned, or that host is gone for good, gbrain sources refresh ${source} --resume on the owner host finishes it (a plain refresh does not adopt another host's refresh).` } };

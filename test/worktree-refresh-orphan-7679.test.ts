@@ -109,6 +109,11 @@ test('#7679: a refresh killed mid-syncing is reported orphaned with its holder, 
     // The wedge: every page write to the worktree is refused while the orphan stands.
     await refusedWith(f.put(f.beta, 'notes/while-orphaned', page('While orphaned', 'refused')), 'worktree_refreshing');
 
+    // Ship audit. Value: protects=a --dry-run reports the orphan and writes nothing (no adoption, holder unchanged); fails_when=the dryRun guard on
+    // adoption is dropped; why_new=no dry run ran against an orphan; seam=none; no_claim=none beyond protects.
+    await refusedWith(refreshWorktree(f.engine, f.alpha, { dryRun: true }), 'refresh_in_progress');
+    expect((await f.refreshRows() as Row[]).map(row => [row.state, row.outcome.holder?.pid, row.outcome.previous_holder])).toEqual([['syncing', pid, undefined]]);
+
     const next = f.push('alpha/three.md', page('Alpha three', 'Landed upstream while the refresh was orphaned.'));
     const result = await refreshWorktree(f.engine, f.alpha);
     expect(result).toMatchObject({ status: 'completed', old_head: target, target_head: next,
@@ -193,6 +198,26 @@ test('#7679: a live refresh is never stolen: owner recovery, a plain refresh and
   }
 }, 300_000);
 
+test('#7679: an orphan written before holders were recorded is reported orphaned on the owner host, and the next plain refresh adopts it', async () => {
+  // Ship audit. Value: protects=a refresh row with no outcome.holder (left by a binary older than #7679) is still adopted and reported orphaned;
+  // fails_when=adoption or the holder report requires a recorded holder, so the upgrade-era orphan stays wedged; why_new=every #7679 test row
+  // carries a holder; seam=none; no_claim=a row written by an actual older binary (the holder is removed with SQL).
+  for (const item of cases) await withKilledRefresh(item, async ({ f, target, orphan }) => {
+    await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET outcome=outcome-'holder' WHERE id=$1::uuid`, [orphan.id]);
+    const [status] = await writerRefreshes(f, f.alpha);
+    expect(status).toMatchObject({ refresh_id: orphan.id, holder: null, liveness: 'orphaned', orphaned: true, auto_recovery: 'next_refresh',
+      fix: { argv: ['gbrain', 'sources', 'refresh', f.alpha, '--resume'] } });
+    expect(status.fix.why).toContain('a process that recorded no holder');
+    const result = await refreshWorktree(f.engine, f.alpha);
+    expect(result).toMatchObject({ status: 'already_current', recovered: { refresh_id: orphan.id, state: 'completed', status: 'completed', previous_holder: null } });
+    const rows = await f.refreshRows() as Row[];
+    expect(rows.map(row => row.state)).toEqual(['completed']);
+    expect(rows[0].outcome.holder.pid).toBe(process.pid);
+    expect(await f.lastCommit(f.alpha)).toBe(target);
+    expect(await f.lastCommit(f.beta)).toBe(target);
+  });
+}, 300_000);
+
 test('#7679: an orphan whose recorded holder is on another host is reported unknown and is not adopted by a plain refresh; --resume on the owner finishes it', async () => {
   for (const item of cases) await withKilledRefresh(item, async ({ f, target, orphan }) => {
     const elsewhere = randomUUID();
@@ -201,6 +226,9 @@ test('#7679: an orphan whose recorded holder is on another host is reported unkn
     expect(status).toMatchObject({ liveness: 'unknown', orphaned: null, auto_recovery: 'unknown', fix: { actor: 'host_admin' } });
     expect(status.fix.why).toContain(elsewhere);
     expect(status.fix.why).toContain('--resume');
+    const sync = await readSyncStatus(f.engine, f.alpha, { detail: false });
+    expect(sync.worktree_refresh).toMatchObject({ refresh_id: orphan.id, liveness: 'unknown', orphaned: null });
+    expect(sync.next).toMatchObject({ actor: 'host_admin', argv: ['gbrain', 'sources', 'writer', 'status', '--source', f.alpha, '--json'] });
     await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_in_progress');
     expect((await f.refreshRows()).map(row => row.state)).toEqual(['syncing']);
     expect(await refreshWorktree(f.engine, f.alpha, { resume: true })).toMatchObject({ status: 'completed', refresh_id: orphan.id, target_head: target });

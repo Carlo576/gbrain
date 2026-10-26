@@ -320,11 +320,106 @@ test('7. a crash leaving HEAD on an unrelated commit is recovery_required; write
   expect(refused.suggestion).toContain(`gbrain sources refresh ${f.alpha} --resume`);
   const resume = await refusedWith(refreshWorktree(f.engine, f.alpha, { resume: true }), 'refresh_recovery_required');
   expect(resume.suggestion).toContain(`reset --hard ${old}`);
+  // Ship audit, #7679. Value: protects=a plain refresh never adopts a recovery_required row, and writer status says nothing recovers it on its
+  // own (auto_recovery none, ask the user before resetting); fails_when=adoption drops its recovery_required guard, or the holder report treats
+  // it as an orphan the next refresh finishes; why_new=the #7679 tests cover syncing orphans only; seam=none; no_claim=the reset choice itself.
+  // The plain refresh refuses with the row's own code and stored fix (both resets), not refresh_in_progress: no process will finish it.
+  const plain = await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_recovery_required');
+  expect(plain.suggestion).toContain(`reset --hard ${old}`);
+  expect((await f.refreshRows()).map(r => r.state)).toEqual(['recovery_required']);
+  const [held] = (await runPersistenceAdministration(f.engine, 'writer_status', { source_id: f.alpha }) as { worktree_refreshes: Array<Record<string, any>> }).worktree_refreshes;
+  expect(held).toMatchObject({ state: 'recovery_required', auto_recovery: 'none', fix: { argv: ['gbrain', 'sources', 'refresh', f.alpha, '--resume'], actor: 'agent' } });
+  expect(held.fix.why).toContain('ask the user');
+  expect(await resumeWorktreeRefreshes(f.engine)).toBe(0);
+  expect((await f.refreshRows()).map(r => r.state)).toEqual(['recovery_required']);
   git(f.root, 'reset', '-q', '--hard', old);
   expect((await refreshWorktree(f.engine, f.alpha, { abandon: true })).status).toBe('abandoned');
   expect((await f.refreshRows()).map(r => r.state)).toEqual(['aborted']);
   expect((await f.put(f.alpha, 'notes/after', page('After', 'admitted again'))).state ?? 'committed').toBe('committed');
 }), 180_000);
+
+test('7b. #7679: a plain refresh rolls back an orphan that died before merging, then runs its own refresh', () => each(async f => {
+  // Ship audit. Value: protects=an orphan that died while fenced (HEAD unmoved) is rolled back by the next plain refresh, which then fast-forwards;
+  // fails_when=refreshWorktree returns the abandoned recovery instead of refreshing, or adoption skips pre-syncing rows; why_new=the #7679 tests
+  // kill only at syncing; seam=none; no_claim=a real process death (the crash is a hook throw; the refresh lock is released as on exit).
+  const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
+  const old = f.head();
+  await expect(refreshWorktree(f.engine, f.alpha, { hooks: { boundary: point => { if (point === 'fenced') throw new Error('simulated crash while fenced'); } } }))
+    .rejects.toThrow('simulated crash');
+  await disposePersistenceConsumer(f.engine);
+  const [orphan] = await f.refreshRows();
+  // The resident consumer's owner scan may already have rolled it back; restore what the crash left so only the plain refresh recovers it.
+  await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state='fenced',completed_at=NULL WHERE id=$1::uuid`, [orphan.id]);
+  expect(f.head()).toBe(old);
+  const result = await refreshWorktree(f.engine, f.alpha);
+  expect(result).toMatchObject({ status: 'completed', old_head: old, target_head: target,
+    recovered: { refresh_id: orphan.id, state: 'aborted', status: 'abandoned', previous_holder: { pid: process.pid } } });
+  expect((await f.refreshRows()).map(r => r.state)).toEqual(['aborted', 'completed']);
+  expect(f.head()).toBe(target);
+  expect(await f.lastCommit(f.alpha)).toBe(target);
+}), 180_000);
+
+test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by the owner scan, a plain refresh and --resume', async () => {
+  // Value: protects=each kind of interrupted refresh row leaves the row section 1.5 names when the owner scan, a plain refresh (adoption) or
+  // --resume (resumeHeld) settles it; fails_when=a kind falls through to a sibling's path (an unverified HEAD adopted as the target, a syncing
+  // row with an unrelated HEAD completed or refreshed over, a dead drain left standing); why_new=the #7679 tests cover syncing orphans with HEAD at
+  // the target only; seam=none; no_claim=a real process death (the crash is a hook throw; the refresh lock is released as on exit).
+  type Kind = 'draining' | 'fenced_old' | 'fenced_target' | 'fenced_unrelated' | 'syncing_at_target' | 'syncing_unrelated';
+  type Action = 'owner_scan' | 'plain' | 'resume';
+  const crashAt = { draining: 'drained', fenced_old: 'fenced', fenced_target: 'fenced', fenced_unrelated: 'fenced', syncing_at_target: 'syncing', syncing_unrelated: 'syncing' } as const;
+  const cells: Array<[Kind, Action]> = [['draining', 'owner_scan'], ['fenced_old', 'owner_scan'], ['syncing_unrelated', 'owner_scan'],
+    ['draining', 'plain'], ['fenced_target', 'plain'], ['fenced_unrelated', 'plain'], ['syncing_at_target', 'plain'], ['syncing_unrelated', 'plain'],
+    ['draining', 'resume'], ['fenced_old', 'resume'], ['fenced_target', 'resume'], ['fenced_unrelated', 'resume'], ['syncing_unrelated', 'resume']];
+  for (const engine of engines) for (const [kind, action] of cells) await withRefreshFixture(engine, async f => {
+    const label = `${kind} x ${action}`;
+    const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
+    const old = f.head();
+    await expect(refreshWorktree(f.engine, f.alpha, { hooks: { boundary: point => { if (point === crashAt[kind]) throw new Error(`simulated crash at ${point}`); } } }))
+      .rejects.toThrow('simulated crash');
+    await disposePersistenceConsumer(f.engine);
+    const [orphan] = await f.refreshRows();
+    // The resident consumer's owner scan may already have settled it; restore what the crash left.
+    const state = kind === 'draining' ? 'draining' : kind.startsWith('fenced') ? 'fenced' : 'syncing';
+    await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state=$2,completed_at=NULL WHERE id=$1::uuid`, [orphan.id, state]);
+    if (kind === 'fenced_target') git(f.root, 'merge', '-q', '--ff-only', target);
+    if (kind.endsWith('_unrelated')) { git(f.root, 'reset', '-q', '--hard', old); commitFile(f.root, 'beta/unrelated.md', page('Unrelated', 'Not the upstream commit.')); }
+    if (kind === 'syncing_at_target') for (const member of [f.alpha, f.beta]) await f.engine.transaction(tx => withCoordinatedWrite(tx, [member],
+      () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [member, target]), TEST_WRITE_ATTRIBUTION));
+    const head = f.head();
+    const rows = async () => (await f.refreshRows()).map(r => r.state);
+    if (action === 'owner_scan') {
+      const moved = await resumeWorktreeRefreshes(f.engine);
+      if (kind === 'syncing_unrelated') { expect(moved, label).toBe(0); expect(await rows(), label).toEqual(['syncing']); }
+      else { expect(moved, label).toBe(1); expect(await rows(), label).toEqual(['aborted']); }
+      expect(f.head(), label).toBe(head);
+      return;
+    }
+    const run = refreshWorktree(f.engine, f.alpha, action === 'resume' ? { resume: true } : {});
+    if (kind.endsWith('_unrelated')) {
+      await refusedWith(run, 'refresh_recovery_required');
+      expect(await rows(), label).toEqual(['recovery_required']);
+      expect(f.head(), label).toBe(head);
+      return;
+    }
+    const result = await run;
+    if (action === 'resume') {
+      expect(result, label).toMatchObject(kind === 'fenced_target' ? { status: 'completed', refresh_id: orphan.id } : { status: 'abandoned', refresh_id: orphan.id });
+      expect(await rows(), label).toEqual([kind === 'fenced_target' ? 'completed' : 'aborted']);
+      expect(f.head(), label).toBe(head);
+      return;
+    }
+    if (kind === 'draining') {
+      expect(result, label).toMatchObject({ status: 'completed', target_head: target, recovered: { refresh_id: orphan.id, state: 'aborted', status: 'abandoned' } });
+      expect(await rows(), label).toEqual(['aborted', 'completed']);
+    } else {
+      expect(result, label).toMatchObject({ status: 'already_current', recovered: { refresh_id: orphan.id, state: 'completed', status: 'completed', previous_holder: { pid: process.pid } } });
+      expect(await rows(), label).toEqual(['completed']);
+    }
+    expect(f.head(), label).toBe(target);
+    expect(await f.lastCommit(f.alpha), label).toBe(target);
+    expect(await f.lastCommit(f.beta), label).toBe(target);
+  });
+}, 600_000);
 
 test('8. a queued git effect drains before fenced, and nothing on the worktree is claimed while fenced', () => each(async f => {
   f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
@@ -396,6 +491,11 @@ test('10. source add and remove on the worktree during a refresh refuse refresh_
     expect(add.suggestion).toContain('--resume');
     await refusedWith(runManagedSourceLifecycle(f.engine, { operation: 'remove', sourceId: f.beta, confirmDestructive: true }), 'refresh_in_progress');
     await refusedWith(refreshWorktree(f.engine, f.beta), 'refresh_in_progress');
+    // Ship audit, #7679. Value: protects=writer status tells writers to retry a live draining refresh, never to --resume it; fails_when=the
+    // draining branch is removed or ordered after the live branch, or liveness misreports the holder; why_new=no test read writer status while draining; seam=none; no_claim=other-host liveness.
+    const [draining] = (await runPersistenceAdministration(f.engine, 'writer_status', { source_id: f.beta }) as { worktree_refreshes: Array<Record<string, any>> }).worktree_refreshes;
+    expect(draining).toMatchObject({ state: 'draining', liveness: 'live', fix: null });
+    expect(draining.next).toContain('queued work drains');
   } } });
   expect(result.status).toBe('completed');
 }), 180_000);
@@ -551,13 +651,17 @@ test('admission completes a syncing refresh whose members all reached the target
   expect((await refreshWorktree(f.engine, f.alpha)).status).toBe('completed');
   const [row] = await f.refreshRows();
   // A refresh whose process died in `syncing` after a later cycle sync caught one member up but not the other.
+  // #7679: the owner scan completes such a row too, so the consumer is stopped to leave it to admission.
+  await disposePersistenceConsumer(f.engine);
   await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state='syncing',completed_at=NULL WHERE id=$1::uuid`, [row.id]);
   const setLastCommit = (sha: string) => f.engine.transaction(tx => withCoordinatedWrite(tx, [f.beta], () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [f.beta, sha]), TEST_WRITE_ATTRIBUTION));
   await setLastCommit(git(f.root, 'rev-parse', 'HEAD~1'));
   await refusedWith(f.put(f.alpha, 'notes/lagging', page('Lagging', 'refused')), 'worktree_refreshing');
   await setLastCommit(target);
   expect((await f.put(f.alpha, 'notes/caught-up', page('Caught up', 'admitted'))).state ?? 'committed').toBe('committed');
-  expect((await f.refreshRows()).map(r => r.state)).toEqual(['completed']);
+  const done = await f.refreshRows();
+  expect(done.map(r => r.state)).toEqual(['completed']);
+  expect(done[0].outcome.completed_by).toBeUndefined();
 }), 120_000);
 
 test('#6712 wave: a refresh completes once every member synced to a descendant of the target, and --resume completes it the same way', () => each(async f => {
