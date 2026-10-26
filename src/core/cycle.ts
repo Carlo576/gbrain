@@ -1224,7 +1224,6 @@ export async function resolveSourceForDir(
     const matched: string[] = [];
     for (const row of candidates) {
       try {
-        // #7630: a relative path realpaths against the cwd, so it would match whatever directory gbrain runs from.
         if (isAbsolute(row.local_path) && realpathSync(row.local_path) === realDir) matched.push(row.id);
       } catch {
         // Stale/unreadable registered path — not a match, keep scanning.
