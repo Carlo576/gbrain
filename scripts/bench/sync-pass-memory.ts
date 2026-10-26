@@ -245,7 +245,7 @@ async function cliRun(): Promise<void> {
     await admin.unsafe('CREATE DATABASE ' + RUN_DB + ' TEMPLATE ' + SEED_DB);
     await admin.end();
     git('reset', '-q', '--hard', seeded.head); git('clean', '-qfd');
-    // --durable: the box's shape, git durability on with a tracking remote; every Git effect commits and pushes.
+    // --durable: git durability on with a tracking remote; every Git effect commits and pushes.
     if (args.includes('--durable')) {
       const remote = join(dir, 'remote.git');
       rmSync(remote, { recursive: true, force: true });
