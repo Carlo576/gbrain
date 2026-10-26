@@ -45,7 +45,8 @@ describe('directPoolProfileForCommand', () => {
   test('#7599: a read-only stdio serve is one-shot; a read-write serve stays resident', () => {
     expect(directPoolProfileForCommand('serve', ['--access', 'read-only'])).toBe('one_shot');
     expect(directPoolProfileForCommand('serve', ['--surface', 'full', '--access', 'read-only'])).toBe('one_shot');
-    for (const args of [[], ['--access', 'full'], ['--surface', 'read-only'], ['--http', '--port', '8080']])
+    expect(directPoolProfileForCommand('serve', ['--access=read-only'])).toBe('one_shot');
+    for (const args of [[], ['--access', 'full'], ['--access=full'], ['--surface', 'read-only'], ['--http', '--port', '8080']])
       expect(directPoolProfileForCommand('serve', args)).toBe('resident');
   });
 

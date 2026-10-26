@@ -582,6 +582,8 @@ drives `tools/list`, the `gbrain://capabilities` resource (`access:
 `unknown_tool` before any handler runs. It denies agent-requested
 mutations; owner maintenance on the same process (startup migrations, hook
 IPC banking) is a separate control. The default is `--access full`.
+`--access=read-only` is the same flag; a repeated `--access` never widens a
+read-only value.
 
 On Postgres a read-only serve is also not a resident owner, because harnesses
 start one per session. It holds no session-lane (direct pool) connection, starts no

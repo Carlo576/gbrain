@@ -39,6 +39,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { VERB_NAMES } from '../core/verbs.ts';
 import { opError } from '../core/ops/contract.ts';
 import { BRAIN_TOOL_ALLOWLIST } from '../core/minions/tools/brain-tool-allowlist.ts';
+import { accessFlagValues } from '../core/direct-pool-profile.ts';
 
 export type McpSurface = 'verbs' | 'starter' | 'full';
 
@@ -156,18 +157,18 @@ export function parseSurfaceFlag(args: string[]): McpSurface | null {
  * mutating, so discovery cannot widen it). It denies agent-requested
  * mutations; owner maintenance (startup migrations, hook IPC banking) is a
  * separate control. HTTP enforces per-token operation grants instead.
+ * `--access=read-only` is the same flag (`accessFlagValues`); any read-only
+ * value wins, so a repeated flag never widens the ceiling.
  */
 export type McpAccess = 'full' | 'read-only';
 
 export function parseAccessFlag(args: string[]): McpAccess {
-  const idx = args.indexOf('--access');
-  if (idx < 0) return 'full';
-  const raw = args[idx + 1];
-  if (raw !== 'full' && raw !== 'read-only') {
+  const values = accessFlagValues(args);
+  if (values.some(raw => raw !== 'full' && raw !== 'read-only')) {
     throw opError('invalid_params', '--access takes read-only or full (default full); see docs/mcp/ADMIN.md#read-only-stdio-serve',
       'Pass --access read-only or --access full (default full).', { docs: 'docs/mcp/ADMIN.md#read-only-stdio-serve' });
   }
-  return raw;
+  return values.includes('read-only') ? 'read-only' : 'full';
 }
 
 export function isReadOnlyOperation(op: Pick<OperationMeta, 'scope' | 'mutating' | 'requiredScopes'>): boolean {
