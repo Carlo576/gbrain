@@ -10,6 +10,40 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.466.0] - 2026-10-26
+
+**A temporary table can no longer slip purged or forgotten content past gbrain's guards. Before, any database session, including gbrain's own role, could create an empty table named like a purge list and have a purged claim, page or take stored again, or a forgotten fact saved active.**
+
+gbrain keeps lists of what you purged (`gbrain forget --purge`) and what you forgot (`gbrain forget`), and database guards check every write against them. Those guards looked tables up in a way that let a session's own temporary tables come first. So a session could create an empty temporary table with the same name as a purge list, and the guard read that empty table instead and let the write through. Every gbrain function now looks at temporary tables last. Nothing else about the guards changed.
+
+### How to get it
+
+Upgrade and let the migration run (`gbrain upgrade`, or `gbrain apply-migrations --yes`). Then check:
+
+```bash
+gbrain doctor --json   # function_search_path: ok
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session creates a temporary table or view named like a purge or withdrawal list, then saves purged content | the purged claim, page, take or derivation was stored again, and a forgotten fact was saved active, for the owner and any other writer | refused (or dropped, or stamped forgotten), exactly as without the temporary table |
+| The migrating role does not own some gbrain functions | — | migration v276 updates the ones it owns, names the rest on stderr and carries on; `gbrain doctor` (`function_search_path`) prints the `ALTER FUNCTION` to run as each owner |
+
+### What to watch for after you upgrade
+
+- **Still open:** on Postgres, a write role with no row-level-security policy on a purge or withdrawal list reads it as empty, so its purged or forgotten writes still go through. Until gbrain#7659 lands, give such a role a `SELECT` policy on those lists for the sources it writes.
+- An older gbrain that runs `gbrain init` or `gbrain upgrade` against the brain undoes this for the functions it re-creates. Doctor flags them; `gbrain init` or `gbrain upgrade` with this release, or the printed `ALTER FUNCTION`, puts it back.
+- Procedures in `public` are left alone.
+
+### Itemized changes
+
+- `src/core/function-search-path.ts`: `FUNCTION_SEARCH_PATH_HARDENING_SQL` appends `pg_temp` to every function in `public` (`prokind = 'f'`) the current role owns that pins `pg_catalog, public` or `pg_catalog`. ALTER only, no body changes. It is the last statement of the schema blob, runs in migration v276 (`function_search_path_pg_temp`) and after `gbrain reindex-search-vector` re-creates the search-vector trigger functions.
+- `src/commands/doctor/checks/function-search-path.ts`: new `function_search_path` check (fail) naming each function still without `pg_temp`, with the `ALTER FUNCTION ... SET search_path` to run as its owner. It never suggests an owner change.
+- The purge and withdrawal guards are unchanged: `SECURITY INVOKER`, same bodies, same `BEFORE ROW` timing.
+- Tests: `test/e2e/function-search-path-postgres.test.ts` (temporary table and view shadows for the owner and a non-owner writer, the migration from the previous version, a migrating role that owns all but one function, schema replay, lock timeout), `test/function-search-path-pglite.test.ts`, `test/doctor-function-search-path.test.ts`.
+
 ## [0.60.465.0] - 2026-10-26
 
 **On a managed brain, releasing a held fact (`gbrain trust release h<id>`) now writes it into its entity page's `## Facts` table through the page-write door, so the released fact lives in Git and a re-import keeps it, instead of a database-only row the file never had.**
