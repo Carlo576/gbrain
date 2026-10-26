@@ -19,6 +19,8 @@ import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { registerLocalWriter, withVerifiedLocalRegistration } from '../src/core/persistence/identity.ts';
 import { runReconcileApply, runReconcilePreview } from '../src/core/persistence/reconcile.ts';
 import { readGitSourceHolds, writeGitHold } from '../src/core/persistence/sync-holds.ts';
+import { resolveRepairScope } from '../src/core/repair/core.ts';
+import { repairRunner } from '../src/core/repair/registry.ts';
 import type { ManagedBrain } from './helpers/managed-brain.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -53,7 +55,14 @@ async function refusedPageBatch({ engine, ctx, root }: ManagedBrain) {
   expect(receipt[0]!.error_message).toContain('preparation_stalled');
   const retry = async () => resumeManagedFacts(engine, (await prepareManagedFactsSession(backstop, input))!);
   expect((await retry().catch(error => error)).code).toBe('source_changed');
-  return { file, pristine, receipt, retry };
+  return { file, pristine, receipt, retry, write: write!.id };
+}
+
+/** The `gbrain repair failed-writes` preview rows for the target's fact requests. */
+async function factsListing(engine: ManagedBrain['engine']) {
+  const preview = await (await repairRunner(engine, { apply: false, logger: { info() {}, warn() {}, error() {} } }))
+    .run('failed-writes', await resolveRepairScope(engine, 'default'), { explicit: true, sourceFlag: 'default' });
+  return (preview.listing ?? []).filter(entry => entry.item.includes(`${TARGET} extract_facts`));
 }
 
 const factRows = (engine: ManagedBrain['engine']) => engine.executeRaw<{ fact: string }>('SELECT fact FROM facts WHERE fact=$1', [CLAIM]);
@@ -63,8 +72,16 @@ for (const backend of testBackends()) {
 
   test(`#7439 [${backend}]: a page-triggered facts batch refused for a stalled hold publishes its retained facts once the reconcile clears the hold`, () => managedBrain(async brain => {
     const { engine } = brain;
-    const { file, pristine, receipt, retry } = await refusedPageBatch(brain);
+    const { file, pristine, receipt, retry, write } = await refusedPageBatch(brain);
     expect(await factRows(engine)).toEqual([]);
+    // Value: protects=repair failed-writes lists a held-file fact refusal with the job retry that recovers it, then drops it once a
+    // follow-up committed; fails_when=the listing names extract --stale, loses the file-check note, or keeps a recovered request;
+    // why_new=#7602 covers revision_conflict listings only; seam=none; no_claim=does not run the job retry itself
+    const [listed, ...others] = await factsListing(engine);
+    expect(others).toEqual([]);
+    expect(listed!.class).toBe('producer_owned');
+    expect(listed!.detail).toStartWith(`recover: gbrain facts retry-dead --reset 'facts-absorb:write:${write}'`);
+    expect(listed!.detail).toContain('once the file check passes');
     writeFileSync(file, pristine);
     await withVerifiedLocalRegistration(engine, await registerLocalWriter(engine, 'cli'), async () => {
       const preview = await runReconcilePreview(engine, { source_id: 'default', slug: TARGET });
@@ -79,6 +96,7 @@ for (const backend of testBackends()) {
     expect(await engine.executeRaw('SELECT request_id, error_message FROM persistence_requests WHERE request_id=$1::uuid', [receipt[0]!.request_id])).toEqual(receipt);
     expect((await retry())?.inserted).toBe(1);
     expect(await factRows(engine)).toHaveLength(1);
+    expect(await factsListing(engine)).toEqual([]);
   }, { databaseUrl }), 120_000);
 
   test(`#7439 [${backend}]: while the held file still differs, a retry keeps the refusal and admits nothing`, () => managedBrain(async brain => {

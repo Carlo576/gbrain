@@ -115,7 +115,7 @@ export interface ManagedFactsSession {
 }
 
 /** #6048: follow-up batches one input-keyed extraction may admit for file-check refusals. */
-const MAX_FILE_REFUSAL_RETRIES = 3;
+export const MAX_FILE_REFUSAL_RETRIES = 3;
 
 /**
  * #6898 follow-up: the most facts one entity request publishes. A publication holds the brain-wide
@@ -447,7 +447,7 @@ async function followEntityMoves(engine: BrainEngine, session: ManagedFactsSessi
       : session.wait.observe((await awaitWrite(engine, row, session.config, { waitMs: session.wait.ms(), signal: session.signal })).row));
     return settled;
   };
-  return followRefusals(engine, session, await settle(rows), 'entity-moved-retry', entityMovedRefusal, readmitMovedFacts, settle);
+  return followRefusals(engine, session, await settle(rows), 'entity-moved-retry', entityMovedRefusal, readmitMovedFacts, { settle, partial: true });
 }
 
 function entityMovedRefusal(row: WriteRequest): boolean {
@@ -462,27 +462,31 @@ function withdrawalRefusal(row: WriteRequest): boolean {
  * While every request of the latest batch is terminal and each uncommitted
  * entity request is a `refused` refusal that kept its facts for this input,
  * look for the next follow-up batch (`digest([batchKey, label, n])`), or admit
- * it through `readmit`, at most MAX_FILE_REFUSAL_RETRIES times.
+ * it through `readmit`, at most MAX_FILE_REFUSAL_RETRIES times. With `partial`,
+ * only the matching refusals are followed; every other entity request of the
+ * batch, and a matching one `readmit` left out, is carried as it stands.
  */
 async function followRefusals(engine: BrainEngine, session: ManagedFactsSession, stored: WriteRequest[], label: string,
   refused: (row: WriteRequest) => boolean,
   readmit: (engine: BrainEngine, followUp: ManagedFactsSession, refused: WriteRequest[]) => Promise<WriteRequest[] | null>,
-  settle?: (batch: WriteRequest[]) => Promise<WriteRequest[]>): Promise<WriteRequest[]> {
+  options: { settle?: (batch: WriteRequest[]) => Promise<WriteRequest[]>; partial?: boolean } = {}): Promise<WriteRequest[]> {
   const carried: WriteRequest[] = [];
   let latest = stored;
   for (let retry = 1; retry <= MAX_FILE_REFUSAL_RETRIES; retry++) {
     if (latest.some(row => !isTerminal(row))) break;
     const uncommitted = latest.filter(row => isEntityRequest(row) && row.state !== 'committed');
-    const retained = uncommitted.map(row => row.intent as ManagedFactIntent | null);
-    if (!uncommitted.length || uncommitted.some((row, i) => !refused(row) || !retained[i]?.facts?.length
-      || retained[i]!.inputDigest !== session.inputDigest || !sameSignature(retained[i]!.embedding, retained[0]!.embedding))) break;
+    const followed = uncommitted.filter(row => refused(row) && (row.intent as ManagedFactIntent | null)?.facts?.length
+      && (row.intent as ManagedFactIntent).inputDigest === session.inputDigest);
+    const retained = followed.map(row => row.intent as ManagedFactIntent);
+    if (!followed.length || !options.partial && followed.length !== uncommitted.length
+      || retained.some(intent => !sameSignature(intent.embedding, retained[0]!.embedding))) break;
     const followUpKey = digest([session.batchKey, label, retry]);
     const followUp: ManagedFactsSession = { ...session, batchKey: followUpKey, embedding: retained[0]!.embedding ?? null,
       completionRequestId: managedFactRequestId(followUpKey, '__managed_facts_complete__') };
-    const admitted = await storedBatch(engine, followUp) ?? await readmit(engine, followUp, uncommitted);
+    const admitted = await storedBatch(engine, followUp) ?? await readmit(engine, followUp, followed);
     if (!admitted) break;
-    carried.push(...latest.filter(row => isEntityRequest(row) && row.state === 'committed'));
-    latest = settle ? await settle(admitted) : admitted;
+    carried.push(...latest.filter(row => isEntityRequest(row) && (row.state === 'committed' || !admitted.some(next => next.slug === row.slug))));
+    latest = options.settle ? await options.settle(admitted) : admitted;
   }
   return [...carried, ...latest];
 }
@@ -558,8 +562,8 @@ async function retainedVisibility(engine: BrainEngine, sourceId: string): Promis
 }
 
 /**
- * #7602: admit the refused requests' retained facts as `followUp` at each entity page's current revision, or return null
- * (nothing admitted) when a page was deleted or replaced since admission. Each refused request must still be authorized
+ * #7602: admit the refused requests' retained facts as `followUp` at each entity page's current revision. A request whose
+ * page was deleted or replaced since admission is left out and keeps its refusal; null when none is left. Each refused request must still be authorized
  * under its stored authority and its page under the current writer grant; the retained intent is otherwise kept as
  * admitted. No extraction runs again.
  */
@@ -571,11 +575,12 @@ async function readmitMovedFacts(engine: BrainEngine, followUp: ManagedFactsSess
     await authorizeStoredRequest(engine, row);
     await authorizeWrite(engine, followUp.authority, 'extract_facts', row.slug);
     const page = await engine.readPageSnapshot(row.slug, { sourceId });
-    if ((page?.page.id ?? null) !== row.page_id) return null;
+    if ((page?.page.id ?? null) !== row.page_id) continue;
     const { expected_revision: _movedRevision, facts, ...kept } = row.intent as ManagedFactIntent;
     entities.push({ slug: row.slug, pageId: row.page_id, intent: { ...kept, batchKey: followUp.batchKey,
       ...(page ? { expected_revision: page.revision } : {}), facts: await Promise.all(facts!.map(narrowed)) } });
   }
+  if (!entities.length) return null;
   return admitManagedFactsBatch(engine, followUp, regroupParts(followUp.batchKey, entities), entities.some(entity => entity.intent.facts!.some(fact => fact.embedding != null)));
 }
 

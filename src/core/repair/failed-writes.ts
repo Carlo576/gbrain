@@ -55,6 +55,7 @@ import { getWorktreeBinding } from '../persistence/ownership.ts';
 import { prepareFileTarget } from '../persistence/page-prepare.ts';
 import { PENDING_IMPORT, SYNC_HELD } from '../persistence/pending-import.ts';
 import { FACTS_ENTITY_MOVED_MESSAGES } from '../persistence/verb-errors.ts';
+import { MAX_FILE_REFUSAL_RETRIES } from '../persistence/facts-maintenance.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
 import { dispositionOf, PAGE_REMOVAL_OPERATIONS, supersessionOrderSql, supersessionSql } from '../persistence/terminal-classify.ts';
@@ -74,7 +75,8 @@ const FACTS_MOVED_REFUSAL = `(r.operation='extract_facts' AND r.state='conflict'
 /** #7602: a refused fact request whose retained facts a later request of the same extraction committed on the same page. */
 const FACTS_RECOVERED = `(r.operation='extract_facts' AND EXISTS (SELECT 1 FROM persistence_requests c WHERE c.operation='extract_facts'
   AND c.source_id=r.source_id AND c.slug=r.slug AND c.state='committed' AND c.sequence>r.sequence
-  AND COALESCE(c.intent->>'inputDigest', c.outcome->>'input_digest')=r.intent->>'inputDigest'))`;
+  AND COALESCE(c.intent->>'inputDigest', c.outcome->>'input_digest')=r.intent->>'inputDigest'
+  AND COALESCE(c.intent->>'batchKey', c.outcome->>'batch_key') IS DISTINCT FROM r.intent->>'batchKey'))`;
 
 interface FailedWrite {
   id: string; request_id: string; sequence: string; operation: string; source_id: string; slug: string; digest: string; state: string;
@@ -104,9 +106,9 @@ async function factsRecovery(engine: BrainEngine, write: FailedWrite, rows: Fail
   if (!job || write.state !== 'conflict') return extractAgain;
   if (write.error_code === 'revision_conflict') {
     if (await pageRevision(engine, write.source_id, write.slug) === null) return `not recoverable: entity page ${write.slug} was deleted after these facts were admitted`;
-    const refusals = rows.filter(row => row.operation === 'extract_facts' && row.error_code === 'revision_conflict' && row.source_id === write.source_id
-      && row.slug === write.slug && row.intent.inputDigest === write.intent.inputDigest);
-    if (refusals.length > 1) return `${extractAgain}; its follow-up batches were refused as well, so a job retry replays the refusal`;
+    const batches = new Set(rows.filter(row => row.operation === 'extract_facts' && row.error_code === 'revision_conflict' && row.source_id === write.source_id
+      && row.slug === write.slug && row.intent.inputDigest === write.intent.inputDigest).map(row => row.intent.batchKey));
+    if (batches.size > MAX_FILE_REFUSAL_RETRIES) return `${extractAgain}; its follow-up batches were refused as well, so a job retry replays the refusal`;
   }
   return `recover: gbrain facts retry-dead --reset 'facts-absorb:write:${job}' (the next facts_drain pass retries the page's facts-absorb job, which re-admits the retained facts without a model call${write.error_code === 'source_changed' ? ' once the file check passes' : ''})`;
 }
@@ -118,6 +120,10 @@ function producerCommand(producer: string, sourceId: string): string {
   if (parts.includes('canonical_reconcile')) return `gbrain sources reconcile ${sourceId} --audit`;
   if (parts.includes('managed_file_repair')) return `gbrain repair frontmatter --source ${sourceId} (a frontmatter repair) or gbrain repair fences --source ${sourceId} (a fence repair)`;
   if (parts.includes('relink_facts')) return `gbrain facts relink --source ${sourceId} --dry-run`;
+  if (parts.includes('managed_maintenance_expire_captured_facts')) return `gbrain repair captured-facts --source ${sourceId}`;
+  if (parts.includes('managed_maintenance_restore_extractor_facts')) return `gbrain repair extractor-facts --source ${sourceId}`;
+  if (parts.includes('managed_maintenance_restore_redacted_facts')) return `gbrain repair redacted-facts --source ${sourceId}`;
+  if (parts.includes('managed_maintenance_conversation_facts')) return `gbrain extract-conversation-facts --source-id ${sourceId} --dry-run`;
   return 'the next `gbrain dream` cycle (or autopilot) produces it again';
 }
 

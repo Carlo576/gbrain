@@ -18,6 +18,7 @@ import { authorizePageVisibility } from './page-visibility.ts';
 import { authorizeFactsBackstop } from './effect-facts.ts';
 import { getWriteRequestById } from './journal.ts';
 import { preparePageMutation } from './page-prepare.ts';
+import { PageRevisionConflictError } from '../page-state/types.ts';
 import { FACTS_BATCH_INCOMPLETE_MESSAGE, FACTS_DEDUP_CHANGED_MESSAGE, FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE, FACTS_ENTITY_CHANGED_MESSAGE } from './verb-errors.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
@@ -236,11 +237,15 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
   if (snapshot && entries.some(entry => entry.rowNum !== undefined)) {
     // #5575 ENG-1: the appended rows have no facts rows yet; their chunks are cut at the append's tier.
     const rowNums = entries.flatMap(entry => entry.rowNum === undefined ? [] : [entry.rowNum]);
+    const moved = () => factsRefusal('revision_conflict', FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE, row,
+      `Entity page ${row.slug} changed while its ## Facts table was being prepared, so none of these facts were published.`);
     page = await withPendingFenceRows({ sourceId: row.source_id, slug: row.slug, rowNums, tier: fenceAppendPendingTier(taint?.trust.tier) },
       () => preparePageMutation(engine, { ...row, intent: { ...p, expected_revision: snapshot.revision,
-        content: serializePageToMarkdown({ ...snapshot.page, ...next }, snapshot.tags) } }, config));
-    if (page.observedRevision !== snapshot.revision) throw factsRefusal('revision_conflict', FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE, row,
-      `Entity page ${row.slug} changed while its ## Facts table was being prepared, so none of these facts were published.`);
+        content: serializePageToMarkdown({ ...snapshot.page, ...next }, snapshot.tags) } }, config)).catch(error => {
+      // #7602: the page preparation refuses a move before the check below sees it.
+      throw error instanceof PageRevisionConflictError && error.code === 'revision_conflict' ? moved() : error;
+    });
+    if (page.observedRevision !== snapshot.revision) throw moved();
   }
   return { observedRevision: snapshot?.revision ?? null, file: page?.file, ...(page?.exclusiveSources ? { exclusiveSources: page.exclusiveSources } : {}), noop: entries.every(entry => entry.duplicateId !== null || entry.duplicateOf !== undefined),
     ...(taint ? { trust: taint.trust } : {}),

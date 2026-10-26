@@ -14,8 +14,11 @@ export const FACTS_BATCH_INCOMPLETE_MESSAGE = 'Some extracted facts have not com
 export const FACTS_ENTITY_CHANGED_MESSAGE = 'The fact entity changed after extraction admission.';
 export const FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE = 'The fact entity changed during preparation.';
 export const FACTS_DEDUP_CHANGED_MESSAGE = 'The fact deduplication state changed before publication.';
+/** The coordinator's refusal when the page moved between preparation and publication (coordinator.ts, group-publish.ts). */
+export const PAGE_CHANGED_DURING_PREPARATION_MESSAGE = 'The page changed during preparation.';
 /** #7602: entity request refusals a follow-up batch re-admits at the entity's current revision (facts-maintenance.ts). */
-export const FACTS_ENTITY_MOVED_MESSAGES: readonly string[] = [FACTS_ENTITY_CHANGED_MESSAGE, FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE, FACTS_DEDUP_CHANGED_MESSAGE];
+export const FACTS_ENTITY_MOVED_MESSAGES: readonly string[] = [FACTS_ENTITY_CHANGED_MESSAGE, FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE, FACTS_DEDUP_CHANGED_MESSAGE,
+  PAGE_CHANGED_DURING_PREPARATION_MESSAGE];
 
 const FRONTMATTER_SLUG_CONFLICT = /^The frontmatter slug "[^"\n]{1,300}" in [^/"\n][^"\n]{0,1000} conflicts with its path, which expects slug "[^"\n]{1,300}"\. Remove `slug:` or make it match the path\.$/;
 

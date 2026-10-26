@@ -18,12 +18,16 @@
 import { afterEach, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { configureGateway, resetGateway, __setChatTransportForTests, type ChatResult } from '../src/core/ai/gateway.ts';
+import { FENCE_FACTS_INTENT } from '../src/core/cycle/extract-facts.ts';
 import type { FactsBackstopCtx } from '../src/core/facts/backstop.ts';
-import { UnrecoverableError } from '../src/core/minions/errors.ts';
+import { FACTS_DEFAULT_VISIBILITY_KEY } from '../src/core/facts/visibility.ts';
 import { makeFactsAbsorbHandler } from '../src/core/minions/handlers/facts-absorb.ts';
+import { jobRefusal } from '../src/core/minions/refusal.ts';
 import type { MinionJobContext } from '../src/core/minions/types.ts';
 import { prepareManagedFactsSession, publishManagedFacts, resumeManagedFacts } from '../src/core/persistence/facts-maintenance.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
+import { maintenancePreflight, submitDatabaseMaintenanceIntent } from '../src/core/persistence/prepared-maintenance.ts';
+import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
 import { resolveRepairScope } from '../src/core/repair/core.ts';
 import { repairRunner } from '../src/core/repair/registry.ts';
 import type { ManagedBrain } from './helpers/managed-brain.ts';
@@ -32,6 +36,8 @@ import { requirePostgresTestDatabase, testBackends } from './helpers/test-backen
 
 const TARGET = 'people/alice-example';
 const CLAIM_B = 'Alice-example owns the synthetic onboarding checklist.';
+const OTHER = 'companies/acme-example';
+const CLAIM_OTHER = 'Acme-example runs the synthetic onboarding pilot.';
 const BODY = 'Notes from a synthetic planning chat about the onboarding checklist and the launch date, kept for the regression.';
 
 afterEach(() => { __setChatTransportForTests(null); resetGateway(); });
@@ -190,6 +196,76 @@ for (const backend of testBackends()) {
     expect(await factsListing(engine)).toEqual([]);
   }, { databaseUrl }), 120_000);
 
+  // Value: protects=a writer-guard-refused fact request is listed for re-extraction, never the job retry that would replay its refusal;
+  // fails_when=factsRecovery offers retry-dead for any page-triggered request, or the listing names extract --stale again;
+  // why_new=the #7602 listings cover conflict rows only; seam=none; no_claim=the guard refusal is stamped onto a stored receipt by SQL,
+  // as test/repair-failed-writes-5983.test.ts does, not produced by a live writer guard
+  test(`#7602 [${backend}]: a fact request the writer guard refused is listed for re-extraction, not a job retry`, () => managedBrain(async brain => {
+    const { engine } = brain;
+    const { move, loser } = await setup(brain, 1);
+    const before = await loser.session();
+    before.entityMoveRetry = false;
+    const race = raceEntityReads(engine, 1, move);
+    expect((await publishManagedFacts(engine, before, loser.backstop, [fact(CLAIM_B)], 'private', loser.slug).catch(error => error).finally(race.restore)).code).toBe('revision_conflict');
+    await engine.transaction(async tx => {
+      await declarePersistenceProtocol(tx);
+      await tx.executeRaw(`UPDATE persistence_requests SET state='failed', error_code='writer_coordinator_required'
+        WHERE operation='extract_facts' AND slug=$1 AND state='conflict' AND intent->>'origin' LIKE '%chats/source-loser%'`, [TARGET]);
+    });
+    expect((await factsListing(engine)).map(entry => [entry.class, entry.detail])).toEqual([['producer_owned',
+      `re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call)`]]);
+  }, { databaseUrl }), 120_000);
+
+  // Value: protects=a re-admitted fact is never wider than the current default visibility, and keeps world under a world default;
+  // fails_when=readmitMovedFacts re-admits the retained facts without narrowing them (or narrows unconditionally);
+  // why_new=the other #7602 rows publish private facts only; seam=none; no_claim=the race is the wrapped entity read above
+  for (const [defaultVisibility, published] of [[null, 'private'], ['world', 'world']] as const) {
+    test(`#7602 [${backend}]: a world fact re-admitted after the race is ${published} under the ${defaultVisibility ?? 'unset'} default visibility`, () => managedBrain(async brain => {
+      const { engine } = brain;
+      if (defaultVisibility) await engine.setConfig(FACTS_DEFAULT_VISIBILITY_KEY, defaultVisibility);
+      const { move, loser } = await setup(brain, 1);
+      const race = raceEntityReads(engine, 1, move);
+      const first = await publishManagedFacts(engine, await loser.session(), loser.backstop, [fact(CLAIM_B)], 'world', loser.slug).finally(race.restore);
+      expect(race.moves()).toBe(1);
+      expect(first.inserted).toBe(1);
+      expect(await engine.executeRaw(`SELECT state, intent->'facts'->0->>'visibility' AS visibility FROM persistence_requests
+        WHERE operation='extract_facts' AND slug=$1 AND intent->>'origin' LIKE '%chats/source-loser%' ORDER BY sequence`, [TARGET]))
+        .toEqual([{ state: 'conflict', visibility: 'world' }, { state: 'committed', visibility: published }]);
+      expect(await engine.executeRaw('SELECT visibility FROM facts WHERE fact=$1', [CLAIM_B])).toEqual([{ visibility: published }]);
+    }, { databaseUrl }), 120_000);
+  }
+
+  // Value: protects=repair failed-writes names the command that produces each guard-refused maintenance facts write again;
+  // fails_when=the listing sends a *_facts producer to gbrain extract --stale again (that sweep runs no fact producer), or a repair's
+  // write to the dream cycle; why_new=no failed-writes test lists a maintenance producer; seam=none; no_claim=the guard refusal (and,
+  // past the first row, the intent kind) is stamped onto a committed fence-facts receipt by SQL, as the writer-guard row above does
+  const maintenanceProducers: Array<[kind: string, command: string]> = [
+    [FENCE_FACTS_INTENT, 'the next `gbrain dream` cycle (or autopilot) produces it again'],
+    ['managed_maintenance_expire_captured_facts', 'gbrain repair captured-facts --source default'],
+    ['managed_maintenance_restore_extractor_facts', 'gbrain repair extractor-facts --source default'],
+    ['managed_maintenance_restore_redacted_facts', 'gbrain repair redacted-facts --source default'],
+    ['managed_maintenance_conversation_facts', 'gbrain extract-conversation-facts --source-id default --dry-run'],
+  ];
+  for (const [kind, command] of maintenanceProducers) {
+    test(`#7602 [${backend}]: a guard-refused ${kind} write is listed with the command that produces it, not extract --stale`, () => managedBrain(async brain => {
+      const { engine, ctx, root } = brain;
+      await put(ctx, TARGET, 'person');
+      const snapshot = (await engine.readPageSnapshot(TARGET, { sourceId: 'default' }))!;
+      await submitDatabaseMaintenanceIntent(engine, (await maintenancePreflight(engine, 'default', root))!, TARGET,
+        { kind: FENCE_FACTS_INTENT, expected_revision: snapshot.revision, page_id: snapshot.page.id, embeddings: [] }, randomUUID());
+      await engine.transaction(async tx => {
+        await declarePersistenceProtocol(tx);
+        expect(await tx.executeRaw(`UPDATE persistence_requests SET state='failed', error_code='writer_coordinator_required',
+          intent=jsonb_set(intent, '{kind}', to_jsonb($3::text)) WHERE slug=$1 AND intent->>'kind'=$2 RETURNING operation`, [TARGET, FENCE_FACTS_INTENT, kind]))
+          .toEqual([{ operation: 'submit_job' }]);
+      });
+      const preview = await (await repairRunner(engine, { apply: false, logger: { info() {}, warn() {}, error() {} } }))
+        .run('failed-writes', await resolveRepairScope(engine, 'default'), { explicit: true, sourceFlag: 'default' });
+      expect((preview.listing ?? []).filter(entry => entry.item.includes(`${TARGET} submit_job`)).map(entry => [entry.class, entry.detail]))
+        .toEqual([['producer_owned', `re-run: ${command}`]]);
+    }, { databaseUrl }), 120_000);
+  }
+
   test(`#7602 [${backend}]: an entity page deleted after admission is not re-targeted; the refusal is not retryable`, () => managedBrain(async brain => {
     const { engine, ctx } = brain;
     const { loser } = await setup(brain, 0);
@@ -202,6 +278,26 @@ for (const backend of testBackends()) {
     expect((await entityRequests(engine)).map(row => row.state)).toEqual(['conflict']);
     expect(await claimB(engine)).toEqual([]);
     expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`not recoverable: entity page ${TARGET} was deleted after these facts were admitted`]);
+  }, { databaseUrl }), 120_000);
+
+  // Value: protects=a moved entity is re-admitted though a sibling entity of the same extraction was deleted, and the sibling keeps its
+  // refusal; fails_when=one deleted page abandons the whole follow-up (the moved entity's facts are dropped) or the deleted one is
+  // re-targeted; why_new=the deleted-page test has a single entity; seam=none; no_claim=the move and the delete are direct writes in the race
+  test(`#7602 [${backend}]: a moved entity is re-admitted beside a sibling whose page was deleted; the sibling stays refused`, () => managedBrain(async brain => {
+    const { engine, ctx } = brain;
+    const { move, loser } = await setup(brain, 1);
+    await put(ctx, OTHER, 'company');
+    const race = raceEntityReads(engine, 1, async n => {
+      await move(n);
+      const other = (await engine.readPageSnapshot(OTHER, { sourceId: 'default' }))!;
+      await submitPageMutation(ctx, { operation: 'delete_page', params: { slug: OTHER, expected_revision: other.revision, request_id: randomUUID() } });
+    });
+    const result = await publishManagedFacts(engine, await loser.session(), loser.backstop, [{ ...fact(CLAIM_OTHER), entity_slug: OTHER }, fact(CLAIM_B)],
+      'private', loser.slug).finally(race.restore);
+    expect(race.moves()).toBe(1);
+    expect({ inserted: result.inserted, refused: result.refused?.map(row => [row.slug, row.code]) }).toEqual({ inserted: 1, refused: [[OTHER, 'revision_conflict']] });
+    expect(await claimB(engine)).toEqual([{ fact: CLAIM_B, source_markdown_slug: TARGET }]);
+    expect(await engine.executeRaw('SELECT fact FROM facts WHERE fact=$1', [CLAIM_OTHER])).toEqual([]);
   }, { databaseUrl }), 120_000);
 
   test(`#7602 [${backend}]: the facts-absorb job that lost the race completes in one attempt with one model call`, () => managedBrain(async brain => {
@@ -223,11 +319,10 @@ for (const backend of testBackends()) {
     const race = raceEntityReads(engine, 4, move);
     const handler = makeFactsAbsorbHandler(engine);
     const first: Error = await handler(jobContext(loser, 1)).then(() => new Error('the job completed')).catch(error => error).finally(race.restore);
-    expect(first).toBeInstanceOf(UnrecoverableError);
-    expect(first.message).toContain('facts_absorb_write_refused (revision_conflict)');
+    expect(jobRefusal(first)).toMatchObject({ code: 'revision_conflict' });
     expect(calls.n).toBe(1);
     const requests = await entityRequests(engine);
-    expect(await handler(jobContext(loser, 1)).catch(error => error)).toBeInstanceOf(UnrecoverableError);
+    expect(jobRefusal(await handler(jobContext(loser, 1)).catch(error => error))).toMatchObject({ code: 'revision_conflict' });
     expect(calls.n).toBe(1);
     expect(await entityRequests(engine)).toEqual(requests);
     expect(await claimB(engine)).toEqual([]);
