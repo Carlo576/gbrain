@@ -114,7 +114,7 @@ export interface ManagedFactsSession {
   signal?: AbortSignal;
 }
 
-/** #6048: follow-up batches one input-keyed extraction may admit for file-check refusals. */
+/** #6048: follow-up batches one extraction may admit for each followed refusal walk (file check, withdrawal, #7602 moved entity). */
 export const MAX_FILE_REFUSAL_RETRIES = 3;
 
 /**

@@ -271,12 +271,12 @@ for (const backend of testBackends()) {
       });
     }, 180_000);
 
-    test('A-36 explicit: a fact writer that names its entity still refuses when that entity changed after admission', async () => {
+    test('A-36 explicit: a fact writer that names its entity still refuses, not retryable, when that entity changed after admission', async () => {
       await managedSource(engine, editB, async ({ sourceId, reachedB }) => {
         const facts = [{ fact: 'Acme Example hired a new CFO.', kind: 'fact', source: 'test', notability: 'high', sessionId: null, visibility: 'world', confidence: 1 }];
         const refusal = await publishManagedEntityFacts(engine, sourceId, B, facts as never).then(() => null, (thrown: { code?: string }) => thrown);
         expect(reachedB()).toBe(1);
-        expect(refusal).toMatchObject({ code: 'revision_conflict' });
+        expect(refusal).toMatchObject({ code: 'revision_conflict', retryable: false });
       });
     }, 180_000);
   });

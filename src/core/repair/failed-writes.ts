@@ -56,7 +56,7 @@ import { prepareFileTarget } from '../persistence/page-prepare.ts';
 import { PENDING_IMPORT, SYNC_HELD } from '../persistence/pending-import.ts';
 import { FACTS_ENTITY_MOVED_MESSAGES } from '../persistence/verb-errors.ts';
 import { MAX_FILE_REFUSAL_RETRIES } from '../persistence/facts-maintenance.ts';
-import { factsRetryDeadCommand } from '../facts/dead-absorb-retry.ts';
+import { factsAbsorbWriteKey, factsRetryDeadCommand } from '../facts/dead-absorb-retry.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
 import { dispositionOf, PAGE_REMOVAL_OPERATIONS, supersessionOrderSql, supersessionSql } from '../persistence/terminal-classify.ts';
@@ -79,6 +79,9 @@ const FACTS_RECOVERED = `EXISTS (SELECT 1 FROM persistence_requests c WHERE r.op
   AND COALESCE(c.intent->>'inputDigest', c.outcome->>'input_digest')=r.intent->>'inputDigest'
   AND COALESCE(c.intent->>'batchKey', c.outcome->>'batch_key') IS DISTINCT FROM r.intent->>'batchKey')`;
 
+/** One managed fact entity request of an extraction (every request sharing its source and input digest). */
+interface ExtractionRequest { slug: string; state: string; error_code: string | null; error_message: string | null; batch_key: string | null }
+
 interface FailedWrite {
   id: string; request_id: string; sequence: string; operation: string; source_id: string; slug: string; digest: string; state: string;
   intent: Record<string, unknown>; authority: WriteAuthority; created_at: string; producer: string | null; error_code: string | null; page_id: string | null;
@@ -97,33 +100,40 @@ function previewCommand(scope: RepairScope): string {
 /**
  * #7602: a refused fact request keeps its extracted facts. A page-triggered one (its job is keyed by the page write) is
  * recovered by resetting that job once it is dead: its retry re-admits them at the entity page's current revision with
- * no model call, once the cause clears. A batch whose follow-ups were refused too, an entity page replaced since, a job
- * that completed or is gone, a writer-guard refusal and a batch with no page write would replay the refusal or have no
- * job to retry: those are extracted again.
+ * no model call, once the cause clears. Only an extraction whose open entity requests are all moved-entity refusals (the
+ * entity walk) or all held-file refusals (the file walk) is re-admitted by one retry. A mixed extraction, a batch whose
+ * follow-ups were refused too, an entity page replaced since, a job that completed or is gone, a writer-guard refusal
+ * and a batch with no page write would replay the refusal or have no job to retry: those are extracted again.
  */
-async function factsRecovery(engine: BrainEngine, write: FailedWrite, rows: FailedWrite[]): Promise<string> {
+async function factsRecovery(engine: BrainEngine, write: FailedWrite, extractions: Map<string, ExtractionRequest[]>): Promise<string> {
   const origin = (write.intent.origin as { slug?: string } | null | undefined)?.slug;
   const job = typeof write.intent.originalRequestId === 'string' ? write.intent.originalRequestId : null;
   const extractAgain = `re-extract: gbrain call extract_facts again on the current text of ${origin ?? 'the source turn'} with a new request_id (one model call)`;
   if (!job || write.state !== 'conflict') return extractAgain;
-  const chain = rows.filter(row => row.operation === 'extract_facts' && row.source_id === write.source_id && row.slug === write.slug
-    && row.intent.inputDigest === write.intent.inputDigest);
-  if (chain.some(row => row.error_code === 'source_changed' && chain.some(prior => prior.error_code === 'revision_conflict' && Number(prior.sequence) < Number(row.sequence)))) {
-    return `${extractAgain}; a follow-up of its moved-entity refusal was refused for a held file, which a job retry does not re-admit`;
+  const extraction = `${write.source_id}\n${String(write.intent.inputDigest)}`;
+  if (!extractions.has(extraction)) extractions.set(extraction, await engine.executeRaw<ExtractionRequest>(
+    `SELECT slug, state, error_code, error_message, intent->>'batchKey' AS batch_key FROM persistence_requests
+      WHERE operation='extract_facts' AND source_id=$1 AND intent->>'inputDigest'=$2 AND intent->>'kind'='managed_facts_entity'`, [write.source_id, write.intent.inputDigest]));
+  const open = extractions.get(extraction)!.filter(row => row.state !== 'committed');
+  const moved = (row: ExtractionRequest) => row.error_code === 'revision_conflict' && FACTS_ENTITY_MOVED_MESSAGES.includes(row.error_message ?? '');
+  if (!open.every(moved) && !open.every(row => row.error_code === 'source_changed')) {
+    return `${extractAgain}; its extraction also holds refusals one job retry does not re-admit together`;
   }
   if (write.error_code === 'revision_conflict') {
     const [page] = await engine.executeRaw<{ id: string }>('SELECT id::text FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [write.source_id, write.slug]);
     if (!page && write.page_id !== null) return `not recoverable: entity page ${write.slug} was deleted after these facts were admitted`;
     if ((page?.id ?? null) !== write.page_id) return `${extractAgain}; entity page ${write.slug} was replaced after these facts were admitted, so a job retry replays the refusal`;
-    const batches = new Set(chain.filter(row => row.error_code === 'revision_conflict').map(row => row.intent.batchKey));
-    if (batches.size > MAX_FILE_REFUSAL_RETRIES) return `${extractAgain}; its follow-up batches were refused as well, so a job retry replays the refusal`;
+    if (new Set(open.filter(row => row.slug === write.slug).map(row => row.batch_key)).size > MAX_FILE_REFUSAL_RETRIES) {
+      return `${extractAgain}; its follow-up batches were refused as well, so a job retry replays the refusal`;
+    }
   }
-  const key = `facts-absorb:write:${job}`;
+  const key = factsAbsorbWriteKey(job);
   const [run] = await engine.executeRaw<{ status: string }>("SELECT status FROM minion_jobs WHERE name='facts-absorb' AND idempotency_key=$1 ORDER BY id DESC LIMIT 1", [key]);
   if (run && run.status !== 'dead' && run.status !== 'completed' && run.status !== 'cancelled') return `pending: its facts-absorb job (${key}) is ${run.status}; preview again once it ends`;
   if (run?.status !== 'dead') return `${extractAgain}; its facts-absorb job ${run ? `is ${run.status}` : 'is gone'}, so gbrain facts retry-dead has no dead job to reset`;
   return `recover: ${factsRetryDeadCommand('--reset', key)} (the next facts_drain pass retries the page's facts-absorb job, which re-admits the retained facts without a model call${write.error_code === 'source_changed' ? ' once the file check passes' : ''})`;
 }
+
 
 /** The command that produces an owner-internal write again, from current content. */
 function producerCommand(producer: string, sourceId: string): string {
@@ -139,14 +149,16 @@ function producerCommand(producer: string, sourceId: string): string {
   return 'the next `gbrain dream` cycle (or autopilot) produces it again';
 }
 
-async function failedWrites(engine: BrainEngine, sourceIds: string[], id?: string): Promise<FailedWrite[]> {
+/** `facts` (the preview only) adds refused fact requests, without the ones a later request of the same extraction recovered. */
+async function failedWrites(engine: BrainEngine, sourceIds: string[], opts: { id?: string; facts?: boolean } = {}): Promise<FailedWrite[]> {
+  const { id, facts } = opts;
   const rows = await engine.executeRaw<FailedWrite>(`SELECT r.id::text, r.request_id::text, r.sequence::text, r.operation, r.source_id, r.slug, r.digest, r.state, r.intent, r.authority,
       to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at, r.error_detail->>'origin' AS origin, r.error_code, r.page_id::text AS page_id,
       CASE WHEN r.operation = ANY($2::text[]) AND NOT (r.operation='put_page' AND r.intent ? 'kind') THEN NULL
         ELSE r.operation || COALESCE(':' || (r.intent->>'kind'), '') END AS producer
     FROM persistence_requests r
-    WHERE r.source_id = ANY($1::text[]) AND NOT r.compacted AND r.intent IS NOT NULL AND (${GUARD_REFUSAL} OR ${DRIFT_REFUSAL} OR ${FACTS_MOVED_REFUSAL})
-      AND NOT ${FACTS_RECOVERED}
+    WHERE r.source_id = ANY($1::text[]) AND NOT r.compacted AND r.intent IS NOT NULL AND (${GUARD_REFUSAL} OR ${DRIFT_REFUSAL}${facts ? ` OR ${FACTS_MOVED_REFUSAL}` : ''})
+      ${facts ? `AND NOT ${FACTS_RECOVERED}` : ''}
       ${id ? 'AND r.id=$3::uuid' : ''}
     ORDER BY r.sequence`, id ? [sourceIds, REPLAYABLE, id] : [sourceIds, REPLAYABLE]);
   if (id) return rows;
@@ -349,7 +361,8 @@ export const failedWritesRepair: RepairHandler = {
   async plan(engine, scope, after, opts): Promise<RepairPlan> {
     const command = previewCommand(scope);
     if (!opts?.apply) {
-      const rows = await failedWrites(engine, scope.source_ids);
+      const rows = await failedWrites(engine, scope.source_ids, { facts: true });
+      const extractions = new Map<string, ExtractionRequest[]>();
       const residuals: Record<string, number> = {};
       const listing: NonNullable<RepairPlan['listing']> = [];
       const producers = new Map<string, string>();
@@ -359,7 +372,7 @@ export const failedWritesRepair: RepairHandler = {
         if (write.producer) {
           residuals[`producer_owned:${write.producer}`] = (residuals[`producer_owned:${write.producer}`] ?? 0) + 1;
           const facts = write.operation === 'extract_facts';
-          const run = facts ? await factsRecovery(engine, write, rows) : producerCommand(write.producer, write.source_id);
+          const run = facts ? await factsRecovery(engine, write, extractions) : producerCommand(write.producer, write.source_id);
           producers.set(`${write.producer} in ${write.source_id}`, facts ? 'each listed request names the command that recovers its facts' : run);
           listing.push({ item: label, class: 'producer_owned', detail: facts ? run : `re-run: ${run}` });
           continue;
@@ -447,7 +460,7 @@ async function replayParams(ctx: OperationContext, write: ApprovedWrite, request
 }
 
 async function replay(ctx: OperationContext, failed: ApprovedWrite): Promise<RepairItemOutcome> {
-  const [live] = await failedWrites(ctx.engine, [failed.source_id], failed.id);
+  const [live] = await failedWrites(ctx.engine, [failed.source_id], { id: failed.id });
   if (!live || live.digest !== failed.digest) return { applied: false, outcome: 'changed_since_preview', reason: 'the failed request was compacted or changed' };
   const lane = laneContext(ctx, live.authority);
   await initializeLocalPersistence(lane);
