@@ -174,6 +174,37 @@ for (const backend of testBackends()) {
       expect(await pagesOf('default')).toBe(0);
     }, 120_000);
 
+    // Value: protects=with an explicit absolute --repo and a stored "." the embed cost gate prices the --repo directory, never the cwd;
+    //   fails_when=the gate input prefers the stored relative local_path, so the estimate runs git and walks files in whatever folder
+    //   gbrain runs from; why_new=the gate case above refuses before the gate (no --repo); seam=resolveSingleSyncEmbedPlan spied to
+    //   record its source and stop the run; no_claim=what the estimate would cost
+    test('gbrain sync --repo <absolute> with a stored "." prices the --repo directory in the cost gate, never the cwd', async () => {
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-7630-gate-')));
+      try {
+        execSync('git init -q && git config user.email t@example.com && git config user.name T', { cwd: repo, stdio: 'pipe' });
+        writeFileSync(join(repo, 'inside.md'), '---\ntype: note\ntitle: Inside\n---\n\nA page of the brain.\n');
+        execSync('git add -A && git commit -q -m initial', { cwd: repo, stdio: 'pipe' });
+        await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+        configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: { OPENAI_API_KEY: 'sk-test-7630' } });
+        const embedBackfill = await import('../src/core/sync-embed-backfill.ts');
+        const priced: Array<string | null> = [];
+        const gate = spyOn(embedBackfill, 'resolveSingleSyncEmbedPlan').mockImplementation(async (_e, source) => {
+          priced.push(source.local_path ?? null);
+          return { stop: true, workerSurface: { status: 'ok' } as never, autoDeferEmbeds: false };
+        });
+        try {
+          await runSyncCli(['--repo', repo, '--source', 'default', '--no-pull']);
+        } finally {
+          gate.mockRestore();
+          resetGateway();
+        }
+        expect(priced).toEqual([repo]);
+        expect(existsSync(join(folder, '.git'))).toBe(false);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    }, 120_000);
+
     // Value: protects=an explicit relative --repo that differs from the stored relative anchor is honored: that directory syncs;
     //   fails_when=the guard starts refusing every relative repoPath instead of only the stored anchor itself;
     //   why_new=no other case passes a relative repoPath other than the anchor; seam=none; no_claim=parallel import workers
@@ -479,8 +510,9 @@ for (const backend of testBackends()) {
       await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
       const { resolveSourcePaths } = await import('../src/core/persistence/resolve-paths.ts');
       const refused = await resolveSourcePaths(engine, 'default', ['notes.md']).then(() => null, (error: { code?: string; message?: string }) => error);
-      expect(refused?.code).toBe('not_found');
+      expect(refused?.code).toBe('sync_anchor_relative');
       expect(refused?.message).toContain('relative local_path');
+      expect(refused?.message).not.toContain('"."');
       const { runFenceCensus } = await import('../src/core/fence-repair/census.ts');
       const [run] = await runFenceCensus(engine, { sourceIds: ['default'], deadline: Date.now() + 60_000 });
       expect(run?.files).toBe('none');

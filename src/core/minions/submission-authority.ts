@@ -112,7 +112,7 @@ async function sourceBoundary(engine: BrainEngine, sourceId: string, jobName: Re
   if (!record(config) || record(config)!.kind != null) deny('generic filesystem jobs require an ordinary filesystem source; use the dedicated connector endpoint',
     `Source ${sourceId} is a connector source: the brain host syncs it with gbrain connectors (connector_sync), not through submit_job.`);
   if (!isAbsolute(source.local_path)) deny('registered source root is a relative path',
-    `Source ${sourceId}'s registered root is the relative path "${source.local_path}", which names whatever directory the brain host runs from (#7630), so nothing was queued. The brain host operator sets it with gbrain sources set-path ${sourceId} <absolute-directory>.`);
+    `Source ${sourceId}'s registered root is a relative path, which names whatever directory the brain host runs from (#7630), so nothing was queued. The brain host operator sets it with gbrain sources set-path ${sourceId} <absolute-directory>.`);
   let canonicalRoot: string;
   try {
     canonicalRoot = realpathSync(source.local_path);

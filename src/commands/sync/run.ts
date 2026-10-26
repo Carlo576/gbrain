@@ -867,7 +867,7 @@ async function runSingleSourceSync(
     if (gateRows.length > 0) {
       const gate = await resolveSingleSyncEmbedPlan(engine, {
         sourceId,
-        local_path: gateRows[0].local_path ?? repoPath ?? null,
+        local_path: (gateRows[0].local_path && isAbsolute(gateRows[0].local_path) ? gateRows[0].local_path : null) ?? repoPath ?? null,
         config: gateRows[0].config ?? {},
         last_commit: gateRows[0].last_commit,
         chunker_version: gateRows[0].chunker_version,

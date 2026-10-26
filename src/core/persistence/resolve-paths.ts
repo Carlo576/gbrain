@@ -115,7 +115,7 @@ export async function resolveSourcePaths(engine: BrainEngine, sourceId: string, 
   const status = ['gbrain', 'sources', 'status', sourceId, '--json'];
   if (!source || source.archived) throw opError('not_found', `Source ${sourceId} is not registered or is archived.`, 'List the registered sources and pass one of their ids.',
     { fix: readFix('Lists the registered sources.', ['gbrain', 'sources', 'list', '--json'], ['gbrain', 'sources', 'list', '--json']) });
-  if (source.local_path && !isAbsolute(source.local_path)) throw opError('not_found', `Source ${sourceId} has the relative local_path "${source.local_path}", which names no fixed directory, so its paths cannot be resolved (sync_anchor_relative).`,
+  if (source.local_path && !isAbsolute(source.local_path)) throw opError('sync_anchor_relative', `Source ${sourceId} has a relative local_path, which names no fixed directory, so its paths cannot be resolved.`,
     'Ask the user which directory holds the checkout, then run gbrain sources set-path on the host that holds it.', { fix: readFix('Shows the source and its stored path.', status, status) });
   if (!source.local_path || !existsSync(source.local_path)) throw opError('not_found', `Source ${sourceId} has no Git checkout on this host, so its paths cannot be resolved here.`,
     'Run this on the host that holds the checkout (gbrain sources status names its path).', { fix: readFix('Shows where the source checkout lives.', status, status) });
