@@ -44,6 +44,7 @@ const TARGET = 'people/alice-example';
 const CLAIM_B = 'Alice-example owns the synthetic onboarding checklist.';
 const OTHER = 'companies/acme-example';
 const CLAIM_OTHER = 'Acme-example runs the synthetic onboarding pilot.';
+const CLAIM_SELF = 'The synthetic planning chat set the onboarding launch date.';
 const BODY = 'Notes from a synthetic planning chat about the onboarding checklist and the launch date, kept for the regression.';
 
 afterEach(() => { __setChatTransportForTests(null); resetGateway(); });
@@ -170,6 +171,23 @@ for (const backend of testBackends()) {
     expect(await entityRequests(engine)).toEqual(requests);
     expect(await claimB(engine)).toHaveLength(1);
     expect(await factsListing(engine)).toEqual([]);
+  }, { databaseUrl }), 120_000);
+
+  // Value: protects=the follow-up of a batch that also committed a fact on its own source page (a page write that extracts facts
+  // about itself) publishes, because the source page moved only by that batch's own commit; fails_when=the follow-up is refused
+  // 'The source page changed during fact extraction.' and the run throws; why_new=the row above extracts facts about the entity
+  // only; seam=none; no_claim=one self fact and one moved entity
+  test(`#7602 [${backend}]: a batch that also committed a fact on its own source page re-admits the moved entity in the same run`, () => managedBrain(async brain => {
+    const { engine } = brain;
+    const { move, loser } = await setup(brain, 1);
+    const race = raceEntityReads(engine, 1, move);
+    const first = await publishManagedFacts(engine, await loser.session(), loser.backstop, [{ ...fact(CLAIM_SELF), entity_slug: loser.slug }, fact(CLAIM_B)],
+      'private', loser.slug).finally(race.restore);
+    expect(race.moves()).toBe(1);
+    expect({ inserted: first.inserted, refused: first.refused }).toEqual({ inserted: 2, refused: undefined });
+    expect((await engine.readPageSnapshot(loser.slug, { sourceId: 'default' }))!.revision).not.toBe(loser.snapshot.revision);
+    expect(await claimB(engine)).toEqual([{ fact: CLAIM_B, source_markdown_slug: TARGET }]);
+    expect((await entityRequests(engine)).map(row => [row.state, row.error_code])).toEqual([['conflict', 'revision_conflict'], ['committed', null]]);
   }, { databaseUrl }), 120_000);
 
   // Value: protects=the third follow-up still runs and publishes when the page stops moving after three reads; fails_when=the walk

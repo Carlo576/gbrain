@@ -124,9 +124,10 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
         `Page ${p.origin.slug}, which these facts were extracted from, was deleted or replaced during extraction.`);
       if (origin.revision !== p.origin.revision) {
         const own = await tx.executeRaw(`SELECT id FROM persistence_requests WHERE operation='extract_facts' AND source_id=$1
-          AND source_incarnation=$2::uuid AND principal_kind=$3 AND principal_id=$4 AND COALESCE(intent->>'batchKey',outcome->>'batch_key')=$5
+          AND source_incarnation=$2::uuid AND principal_kind=$3 AND principal_id=$4
+          AND (COALESCE(intent->>'batchKey',outcome->>'batch_key')=$5 OR COALESCE(intent->>'inputDigest',outcome->>'input_digest')=$8)
           AND slug=$6 AND state='committed' AND outcome->>'revision'=$7`,
-        [row.source_id, row.source_incarnation, row.principal_kind, row.principal_id, p.batchKey, p.origin.slug, origin.revision]);
+        [row.source_id, row.source_incarnation, row.principal_kind, row.principal_id, p.batchKey, p.origin.slug, origin.revision, p.inputDigest ?? null]);
         if (!own.length) throw factsRefusal('revision_conflict', 'The source page changed during fact extraction.', row,
           `Page ${p.origin.slug} changed after its facts were extracted, so facts from the older text were not published.`,
           `once it is final, run extract_facts again on the current text of ${p.origin.slug} with a new request_id.`);
