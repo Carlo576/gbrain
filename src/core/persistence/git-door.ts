@@ -367,7 +367,7 @@ function refuseChanged(root: string, targets: Iterable<Target>): void {
   const moved = [...targets].filter(target => { try { return hashFile(join(root, target.rel)) !== target.planned; } catch { return true; } }).map(target => target.rel);
   if (!moved.length) return;
   throw opError('git_target_changed', `${moved.join(', ')} in ${root} no longer holds the bytes this write published, so nothing was committed and the write was not published.`,
-    'Another process changed the file during the write; recovery leaves the changed file as it is and holds the write, so the source\'s later writes wait. Preview with gbrain repair stuck-recovery --source <id> --json, ask the user which version to keep, then apply --keep disk or --keep prior with the preview\'s --expect hash.', { detail: moved.join(',') });
+    'Another process changed the file during the write; recovery leaves the changed file as it is and holds the write, so the source\'s later writes wait. Preview with gbrain repair stuck-recovery --source <id> --json, ask the user which version to keep, then run gbrain repair stuck-recovery --source <id> --keep disk|prior --apply --expect <preview_hash> --yes (disk keeps the edit).', { detail: moved.join(',') });
 }
 
 /** Targets whose index entry differs from HEAD's and from the version their path's last commit replaced (a staged change, or a merge conflict) refuse as `git_index_conflict`. */

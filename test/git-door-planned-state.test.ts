@@ -325,7 +325,7 @@ describe('door plumbing: the planned state', () => {
     const bin = mkdtempSync(join(tmpdir(), 'gbrain-git-shim-'));
     roots.push(bin);
     const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" hash-object -w "*) printf 'edited during hash\\n' > '${join(root, 'notes/a.md')}';; esac\nexec '${real}' "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" hash-object -w "*) printf 'edited during hash\\n' > '${join(root, 'notes/a.md')}';; esac\nPATH='${process.env.PATH}' exec '${real}' "$@"\n`, { mode: 0o755 });
     put(root, 'notes/a.md', 'planned\n');
     await withEnv({ PATH: `${bin}:${process.env.PATH}` }, async () => {
       expect(await refusal(commitThroughDoor(root, [{ path: join(root, 'notes/a.md'), planned: sha256('planned\n') }]))).toMatchObject({ code: 'git_target_changed' });

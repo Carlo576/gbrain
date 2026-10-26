@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const BENCH = resolve(import.meta.dir, '../scripts/bench/door-write-overhead.ts');
+const BENCH = join(resolve(import.meta.dir, '..'), 'scripts/bench/door-write-overhead.ts');
 
 describe('door write overhead bench', () => {
   test('the door and trace phases run on a small checkout and report each measured write', () => {
