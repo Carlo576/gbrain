@@ -145,7 +145,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   const output = redactRetrievalOutput(results, { ...meta, delivery: evidence.delivery, ...shown });
   // An explicit budget's cap holds at this final boundary too (snippet
   // markers and redaction recounted); without one both are no-ops.
-  const capped = evidence.explicitSnippet ? capDeliveredSnippets(output.results, snippetCap, output.meta.delivery) : capEvidenceToBudget(output.results, output.meta.delivery);
+  const capped = capEvidenceToBudget(evidence.explicitSnippet ? capDeliveredSnippets(output.results, snippetCap, output.meta.delivery) : output.results, output.meta.delivery, true);
   const delivery = output.meta.delivery;
   return emit(output, projectRows(fenceTranscriptRows(capped, { count: text => countEvidenceTokens(text, delivery.tokenizer), delivery }).map(factRowOutput), rows, lean));
 }

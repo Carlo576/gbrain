@@ -1455,10 +1455,11 @@ function redactDelivered(results: DeliveredSearchResult[], tokenizer: 'cl100k' |
  * EVIDENCE_CUT_MARKER when a body still fits (rank one always is), otherwise
  * dropped as `budget_recount`. `budget_used`, `tokens_delivered`, `blocks`
  * and `dropped` are rewritten from the recount. Runs only when the delivery
- * carries `auto_packing`; everything else is returned as is. A conversation
- * row counts as it is delivered, inside its quote fence (#7600).
+ * carries `auto_packing`; everything else is returned as is. With `quote`
+ * (search/query and assemble_evidence) a conversation row counts inside its
+ * quote fence (#7600); deliverEvidence's own cap (recall) counts the text as returned.
  */
-export function capEvidenceToBudget<T extends SearchResult & { delivered?: DeliveredEvidence }>(results: T[], delivery: DeliveryMeta): T[] {
+export function capEvidenceToBudget<T extends SearchResult & { delivered?: DeliveredEvidence }>(results: T[], delivery: DeliveryMeta, quote = false): T[] {
   if (!delivery.auto_packing) return results;
   const tokenizer = delivery.tokenizer;
   const count = (text: string | undefined) => countEvidenceTokens(text ?? '', tokenizer);
@@ -1467,16 +1468,17 @@ export function capEvidenceToBudget<T extends SearchResult & { delivered?: Deliv
   let lost = 0;
   const out: T[] = [];
   for (const r of results) {
+    const asDelivered = (text: string) => (quote ? deliveredQuoteText(r, text) : text);
     const titleTok = count(r.title);
-    const textTok = count(deliveredQuoteText(r, r.chunk_text));
+    const textTok = count(asDelivered(r.chunk_text));
     if (titleTok + textTok <= remaining) {
       remaining -= titleTok + textTok;
       out.push(!r.delivered || r.delivered.tokens === textTok ? r : { ...r, delivered: { ...r.delivered, tokens: textTok } });
       continue;
     }
     const source = (r.chunk_text ?? '').endsWith(EVIDENCE_CUT_MARKER) ? (r.chunk_text ?? '').slice(0, -EVIDENCE_CUT_MARKER.length) : r.chunk_text ?? '';
-    const quoted = deliveredQuoteText(r, source) !== source;
-    const fenceTok = quoted ? count(deliveredQuoteText(r, source)) - count(source) : 0;
+    const quoted = asDelivered(source) !== source;
+    const fenceTok = quoted ? count(asDelivered(source)) - count(source) : 0;
     if (out.length > 0 && remaining - titleTok - cutTok - fenceTok < CUT_BODY_MIN) { lost++; continue; }
     const titleRoom = Math.max(0, remaining - cutTok - fenceTok - CUT_BODY_MIN);
     const title = titleTok > titleRoom ? sliceToTokenCount(r.title ?? '', titleRoom, tokenizer) : r.title ?? '';
@@ -1486,16 +1488,16 @@ export function capEvidenceToBudget<T extends SearchResult & { delivered?: Deliv
     for (;;) {
       body = sliceToTokenCount(source, Math.max(0, room), tokenizer).replace(/\s+$/, '');
       text = body + EVIDENCE_CUT_MARKER;
-      const over = count(title) + count(deliveredQuoteText(r, text)) - remaining;
+      const over = count(title) + count(asDelivered(text)) - remaining;
       if (!quoted || over <= 0 || room <= 0) break;
       room -= over;
     }
-    remaining -= count(title) + count(deliveredQuoteText(r, text));
+    remaining -= count(title) + count(asDelivered(text));
     const row = { ...r, title, chunk_text: text } as T;
     if (r.delivered) {
       const spans = r.delivered.match_spans.filter(s => s.start < body.length).map(s => ({ ...s, end: Math.min(s.end, body.length) }));
       const unmapped = [...new Set([...(r.delivered.unmapped_chunk_ids ?? []), ...r.delivered.match_spans.map(s => s.chunk_id).filter(id => !spans.some(s => s.chunk_id === id))])];
-      row.delivered = { ...r.delivered, match_spans: spans, tokens: count(deliveredQuoteText(r, text)), truncated: true, ...(unmapped.length > 0 ? { unmapped_chunk_ids: unmapped } : {}) };
+      row.delivered = { ...r.delivered, match_spans: spans, tokens: count(asDelivered(text)), truncated: true, ...(unmapped.length > 0 ? { unmapped_chunk_ids: unmapped } : {}) };
     }
     out.push(row);
   }
@@ -1715,7 +1717,7 @@ export async function assembleEvidenceForHits(engine: BrainEngine, input: Assemb
   }
   const d = await deliverEvidence(engine, rows, plan, scope, { liveHits: true, ...(input.query ? { query: input.query } : {}) });
   const out = redactRetrievalOutput(neutralizeTranscriptRows(d.results), d.delivery);
-  return { results: fenceTranscriptRows(capEvidenceToBudget(out.results, out.meta), { count: text => countEvidenceTokens(text, out.meta.tokenizer), delivery: out.meta }), delivery: out.meta, unresolved };
+  return { results: fenceTranscriptRows(capEvidenceToBudget(out.results, out.meta, true), { count: text => countEvidenceTokens(text, out.meta.tokenizer), delivery: out.meta }), delivery: out.meta, unresolved };
 }
 
 /** SHA-256 over the delivered evidence (see docs/evidence-delivery.md). */

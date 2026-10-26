@@ -143,6 +143,34 @@ for (const backend of testBackends()) {
       expect(row.delivered?.truncated).toBe(true);
     }, 120_000);
 
+    // Pre-landing review fixes, pass 2: snippet_chars together with token_budget still holds the budget once the fence is added.
+    test('search with token_budget and snippet_chars: the fenced rows fit the budget and budget_used is their recount', async () => {
+      let meta: Record<string, any> | null = null;
+      const ctx = {
+        engine: engine as never, config: { engine: engine.kind } as never, logger: console as never, dryRun: false, remote: false, sourceId: 'default',
+        emitResponseMeta: (key: string, value: unknown) => { if (key === 'retrieval') meta = value as Record<string, any>; },
+      } as OperationContext;
+      const rows = await operationsByName.search!.handler(ctx, { query: QUERY, return_unit: 'auto', token_budget: BUDGET, snippet_chars: 2000 }) as Row[];
+      const delivery = (meta as Record<string, any> | null)?.delivery as DeliveryMeta;
+      expect(delivery.auto_packing).toBeDefined();
+      inner(rows.find(r => r.slug === SLUG)!);
+      expect(recount(rows, delivery.tokenizer)).toBeLessThanOrEqual(BUDGET);
+      expect(delivery.budget_used).toBe(recount(rows, delivery.tokenizer));
+    }, 120_000);
+
+    test('remote assemble_evidence with no budget: counts and spans describe the fenced text', async () => {
+      const res = await dispatchToolCall(engine, 'assemble_evidence', { hits: [{ source_id: 'default', slug: SLUG, chunk_id: hitChunkId }], return_unit: 'auto' },
+        { remote: true, transport: 'stdio', sourceId: 'default' });
+      expect(res.isError).not.toBe(true);
+      const out = JSON.parse(res.content[0]!.text) as { results: Row[]; delivery: DeliveryMeta };
+      expect(out.delivery.auto_packing).toBeUndefined();
+      const row = out.results.find(r => r.slug === SLUG)!;
+      inner(row);
+      expect(row.delivered!.tokens).toBe(countEvidenceTokens(row.chunk_text, out.delivery.tokenizer));
+      expect(out.delivery.tokens_delivered).toBe(out.results.reduce((n, r) => n + (r.delivered?.tokens ?? 0), 0));
+      expect((row.delivered!.match_spans ?? []).some(s => row.chunk_text.slice(s.start, s.end).includes(QUERY))).toBe(true);
+    }, 120_000);
+
     // Value: protects=remote assemble_evidence with token_budget returns the conversation page cut inside an intact quote fence, within the budget;
     //   fails_when=assembleEvidenceForHits fences before capEvidenceToBudget or the cap counts the unfenced text;
     //   why_new=search-transcript-quote.test.ts calls assemble_evidence without a budget, where the cap never runs; seam=none;

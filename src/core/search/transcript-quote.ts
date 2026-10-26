@@ -52,6 +52,9 @@ const XML_INVOKE_NAME_RE = new RegExp(`<${XML_PREFIX}invoke\\b[^<>]*?\\bname\\s*
 const ENDS_LINE_RE = /^[ \t]*(?:\n|$|<)/;
 const CUT_MARKER = OMISSION.trimEnd();
 const MAX_CANDIDATES = 64;
+/** A segment's scan budget, in characters walked: this many per character plus a floor. Once spent, the rest of the message at each later trigger is summarized (fails closed). */
+const SCAN_WORK_PER_CHAR = 8;
+const SCAN_WORK_FLOOR = 65536;
 
 type Row = Pick<SearchResult, 'slug' | 'type' | 'chunk_text' | 'result_type' | 'quoted'>;
 type Span = { start: number; end: number };
@@ -62,15 +65,21 @@ function isTranscriptRow(row: Row): boolean {
   return row.type === TRANSCRIPT_PAGE_TYPE && row.result_type !== 'fact' && typeof row.chunk_text === 'string' && row.chunk_text.length > 0;
 }
 
-/** Message anchor lines of one segment: where each line starts and where its message text starts. */
-interface Anchors { lines: number[]; texts: number[] }
+/** Message anchor lines of one segment: where each line starts, where its message text starts, and where the whitespace before it starts. */
+interface Anchors { lines: number[]; texts: number[]; ends: number[] }
 
 function anchorsOf(segment: string): Anchors {
-  const a: Anchors = { lines: [], texts: [] };
+  const a: Anchors = { lines: [], texts: [], ends: [] };
   let lineStart = 0;
   for (const line of segment.split('\n')) {
     const m = ANCHOR_RE.exec(line);
-    if (m) { a.lines.push(lineStart); a.texts.push(lineStart + line.length - (m[ANCHOR_TEXT] ?? '').length); }
+    if (m) {
+      let end = lineStart;
+      while (end > (a.lines.at(-1) ?? 0) && /\s/.test(segment[end - 1]!)) end--;
+      a.lines.push(lineStart);
+      a.texts.push(lineStart + line.length - (m[ANCHOR_TEXT] ?? '').length);
+      a.ends.push(end);
+    }
     lineStart += line.length + 1;
   }
   return a;
@@ -93,10 +102,7 @@ function openStart(a: Anchors, at: number): number {
 /** Where an open-ended block starting at `from` stops: before the next message's anchor line (whitespace before it kept), else the segment end. */
 function bound(segment: string, a: Anchors, from: number): number {
   const i = anchorsBefore(a, from + 1);
-  if (i >= a.lines.length) return segment.length;
-  let end = a.lines[i]!;
-  while (end > from && /\s/.test(segment[end - 1]!)) end--;
-  return end;
+  return i >= a.lines.length ? segment.length : Math.max(from, a.ends[i]!);
 }
 
 interface Frame { kind: '{' | '['; key: string | null; expectKey: boolean; lastKey: string | null }
@@ -158,6 +164,7 @@ function summary(names: string[]): string {
  * rest of the message from this match is summarized instead of scanned.
  */
 function blockAt(segment: string, a: Anchors, m: RegExpExecArray, work: { left: number }): (Edit & { closed?: boolean }) | null {
+  if (work.left <= 0) return { start: openStart(a, m.index), end: bound(segment, a, m.index), text: summary([]), closed: true };
   if (m[1]) {
     const open = m.index + m[0].length - 1;
     const scan = scanJson(segment, open, { limit: bound(segment, a, open) });
@@ -179,6 +186,7 @@ function blockAt(segment: string, a: Anchors, m: RegExpExecArray, work: { left: 
   const scan = scanJson(segment, m.index, { open: true, limit: bound(segment, a, m.index) });
   work.left -= scan.stop - m.index;
   if (!scan.closed && anchorsBefore(a, m.index) > 0) return null;
+  work.left -= m.index - start;
   const before = /"name"\s*:\s*"([^"\\]{1,64})"/.exec(segment.slice(start, m.index))?.[1];
   const names = scan.names.length > 0 || !before || !NAME_RE.test(before) ? scan.names : [before];
   return { start, end: scan.end, text: summary(names) };
@@ -187,7 +195,7 @@ function blockAt(segment: string, a: Anchors, m: RegExpExecArray, work: { left: 
 /** JSON tool-call blocks of one segment, as non-overlapping edits in order. */
 function jsonEdits(segment: string): Edit[] {
   const a = anchorsOf(segment);
-  const work = { left: 8 * segment.length + 65536 };
+  const work = { left: SCAN_WORK_PER_CHAR * segment.length + SCAN_WORK_FLOOR };
   const edits: Edit[] = [];
   let last = 0;
   for (const m of segment.matchAll(TRIGGER_RE)) {
@@ -224,23 +232,29 @@ function xmlEdits(segment: string): Edit[] {
   };
   const floor = (at: number) => Math.max(openStart(a, at), spans.at(-1)?.end ?? 0);
   let stack: string[] = [];
+  const open = new Map<string, number>();
+  const push = (name: string) => { stack.push(name); open.set(name, (open.get(name) ?? 0) + 1); };
+  const reset = (name: string) => { stack = [name]; open.clear(); open.set(name, 1); };
   let blockStart = 0;
   let blockEnd = 0;
   for (const m of segment.matchAll(XML_TAG_RE)) {
     const [tag, slash, name, attrs] = m as unknown as [string, string, string, string];
     const after = m.index + tag.length;
-    if (stack.length > 0 && m.index >= blockEnd) { add(blockStart, blockEnd); stack = []; }
+    if (stack.length > 0 && m.index >= blockEnd) { add(blockStart, blockEnd); stack = []; open.clear(); }
     if (stack.length > 0) {
-      if (!slash) stack.push(name);
-      else if (stack.lastIndexOf(name) >= 0) stack.length = stack.lastIndexOf(name);
+      if (!slash) push(name);
+      else if (open.get(name)) {
+        let top: string;
+        do { top = stack.pop()!; open.set(top, open.get(top)! - 1); } while (top !== name);
+      }
       if (stack.length === 0) add(blockStart, after);
       continue;
     }
     const markup = ENDS_LINE_RE.test(segment.slice(after, after + 64));
     const named = /\bname\s*=/.test(attrs);
     if (slash) { if (markup) add(floor(m.index), after); continue; }
-    if (name === 'parameter') { if (named) { blockStart = floor(m.index); blockEnd = bound(segment, a, m.index); stack = [name]; } continue; }
-    if (markup || (name === 'invoke' && named)) { blockStart = m.index; blockEnd = bound(segment, a, m.index); stack = [name]; }
+    if (name === 'parameter') { if (named) { blockStart = floor(m.index); blockEnd = bound(segment, a, m.index); reset(name); } continue; }
+    if (markup || (name === 'invoke' && named)) { blockStart = m.index; blockEnd = bound(segment, a, m.index); reset(name); }
   }
   if (stack.length > 0) add(blockStart, blockEnd);
   return spans.map(({ start, end }) => ({ start, end, text: summary(xmlNames(segment.slice(start, end))) }));
