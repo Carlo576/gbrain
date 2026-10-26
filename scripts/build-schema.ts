@@ -119,7 +119,8 @@ export const FRAGMENTS: readonly Fragment[] = [
   { source: 'src/core/write-gate-schema.ts', expr: 'WRITE_GATE_SCHEMA_SQL', postgres: WRITE_GATE_SCHEMA_SQL, pglite: WRITE_GATE_SCHEMA_SQL },
   { source: 'src/core/questions/schema.ts', expr: 'PINNED_QUESTIONS_SCHEMA_SQL', postgres: PINNED_QUESTIONS_SCHEMA_SQL, pglite: PINNED_QUESTIONS_SCHEMA_SQL },
   { source: 'src/core/belief/schema.ts', expr: 'BELIEF_LEDGER_SCHEMA_SQL', postgres: BELIEF_LEDGER_SCHEMA_SQL, pglite: BELIEF_LEDGER_SCHEMA_SQL },
-  // Last: a replay's CREATE OR REPLACE resets each function's search_path, so pg_temp is appended after every one (#7632).
+  // Its region must stay the last statement of src/schema.sql (regions render where their markers sit, not in this
+  // array's order): a replay's CREATE OR REPLACE resets each function's search_path, so pg_temp is appended after every one (#7632).
   { source: 'src/core/function-search-path.ts', expr: 'FUNCTION_SEARCH_PATH_HARDENING_SQL', postgres: FUNCTION_SEARCH_PATH_HARDENING_SQL, pglite: FUNCTION_SEARCH_PATH_HARDENING_SQL },
 ];
 
