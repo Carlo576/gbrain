@@ -75,4 +75,25 @@ describe('serve --flag=value', () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('--source-guard is a switch and takes no value');
   });
+
+  test('a refusal under --json prints one invalid_params envelope on stdout', () => {
+    const r = cli(['serve', '--source-guard=true', '--json']);
+    expect(r.status).toBe(2);
+    const envelope = JSON.parse(r.stdout.trim());
+    expect(envelope.code).toBe('invalid_params');
+    expect(envelope.message).toContain('--source-guard is a switch and takes no value');
+  });
+
+  test('eval longmemeval refuses a value on its own switch instead of turning it on', () => {
+    const r = cli(['eval', 'longmemeval', 'data-example.jsonl', '--retrieval-only', '--judge=false']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('--judge is a switch and takes no value');
+    expect(r.stderr).not.toContain('cannot be combined');
+  });
+
+  test('--help still answers when an = token would refuse', () => {
+    const r = cli(['serve', '--source-guard=true', '--help']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('gbrain serve');
+  });
 });

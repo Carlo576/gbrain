@@ -88,9 +88,10 @@ const DELEGATED_MODULES: Record<string, string[]> = {
  * declares both flags in its own source. strict-args.ts is the strict-argument
  * table for several commands' destructive subcommands (#6114): its literals
  * belong to pages, cache, schema, integrity and search, each of which reads
- * its own flags in its own source.
+ * its own flags in its own source. flag-equals.ts (#7619) names flags as
+ * arity data for the `=` split; each handler reads its own flags.
  */
-const EXCLUDED_MODULES = ['thin-client-routing.ts', 'persistence-delegate.ts', 'job-isolation.ts', 'strict-args.ts'];
+const EXCLUDED_MODULES = ['thin-client-routing.ts', 'persistence-delegate.ts', 'job-isolation.ts', 'strict-args.ts', 'flag-equals.ts'];
 
 function isExcludedModule(p: string): boolean {
   // Basename comparison is path-separator agnostic: on Windows p ends in

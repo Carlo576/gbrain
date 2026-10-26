@@ -42,7 +42,7 @@ import { currentCliWriteWait } from '../core/persistence/write-wait.ts';
 import { isScopeErrorCode } from '../core/error-catalogue.ts';
 import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict, writeStdoutFinal } from '../core/cli-force-exit.ts';
 import { loadCuratedHelp, printCuratedHelp } from './help/render.ts';
-import { splitFlagEquals } from './flag-equals.ts';
+import { EQUALS_TOKEN, OWN_EQUALS_PARSERS, knownSwitches, splitFlagEquals } from './flag-equals.ts';
 import { printHelp } from './top-help.ts';
 import { curatedFlagError } from './help/validate.ts';
 import { cliCommandOf, exitCliError, exitOnRepairFailed, unknownFlagError, usageError, writeCliError, writeCliNotice, writeFatalCliError } from './cli-error.ts';
@@ -1324,10 +1324,10 @@ export function validateCommandFlags(command: string, subArgs: string[]): string
   return null; // unknown command — the dispatcher's own error handles it
 }
 
-/** #7619: the argv a CLI_ONLY handler receives, `--flag=value` split (cli/flag-equals.ts); commands with their own `=`-aware parser keep it. */
+/** #7619: the argv a CLI_ONLY handler receives, `--flag=value` split or refused (cli/flag-equals.ts); commands with their own `=`-aware parser keep it. */
 export async function cliOnlyFlagArgs(command: string, subArgs: string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
-  if (!CLI_ONLY.has(command) || flagValidationExempt(command, subArgs) || command === 'retrieval-upgrade' || command === 'migrate' && subArgs[0] === 'embeddings' || strictSpecFor(command, subArgs)) return { args: subArgs };
-  return splitFlagEquals(command, subArgs, await loadCuratedHelp(command));
+  if (!CLI_ONLY.has(command) || flagValidationExempt(command, subArgs) || strictSpecFor(command, subArgs) || OWN_EQUALS_PARSERS.has(command) || OWN_EQUALS_PARSERS.has(`${command} ${subArgs[0]}`) || !subArgs.some(a => EQUALS_TOKEN.test(a))) return { args: subArgs };
+  return splitFlagEquals(command, subArgs, await loadCuratedHelp(command), await knownSwitches());
 }
 
 /** CLI_ONLY lane: token scan against the generated legal set. */
