@@ -30,6 +30,8 @@ import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
 const INDEX = PERSISTENCE_FOREGROUND_COMMITTED_INDEX;
+const RECEIPTS = 20_000;
+const FOREGROUND_TAIL = 20;
 const migration = MIGRATIONS.find(m => m.name === 'persistence_foreground_committed_index');
 
 describe('#7649 the foreground-commit index migration module', () => {
@@ -81,9 +83,9 @@ for (const backend of testBackends()) describe(`[${backend}] #7649 the foregroun
     await engine.executeRaw(`INSERT INTO persistence_requests(principal_kind,principal_id,request_id,operation,source_id,source_incarnation,
         worktree_id,slug,digest,intent,authority,intent_bytes,terminal_reservation,state,completed_at)
       SELECT 'local_cli','seed',gen_random_uuid(),'put_page','default',(SELECT incarnation FROM sources WHERE id='default'),$1::uuid,'seed-'||g,'d',
-        CASE WHEN g>19980 THEN jsonb_build_object('kind','put_page') ELSE jsonb_build_object('kind','managed_sync_import','runId','r','index',g) END,
+        CASE WHEN g>$2::int-$3::int THEN jsonb_build_object('kind','put_page') ELSE jsonb_build_object('kind','managed_sync_import','runId','r','index',g) END,
         '{}'::jsonb,1,64,'committed',now()
-      FROM generate_series(1,20000) g`, [worktree]);
+      FROM generate_series(1,$2::int) g`, [worktree, RECEIPTS, FOREGROUND_TAIL]);
     for (const [slug, kind] of [['queued-sync', 'managed_sync_import'], ['queued-fg', 'put_page']]) {
       await engine.executeRaw(`INSERT INTO persistence_requests(principal_kind,principal_id,request_id,operation,source_id,source_incarnation,
           worktree_id,slug,digest,intent,authority,intent_bytes,terminal_reservation,state)

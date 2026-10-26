@@ -1,6 +1,6 @@
 /**
  * #7645 class closure, Postgres half (the PGLite half and the rationale are in
- * test/schema-history-upgrade.test.ts): a Postgres brain created by any release
+ * test/schema-history-upgrade.slow.test.ts): a Postgres brain created by any release
  * since v260 upgrades to the latest schema through initSchema and ends with the
  * catalog a fresh install has. Each fixture loads into its own throwaway
  * database. Skips without DATABASE_URL.

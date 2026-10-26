@@ -37,6 +37,10 @@ test('a schema-history fixture exists for every schema version from v260 to the 
   expect(versions).toEqual(Array.from({ length: newest - FIRST_SCHEMA_HISTORY_VERSION + 1 }, (_, i) => FIRST_SCHEMA_HISTORY_VERSION + i));
 });
 
+test('the Postgres fixtures cover the same schema versions as the PGLite ones', () => {
+  expect(schemaHistoryVersions('postgres')).toEqual(versions);
+});
+
 for (const version of versions) {
   describe(`PGLite brain created at v${version} (#7645)`, () => {
     let engine: PGLiteEngine;
@@ -48,6 +52,8 @@ for (const version of versions) {
       upgrade = withCatalogConfig(CATALOG_CONFIGS[0], () => withColdPglite(async () => {
         await engine.connect({});
         await engine.db.exec(schemaHistorySql('pglite', version));
+        const [{ value }] = (await engine.db.query<{ value: string }>(`SELECT value FROM config WHERE key = 'version'`)).rows;
+        if (value !== String(version)) throw new Error(`fixture v${version} restored a brain at schema v${value}`);
         await engine.initSchema();
       }));
       await upgrade.catch(() => {});

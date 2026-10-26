@@ -690,7 +690,7 @@ function parseIndexColumnReferences(sql: string): Array<{ table: string; column:
       if (!expr) continue;
       const bare = expr.replace(/'(?:[^']|'')*'/g, ' ').replace(/::\s*\w+(?:\s*\[\])?/g, ' ');
       for (const word of bare.matchAll(/\b([a-z_]\w*)\b(?!\s*\()/gi)) {
-        if (/^(and|or|not|is|null|true|false|in|like|ilike|between|any|all|distinct|from)$/i.test(word[1])) continue;
+        if (/^(and|or|not|is|null|true|false|in|like|ilike|between|any|all|distinct|from|case|when|then|else|end|interval|array|current_date|current_timestamp|localtimestamp)$/i.test(word[1])) continue;
         result.push({ table, column: word[1].toLowerCase() });
       }
     }
@@ -729,6 +729,16 @@ test('parseBaseTableColumns + parseIndexColumnReferences extract structural refe
   expect(refs).toContainEqual({ table: 'pages', column: 'id' });
   // USING hnsw with operator class.
   expect(refs).toContainEqual({ table: 'pages', column: 'embedding' });
+});
+
+test('parseIndexColumnReferences extracts partial-index WHERE and INCLUDE identifiers (#7645)', () => {
+  const refs = parseIndexColumnReferences(`
+    CREATE INDEX IF NOT EXISTS derived_generation_items_pending ON derived_generation_items (generation_id) WHERE pending;
+    CREATE INDEX i ON t (a) INCLUDE (b) WHERE kind = 'x'::text AND lower(c) IS NOT NULL AND CASE WHEN d THEN true ELSE false END;
+  `);
+  expect(refs).toContainEqual({ table: 'derived_generation_items', column: 'pending' });
+  for (const column of ['a', 'b', 'kind', 'c', 'd']) expect(refs).toContainEqual({ table: 't', column });
+  expect(refs.filter(r => ['x', 'text', 'lower', 'case', 'when', 'then', 'else', 'end'].includes(r.column))).toEqual([]);
 });
 
 test('parseIndexColumnReferences catches v0.27 composite second-column case', () => {
