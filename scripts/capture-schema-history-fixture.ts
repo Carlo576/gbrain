@@ -101,9 +101,9 @@ export async function dumpBrainSchema(query: Query, version: number): Promise<st
     if (String(rows).includes(tag)) throw new Error(`row data of ${name} contains ${tag}`);
     out.push(`INSERT INTO ${ident(name)} (${t.insertable.join(', ')}) OVERRIDING SYSTEM VALUE\n  SELECT ${t.insertable.join(', ')} FROM json_populate_recordset(NULL::${ident(name)}, ${tag}${rows}${tag});`);
   }
-  for (const s of sequences) {
-    const [{ last_value, is_called }] = await query(`SELECT last_value::text AS last_value, is_called FROM ${ident(s.name)}`);
-    out.push(`SELECT setval('${ident(s.name)}', ${last_value}, ${is_called ? 'true' : 'false'});`);
+  for (const s of await sequencePositions(query)) {
+    const target = s.table_name && s.column_name ? `pg_get_serial_sequence('${ident(s.table_name)}', '${s.column_name}')` : `'${ident(s.name)}'`;
+    out.push(`SELECT setval(${target}, ${s.last_value}, ${s.is_called ? 'true' : 'false'});`);
   }
   const constraints = await query(`
     SELECT t.relname AS table_name, con.conname AS name, con.contype AS type, pg_get_constraintdef(con.oid) AS def
@@ -169,6 +169,23 @@ export async function dumpBrainSchema(query: Query, version: number): Promise<st
   return out.join('\n\n') + '\n';
 }
 
+/** Every public sequence with its position, keyed by the column that owns it (serial or identity) or by its own name. */
+async function sequencePositions(query: Query): Promise<Array<{ name: string; table_name: string | null; column_name: string | null; last_value: string; is_called: boolean }>> {
+  const out = [];
+  for (const s of await query(`
+    SELECT c.relname AS name, t.relname AS table_name, a.attname AS column_name
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('a', 'i')
+    LEFT JOIN pg_class t ON t.oid = d.refobjid
+    LEFT JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+    WHERE n.nspname = 'public' AND c.relkind = 'S' AND ${NOT_EXTENSION_MEMBER('pg_class', 'c.oid')}
+    ORDER BY c.oid`)) {
+    const [{ last_value, is_called }] = await query(`SELECT last_value::text AS last_value, is_called FROM ${ident(s.name)}`);
+    out.push({ name: s.name, table_name: s.table_name ?? null, column_name: s.column_name ?? null, last_value, is_called: Boolean(is_called) });
+  }
+  return out;
+}
+
 /** Blank every secret a fresh brain generates (e.g. shared_skill_state.token_secret) so no fixture carries one. */
 async function blankSecrets(query: Query): Promise<void> {
   for (const c of await query(`
@@ -201,6 +218,8 @@ async function fidelity(original: Query, restored: Query): Promise<string[]> {
   if (catalogDiff.length > 0) problems.push(formatCatalogDiffForFailure(catalogDiff));
   const [a, b] = [await original(FUNCTION_BODIES_SQL), await restored(FUNCTION_BODIES_SQL)];
   if (JSON.stringify(a) !== JSON.stringify(b)) problems.push('function bodies differ');
+  const positions = async (q: Query) => JSON.stringify((await sequencePositions(q)).map(({ table_name, column_name, last_value, is_called }) => ({ table_name, column_name, last_value, is_called })));
+  if (await positions(original) !== await positions(restored)) problems.push('sequence positions differ');
   const [ra, rb] = [await tableRows(original), await tableRows(restored)];
   for (const name of new Set([...Object.keys(ra), ...Object.keys(rb)])) {
     if (ra[name] !== rb[name]) problems.push(`rows of ${name} differ`);
