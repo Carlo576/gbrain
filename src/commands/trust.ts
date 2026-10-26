@@ -28,6 +28,8 @@ import {
   type TrustExplanation, type TrustReview, type TrustReviewFilter,
 } from '../core/trust/review.ts';
 import { trustLabel } from '../core/trust/tier.ts';
+import { PENDING_WRITE_EXIT_CODE } from '../core/exit-codes.ts';
+import { pendingReceiptOf, pollCommand } from '../core/persistence/write-wait.ts';
 import { reportPersistenceCliError } from './persistence-delegate.ts';
 import { writeCliError } from '../cli/cli-error.ts';
 
@@ -159,17 +161,24 @@ async function acceptAll(backend: TrustBackend, args: string[], json: boolean): 
   const summary = [`Accept ${previews.length} item(s):`, ...previews.map(p => `  ${p.ref.padEnd(6)} ${p.summary}`)].join('\n');
   await requireOwnerConfirmation(LOCAL_CTX, { ref: `${previews.length} items`, token, summary, command });
   const accepted: OwnerActionResult[] = [];
+  const pending: Array<{ ref: string; request_id: string; poll: string }> = [];
   const failed: Array<{ ref: string; error: unknown }> = [];
   for (let i = 0; i < inputs.length; i++) {
     try { accepted.push(await backend.apply(inputs[i]!, previews[i]!.binding, previews[i]!.raises)); }
-    catch (error) { failed.push({ ref: previews[i]!.ref, error: error instanceof OperationError ? error.toJSON() : String(error) }); }
+    catch (error) {
+      const receipt = pendingReceiptOf(error);
+      if (receipt) pending.push({ ref: previews[i]!.ref, request_id: receipt.request_id, poll: pollCommand(receipt.request_id) });
+      else failed.push({ ref: previews[i]!.ref, error: error instanceof OperationError ? error.toJSON() : String(error) });
+    }
   }
-  if (json) await writeStdoutFinal(`${JSON.stringify({ accepted, failed }, null, 2)}\n`);
+  if (json) await writeStdoutFinal(`${JSON.stringify({ accepted, pending, failed }, null, 2)}\n`);
   else {
     for (const r of accepted) console.log(resultLine(r));
+    for (const p of pending) console.log(`${p.ref}: accepted, still pending (request ${p.request_id}; check with ${p.poll})`);
     for (const f of failed) console.log(`${f.ref}: not applied (${(f.error as { message?: string }).message ?? String(f.error)})`);
   }
   if (failed.length) setCliExitVerdict(1);
+  else if (pending.length) setCliExitVerdict(PENDING_WRITE_EXIT_CODE);
 }
 
 /** Renders a refusal through the shared CLI envelope with its contract exit code (3 for consent refusals). */

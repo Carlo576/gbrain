@@ -16,7 +16,7 @@
  * insufficient_scope, a stale approval applies, or the listing drifts.
  * Runs on PGLite, and on Postgres when DATABASE_URL is set.
  */
-import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
+import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -477,6 +477,32 @@ describe('review, explain and accept-all (CEO-2, DX-10, DX-15, DX-16)', () => {
     expect(lines.filter(l => l.includes('accepted'))).toHaveLength(2);
     for (const slug of ['notes/bulk-a-example', 'notes/bulk-b-example']) expect((await pageRow(b, slug)).trust_tier).toBe('user_confirmed');
   }), 90_000);
+
+  test('accept-all reports a release still pending in the door as pending (exit 10 with its poll command), never as not applied', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const requestId = randomUUID();
+    const pending = Object.assign(new OperationError('write_pending', 'The write is accepted and is still pending.'),
+      { writeRequest: { request_id: requestId, state: 'queued', retry_after_ms: 1000 } });
+    const backend = {
+      review: async () => ({ items: [{ kind: 'hold', ref: 'h7', source_id: 'default' }, { kind: 'hold', ref: 'h8', source_id: 'default' }] }),
+      explain: async () => [],
+      preview: async (input: OwnerActionInput) => ({ action: 'release', ref: input.ref, token: input.ref, command: `gbrain trust release ${input.ref}`, raises: true, binding: `b-${input.ref}`, summary: `Release held fact ${input.ref}` }),
+      apply: async (input: OwnerActionInput) => {
+        if (input.ref === 'h7') throw pending;
+        return { action: 'release', ref: 'h8', status: 'released', tier: 'user_confirmed' };
+      },
+    } as unknown as Parameters<typeof runTrustOwnerCommand>[0];
+    typesToken();
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.join(' ')); };
+    let exit: number | undefined;
+    try { await runTrustOwnerCommand(backend, 'review', ['--accept-all', '--from', 'default']); exit = currentExitCode(); }
+    finally { console.log = original; process.exitCode = 0; _resetCliExitVerdictForTests(); }
+    expect(lines.join('\n')).not.toContain('h7: not applied');
+    expect(lines.find(l => l.startsWith('h7:'))).toContain(requestId);
+    expect(lines.find(l => l.startsWith('h8:'))).toContain('released');
+    expect(exit).toBe(10);
+  }), 60_000);
 
   test('the review listing is pinned (DX-16) and explain names tier, origin, receipts and activation', async () => withEnv({ GBRAIN_HOME: home }, async () => {
     const engine = engines[0]!;
