@@ -10297,7 +10297,7 @@ Turning the `preparation_deadlines` switch off (`gbrain config set persistence.p
 
 <a id="embed-backfill-skipped"></a>**A sync job or `embed-backfill` job reports `embed_backfill_skipped` (reason `embedding_disabled`)?** Nothing is wrong: the brain is keyless by choice (`embedding_disabled`), so sync queues no embed-backfill and a backfill already queued ends on its first attempt without reading a page. Search stays keyword-only. The notice appears once per brain state (the first skip after the brain became keyless); its fix is the optional step that turns embedding on and names the provider key it needs (effects `credentials` and `paid`: ask the user first).
 
-**`gbrain doctor` warns `default_source_local_path`?** Your `default` source has no `local_path` AND that null pointer is provably breaking write-through (the repo fallback is another source's own working tree, or file-backed default pages have no resolvable root). A null `local_path` on its own is the designed fallback topology and reports ok. The repair is a pointer update, never a file move: `gbrain sources set-path default <path>` prints the prior value before changing it and refuses a path that nests inside or swallows another source's tree (exit 6; `--force` bypasses). **Say to your agent:** *"Run a brain health check and fix what you find"* — the maintain skill runs `gbrain doctor` and applies the printed repair.
+**`gbrain doctor` warns `default_source_local_path`?** Your `default` source has no `local_path` AND that null pointer is provably breaking write-through (the repo fallback is another source's own working tree, or file-backed default pages have no resolvable root). A null `local_path` on its own is the designed fallback topology and reports ok. The repair is a pointer update, never a file move: `gbrain sources set-path default <path>` prints the prior value before changing it and refuses a path that nests inside or swallows another source's tree (exit 6; `--force` bypasses). The check also warns when any source's `local_path` is a relative path such as `.`, or when a `default` source with no path falls back to a relative `sync.repo_path`, because sync refuses those (`sync_anchor_relative`); see [relative source path](#relative-source-path). **Say to your agent:** *"Run a brain health check and fix what you find"* — the maintain skill runs `gbrain doctor` and applies the printed repair.
 
 **A Gmail, Calendar or GitHub connector source still has an old `local_path`?** Connector sources sync from their provider, so autopilot ignores their `local_path`: once a connector has synced (or tried to) at least once, autopilot syncs it on every interval and runs its database phases with no checkout. A connector that has never synced stays idle until you run `gbrain sync --source <id>` once; autopilot prints that command the first time it skips one. To remove the stale pointer, run `gbrain sources set-path <id> --clear` (connector sources, or any source whose `local_path` is relative; it refuses a filesystem source with an absolute path and any source bound to a canonical owner). `config.syncEnabled=false` still opts a source out. **Say to your agent:** *"My Gmail source points at an old folder. Clear it and keep it syncing."*
 
@@ -11016,7 +11016,10 @@ the database (`repo_not_found`, `no_repo_configured`), a captured file keeps
 no origin path, matching a folder to its source ignores the path, fence repair
 edits stored pages, managed activation refuses it (`source_changed`, detail
 `source_path_missing`), the dream, autopilot, per-phase and global
-maintenance cycles and `gbrain maintain` run only their database phases,
+maintenance cycles and `gbrain maintain` run only their database phases
+(a cycle run on a directory that matches no registered source fails its
+sync phase `sync_anchor_relative` while the `default` source's path is
+relative),
 `sources set-path` does not count it as another source's tree, the
 write-through leak guard counts a live source's relative path as owning any
 tree (so every source with no `local_path`, the `default` source and any
