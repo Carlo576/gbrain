@@ -44,7 +44,7 @@ import { keepFrontmatterMatches } from '../search/frontmatter-where.ts';
 import { WHERE_PARAM, whereOpParam } from './where-param.ts';
 import { searchFilterHint } from '../search/filter-hint.ts';
 import { TargetTrace, diagnoseProbe, diagnoseTrace, probeTarget, type ExplainTargetDiagnosis } from '../search/explain-target.ts';
-import { assembleEvidenceForHits, capDeliveredSnippets, capEvidenceToBudget, deliverEvidence, pagePlanHits, resolveEvidencePlan, selectLongPages, unsupportedDelivery, withLongPagePolicy, type DeliveryMeta, type DeliveryScope, type EvidencePlan, type FrozenHit, type ReturnUnit } from '../search/evidence-delivery.ts';
+import { assembleEvidenceForHits, capDeliveredSnippets, capEvidenceToBudget, countEvidenceTokens, deliverEvidence, pagePlanHits, resolveEvidencePlan, selectLongPages, unsupportedDelivery, withLongPagePolicy, type DeliveryMeta, type DeliveryScope, type EvidencePlan, type FrozenHit, type ReturnUnit } from '../search/evidence-delivery.ts';
 import { privateProvenanceFilterFragment, resolveExcludePrivatePages } from '../search/private-visibility.ts';
 import { AUDIT_ROW_SOURCES } from '../facts/audit-sources.ts';
 import { SAFE_FENCE_CHUNKER_VERSION, chunkManifestReads } from '../search/safe-chunks.ts';
@@ -146,7 +146,8 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   // An explicit budget's cap holds at this final boundary too (snippet
   // markers and redaction recounted); without one both are no-ops.
   const capped = evidence.explicitSnippet ? capDeliveredSnippets(output.results, snippetCap, output.meta.delivery) : capEvidenceToBudget(output.results, output.meta.delivery);
-  return emit(output, projectRows(fenceTranscriptRows(capped).map(factRowOutput), rows, lean));
+  const delivery = output.meta.delivery;
+  return emit(output, projectRows(fenceTranscriptRows(capped, { count: text => countEvidenceTokens(text, delivery.tokenizer), delivery }).map(factRowOutput), rows, lean));
 }
 
 /** C1: the per-call row-shape escape hatch shared by `search` and `query` (`detail` is query's low/medium/high). */

@@ -1474,11 +1474,13 @@ export function capEvidenceToBudget<T extends SearchResult & { delivered?: Deliv
       out.push(!r.delivered || r.delivered.tokens === textTok ? r : { ...r, delivered: { ...r.delivered, tokens: textTok } });
       continue;
     }
-    if (out.length > 0 && remaining - titleTok - cutTok < CUT_BODY_MIN) { lost++; continue; }
-    const title = titleTok > Math.max(0, remaining - cutTok - CUT_BODY_MIN) ? sliceToTokenCount(r.title ?? '', Math.max(0, remaining - cutTok - CUT_BODY_MIN), tokenizer) : r.title ?? '';
     const source = (r.chunk_text ?? '').endsWith(EVIDENCE_CUT_MARKER) ? (r.chunk_text ?? '').slice(0, -EVIDENCE_CUT_MARKER.length) : r.chunk_text ?? '';
     const quoted = deliveredQuoteText(r, source) !== source;
-    let room = remaining - count(title) - cutTok - (quoted ? count(deliveredQuoteText(r, source)) - count(source) : 0);
+    const fenceTok = quoted ? count(deliveredQuoteText(r, source)) - count(source) : 0;
+    if (out.length > 0 && remaining - titleTok - cutTok - fenceTok < CUT_BODY_MIN) { lost++; continue; }
+    const titleRoom = Math.max(0, remaining - cutTok - fenceTok - CUT_BODY_MIN);
+    const title = titleTok > titleRoom ? sliceToTokenCount(r.title ?? '', titleRoom, tokenizer) : r.title ?? '';
+    let room = remaining - count(title) - cutTok - fenceTok;
     let body = '';
     let text = '';
     for (;;) {
@@ -1713,7 +1715,7 @@ export async function assembleEvidenceForHits(engine: BrainEngine, input: Assemb
   }
   const d = await deliverEvidence(engine, rows, plan, scope, { liveHits: true, ...(input.query ? { query: input.query } : {}) });
   const out = redactRetrievalOutput(neutralizeTranscriptRows(d.results), d.delivery);
-  return { results: fenceTranscriptRows(capEvidenceToBudget(out.results, out.meta)), delivery: out.meta, unresolved };
+  return { results: fenceTranscriptRows(capEvidenceToBudget(out.results, out.meta), { count: text => countEvidenceTokens(text, out.meta.tokenizer), delivery: out.meta }), delivery: out.meta, unresolved };
 }
 
 /** SHA-256 over the delivered evidence (see docs/evidence-delivery.md). */

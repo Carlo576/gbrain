@@ -92,7 +92,9 @@ close. Each tool-call or function-call JSON block in it is replaced by
 `[tool call: <name>, arguments omitted]`, and so is each XML-style call
 block (`function_calls`, `invoke`, `tool_use`). `search`, `query` and
 `assemble_evidence` return it this way to every caller, the CLI included;
-the stored page is unchanged (`get_page` reads it as written).
+the stored page is unchanged (`get_page` reads it as written). Other read
+paths (`recall`, `think`, `search_exact`, `fetch`, `get_chunks`) and other
+conversation-like page types still return the text as stored.
 
 `effective_date` is the page's own date and `effective_date_source` says
 which kind: `date`, `published` or `filename` is a document date,
