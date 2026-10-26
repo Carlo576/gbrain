@@ -436,7 +436,7 @@ describe('the trust_release preparer refuses a request the owner did not confirm
     const engine = new Proxy({}, { get: (_t, key) => { throw new Error(`engine.${String(key)} read`); } }) as BrainEngine;
     const intent = { hold_id: 1, last_seen_at: '2026-01-01T00:00:00Z', by: 'owner:owner-example', mode: 'append' };
     const row = (over: Record<string, unknown>) => ({ operation: 'trust_release', source_id: 'default', slug, page_id: 1, intent, authority: { remote: false }, ...over }) as never;
-    for (const bad of [{ authority: { remote: true } }, { intent: null }, { intent: { ...intent, mode: 'rewrite' } }, { intent: { ...intent, hold_id: 'h1' } }, { operation: 'remember' }]) {
+    for (const bad of [{ authority: { remote: true } }, { intent: null }, { intent: { ...intent, mode: 'rewrite' } }, { intent: { ...intent, hold_id: 'h1' } }, { intent: { ...intent, mode: 'index-existing' } }, { operation: 'remember' }]) {
       const error = await prepareTrustReleaseMutation(engine, row(bad), { engine: 'pglite' } as never).then(() => null, (e: { code?: string }) => e);
       expect({ bad, code: error?.code }).toEqual({ bad, code: 'confirmation_required' });
     }

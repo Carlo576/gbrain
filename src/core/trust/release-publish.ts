@@ -125,7 +125,7 @@ export async function submitTrustRelease(engine: BrainEngine, holdId: number, by
 export async function prepareTrustReleaseMutation(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
   const intent = row.intent as unknown as ReleaseIntent | null;
   if (row.operation !== TRUST_RELEASE_OPERATION || row.authority.remote || !intent || !Number.isSafeInteger(intent.hold_id) || typeof intent.last_seen_at !== 'string'
-    || typeof intent.by !== 'string' || (intent.mode !== 'append' && intent.mode !== 'index-existing')) {
+    || typeof intent.by !== 'string' || (intent.mode !== 'append' && intent.mode !== 'index-existing') || (intent.mode === 'index-existing' && !Number.isSafeInteger(intent.row_num))) {
     throw opError('confirmation_required', 'This release is not confirmed by the owner; nothing was changed.',
       'Run gbrain trust release on the brain host in an interactive terminal.');
   }
@@ -145,7 +145,7 @@ export async function prepareTrustReleaseMutation(engine: BrainEngine, row: Writ
     valid_until: str(p.valid_until) ? new Date(String(p.valid_until)) : null, embedding: null, embedding_model: null,
   };
   const append = await prepareFenceFactAppend(engine, row, config, snapshot, intent.mode === 'index-existing'
-    ? { mode: 'index-existing', rowNum: Number(intent.row_num), fact, pendingTier: 'user_confirmed' }
+    ? { mode: 'index-existing', rowNum: intent.row_num!, fact, pendingTier: 'user_confirmed' }
     : { fact, pendingTier: 'user_confirmed' });
   if (intent.mode === 'index-existing') {
     const base = await materializedPage(engine, snapshot.page);
