@@ -164,6 +164,9 @@ Measured on ubicloud-standard-4, full scope, run 39996381819:
 
 ## Cost of parity
 
+The Bun 1.4.0 cells below were dropped when the floor moved to Bun 1.4.4
+(#7644); the figures are the measurements from before that change.
+
 Measured from the 15 latest green pull-request Test runs before parity (job
 start to finish, PR parameters): the Bun 1.4.0 twins add 14 cells per
 `pull_request` run, 55.9 runner-minutes in total: 233 Ubicloud vCPU-minutes

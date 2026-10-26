@@ -65,7 +65,7 @@ describe('native lock distribution integrity', () => {
     }
   });
 
-  test('required CI executes every declared target at both supported Bun versions', () => {
+  test('required CI executes every declared target at every supported Bun version', () => {
     type NativeJob = {
       'runs-on': string;
       strategy: { matrix: { bun: string[]; target: string[] } };

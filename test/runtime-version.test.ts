@@ -60,7 +60,7 @@ describe('Bun runtime floor', () => {
     expect(checkBunRuntime('1.3.14')).toEqual({ name: 'bun_runtime', status: 'fail', message: OLD_BUN_REFUSAL.replace('\n', ' ') });
     expect(checkBunRuntime('1.4.2')).toEqual({ name: 'bun_runtime', status: 'fail', message: 'GBrain requires Bun 1.4.4 or newer (found Bun 1.4.2). '
       + 'Fix: run `bun upgrade`, then restart GBrain. If a `gbrain upgrade` stopped here, finish it with `gbrain post-upgrade`.' });
-    expect(checkBunRuntime().status).toBe(Bun.semver.order(Bun.version, SECURE_BUN_VERSION) >= 0 ? 'ok' : 'warn');
+    expect(checkBunRuntime().status).toBe(unsupportedBunMessage(Bun.version) === null ? 'ok' : 'fail');
   });
 
   test('#7373: the floor carries the Brotli fix, so a Bun without it is refused however gbrain is installed', () => {

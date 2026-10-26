@@ -341,6 +341,17 @@ await new Promise(() => setInterval(() => {}, 1000));`);
     }
   });
 
+  it('a log that names no Bun, or a prerelease of the fixed Bun, is read as an affected Bun', () => {
+    const noBanner = feed(poisonedRun.slice(1));
+    expect(noBanner.poisoned()).toBe(true);
+    expect(noBanner.render('test (7)', '/tmp/unit.log', 1)).toContain(`**${BUN_SPAWNSYNC_POISONED}**`);
+    expect(feed(['bun test v1.4.3-canary.1 (abc)', ...poisonedRun.slice(1)]).poisoned()).toBe(true);
+    const live = new FailureCollector();
+    const notes: string[] = [];
+    for (const line of cancelledRun.slice(1)) { live.feed(line); notes.push(...live.takeLiveNotes()); }
+    expect(notes.join('\n')).toContain('On this Bun,');
+  });
+
   it('a non-timeout failure after the kill, or timeouts confined to one file, is left for its own diagnosis', () => {
     const mixed = feed([
       ...poisonedRun,

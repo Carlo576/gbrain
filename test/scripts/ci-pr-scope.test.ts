@@ -25,7 +25,7 @@ function cells(job: Job, context: Record<string, unknown>): string[] {
 }
 
 const native = load('native-locks.yml').jobs;
-/** The primary (pinned) Bun and the oldest supported one: matrices run both, or one cell when the floor is the primary. */
+/** The primary (pinned) Bun and the oldest supported one: matrices run every supported version (one cell today: the floor is the primary). */
 const PRIMARY_BUN = '1.4.4';
 const SUPPORTED_BUN = [...new Set([MINIMUM_BUN_VERSION, PRIMARY_BUN])];
 const nativeCells = (scope: string) => ({
@@ -156,7 +156,7 @@ esac
   // Pull requests run the cheap tier (docs/ci-event-parity.md#full-ci-on-pull-requests):
   // of the persistence lanes only the crash robot and convergence; the rest run
   // in the full-ci dispatch, on every push, in the merge queue and nightly.
-  test('security and persistence matrices run both supported Bun versions on every event that runs them; pull requests run only the crash robot and convergence', () => {
+  test('security and persistence matrices run every supported Bun version on every event that runs them; pull requests run only the crash robot and convergence', () => {
     const security = load('test.yml').jobs['security-regressions'];
     const persistence = load('persistence-validation.yml').jobs;
     const cheap = [security, persistence['crash-robot']!, persistence.convergence!];
@@ -169,7 +169,7 @@ esac
         expect(cells(job, { github: { event_name }, inputs: {} })).toEqual(push);
       }
       expect(cells(job, { github: { event_name: 'pull_request' }, inputs: {} })).toEqual(cheap.includes(job) ? push : []);
-      expect(push.filter(cell => cell.split('/').includes(MINIMUM_BUN_VERSION)).length).toBe(push.length / SUPPORTED_BUN.length);
+      for (const bun of SUPPORTED_BUN) expect(push.filter(cell => cell.split('/').includes(bun)).length).toBe(push.length / SUPPORTED_BUN.length);
     }
     expect(cells(security, { github: { event_name: 'pull_request' }, inputs: {} })).toHaveLength(3 * SUPPORTED_BUN.length);
   });
@@ -292,7 +292,7 @@ esac
 
   // #4479: a local gate or VM on a different Bun than CI produced
   // runtime-only skew, so every single-version pin moves together.
-  test('every single-version Bun pin matches the primary, and matrices keep the oldest supported version', () => {
+  test('every single-version Bun pin matches the primary, and matrices run every supported version', () => {
     const primary = PRIMARY_BUN;
     // #7373: release binaries embed this Bun, so it never drops below the first release with the CVE-2026-111497 fix.
     expect(Bun.semver.order(primary, SECURE_BUN_VERSION)).toBeGreaterThanOrEqual(0);
