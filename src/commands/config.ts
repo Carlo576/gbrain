@@ -993,6 +993,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       process.exit(1);
     }
     const value = tail.find(a => !a.startsWith('-')) ?? args[2];
+    const repoPathRefusal = key === 'sync.repo_path' ? (await import('../core/sync-config-keys.ts')).syncRepoPathRefusal(value) : null;
+    if (repoPathRefusal) { console.error(repoPathRefusal); process.exit(1); }
 
     // Bootstrap hook-lane keys are FILE-plane canonical: they are read by
     // engine-free processes (the harness hook children and the detached

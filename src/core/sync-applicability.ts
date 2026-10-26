@@ -93,7 +93,7 @@ export function syncNotApplicableError(dir: SyncContentDirectory): OperationErro
  * everything in it, an import of its markdown). Refused before any Git probe, cost estimate or import.
  */
 export function syncAnchorRelativeError(sourceId: string | undefined, anchor: string): OperationError {
-  const why = `A relative path names whatever directory gbrain runs from (now ${process.cwd()}), not a fixed folder, so it cannot prove which folder is the brain; syncing it from an unrelated folder would Git-initialize that folder, commit everything in it and import its markdown. Nothing was changed.`;
+  const why = `A relative path names whatever directory gbrain runs from, not a fixed folder, so it cannot prove which folder is the brain; syncing it from an unrelated folder would Git-initialize that folder, commit everything in it and import its markdown. Nothing was changed.`;
   if (!sourceId) {
     return opError('sync_anchor_relative', `Sync refused: sync.repo_path is the relative path "${anchor}".`,
       'Ask the user which directory holds the brain repo, then set it as an absolute path: gbrain config set sync.repo_path <absolute-directory>.',

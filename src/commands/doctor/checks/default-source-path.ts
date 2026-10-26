@@ -7,12 +7,14 @@
  * A null `default.local_path` is the DESIGNED fallback topology (pages nest
  * under sync.repo_path), so the check only warns when the fallback
  * demonstrably fails — see the helper's doc comment for the exact gates.
+ * #7630: it also warns for every other source whose local_path is relative.
  *
  * Lives in the doctor module dir per the peeled-façade rule — new code goes
  * here, not back into doctor.ts. Returns null for the 'skip' verdict so the
  * caller pushes nothing.
  */
 import { existsSync, statSync } from 'fs';
+import { isAbsolute } from 'path';
 import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
 import { assessDefaultSourcePath } from '../../../core/default-source-path-check.ts';
@@ -71,10 +73,18 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
     collidingSourceId,
     sharedPages,
   });
-  if (assessment.status === 'skip') return null;
+  // #7630: any other source with a relative local_path is refused by sync the same way, so name it here too.
+  const relative = (await engine.executeRaw<{ id: string; local_path: string }>(
+    `SELECT id, local_path FROM sources WHERE id <> 'default' AND local_path IS NOT NULL AND archived IS NOT TRUE ORDER BY id`,
+  )).filter(row => !isAbsolute(row.local_path));
+  if (assessment.status === 'skip' && relative.length === 0) return null;
+  const relativeNote = relative.length === 0 ? '' :
+    `${relative.map(row => `source "${row.id}" has the relative local_path "${row.local_path}"`).join('; ')}, which names whatever directory ` +
+    'gbrain runs from, so sync refuses it (sync_anchor_relative). Ask the user which directory holds its files, then run ' +
+    '`gbrain sources set-path <id> <absolute-directory>`, or clear the pointer with `gbrain sources set-path <id> --clear`.';
   return {
     name: 'default_source_local_path',
-    status: assessment.status,
-    message: assessment.message,
+    status: relative.length > 0 || assessment.status === 'skip' ? 'warn' : assessment.status,
+    message: [assessment.message, relativeNote].filter(Boolean).join(' '),
   };
 }

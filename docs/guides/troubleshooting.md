@@ -834,8 +834,8 @@ gbrain runs from, so it cannot say which folder is the brain. Before #7630, a
 folder treated that folder as the brain repo: it ran `git init`, committed
 everything in it and imported its markdown. Sync now refuses
 `sync_anchor_relative` (exit 3) before any Git probe, cost estimate or import,
-and nothing is changed. Doctor's `default_source_local_path` check warns on a
-relative `default` path.
+and nothing is changed. Doctor's `default_source_local_path` check warns on
+every source with a relative path.
 
 Ask the user which directory holds the source, then do one of:
 
@@ -847,14 +847,21 @@ Ask the user which directory holds the source, then do one of:
   is set again. On a managed brain, a source with a canonical owner refuses
   `--clear` (`writer_transfer_required`); point it at its directory instead.
 
-Until the path is absolute, nothing else treats the folder gbrain runs from as
-the source either: page write-through skips the file (`repo_not_found`), the
-dream and autopilot cycles run only their database phases, `gbrain autopilot
+Until the path is absolute, the main readers do not treat the folder gbrain
+runs from as the source either: page and fact writes skip the file and stay in
+the database (`repo_not_found`, `no_repo_configured`), a captured file keeps
+no origin path, matching a folder to its source ignores the path, fence repair
+edits stored pages, managed activation refuses it (`source_changed`, detail
+`source_path_missing`), the dream, autopilot, per-phase and global
+maintenance cycles run only their database phases, `gbrain autopilot
 --install` asks for `--repo`, a remote `submit_job` for the source is
-refused, import does not count the folder as a configured root, and a managed
-brain does not record it as a managed root.
+refused, import does not count the folder as a configured root or stamp it
+fresh, and a managed brain does not record it as a managed root. A few other
+local commands may still read it from the folder they run in, so set the path
+first.
 
 For `sync.repo_path`: `gbrain config set sync.repo_path <absolute-directory>`.
+`config set` refuses a relative value and writes nothing.
 
 If an earlier sync already initialized and imported the wrong folder, the user
 decides what to undo: the folder's new `.git` directory and the pages imported

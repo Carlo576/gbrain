@@ -13,7 +13,10 @@
  *   legacy `sync.repo_path`; the folder gets no `.git` and nothing is imported;
  * - a relative anchor never proves ownership, so even an explicit absolute path to the cwd is not auto-initialized;
  * - `gbrain sources set-path <id> --clear` clears a relative filesystem path without SQL, and still refuses an absolute one;
- * - doctor's `default_source_local_path` warns on a relative path;
+ * - doctor's `default_source_local_path` warns on a relative path, on any source, and `config set sync.repo_path` refuses one;
+ * - no other reader resolves a relative root against the cwd: write-through, page and fact writes, capture origins,
+ *   folder-to-source matching, fence repair, activation, import roots and freshness, remote submit_job, managed roots, and
+ *   the dream, autopilot, per-phase and global maintenance cycles;
  * - a stalled foreground write's diagnosis inspects the writer and says to resubmit with a new request_id, while a
  *   recorded sync fault keeps its sync retry.
  *
@@ -105,7 +108,8 @@ for (const backend of testBackends()) {
     // Value: protects=gbrain sync --all fails only the source with a relative local_path and still syncs an absolute one;
     //   fails_when=the --all fan-out guard aborts the whole run, drops the source, or reports it ok / imports the cwd;
     //   why_new=the performSync cases above never enter runSyncAll's fan-out or its per-source JSON envelope; seam=none;
-    //   no_claim=the cost-gate walk ordering (--no-embed skips the gate) and the exit-3 mapping of a single-source run
+    //   no_claim=the cost-gate walk ordering (--no-embed skips the gate), the exit-3 mapping of a single-source run, and parallel
+    //   import workers (--workers 1: a worker opens the configured DATABASE_URL, not this test's isolated Postgres database)
     test('gbrain sync --all fails only the relative source: an absolute source still syncs and the cwd is untouched', async () => {
       const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-7630-repo-')));
       try {
@@ -117,7 +121,7 @@ for (const backend of testBackends()) {
         const before = await pagesOf('default');
         const { lines, exit } = await cli(async () => {
           const { runSync } = await import('../src/commands/sync.ts');
-          await runSync(engine, ['--all', '--no-pull', '--no-embed', '--json']);
+          await runSync(engine, ['--all', '--no-pull', '--no-embed', '--json', '--workers', '1']);
         });
         const envelope = JSON.parse(lines.find(line => line.startsWith('{"schema_version"'))!) as { sources: Array<{ source_id: string; status: string; error?: string }>; error_count: number };
         const bySource = Object.fromEntries(envelope.sources.map(s => [s.source_id, s]));
@@ -172,7 +176,8 @@ for (const backend of testBackends()) {
 
     // Value: protects=an explicit relative --repo that differs from the stored relative anchor is honored: that directory syncs;
     //   fails_when=the guard starts refusing every relative repoPath instead of only the stored anchor itself;
-    //   why_new=no other case passes a relative repoPath other than the anchor; seam=none; no_claim=none beyond protects
+    //   why_new=no other case passes a relative repoPath other than the anchor; seam=none; no_claim=parallel import workers
+    //   (--workers 1: a worker opens the configured DATABASE_URL, not this test's isolated Postgres database)
     test('gbrain sync --repo brain (relative, not the stored ".") is honored: brain syncs, the cwd stays untouched', async () => {
       await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
       const brain = join(folder, 'brain');
@@ -180,7 +185,7 @@ for (const backend of testBackends()) {
       execSync('git init -q && git config user.email t@example.com && git config user.name T', { cwd: brain, stdio: 'pipe' });
       writeFileSync(join(brain, 'inside.md'), '---\ntype: note\ntitle: Inside\n---\n\nA page of the brain.\n');
       execSync('git add -A && git commit -q -m initial', { cwd: brain, stdio: 'pipe' });
-      const result = await runSyncCli(['--repo', 'brain', '--no-pull', '--no-embed', '--json']);
+      const result = await runSyncCli(['--repo', 'brain', '--no-pull', '--no-embed', '--json', '--workers', '1']);
       expect(result.refused?.code).toBeUndefined();
       expect(result.exit).toBeUndefined();
       const slugs = (await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id='default' ORDER BY slug")).map(row => row.slug);
@@ -314,6 +319,95 @@ for (const backend of testBackends()) {
       });
       expect(existsSync(join(folder, '.git'))).toBe(false);
       expect(await pageCount()).toBe(0);
+    }, 120_000);
+
+    // Value: protects=a relative local_path or sync.repo_path never becomes the cwd for folder-to-source matching, fence repair,
+    //   page and fact write-through (including the automatic claim of an unbound PGLite source), capture origins, activation
+    //   or the per-phase and global maintenance jobs; fails_when=any of those readers resolves "." against process.cwd();
+    //   why_new=the reader test above covers write-through, install, cycle, import, submit_job and managed roots only; seam=none;
+    //   no_claim=readers that only test whether a root is set (atom, facts and prepared maintenance refuse without an owner)
+    test('the remaining readers ignore a relative root: source matching, fence repair, page and fact writes, activation, phase and global maintenance', async () => {
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-7630-src-')));
+      try {
+        mkdirSync(join(repo, 'sub'));
+        await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+        await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', $1)", [repo]);
+        await withEnv({ GBRAIN_HOME: home, GBRAIN_SOURCE: undefined }, async () => {
+          const { resolveSourceId, resolveSourceForRepoPath } = await import('../src/core/source-resolver.ts');
+          process.chdir(join(repo, 'sub'));
+          try {
+            expect(await resolveSourceId(engine, null, join(repo, 'sub'))).toBe('notes-a');
+            expect((await resolveSourceForRepoPath(engine, join(repo, 'sub')))?.source_id).toBe('notes-a');
+          } finally { process.chdir(folder); }
+
+          const { loadFenceSource } = await import('../src/core/fence-repair/repair-io.ts');
+          expect((await loadFenceSource(engine, 'default'))?.root).toBeNull();
+
+          const { resolveFactWriteTarget } = await import('../src/core/persistence/fact-write-target.ts');
+          expect((await resolveFactWriteTarget(engine, 'default', { local_path: '.', kind: null }, { fileBacked: false, remote: false })).kind).toBe('publish');
+
+          const { operations } = await import('../src/core/operations.ts');
+          const ctx = { engine, config: { engine: backend }, logger: { info() {}, warn() {}, error() {} }, dryRun: false, remote: false, sourceId: 'default', deferEmbeds: true };
+          await operations.find(o => o.name === 'put_page')!.handler(ctx as never, { slug: 'notes/kept-in-db', content: '---\ntype: note\ntitle: Kept\n---\n\nA page with no folder of its own.\n' });
+          const { getWorktreeBinding } = await import('../src/core/persistence/ownership.ts');
+          expect(await getWorktreeBinding(engine, 'default')).toBeNull();
+          expect(existsSync(join(folder, 'notes'))).toBe(false);
+          await operations.find(o => o.name === 'capture')!.handler(ctx as never, { slug: 'notes', content: 'A captured note.', local_file: join(folder, 'notes.md') });
+          expect(await engine.executeRaw("SELECT source_uri FROM pages WHERE source_id='default' AND slug='notes'")).toEqual([{ source_uri: 'cli-file' }]);
+
+          const { activatePersistence } = await import('../src/core/persistence/activation.ts');
+          const refused = await activatePersistence(engine, { confirmQuiesced: true, dryRun: true }).then(() => ({}), (error: unknown) => error) as { detail?: string; message?: string };
+          expect(refused).toMatchObject({ detail: 'source_path_missing' });
+          expect(refused.message).toContain("records the relative local path .");
+
+          await engine.setConfig('sync.repo_path', '.');
+          await engine.executeRaw("UPDATE sources SET local_path=NULL WHERE id='default'");
+          const { makeCyclePhaseHandler } = await import('../src/core/minions/handlers/cycle-phase.ts');
+          const phase = await makeCyclePhaseHandler(engine, 'recompute_emotional_weight')({ id: 1, data: {}, signal: undefined } as never) as { report: { brain_dir: string | null } };
+          expect(phase.report.brain_dir).toBeNull();
+          const { makeAutopilotGlobalMaintenanceHandler } = await import('../src/core/minions/handlers/autopilot-global-maintenance.ts');
+          const brainDirs: Array<string | null | undefined> = [];
+          const runCycle = async (_engine: BrainEngine, opts: { phases?: string[]; brainDir?: string | null }) => {
+            brainDirs.push(opts.brainDir);
+            return { schema_version: '1', timestamp: new Date().toISOString(), duration_ms: 1, status: 'ok', totals: {},
+              phases: [{ phase: opts.phases![0], status: 'ok', duration_ms: 1, summary: 'ok', details: {} }] };
+          };
+          await makeAutopilotGlobalMaintenanceHandler(engine, { runCycle: runCycle as never })({ id: 2, attempts_made: 0, signal: undefined, deadlineAtMs: null, data: { phases: ['orphans'] } } as never);
+          expect(brainDirs.length).toBeGreaterThan(0);
+          expect(brainDirs.every(dir => dir === null)).toBe(true);
+        });
+        expect(existsSync(join(folder, '.git'))).toBe(false);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    }, 120_000);
+
+    test('gbrain config set sync.repo_path refuses a relative path and writes nothing; an absolute one is stored', async () => {
+      const { runConfig } = await import('../src/commands/config.ts');
+      const refused = await cli(() => runConfig(engine, ['set', 'sync.repo_path', '.']));
+      expect(refused.exit).toBe(1);
+      expect(refused.lines.join('\n')).toContain('sync.repo_path must be an absolute directory');
+      expect(await engine.getConfig('sync.repo_path')).toBeNull();
+      const stored = await cli(() => runConfig(engine, ['set', 'sync.repo_path', folder]));
+      expect(stored.exit).toBeUndefined();
+      expect(await engine.getConfig('sync.repo_path')).toBe(folder);
+    }, 120_000);
+
+    test('doctor default_source_local_path warns for any source with a relative path, not only default', async () => {
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', 'notes')");
+      const check = await defaultSourceLocalPathCheck(engine);
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('source "notes-a" has the relative local_path "notes"');
+      expect(check?.message).toContain('gbrain sources set-path <id> <absolute-directory>');
+    }, 120_000);
+
+    test('gbrain import of the cwd into a source whose local_path is "." does not stamp it fresh', async () => {
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.')");
+      const { runImport } = await import('../src/commands/import.ts');
+      await cli(() => runImport(engine, [folder, '--source', 'notes-a', '--no-embed']));
+      expect(await pagesOf('notes-a')).toBe(1);
+      const [row] = await engine.executeRaw<{ last_sync_at: unknown }>("SELECT last_sync_at FROM sources WHERE id='notes-a'");
+      expect(row!.last_sync_at).toBeNull();
     }, 120_000);
   });
 }

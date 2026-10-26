@@ -10,6 +10,7 @@
  *   `config get` prints the value in effect and where it comes from, and doctor (`sync_config_keys`) reports a value
  *   stored before the upgrade as unapplied.
  */
+import { isAbsolute } from 'node:path';
 import { CONFIG_ROLLBACK_WINDOWS, type ConfigRollbackWindow } from './wire-skew.ts';
 import type { BrainEngine } from './engine.ts';
 
@@ -132,6 +133,12 @@ export function syncKeySetNotice(key: string): { writes: boolean; lines: string[
  * which writes nothing. A rollback key's `set` returns false so the write goes ahead; any other key returns false.
  * #6712 PR 4b: `get sync.admission` prints the value in effect (`normal` when unset) and when it was set.
  */
+/** #7630: the `config set sync.repo_path` refusal for a relative value, or null when it may be stored. */
+export function syncRepoPathRefusal(value: string): string | null {
+  if (isAbsolute(value)) return null;
+  return `[config] sync.repo_path must be an absolute directory (got '${value}'): a relative path names whatever directory gbrain runs from, and sync refuses it (sync_anchor_relative). Nothing was written.`;
+}
+
 export async function handleSyncKeyConfig(engine: Pick<BrainEngine, 'getConfig' | 'executeRaw'>, action: 'get' | 'set', key: string): Promise<boolean> {
   if (action === 'get' && key === 'sync.admission') {
     const { readSyncAdmissionSetting } = await import('./persistence/sync-admission.ts');
