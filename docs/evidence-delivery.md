@@ -305,7 +305,9 @@ When the caller passes a budget (`token_budget` on `query`, `search` and
 `assemble_evidence`, `budget_tokens` on `recall`) and the unit is `auto`, the
 budget is a hard cap on the delivered evidence: the recount of every result's
 title plus `chunk_text` (the evidence, its omission lines, cut markers and
-snippet markers) never exceeds it. JSON fields outside those two (`delivered`,
+snippet markers) never exceeds it, except that a quoted conversation row at
+rank one is kept when its quote fence alone exceeds a very small budget (see
+[Response shape](#response-shape-additive)). JSON fields outside those two (`delivered`,
 spans, scores, the `delivery` meta) are not counted. The four operations share
 one rule:
 
@@ -414,7 +416,10 @@ one-line summary, then a marker line and a code fence wrap the text. Its
 covers the summary), and its `tokens`, the meta `tokens_delivered` and
 `budget_used` and `evidenceFingerprint` count or hash the fenced text. An
 explicit `snippet_chars` caps the text inside the fence, so the row can run
-longer than the cap by the marker and fence lines.
+longer than the cap by the marker and fence lines. Under `auto` an explicit
+budget pays for the fence, except that a rank-one row is kept when the fence
+alone exceeds a very small budget; budgets under other units do not count it.
+With `date_header`, the header is the first line inside the fence.
 
 One result is returned per expanded page, at the page's best rank. `chunk_id`,
 `chunk_index`, `score` and the other ranking fields stay those of the page's
