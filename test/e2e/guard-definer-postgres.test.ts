@@ -511,7 +511,8 @@ describeE2E('purge and withdrawal guards under a scoped write role (#7632)', () 
           EXECUTE format('CREATE POLICY gbrain_test_reader ON %s TO ${reader} USING (true) WITH CHECK (true)', t.rel);
         END LOOP; END $$`);
     const [held, heldOutput] = insertDerivation(JSON.stringify({ text: PURGED_CLAIM }));
-    for (const role of ['postgres', bypass, reader]) {
+    const [{ owner }] = await conn.unsafe<Array<{ owner: string }>>('SELECT current_user AS owner');
+    for (const role of [owner!, bypass, reader]) {
       await as(conn, role, async run => {
         expect({ role, rows: rowsOf(await run(held, [ids.derived, 1, heldOutput])) }).toEqual({ role, rows: [] });
       });
