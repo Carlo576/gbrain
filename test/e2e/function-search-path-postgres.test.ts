@@ -345,4 +345,20 @@ describeE2E('a temp table or view named like a ledger hides nothing from the gua
       }
     }, 300_000);
   }
+
+  test('9. a migration run at the latest version (nothing pending) still puts pg_temp back on a function a failed earlier run left without it', async () => {
+    const brain = await freshBrain();
+    const engine = new PostgresEngine();
+    try {
+      await brain.conn.unsafe('ALTER FUNCTION gbrain_refuse_purged_fact() SET search_path = pg_catalog, public');
+      expect((await catalog(brain.conn)).withoutTemp).toEqual(['gbrain_refuse_purged_fact()']);
+      await engine.connect({ database_url: brain.url });
+      const { value } = await capturingStderr(() => runMigrations(engine));
+      expect(value).toEqual({ applied: 0, current: LATEST_VERSION });
+      expect((await catalog(brain.conn)).withoutTemp).toEqual([]);
+    } finally {
+      await engine.disconnect();
+      await brain.conn.end();
+    }
+  }, 300_000);
 });

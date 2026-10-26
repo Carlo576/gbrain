@@ -32,7 +32,7 @@ describe('the search_path step after a migration run is best-effort (#7632)', ()
     let stderr = '';
     process.stderr.write = ((chunk: string | Uint8Array) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
     try {
-      expect((await runMigrations(engine)).applied).toBe(1);
+      expect((await runMigrations(engine)).applied).toBe(LATEST_VERSION - actual.v277.version + 1);
     } finally {
       process.stderr.write = write;
     }
