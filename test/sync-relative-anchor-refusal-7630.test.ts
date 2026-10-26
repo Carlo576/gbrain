@@ -513,6 +513,8 @@ for (const backend of testBackends()) {
       expect(refused?.code).toBe('sync_anchor_relative');
       expect(refused?.message).toContain('relative local_path');
       expect(refused?.message).not.toContain('"."');
+      expect((refused as { fix?: { ask_user?: boolean; argv?: string[]; user_message?: string } } | null)?.fix).toMatchObject({ ask_user: true, argv: ['gbrain', 'sources', 'set-path', 'default', '<dir>'] });
+      expect((refused as { fix?: { user_message?: string } } | null)?.fix?.user_message).not.toContain('"."');
       const { runFenceCensus } = await import('../src/core/fence-repair/census.ts');
       const [run] = await runFenceCensus(engine, { sourceIds: ['default'], deadline: Date.now() + 60_000 });
       expect(run?.files).toBe('none');
@@ -583,6 +585,18 @@ for (const backend of testBackends()) {
       expect(await otherSourceOwning(engine, 'default', join(tmpdir(), 'elsewhere', 'notes.md'))).toBe('notes-a');
       await engine.executeRaw("UPDATE sources SET archived=true, archived_at=now() WHERE id='notes-a'");
       expect(await otherSourceOwning(engine, 'default', join(folder, 'notes.md'))).toBeNull();
+    }, 120_000);
+
+    // Value: protects=a sibling whose local_path is absolute for another OS (a Windows drive path read on POSIX) never blocks default
+    //   write-through, the same reading doctor and set-path --clear use; fails_when=the leak guard calls it relative with the host's
+    //   isAbsolute, so every sync.repo_path write goes database-only while doctor reports ok; why_new=the case above has only a "."
+    //   sibling; seam=none; no_claim=what a Windows host does with a POSIX path (posix.isAbsolute covers it there)
+    test('a sibling with another OS\'s absolute local_path does not make the leak guard fail closed', async () => {
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('win-host', 'win-host', $1)", ['C:\\brain-example']);
+      const { otherSourceOwning } = await import('../src/core/write-through.ts');
+      expect(await otherSourceOwning(engine, 'default', join(folder, 'notes.md'))).toBeNull();
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.')");
+      expect(await otherSourceOwning(engine, 'default', join(folder, 'notes.md'))).toBe('notes-a');
     }, 120_000);
 
     // /ship review fixes (GBRA-207, #7630).

@@ -23,7 +23,7 @@ import { hasSourceFilesystemLock, withSourceFilesystemLock, assertSourceFilesyst
  */
 
 import { existsSync, statSync, mkdirSync, unlinkSync, readdirSync, readFileSync } from 'fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from 'path';
 import { atomicWriteFileSync } from './atomic-write.ts';
 import type { BrainEngine } from './engine.ts';
 import { isRelativeFileUri, serializePageToMarkdown, resolvePageFilePath, resolveSourceLocalFilePath } from './markdown.ts';
@@ -296,7 +296,9 @@ export async function otherSourceOwning(engine: BrainEngine, sourceId: string, p
   const target = identity(path);
   return rows.find(row => {
     // #7630: a live source's relative local_path names no known tree, so like any unresolvable spelling it counts as a match.
-    if (!isAbsolute(msysToNativePath(row.local_path))) return relativeOwns && !row.archived;
+    // An absolute path written by another OS (C:\ on POSIX) is not relative, the same reading doctor and --clear use.
+    const native = msysToNativePath(row.local_path);
+    if (!posix.isAbsolute(native) && !win32.isAbsolute(native)) return relativeOwns && !row.archived;
     const other = identity(row.local_path);
     if (target === null || other === null) return true;
     const rel = relative(other, target);
