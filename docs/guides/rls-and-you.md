@@ -239,7 +239,12 @@ brains, the schema migration that creates the table
 (`bun run new:migration <name>`, one file in `src/core/schema-migrations/`)
 enables RLS too, with a `sqlFor: { pglite: ... }` variant that leaves it out.
 The auto-RLS event trigger and doctor's `rls` check backstop a table that
-slips through on Postgres, but they are the safety net, not the plan.
+slips through on Postgres, but they are the safety net, not the plan: the
+trigger needs a superuser and is missing on many managed brains, and
+`gbrain apply-migrations --yes` runs migrations without replaying
+`src/schema.sql`. `test/e2e/rls-every-table-postgres.test.ts` checks every
+public table after a fresh install and after that migrations-only upgrade,
+both with the trigger inert, so a table that relies on either one fails it.
 
 ## Function search_path
 
