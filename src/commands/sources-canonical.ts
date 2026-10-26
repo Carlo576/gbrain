@@ -39,7 +39,7 @@ const sample = (paths: string[]) => paths.map(path => `    ${path}`);
 export function describeGitPreview(p: GitConversionPreview): string {
   const { detail } = p.discard;
   const causes = [...Object.entries(detail.git_overwrites_database).flatMap(([cls, kinds]) => Object.entries(kinds).map(([kind, n]) => `git_overwrites_database ${cls} on ${kind} ${n}`)),
-    ...(['uncommitted_edit', 'unparseable', 'export_mismatch'] as const).flatMap(category => Object.entries(detail[category]).map(([key, n]) => `${category} ${key} ${n}`))];
+    ...(['uncommitted_edit', 'unparseable', 'export_mismatch', 'ignore_status_unknown'] as const).flatMap(category => Object.entries(detail[category]).map(([key, n]) => `${category} ${key} ${n}`))];
   const lines = [`Source ${p.source_id}${p.strict ? ' (already git-canonical)' : ''} at ${p.head?.slice(0, 12) ?? 'no commit'}: ${p.pages} live page(s), ${p.equal} equal to HEAD.`,
     `Adopt (write the database's page to its file and commit it through the door, ${p.adopt.groups} commit(s) of up to ${CONVERSION_GROUP_MAX}): ${p.adopt.count} (${counts(p.adopt.by)}).`, ...sample(p.adopt.sample),
     `Declared database-only (nothing written, nothing deleted): ${p.declared.count} (${counts(p.declared.by)}).`,

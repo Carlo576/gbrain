@@ -78,7 +78,7 @@ export const GIT_WINS_REASONS = ['git_ahead', 'deleted_by_commit', 'held_deletio
 export type GitWinsReason = typeof GIT_WINS_REASONS[number];
 /** Database content the apply would discard or cannot place, by why: each must be zero before the apply runs. */
 export const DISCARD_CATEGORIES = ['both_moved', 'held_drift_both', 'held_drift_unknown_differs', 'deleted_in_git', 'uncommitted_edit', 'ignored_target', 'unparseable', 'unsafe_path',
-  'segmented_page', 'export_mismatch', 'git_overwrites_database'] as const;
+  'segmented_page', 'export_mismatch', 'git_overwrites_database', 'ignore_status_unknown'] as const;
 export type DiscardCategory = typeof DISCARD_CATEGORIES[number];
 /** A private, alias-private or lineage-private page whose row still records a file: committed at HEAD, or absent from it. */
 export const WITHHOLD_KINDS = ['file_committed', 'file_absent'] as const;
@@ -89,13 +89,15 @@ interface Counted<K extends string> { count: number; by: Record<K, number>; samp
  * Counts behind some discard categories (outside the preview hash). git_overwrites_database: the class the path has on a
  * source that is not strict (with its sub, side or state), then the page's kind (`declared:<class>`, `live`, or
  * `tombstone_or_none`); uncommitted_edit: the working-tree state; unparseable: why the committed file cannot be read;
- * export_mismatch: each field the page's export reads back different (`unparseable:<reason>` when it does not parse).
+ * export_mismatch: each field the page's export reads back different (`unparseable:<reason>` when it does not parse);
+ * ignore_status_unknown: why Git could not say whether the target is ignored (IgnoreUnknownReason).
  */
 export interface DiscardDetail {
   git_overwrites_database: Record<string, Record<string, number>>;
   uncommitted_edit: Record<string, number>;
   unparseable: Record<string, number>;
   export_mismatch: Record<string, number>;
+  ignore_status_unknown: Record<string, number>;
 }
 /** `disk`: sha256 of the working-tree bytes the preview saw (HEAD's or the export's), null when the file was absent. */
 export interface AdoptItem { id: string; source_id: string; slug: string; revision: string | null; path: string; state: AdoptState; disk: string | null }
@@ -136,7 +138,7 @@ export interface GitConversionPlan { preview: GitConversionPreview; context: Man
 
 const counted = <K extends string>(keys: readonly K[]): Counted<K> => ({ count: 0, by: Object.fromEntries(keys.map(key => [key, 0])) as Record<K, number>, sample: [] });
 const bump = (into: Record<string, number>, key: string) => { into[key] = (into[key] ?? 0) + 1; };
-const emptyDiscard = () => ({ ...counted(DISCARD_CATEGORIES), detail: { git_overwrites_database: {}, uncommitted_edit: {}, unparseable: {}, export_mismatch: {} } as DiscardDetail });
+const emptyDiscard = () => ({ ...counted(DISCARD_CATEGORIES), detail: { git_overwrites_database: {}, uncommitted_edit: {}, unparseable: {}, export_mismatch: {}, ignore_status_unknown: {} } as DiscardDetail });
 function tally<K extends string>(into: Counted<K>, key: K, path: string): void {
   into.count++;
   into.by[key] = (into.by[key] ?? 0) + 1;
@@ -250,7 +252,9 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   preview.withhold.groups = Math.ceil(withhold.filter(item => item.kind === 'file_committed').length / CONVERSION_GROUP_MAX);
   preview.remaining = preview.adopt.count + preview.withhold.count + preview.git_wins.count + preview.holds.count + preview.parked_effects.retry + preview.discard.count;
   preview.preview_hash = previewHash({ source: sourceId, incarnation, to: 'git', strict: preview.strict, head: preview.head, states: census.states, declared: census.declared,
-    adopt: adopt.map(item => [item.id, item.revision, item.path, item.state, item.disk]), git_wins: [...accepted].sort(), discard: preview.discard.by,
+    adopt: adopt.map(item => [item.id, item.revision, item.path, item.state, item.disk]), git_wins: [...accepted].sort(),
+    // ignore_status_unknown is bound only when present, so the hash of a plan with no such path is the one earlier releases gave.
+    discard: preview.discard.by.ignore_status_unknown ? preview.discard.by : { ...preview.discard.by, ignore_status_unknown: undefined },
     // Bound only when present, so the hash of a plan with nothing to withhold is the one earlier releases gave.
     withhold: withhold.length ? withhold.map(item => [item.id, item.revision, item.path, item.kind, item.disk]) : undefined,
     holds: holds.map(hold => [hold.path, hold.code, hold.side, hold.observed_at]), parked: parked.map(item => [item.effect, item.action, item.codes]), index: preview.index });
@@ -295,8 +299,9 @@ class ExportChecks {
 async function planAdoption(engine: BrainEngine, sourceId: string, root: string, candidates: Array<{ page: GitGapPage; state: AdoptState }>, exported: ExportChecks,
   preview: GitConversionPreview, adopt: AdoptItem[], discard: (category: DiscardCategory, path: string) => void): Promise<void> {
   if (!candidates.length) return;
-  const ignored = await ignoredPaths(root, candidates.map(({ page }) => page.path!));
-  const unread = candidates.map(({ page }) => page).filter(page => ignored && !ignored.has(page.path!) && !page.segmented && !exported.get(page.id));
+  const status = await ignoredPaths(root, candidates.map(({ page }) => page.path!))
+    ?? { ignored: new Set<string>(), unknown: new Map(candidates.map(({ page }) => [page.path!, 'git_error' as const])) };
+  const unread = candidates.map(({ page }) => page).filter(page => !status.ignored.has(page.path!) && !status.unknown.has(page.path!) && !page.segmented && !exported.get(page.id));
   const withdrawals = unread.length ? await readExportWithdrawals(engine, sourceId) : [];
   for (let start = 0; start < unread.length; start += ADOPTION_BATCH) {
     const batch = unread.slice(start, start + ADOPTION_BATCH);
@@ -308,9 +313,11 @@ async function planAdoption(engine: BrainEngine, sourceId: string, root: string,
   }
   for (const { page, state } of candidates) {
     const path = page.path!;
-    // Fail-closed fallback: an ignored path with no file is already declared git_ignored by the census, and Git commits a
-    // tracked file whatever its ignore rules say, so this fires only when reading the ignore rules fails (ignored is null).
-    if (!ignored || ignored.has(path)) { discard('ignored_target', path); continue; }
+    // A target Git cannot check (beyond a symlink, outside the checkout, a timed-out check) is never written; the census
+    // declares an ignored path with no file git_ignored, so ignored_target is a path whose rules changed since it read them.
+    const unknown = status.unknown.get(path);
+    if (unknown) { discard('ignore_status_unknown', path); bump(preview.discard.detail.ignore_status_unknown, unknown); continue; }
+    if (status.ignored.has(path)) { discard('ignored_target', path); continue; }
     if (page.segmented) { discard('segmented_page', path); continue; }
     const check = exported.get(page.id)!;
     const { readBack } = check;

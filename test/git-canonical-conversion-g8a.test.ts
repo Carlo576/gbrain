@@ -359,6 +359,20 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect(reads).toBeLessThanOrEqual(2 * (Math.ceil(2 * WIDE / 256) + Math.ceil(WIDE / ADOPTION_BATCH)));
   }, { databaseUrl, setup: wideSetup }), 300_000);
 
+  test('#7618: a target whose ignore status Git cannot read is discarded on its own, and every other candidate adopts', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    mkdirSync(join(root, 'real'));
+    symlinkSync('real', join(root, 'link'));
+    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,timeline,frontmatter)
+      SELECT 'default',s,'concept',s,'Only in the database.','',jsonb_build_object('type','concept','title',s)
+      FROM (SELECT CASE WHEN n=150 THEN 'link/beyond' ELSE 'dbonly/p'||lpad(n::text,3,'0') END AS s FROM generate_series(0,$1::int - 1) n) pages`, [WIDE]), TEST_WRITE_ATTRIBUTION));
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview.adopt).toMatchObject({ count: WIDE - 1, by: { undeclared_database_only: WIDE - 1 } });
+    expect(preview.discard).toMatchObject({ count: 1, by: { ignore_status_unknown: 1, ignored_target: 0 }, sample: ['link/beyond.md'], detail: { ignore_status_unknown: { symlink: 1 } } });
+    expect(describeGitPreview(preview)).toContain('ignore_status_unknown symlink 1');
+  }, { databaseUrl, setup }), 300_000);
+
   test('#7618: a hold at a declared page\'s path is judged by the strict verdict, so a page Git would overwrite is a discard', () => managedBrain(async brain => {
     const { engine, root } = brain;
     await heldDeclaredDrift(brain);

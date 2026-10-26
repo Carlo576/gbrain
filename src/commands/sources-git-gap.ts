@@ -185,10 +185,12 @@ async function censusBatch(tx: BrainEngine, batch: Key[], census: GitGapCensus, 
     return { key, path, rel: path ? relative(checkout!.root, path).split(sep).join('/') : null };
   });
   if (checkout) {
-    const ignored = await ignoredPaths(checkout.root, rows.flatMap(row => row.rel === null ? [] : [row.rel]));
-    if (!ignored) throw refuse(`Git could not say which paths the checkout at ${checkout.root} ignores, so the declared classes are unknown.`,
+    // A path whose ignore status Git cannot read (one beyond a symlink) is classified as if not ignored: the conversion plan
+    // discards it as ignore_status_unknown instead of adopting it.
+    const status = await ignoredPaths(checkout.root, rows.flatMap(row => row.rel === null ? [] : [row.rel]));
+    if (!status) throw refuse(`Git could not say which paths the checkout at ${checkout.root} ignores, so the declared classes are unknown.`,
       `Nothing changed. Check that ${checkout.root} is a Git checkout (git -C ${checkout.root} rev-parse HEAD), then rerun gbrain sources git-gap ${batch[0]!.source_id}.`);
-    ctx.policy.ignored = ignored;
+    ctx.policy.ignored = status.ignored;
   }
   const noFile = { undeclared: [] as Key[], declared: [] as Key[] };
   const compare: Array<{ key: Key; path: string; rel: string; blob: TreeBlob; worktree: WorktreeState }> = [];
