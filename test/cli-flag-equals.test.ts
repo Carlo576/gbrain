@@ -528,13 +528,21 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     }
   });
 
-  // Value: protects=free text that only looks like an = flag reaches the handler (capture text, the agent run prompt), while the flag zone still refuses; fails_when=the scan reads quoted text or the prompt as flags, or stops before the flag zone ends; why_new=the short-flag and prompt rows only covered refusals; seam=none; no_claim=agent run's own parse after the gate (argv-level)
+  // Value: protects=free text that only looks like an = flag reaches the handler (capture text, the agent run prompt), while the flag zone and the trailing switches agent run hoists still refuse; fails_when=the scan reads quoted text or the prompt as flags, or skips the flag zone or the hoisted trailing switches; why_new=the short-flag and prompt rows only covered refusals; seam=none; no_claim=agent run's own parse after the gate (argv-level)
   test('free text that only looks like an = flag is not scanned', async () => {
     expect(await argvFor('capture', ['-n=3 is the answer'])).toEqual(['-n=3 is the answer']);
     expect(await argvFor('agent', ['run', 'fix', 'the', '--model=opus', 'bug'])).toEqual(['run', 'fix', 'the', '--model=opus', 'bug']);
     expect(await argvFor('agent', ['run', '--model', 'opus', 'fix', '--tools=x'])).toEqual(['run', '--model', 'opus', 'fix', '--tools=x']);
     expect(await refusalFor('agent', ['run', '--model=opus', 'fix'])).toContain('--model=…');
     expect(await refusalFor('agent', ['run', '--detach', '--tools=x', 'fix'])).toContain('--tools=…');
+    for (const args of [['run', '--detach', 'fix', '--model=opus'], ['run', '--follow', 'summarize', '--tools=bash'], ['run', '--detach', '-n=3'], ['run', '--note', '--tools=x'], ['run', 'fix', '--', '--detach=true'], ['run', '--', '--model=opus', 'fix']]) {
+      expect(await argvFor('agent', args)).toEqual(args);
+    }
+    for (const [args, flag] of [[['run', 'summarize the page', '--detach=true'], '--detach'], [['run', 'fix', '--detach', '--no-follow=1'], '--no-follow'], [['run', 'fix', '--follow=false', '--detach'], '--follow']] as const) {
+      const message = await refusalFor('agent', [...args]);
+      expect(message).toContain(`${flag}=…`);
+      expect(message).toMatch(new RegExp(`${flag} is a switch|write ${flag} on its own`));
+    }
   });
 
   test('the hand-parsed search subcommands refuse an = form without vouching for the flag', async () => {
