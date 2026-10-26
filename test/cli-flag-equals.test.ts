@@ -22,6 +22,13 @@ import { loadCuratedHelp } from '../src/cli/help/render.ts';
 import { parseAccessFlag, parseSurfaceFlag } from '../src/mcp/surface.ts';
 import { parseMovementArgs } from '../src/commands/sources-writer-movement.ts';
 import { parseAddTypeArgs } from '../src/commands/schema-add-type.ts';
+import { parseRepairArgs } from '../src/commands/repair.ts';
+import { parseTakesMutation } from '../src/commands/takes-mutation.ts';
+import { parseReconcileArgs } from '../src/commands/source-reconcile.ts';
+import { parseMigrateEmbeddingsFlags } from '../src/core/embedding-migration-cli.ts';
+import { parseGoogleAttachmentsArgs } from '../src/commands/google-attachments.ts';
+import { parseAppendArgs } from '../src/cli/commands/append.ts';
+import { splitFlagEquals } from '../src/cli/flag-equals.ts';
 
 const PASSTHROUGH = new Set(['call', 'retrieval-upgrade']);
 
@@ -416,7 +423,12 @@ describe('#7619 split rules', () => {
     const READER = [/['"`]--[a-z0-9-]+=/, /(?:startsWith|indexOf|===)\(?\s*`\$\{\w+\}=`/, /startsWith\(\w+ \+ '='\)/];
     const found = [...new Glob('src/**/*.ts').scanSync('.')].filter(p => !p.endsWith('.generated.ts') && READER.some(r => r.test(readFileSync(p, 'utf8'))));
     expect(found.filter(p => !(p in MODULE_OWNERS))).toEqual([]);
-    for (const p of Object.keys(MODULE_OWNERS)) expect(readFileSync(p, 'utf8').length).toBeGreaterThan(0);
+    const EVIDENCE = [...READER, /\.indexOf\('='\)/, /`\$\{\w+\}=`/, /\(\?:=\(\.\*\)\)/, /\(=\|\$\)/, /\bparseListingFlags\(|\bextractDecideEvalFlags\(/];
+    for (const [p, owner] of Object.entries(MODULE_OWNERS)) {
+      const src = readFileSync(p, 'utf8');
+      expect(src.length).toBeGreaterThan(0);
+      if (Array.isArray(owner)) expect(EVIDENCE.some(r => r.test(src)) ? p : `${p}: no = reader evidence`).toBe(p);
+    }
     const owned = new Set(Object.values(MODULE_OWNERS).filter(v => Array.isArray(v)).flat());
     expect([...owned].sort()).toEqual(Object.keys(EQUALS_READERS).sort());
     for (const [key, flags] of Object.entries(EQUALS_READERS)) for (const flag of flags) expect(CLI_FLAG_REGISTRY[key.split(' ')[0]!]).toContain(flag);
@@ -489,10 +501,10 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
   });
 
   test('the hand-parsed search subcommands refuse an = form without vouching for the flag', async () => {
-    for (const [args, flag] of [[['modes', '--mdoe=balanced'], '--mdoe'], [['diagnose', 'q', '--target', 'x', '--source=source-a'], '--source']] as const) {
+    for (const [args, flag] of [[['modes', '--mdoe=balanced'], '--mdoe'], [['diagnose', 'q', '--target', 'x', '--source=source-a'], '--source'], [['stats', '--yes=n'], '--yes'], [['modes', '--dry-run=x'], '--dry-run'], [['stats', '--no-thing=x'], '--no-thing']] as const) {
       const r = await cliOnlyFlagArgs('search', [...args]);
       expect('refusal' in r && r.refusal.message).toContain(`${flag}=…`);
-      expect('refusal' in r && r.refusal.message).not.toContain(`takes ${flag}`);
+      expect('refusal' in r && r.refusal.message).toContain('reads no = form');
       expect('refusal' in r && r.refusal.suggestion).toContain(`gbrain search ${args[0]} --help`);
     }
   });
@@ -544,6 +556,25 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     expect(parseMovementArgs(['source-a', '--json=true'])).toMatchObject({ json: true });
     expect(() => parseAddTypeArgs(['note', '--primitive=entity', '--no-prefix', '--json=true'])).not.toThrow();
     expect(() => parseMovementArgs(['source-a', '--json=false'])).toThrow('--json is a switch');
+  });
+
+  test('own = parsers behind the gate refuse a value on consent and mutation switches', () => {
+    const rows: [string, () => unknown][] = [
+      ['repair --yes=n', () => parseRepairArgs(['file-drift', '--apply', '--yes=n'])],
+      ['repair --apply=false', () => parseRepairArgs(['file-drift', '--apply=false'])],
+      ['takes --force=false', () => parseTakesMutation(['add', 'people/alice-example', '--claim', 'x', '--force=false'])],
+      ['reconcile --preview=false', () => parseReconcileArgs(['notes', '--preview=false'])],
+      ['retrieval-upgrade --yes=true', () => parseMigrateEmbeddingsFlags(['--yes=true'], { route: 'retrieval-upgrade' })],
+      ['retrieval-upgrade --dry-run=false', () => parseMigrateEmbeddingsFlags(['--dry-run=false'], { route: 'retrieval-upgrade' })],
+      ['google attachments --yes=n', () => parseGoogleAttachmentsArgs(['backfill', '--source', 'default', '--yes=n'])],
+      ['append --json=false', () => parseAppendArgs(['notes/a', '--json=false'])],
+    ];
+    for (const [label, run] of rows) expect(run, label).toThrow(/value|unknown flag/);
+  });
+
+  test('a command with no registry row never echoes an = value', async () => {
+    const r = await splitFlagEquals('unregistered-example', ['--token=AbcSecretValue123']);
+    expect(JSON.stringify(r)).not.toContain('AbcSecretValue123');
   });
 
   test('OWN_EQUALS_PARSERS and the = option parsers match in both directions', () => {

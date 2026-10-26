@@ -229,6 +229,7 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
   const readers = [...EQUALS_READERS[command] ?? [], ...EQUALS_READERS[`${command} ${args[0]}`] ?? []];
   let types: Map<string, string> | undefined;
   const out: string[] = [];
+  const where = args[0] && !args[0].startsWith('-') ? `gbrain ${command} ${args[0]}` : `gbrain ${command}`;
   let pastDashDash = false;
   for (let i = 0; i < args.length; i++) {
     const token = args[i]!;
@@ -248,14 +249,14 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
     types ??= new Map((await loadCuratedHelp(command))?.flags.map(f => [f.name, f.type]));
     const own = types.get(flag) ?? (command === 'sync' ? (SYNC_FLAGS as Record<string, { arity: string }>)[flag]?.arity : undefined);
     const isSwitch = own !== undefined ? own === 'boolean' : flag.startsWith('--no-') || COMMAND_SWITCHES[command]?.includes(flag) || (await knownSwitches()).has(flag);
-    const refusal = isSwitch
+    const refusal = !legal
+      ? [`${where} reads no = form`, `Check the flag in ${where} --help: write a switch on its own (a value never turns it off), or a value as the next argument.`]
+      : isSwitch
       ? [`${flag} is a switch and takes no value`, `Write ${flag} on its own, or leave it out.`]
       : value === '' || /^-[-A-Za-z]/.test(value)
         ? [`the value is empty or looks like a flag`, `Write ${flag} <value> with the value as the next argument.`]
         : own === undefined && /^(true|false|yes|no|y|n|on|off|0|1)$/i.test(value)
           ? [`write ${flag} on its own if it is a switch, or with its value as the next argument`, `If ${flag} is a switch, write it on its own to turn it on, or leave it out to turn it off: a value never turns it off. If it takes a value, put the value in the next argument.`]
-          : !legal
-          ? [`gbrain ${command} ${args[0]} reads no = form`, `Check the flag in gbrain ${command} ${args[0]} --help, then write its value as the next argument.`]
           : own === undefined
           ? [`this command takes ${flag} <value> as two arguments`, `Write ${flag} <value>, or ${flag} on its own if it is a switch.`]
           : null;
