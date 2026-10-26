@@ -490,7 +490,9 @@ export async function readSegmentDerivations(exec: LegacyUnscopedRead, pageId: n
  * Insert or replace rows keyed (page, kind, occurrence), in statements bounded like manifest rows. A replaced row
  * keeps its created_at and moves updated_at. Outputs and receipts travel inside the batch's JSON text, never as a
  * `::jsonb` bind of a stringified value. A row a fact purge's sweep refuses (it holds the purged claim; page-body/schema.ts)
- * is not stored, and the call throws DerivationWriteRefused after storing the others.
+ * is not stored, and the call throws DerivationWriteRefused after storing the others. A writer that cannot read the sweep
+ * records but whose row RLS accepts meets the AFTER ROW check instead: it raises P0001 derivation_purge_pending and that
+ * batch's statement stores nothing.
  */
 export async function upsertSegmentDerivations(exec: SqlExecutor, rows: readonly SegmentDerivationInput[]): Promise<void> {
   const batches = jsonRowBatches(rows, row => ({

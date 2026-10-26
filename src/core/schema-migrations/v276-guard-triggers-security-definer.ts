@@ -78,8 +78,8 @@ export async function hardenGuards(engine: BrainEngine, label: string): Promise<
       WHERE n.nspname = 'public' AND p.proconfig && $1::text[] ORDER BY 1`, [[...LEGACY_SEARCH_PATH_SETTINGS]]);
   skipped.push(...unhardened.map(r => r.sig));
   if (skipped.length > 0) {
-    process.stderr.write(`  ${label}: ${skipped.length} guard function(s) or trigger(s) left as they were (${skipped.join(', ')}): `
-      + 'the role must own them. Run gbrain doctor for the fix.\n');
+    process.stderr.write(`  ${label}: ${skipped.length} function(s) or trigger(s) left as they were (${skipped.join(', ')}): `
+      + 'the role must own them, and a guard its trigger\'s table. Run gbrain doctor for the fix.\n');
   }
   return skipped;
 }

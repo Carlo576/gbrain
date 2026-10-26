@@ -46,7 +46,7 @@ export async function guardFunctionProblems(engine: BrainEngine): Promise<{ prob
     }
     if (g.reads_under_rls.length > 0) {
       problems.push(`${g.fn}()'s owner ${g.owner} neither bypasses RLS nor owns ${g.reads_under_rls.join(', ')} unforced, so the guard reads them filtered`);
-      fix.push(`-- give ${g.fn}() an owner that bypasses RLS (ALTER FUNCTION ${g.fn}() OWNER TO <owner of the tables>), or ALTER ROLE ${g.owner} BYPASSRLS;`);
+      fix.push(`/* give ${g.fn}() an owner that bypasses RLS (ALTER FUNCTION ${g.fn}() OWNER TO <owner of the tables>), or ALTER ROLE ${g.owner} BYPASSRLS; */`);
     }
   }
   const triggers = await engine.executeRaw<{ trigger: string; before: boolean }>(

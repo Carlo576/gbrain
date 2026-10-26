@@ -5836,7 +5836,7 @@ segmented chunk (`test/e2e/segmented-switch-off-write-role.test.ts`). With the
 policies above it creates segmented pages and sees only its sources' rows
 (`test/e2e/segmented-rls-scope.test.ts`).
 
-**Purge and withdrawal guards.** The seven triggers that refuse purged content and
+**Purge and withdrawal guards.** The seven guard functions that refuse purged content and
 keep withdrawn facts withdrawn read their ledgers (`fact_purges`, `fact_withdrawals`,
 `take_purges`, `page_purges` and the two derivation purge tables) as the role that owns
 them, which ran the migrations: they are `SECURITY DEFINER` with
