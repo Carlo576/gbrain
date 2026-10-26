@@ -1121,6 +1121,13 @@
             "status": "ok"
           },
           {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "Skipped (PGLite: one role, so every guard reads every row)",
+            "name": "guard_functions",
+            "status": "ok"
+          },
+          {
             "category": "meta",
             "elapsed_ms": "<volatile>",
             "message": "Version <latest> (latest: <latest>)",
@@ -5853,6 +5860,13 @@
             "elapsed_ms": "<volatile>",
             "message": "Skipped (PGLite — no PostgREST exposure, RLS not applicable)",
             "name": "rls",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "Skipped (PGLite: one role, so every guard reads every row)",
+            "name": "guard_functions",
             "status": "ok"
           },
           {

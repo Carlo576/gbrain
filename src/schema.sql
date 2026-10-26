@@ -2257,7 +2257,7 @@ CREATE TABLE IF NOT EXISTS page_segment_derivation_purge_pages (
   page_id    INTEGER NOT NULL,
   PRIMARY KEY (request_id, page_id)
 );
-CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SET search_path = pg_catalog, public AS $func$
+CREATE OR REPLACE FUNCTION gbrain_mark_derivation_scope_entry() RETURNS trigger SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $func$
 DECLARE
   src TEXT;
   page INTEGER;
@@ -2275,6 +2275,11 @@ BEGIN
   RETURN NULL;
 END
 $func$ LANGUAGE plpgsql;
+REVOKE EXECUTE ON FUNCTION gbrain_mark_derivation_scope_entry() FROM PUBLIC;
+DO $revoke$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE EXECUTE ON FUNCTION gbrain_mark_derivation_scope_entry() FROM anon; END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE EXECUTE ON FUNCTION gbrain_mark_derivation_scope_entry() FROM authenticated; END IF;
+END $revoke$;
 DROP TRIGGER IF EXISTS page_body_manifest_derivation_scope_retire ON page_body_manifest;
 CREATE TRIGGER page_body_manifest_derivation_scope_retire AFTER UPDATE OF gen_to ON page_body_manifest
   FOR EACH ROW WHEN (OLD.gen_to IS NULL AND NEW.gen_to IS NOT NULL AND OLD.staging_id IS NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
@@ -2284,7 +2289,9 @@ CREATE TRIGGER page_body_manifest_derivation_scope_delete AFTER DELETE ON page_b
 DROP TRIGGER IF EXISTS pages_derivation_scope_delete ON pages;
 CREATE TRIGGER pages_derivation_scope_delete AFTER UPDATE OF deleted_at ON pages
   FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
-CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS $func$
+CREATE OR REPLACE FUNCTION gbrain_caller_sees_page(page INTEGER) RETURNS boolean LANGUAGE sql STABLE SECURITY INVOKER
+  SET search_path = pg_catalog, public, pg_temp AS $func$ SELECT EXISTS (SELECT 1 FROM pages WHERE id = page) $func$;
+CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $func$
 BEGIN
   IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
     WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
@@ -2299,9 +2306,14 @@ BEGIN
   RETURN NEW;
 END
 $func$ LANGUAGE plpgsql;
+REVOKE EXECUTE ON FUNCTION gbrain_refuse_purging_derivation() FROM PUBLIC;
+DO $revoke$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE EXECUTE ON FUNCTION gbrain_refuse_purging_derivation() FROM anon; END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE EXECUTE ON FUNCTION gbrain_refuse_purging_derivation() FROM authenticated; END IF;
+END $revoke$;
 DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
 CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
-  FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
+  FOR EACH ROW WHEN (gbrain_caller_sees_page(NEW.page_id)) EXECUTE FUNCTION gbrain_refuse_purging_derivation();
 -- END GENERATED from src/core/page-body/schema.ts (PAGE_SEGMENT_DERIVATIONS_SQL)
 
 -- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_BODY_RLS_SQL). Edit that file, then run: bun run build:schema
@@ -3603,3 +3615,19 @@ CREATE TABLE IF NOT EXISTS sync_notifier_sources (
   owner_seen_at TIMESTAMPTZ,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Last statement: pg_temp ends every gbrain function's pinned search_path (#7632), after any CREATE OR REPLACE above reset it.
+-- BEGIN GENERATED from src/core/guard-definer.ts (FUNCTION_SEARCH_PATH_HARDENING_SQL). Edit that file, then run: bun run build:schema
+DO $harden$
+DECLARE f RECORD;
+BEGIN
+  FOR f IN SELECT p.oid::regprocedure AS sig, substr(c.setting, 13) AS path
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL unnest(p.proconfig) AS c(setting)
+    WHERE n.nspname = 'public' AND c.setting IN ('search_path=pg_catalog, public', 'search_path=pg_catalog')
+      AND pg_has_role(current_user, p.proowner, 'USAGE')
+    ORDER BY 1
+  LOOP
+    EXECUTE format('ALTER FUNCTION %s SET search_path = %s, pg_temp', f.sig, f.path);
+  END LOOP;
+END $harden$;
+-- END GENERATED from src/core/guard-definer.ts (FUNCTION_SEARCH_PATH_HARDENING_SQL)

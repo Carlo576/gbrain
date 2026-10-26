@@ -260,9 +260,20 @@ both with the trigger inert, so a table that relies on either one fails it.
 
 ## Function search_path
 
-Every plpgsql function gbrain installs pins `search_path = pg_catalog, public`,
+Every plpgsql function gbrain installs pins `search_path = pg_catalog, public, pg_temp`,
 so a same-named object in another schema can never change what the function
-reads or writes. The three fact-fingerprint functions
+reads or writes. `pg_temp` is named last because PostgreSQL otherwise searches the
+caller's temporary schema first for tables and views: a session could shadow a table
+a function reads with a temporary one of the same name. On an older brain, migration
+v276 appends `pg_temp` to every gbrain function it owns with `ALTER FUNCTION` (no body
+changes), and `gbrain doctor` (`guard_functions`) names any function it could not change.
+
+The seven purge and withdrawal guards are also `SECURITY DEFINER`, so they read the purge
+and withdrawal ledgers as their owner whatever the writing role's policies are. EXECUTE on
+them is revoked from PUBLIC, `anon` and `authenticated`, and the guards that raise fire
+after RLS accepts the row, so a role RLS refuses gets the same refusal whether or not the
+content was purged. [docs/ENGINES.md](../ENGINES.md) ("Purge and withdrawal guards") has
+what changes for a scoped write role. The three fact-fingerprint functions
 (`gbrain_fact_fingerprint`, `gbrain_fact_fingerprint_v1`,
 `gbrain_fact_normalize`) are SQL functions that an index expression uses, so
 they call `pg_catalog.`-qualified built-ins instead of pinning a setting (a

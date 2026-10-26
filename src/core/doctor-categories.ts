@@ -398,6 +398,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'grant_new_ops_available',
   'reranker_health',
   'rls',
+  // #7632: the purge and withdrawal guards read their ledgers as their owner.
+  'guard_functions',
   'rls_event_trigger',
   'search_mode',
   'decide_health',

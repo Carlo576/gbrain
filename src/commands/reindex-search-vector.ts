@@ -48,6 +48,7 @@
 
 import type { BrainEngine } from '../core/engine.ts';
 import { getFtsLanguage, FTS_REINDEX_MARKER_KEY, pageSearchVectorTriggerFnSql, chunkSearchVectorTriggerFnSql } from '../core/fts-language.ts';
+import { FUNCTION_SEARCH_PATH_HARDENING_SQL } from '../core/guard-definer.ts';
 import { checkpointKey } from '../core/backfill-base.ts';
 import { ensureFactsFtsIndex } from '../core/facts/fts-index.ts';
 import { consentGate } from '../core/consent-cli.ts';
@@ -181,6 +182,8 @@ export async function runReindexSearchVector(
     throw err;
   }
   await engine.executeRaw(recreateChunksFn);
+  // CREATE OR REPLACE reset both functions' search_path; pg_temp goes back last (#7632, guard-definer.ts).
+  await engine.executeRaw(FUNCTION_SEARCH_PATH_HARDENING_SQL);
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
 

@@ -1117,6 +1117,13 @@
             "status": "ok"
           },
           {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "The 7 purge and withdrawal guards read their ledgers as their owner; every gbrain function pins pg_temp last",
+            "name": "guard_functions",
+            "status": "ok"
+          },
+          {
             "category": "meta",
             "elapsed_ms": "<volatile>",
             "message": "Version <latest> (latest: <latest>)",
@@ -5850,6 +5857,13 @@
             "elapsed_ms": "<volatile>",
             "message": "RLS enabled on 161/161 public tables",
             "name": "rls",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "The 7 purge and withdrawal guards read their ledgers as their owner; every gbrain function pins pg_temp last",
+            "name": "guard_functions",
             "status": "ok"
           },
           {

@@ -358,6 +358,10 @@
         "name": "rls"
       },
       {
+        "category": "ops",
+        "name": "guard_functions"
+      },
+      {
         "category": "meta",
         "name": "schema_version"
       },

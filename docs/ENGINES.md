@@ -390,6 +390,26 @@ segmented chunk (`test/e2e/segmented-switch-off-write-role.test.ts`). With the
 policies above it creates segmented pages and sees only its sources' rows
 (`test/e2e/segmented-rls-scope.test.ts`).
 
+**Purge and withdrawal guards.** The seven triggers that refuse purged content and
+keep withdrawn facts withdrawn read their ledgers (`fact_purges`, `fact_withdrawals`,
+`take_purges`, `page_purges` and the two derivation purge tables) as the role that owns
+them, which ran the migrations: they are `SECURITY DEFINER` with
+`search_path = pg_catalog, public, pg_temp` (migration v276, #7632). Before, they read
+under the writing role's RLS, so a write role with no policy on a ledger saw no purge
+and no withdrawal and stored the claim again. Nothing changes for an owner or a role
+that bypasses RLS, and `anon` / `authenticated` gain nothing: EXECUTE on the guards is
+revoked from them and from PUBLIC, the three raising guards fire `AFTER ROW` (after RLS
+has accepted the row), and the derivation guard fires only when the writing role can
+see the page (`gbrain_caller_sees_page`). A scoped write role is now refused where it
+was let through, and learns whether content it supplies itself is purged or withdrawn
+in a source it can already write; the guards also perform two fixed side effects for
+it as the owner (expiring the facts its own statement just inserted when they are
+withdrawn, and adding its page to a running derivation purge's page list). Every other
+gbrain function that pins a search_path now ends it with `pg_temp`. Where the migrating
+role does not own a guard or its table, the migration names it on stderr and leaves it;
+`gbrain doctor` (`guard_functions`) prints the SQL to run as the owner
+(`test/e2e/guard-definer-postgres.test.ts`).
+
 **In engine-sql.** A read in a migrated domain takes a `ScopedRead` when it
 runs through this helper and a `LegacyUnscopedRead` when it runs on the pool
 (`src/core/engine-sql/brands.ts`); the engine obtains the branded executor, so
