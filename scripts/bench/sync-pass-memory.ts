@@ -31,6 +31,8 @@ const command = args[0];
 const adminUrl = flag('url', 'postgresql://postgres:postgres@127.0.0.1:5434/postgres')!;
 const dir = flag('dir')!;
 const PAGES = Number(flag('pages', '20000')), AHEAD = Number(flag('ahead', '5000')), COMMITS = Number(flag('commits', '200')), DBONLY = Number(flag('dbonly', '0'));
+const JSONS = Number(flag('json', '0')), STRATEGY = flag('strategy');
+const MEDIA = Number(flag('media', '0')), MEDIA_MB = Number(flag('media-mb', '6')), IGNORED = Number(flag('ignored', '0'));
 const KB = Number(flag('kb', '1')), LEGACY = Number(flag('legacy', '0')), FIXTURE = args.includes('--fixture'), EXTRACT = args.includes('--extract');
 // --fixture: the production-soak fixture's pages (links, facts fences, timelines, private pages, long meetings and chats), its default source.
 const soak = { ...DEFAULTS, pages: Math.ceil(PAGES / 0.52) + 1, hugeMb: 1, oversized: 0 };
@@ -77,6 +79,44 @@ async function seed(): Promise<void> {
     git('add', '-A'); git('commit', '-qm', 'batch ' + c);
   }
   git('gc', '-q');
+  // --media N: a media corpus beside the pages, N tracked binaries of 1..--media-mb MB (random bytes), every fourth with a
+  // Markdown sidecar page that embeds it, and an ignored media directory of --ignored files that is never tracked.
+  if (MEDIA) {
+    const { randomBytes } = await import('node:crypto');
+    git('config', 'core.compression', '0'); git('config', 'core.bigFileThreshold', '1m');
+    writeFileSync(join(root, '.gitignore'), 'raw-media/\n');
+    const exts = ['jpg', 'png', 'pdf', 'mp3', 'mp4', 'm4a'];
+    for (let i = 0; i < MEDIA; i++) {
+      const name = 'media/m' + String(i % 20).padStart(2, '0') + '/asset' + String(i).padStart(5, '0') + '.' + exts[i % exts.length];
+      mkdirSync(dirname(join(root, name)), { recursive: true });
+      writeFileSync(join(root, name), randomBytes((1 + (i * 7919) % MEDIA_MB) * 1024 * 1024 - (i % 997)));
+      if (i % 4 === 0) write(name.replace(/\.[a-z0-9]+$/, '.md'), '---\ntype: note\ntitle: Asset ' + i + '\n---\n\n# Asset ' + i + '\n\n![asset ' + i + '](' + name.slice(name.lastIndexOf('/') + 1) + ')\n');
+      if (i % 500 === 499) { git('add', '-A'); git('commit', '-qm', 'media ' + i); }
+    }
+    for (let i = 0; i < IGNORED; i++) { mkdirSync(join(root, 'raw-media'), { recursive: true }); writeFileSync(join(root, 'raw-media', 'clip' + i + '.mp4'), randomBytes(4 * 1024 * 1024)); }
+    git('add', '-A'); if (git('status', '--porcelain')) git('commit', '-qm', 'media');
+  }
+  // --json N: structured files beside the pages, N nested JSON documents of 5..15 KB, one 1.7 MB JSONL log and a few
+  // .mjs, .py, .txt, .log and .html files, as a brain that keeps tool output and scripts in its repository does.
+  if (JSONS) {
+    const value = (i: number, depth: number): unknown => depth > 3 ? WORDS[i % WORDS.length] + ' ' + i
+      : Object.fromEntries(Array.from({ length: 3 + (i % 4) }, (_, k) => [WORDS[(i + k) % WORDS.length] + k,
+        k % 3 === 0 ? Array.from({ length: 2 + ((i + k) % 3) }, (_, j) => value(i * 7 + j, depth + 1)) : k % 3 === 1 ? value(i * 3 + k, depth + 1) : (i * 31 + k) % 1000]));
+    for (let i = 0; i < JSONS; i++) {
+      const doc: Record<string, unknown> = { id: 'rec-' + i, created: '2026-01-' + String(1 + (i % 28)).padStart(2, '0'), items: [] as unknown[] };
+      const target = 5 * 1024 + ((i * 7919) % (10 * 1024));
+      while (JSON.stringify(doc, null, 2).length < target) (doc.items as unknown[]).push(value(i * 13 + (doc.items as unknown[]).length, 0));
+      write('data/d' + String(i % 40).padStart(2, '0') + '/rec' + String(i).padStart(5, '0') + '.json', JSON.stringify(doc, null, 2) + '\n');
+      if (i % 1000 === 999) { git('add', '-A'); git('commit', '-qm', 'data ' + i); }
+    }
+    write('logs/events.jsonl', Array.from({ length: 9000 }, (_, i) => JSON.stringify({ at: i, kind: WORDS[i % WORDS.length], detail: body(i).slice(0, 150) })).join('\n') + '\n');
+    for (let i = 0; i < 6; i++) {
+      write('scripts/tool' + i + '.mjs', 'export function run' + i + '(input) {\n  const out = [];\n  for (const item of input) out.push(item * ' + i + ');\n  return out;\n}\n\nexport const name = \'tool' + i + '\';\n');
+      write('scripts/job' + i + '.py', 'def job' + i + '(rows):\n    return [row for row in rows if row]\n\n\nclass Runner' + i + ':\n    def go(self):\n        return job' + i + '([1, 2])\n');
+      write('notes-raw/r' + i + '.txt', body(i)); write('logs/run' + i + '.log', body(i + 1)); write('exports/page' + i + '.html', '<html><body><p>' + body(i) + '</p></body></html>\n');
+    }
+    git('add', '-A'); if (git('status', '--porcelain')) git('commit', '-qm', 'data');
+  }
   const engine = await open(SEED_DB);
   try {
     await engine.initSchema();
@@ -86,6 +126,7 @@ async function seed(): Promise<void> {
     const { withCoordinatedWrite } = await import('../../src/core/persistence/context.ts');
     const { disposePersistenceConsumer } = await import('../../src/core/persistence/service.ts');
     await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [root]);
+    if (STRATEGY) await engine.executeRaw("UPDATE sources SET config=COALESCE(config,'{}'::jsonb) || jsonb_build_object('strategy',$1::text) WHERE id='default'", [STRATEGY]);
     await claimWorktree(engine, 'default', root);
     await activateSharedSkillPersistence(engine, { confirmQuiesced: true });
     const started = performance.now();
@@ -103,7 +144,7 @@ async function seed(): Promise<void> {
     }, { requestId: null, principal: { kind: 'application', id: 'probe:fixture' } }));
     await disposePersistenceConsumer(engine);
   } finally { await engine.disconnect(); }
-  writeFileSync(join(dir, 'seed.json'), JSON.stringify({ pages: PAGES, ahead: AHEAD, commits: COMMITS, dbonly: DBONLY, kb: KB, legacy: LEGACY, head: git('rev-parse', 'HEAD') }));
+  writeFileSync(join(dir, 'seed.json'), JSON.stringify({ pages: PAGES, ahead: AHEAD, commits: COMMITS, dbonly: DBONLY, kb: KB, legacy: LEGACY, media: MEDIA, media_mb: MEDIA_MB, ignored: IGNORED, json: JSONS, strategy: STRATEGY ?? null, head: git('rev-parse', 'HEAD') }));
   await admin.end();
 }
 
@@ -123,7 +164,7 @@ async function run(): Promise<void> {
   const sample = () => {
     const m = process.memoryUsage();
     const types = ticks++ % 10 === 0 ? Object.fromEntries(Object.entries(heapStats().objectTypeCounts).sort((a, b) => b[1] - a[1]).slice(0, 15)) : undefined;
-    appendFileSync(out, JSON.stringify({ t: Math.round((performance.now() - t0) / 100) / 10, phase, scanned, total, rss_mb: Math.round(m.rss / 1048576), heap_mb: Math.round(m.heapUsed / 1048576), ...(types ? { types } : {}) }) + '\n');
+    appendFileSync(out, JSON.stringify({ t: Math.round((performance.now() - t0) / 100) / 10, phase, scanned, total, rss_mb: Math.round(m.rss / 1048576), heap_mb: Math.round(m.heapUsed / 1048576), external_mb: Math.round(m.external / 1048576), array_buffers_mb: Math.round(m.arrayBuffers / 1048576), ...(types ? { types } : {}) }) + '\n');
   };
   const timer = setInterval(sample, 1000);
   const engine = await open(RUN_DB);
