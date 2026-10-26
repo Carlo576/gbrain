@@ -6,7 +6,7 @@ import { resolveSchemaLockTimeoutMs, schemaLockBlockedError } from '../postgres-
 import {
   AFTER_ROW_PURGE_TRIGGERS, DEFINER_GUARDS, FUNCTION_SEARCH_PATH_HARDENING_SQL, LEGACY_SEARCH_PATH_SETTINGS, definerGuardSql,
 } from '../guard-definer.ts';
-import { DERIVATION_GUARD_GATE_SQL, DERIVATION_GUARD_TRIGGER_SQL } from '../page-body/schema.ts';
+import { DERIVATION_STORED_GUARD_SQL } from '../page-body/schema.ts';
 
 // Applied by src/core/migrate.ts on the next initSchema(); see docs/ENGINES.md
 // ("Canonical schema sources") for when schema.sql or a TS fragment also changes.
@@ -15,15 +15,15 @@ import { DERIVATION_GUARD_GATE_SQL, DERIVATION_GUARD_TRIGGER_SQL } from '../page
 // a policy on a ledger no longer slips a purged claim, page, take or derivation, or a withdrawn fact, past them. The
 // rest of the change keeps that from widening anyone's reach (src/core/guard-definer.ts): search_path pinned with
 // pg_temp last on every gbrain function, EXECUTE revoked from PUBLIC/anon/authenticated, the raising guards moved to
-// AFTER ROW and the BEFORE derivation guard gated on the writer seeing the page, so a definer never answers a role
-// RLS refuses. ALTER and trigger DDL need the owner: a function or table the role does not own is skipped and named
+// AFTER ROW, and the derivation guard split into its BEFORE ROW invoker drop (unchanged) and an AFTER ROW definer that
+// raises for a row stored anyway, so a definer never answers a role RLS refuses. ALTER and trigger DDL need the owner: a function or table the role does not own is skipped and named
 // on stderr, as v275 does, and doctor's guard_functions check keeps failing with the fix until it is done. Each
 // function and each table is its own short transaction with the migration's statement and lock timeouts.
 const TRIGGERS: ReadonlyArray<{ table: string; trigger: string; fn: string; sql: string }> = [
   ...AFTER_ROW_PURGE_TRIGGERS,
   {
-    table: 'page_segment_derivations', trigger: 'page_segment_derivations_refuse_purging', fn: 'gbrain_refuse_purging_derivation',
-    sql: `${DERIVATION_GUARD_GATE_SQL}\n${DERIVATION_GUARD_TRIGGER_SQL}`,
+    table: 'page_segment_derivations', trigger: 'page_segment_derivations_refuse_stored_purging', fn: 'gbrain_refuse_stored_purging_derivation',
+    sql: DERIVATION_STORED_GUARD_SQL,
   },
 ];
 
@@ -45,8 +45,8 @@ async function inShortTransaction(engine: BrainEngine, step: string, sql: string
 
 /**
  * Moves the guards' triggers, then makes the purge and withdrawal guards definers, and appends pg_temp to every gbrain
- * function's search_path, for what the role owns. A raising guard whose trigger still fires BEFORE ROW ungated stays
- * an invoker, so a definer never answers before RLS. Names on stderr what it could not change and returns those names.
+ * function's search_path, for what the role owns. A raising guard whose trigger still fires BEFORE ROW stays an
+ * invoker, so a definer never answers before RLS; a guard whose table step was skipped is absent and named. Names on stderr what it could not change and returns those names.
  */
 export async function hardenGuards(engine: BrainEngine, label: string): Promise<string[]> {
   const skipped: string[] = [];
@@ -62,12 +62,11 @@ export async function hardenGuards(engine: BrainEngine, label: string): Promise<
   }
   const exposed = new Set((await engine.executeRaw<{ fn: string }>(
     `SELECT DISTINCT p.proname AS fn FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
-      WHERE NOT t.tgisinternal AND p.proname = ANY($1::text[]) AND (t.tgtype & 2) <> 0
-        AND pg_get_triggerdef(t.oid) NOT LIKE '%gbrain_caller_sees_page(%'`,
+      WHERE NOT t.tgisinternal AND p.proname = ANY($1::text[]) AND (t.tgtype & 2) <> 0`,
     [TRIGGERS.map(t => t.fn)])).map(r => r.fn));
   const functions = await engine.executeRaw<{ fn: string; owned: boolean | null }>(
     `SELECT f.fn, pg_has_role(current_user, p.proowner, 'USAGE') AS owned
-       FROM unnest($1::text[]) AS f(fn) JOIN pg_proc p ON p.oid = to_regprocedure(f.fn || '()') ORDER BY f.fn`,
+       FROM unnest($1::text[]) AS f(fn) LEFT JOIN pg_proc p ON p.oid = to_regprocedure(f.fn || '()') ORDER BY f.fn`,
     [DEFINER_GUARDS.map(g => g.fn)]);
   for (const { fn, owned } of functions) {
     if (owned && !exposed.has(fn)) await inShortTransaction(engine, `${label} on ${fn}()`, definerGuardSql(fn));

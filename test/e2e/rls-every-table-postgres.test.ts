@@ -122,6 +122,7 @@ describeE2E('RLS on every public table (Postgres, no auto-RLS event trigger)', (
         DROP TRIGGER IF EXISTS pages_derivation_scope_delete ON pages;
         DROP FUNCTION IF EXISTS gbrain_mark_derivation_scope_entry();
         DROP FUNCTION IF EXISTS gbrain_refuse_purging_derivation();
+        DROP FUNCTION IF EXISTS gbrain_refuse_stored_purging_derivation();
         ALTER TABLE facts DROP CONSTRAINT IF EXISTS facts_source_window_chk, DROP COLUMN IF EXISTS source_window;
         ALTER TABLE pages DROP COLUMN IF EXISTS withheld_source_path;`);
       await conn.unsafe(`UPDATE config SET value = '272' WHERE key = 'version'`);

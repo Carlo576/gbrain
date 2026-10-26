@@ -17,14 +17,18 @@
  *   trigger fires whatever the EXECUTE grants are.
  * - A definer never answers before RLS has accepted the row. BEFORE ROW triggers run before RLS WITH CHECK, so a
  *   raising definer BEFORE guard would tell a role with a bare INSERT grant (Supabase anon) purged content from any
- *   other content. The raising guards fire AFTER ROW; the derivation guard must stay BEFORE (its callers count the
- *   rows it drops), so its trigger runs only WHEN the writing role can see the page (gbrain_caller_sees_page, an
- *   invoker helper). gbrain_preserve_fact_withdrawal stays BEFORE: it never raises, and its stamp is visible only on
- *   a row RLS accepted.
+ *   other content. The raising guards fire AFTER ROW. The derivation guard is split: its BEFORE ROW half
+ *   (gbrain_refuse_purging_derivation) stays SECURITY INVOKER and silently drops a row the writer can see a sweep
+ *   would delete, as before, so its callers still count the rows it drops; its AFTER ROW half
+ *   (gbrain_refuse_stored_purging_derivation) is the definer and raises derivation_purge_pending for such a row that
+ *   was stored anyway, which only a writer RLS accepted and that has no policy on the sweep records reaches.
+ *   gbrain_preserve_fact_withdrawal stays BEFORE: it never raises, and its stamp is visible only on a row RLS accepted.
  *
  * What a writer gains: the two fixed side effects the definer bodies perform as the owner (expiring the facts its own
  * statement just inserted, adding its page to a running derivation purge's page list) and knowing whether content it
- * supplies is purged or withdrawn in a source it can already write.
+ * supplies is purged or withdrawn in a source it can already write. anon and authenticated gain nothing: RLS refuses
+ * their row before any definer reads a ledger. A writer RLS accepts but with no policy on a ledger is refused where it
+ * used to fail open, with an error (derivation_purge_pending for a derivation) instead of a silent drop.
  */
 
 /** The seven guards and the tables each reads, besides the one its trigger is on. */
@@ -34,7 +38,7 @@ export const DEFINER_GUARDS = [
   { fn: 'gbrain_refuse_purged_fact', reads: ['fact_purges', 'sources'] },
   { fn: 'gbrain_refuse_purged_page', reads: ['page_purges'] },
   { fn: 'gbrain_refuse_purged_take', reads: ['take_purges', 'pages'] },
-  { fn: 'gbrain_refuse_purging_derivation', reads: ['page_segment_derivation_purges', 'pages', 'page_body_manifest'] },
+  { fn: 'gbrain_refuse_stored_purging_derivation', reads: ['page_segment_derivation_purges', 'pages', 'page_body_manifest'] },
   { fn: 'gbrain_mark_derivation_scope_entry', reads: ['page_segment_derivation_purges', 'page_segment_derivation_purge_pages'] },
 ] as const;
 

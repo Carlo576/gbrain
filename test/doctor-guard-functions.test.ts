@@ -24,16 +24,14 @@ describe('guard_functions doctor check (#7632)', () => {
       GRANT EXECUTE ON FUNCTION gbrain_refuse_purged_take() TO PUBLIC;
       DROP TRIGGER pages_refuse_purged ON pages;
       CREATE TRIGGER pages_refuse_purged BEFORE INSERT OR UPDATE ON pages FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purged_page();
-      DROP TRIGGER page_segment_derivations_refuse_purging ON page_segment_derivations;
-      CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
-        FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
+      DROP TRIGGER page_segment_derivations_refuse_stored_purging ON page_segment_derivations;
       ALTER FUNCTION gbrain_try_jsonb(text) SET search_path = pg_catalog, public;`);
     const { problems, fix } = await guardFunctionProblems(engine);
     expect(problems).toEqual([
       'gbrain_refuse_purged_page() is not SECURITY DEFINER with search_path pg_catalog, public, pg_temp',
       'gbrain_refuse_purged_take() is executable by PUBLIC',
       'pages_refuse_purged on pages still fires BEFORE ROW',
-      'page_segment_derivations_refuse_purging has no gbrain_caller_sees_page gate',
+      'page_segment_derivations has no page_segment_derivations_refuse_stored_purging AFTER ROW check',
       '2 function(s) pin search_path without pg_temp last (gbrain_refuse_purged_page(), gbrain_try_jsonb(text))',
     ]);
     await engine.runMigration(0, fix.join('\n'));

@@ -398,11 +398,14 @@ them, which ran the migrations: they are `SECURITY DEFINER` with
 under the writing role's RLS, so a write role with no policy on a ledger saw no purge
 and no withdrawal and stored the claim again. Nothing changes for an owner or a role
 that bypasses RLS, and `anon` / `authenticated` gain nothing: EXECUTE on the guards is
-revoked from them and from PUBLIC, the three raising guards fire `AFTER ROW` (after RLS
-has accepted the row), and the derivation guard fires only when the writing role can
-see the page (`gbrain_caller_sees_page`). A scoped write role is now refused where it
-was let through, and learns whether content it supplies itself is purged or withdrawn
-in a source it can already write; the guards also perform two fixed side effects for
+revoked from them and from PUBLIC, and every guard that refuses a write fires `AFTER ROW`,
+after RLS has accepted the row. The derivation guard is split: its `BEFORE ROW` half
+still runs as the writing role and silently drops a row the role can see a running purge
+sweep would delete, as before, and an `AFTER ROW` definer
+(`gbrain_refuse_stored_purging_derivation`) refuses such a row that was stored anyway
+with `derivation_purge_pending`. A scoped write role with no policy on a ledger is now
+refused, with an error, where it was let through, and learns whether content it supplies
+itself is purged or withdrawn in a source it can already write; the guards also perform two fixed side effects for
 it as the owner (expiring the facts its own statement just inserted when they are
 withdrawn, and adding its page to a running derivation purge's page list). Every other
 gbrain function that pins a search_path now ends it with `pg_temp`. Where the migrating

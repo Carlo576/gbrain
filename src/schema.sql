@@ -2289,9 +2289,7 @@ CREATE TRIGGER page_body_manifest_derivation_scope_delete AFTER DELETE ON page_b
 DROP TRIGGER IF EXISTS pages_derivation_scope_delete ON pages;
 CREATE TRIGGER pages_derivation_scope_delete AFTER UPDATE OF deleted_at ON pages
   FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
-CREATE OR REPLACE FUNCTION gbrain_caller_sees_page(page INTEGER) RETURNS boolean LANGUAGE sql STABLE SECURITY INVOKER
-  SET search_path = pg_catalog, public, pg_temp AS $func$ SELECT EXISTS (SELECT 1 FROM pages WHERE id = page) $func$;
-CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $func$
+CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
     WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
@@ -2306,14 +2304,34 @@ BEGIN
   RETURN NEW;
 END
 $func$ LANGUAGE plpgsql;
-REVOKE EXECUTE ON FUNCTION gbrain_refuse_purging_derivation() FROM PUBLIC;
-DO $revoke$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE EXECUTE ON FUNCTION gbrain_refuse_purging_derivation() FROM anon; END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE EXECUTE ON FUNCTION gbrain_refuse_purging_derivation() FROM authenticated; END IF;
-END $revoke$;
 DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
 CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
-  FOR EACH ROW WHEN (gbrain_caller_sees_page(NEW.page_id)) EXECUTE FUNCTION gbrain_refuse_purging_derivation();
+  FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
+CREATE OR REPLACE FUNCTION gbrain_refuse_stored_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $func$
+BEGIN
+  IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
+    WHERE p.id = NEW.page_id AND (NEW.page_id = ANY(x.page_ids::int[]) OR p.deleted_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM page_body_manifest m
+    WHERE m.page_id = NEW.page_id AND m.occurrence_id = NEW.occurrence_id AND m.gen_to IS NULL AND m.staging_id IS NULL AND m.sha256 = NEW.segment_sha256))
+      AND CASE WHEN replace(translate(lower(COALESCE(NEW.output::text, '') || ' ' || COALESCE(NEW.receipt::text, '')), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM (VALUES (NEW.output), (NEW.receipt)) doc(j),
+    LATERAL (SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "string")') #>> '{}' AS t
+      UNION ALL SELECT jsonb_path_query(doc.j, 'strict $.** ? (@.type() == "object").keyvalue().key') #>> '{}') s
+    WHERE CASE WHEN replace(translate(lower(s.t), 'ς', 'σ'), 'i̇', 'i') LIKE ANY (x.patterns::text[]) THEN EXISTS (SELECT 1 FROM unnest(x.needles::text[]) k(n)
+      WHERE strpos(' ' || replace(translate(gbrain_fact_normalize(s.t), 'ς', 'σ'), 'i̇', 'i') || ' ', k.n) > 0) ELSE false END) ELSE false END) THEN
+    RAISE EXCEPTION USING ERRCODE = 'P0001',
+      MESSAGE = 'derivation_purge_pending: a fact purge''s sweep of stored derivation results is still running and this row holds its claim',
+      DETAIL = json_build_object('table', 'page_segment_derivations')::text;
+  END IF;
+  RETURN NULL;
+END
+$func$ LANGUAGE plpgsql;
+REVOKE EXECUTE ON FUNCTION gbrain_refuse_stored_purging_derivation() FROM PUBLIC;
+DO $revoke$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE EXECUTE ON FUNCTION gbrain_refuse_stored_purging_derivation() FROM anon; END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE EXECUTE ON FUNCTION gbrain_refuse_stored_purging_derivation() FROM authenticated; END IF;
+END $revoke$;
+DROP TRIGGER IF EXISTS page_segment_derivations_refuse_stored_purging ON page_segment_derivations;
+CREATE TRIGGER page_segment_derivations_refuse_stored_purging AFTER INSERT OR UPDATE OF output, receipt ON page_segment_derivations
+  FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_stored_purging_derivation();
 -- END GENERATED from src/core/page-body/schema.ts (PAGE_SEGMENT_DERIVATIONS_SQL)
 
 -- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_BODY_RLS_SQL). Edit that file, then run: bun run build:schema

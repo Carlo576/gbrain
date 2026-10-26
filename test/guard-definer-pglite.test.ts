@@ -1,7 +1,7 @@
 /**
  * #7632 on PGLite: one role, so the guards read every ledger row either way, but the catalog matches Postgres (the
- * guards are definers with pg_temp last on their path, the raising guard triggers fire AFTER ROW, the derivation guard is
- * gated, every pinned search_path ends in pg_temp) and an AFTER ROW guard still refuses the write in the same statement.
+ * guards are definers with pg_temp last on their path, the raising guard triggers fire AFTER ROW, the derivation guard's
+ * BEFORE ROW drop is joined by its AFTER ROW check, every pinned search_path ends in pg_temp) and an AFTER ROW guard still refuses the write in the same statement.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -24,15 +24,16 @@ describe('purge and withdrawal guard catalog on PGLite (#7632)', () => {
     expect(rows).toEqual([...DEFINER_GUARDS].map(g => g.fn).sort().map(fn => ({ fn, secdef: true, config: [`search_path=${GUARD_SEARCH_PATH}`], public_execute: false })));
   });
 
-  test('the raising guards fire AFTER ROW and the derivation guard is gated on the writer seeing the page', async () => {
-    const rows = await engine.executeRaw<{ trigger: string; timing: string; gated: boolean }>(
-      `SELECT tgname AS trigger, CASE WHEN (tgtype & 2) <> 0 THEN 'BEFORE' ELSE 'AFTER' END AS timing, pg_get_triggerdef(oid) LIKE '%WHEN (gbrain_caller_sees_page(new.page_id))%' AS gated
-         FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ('facts_refuse_purged', 'takes_refuse_purged', 'pages_refuse_purged', 'page_segment_derivations_refuse_purging') ORDER BY 1`);
+  test('the raising guards fire AFTER ROW and the derivation guard drops BEFORE ROW and checks AFTER ROW', async () => {
+    const rows = await engine.executeRaw<{ trigger: string; timing: string }>(
+      `SELECT tgname AS trigger, CASE WHEN (tgtype & 2) <> 0 THEN 'BEFORE' ELSE 'AFTER' END AS timing FROM pg_trigger WHERE NOT tgisinternal
+         AND tgname IN ('facts_refuse_purged', 'takes_refuse_purged', 'pages_refuse_purged', 'page_segment_derivations_refuse_purging', 'page_segment_derivations_refuse_stored_purging') ORDER BY 1`);
     expect(rows).toEqual([
-      { trigger: 'facts_refuse_purged', timing: 'AFTER', gated: false },
-      { trigger: 'page_segment_derivations_refuse_purging', timing: 'BEFORE', gated: true },
-      { trigger: 'pages_refuse_purged', timing: 'AFTER', gated: false },
-      { trigger: 'takes_refuse_purged', timing: 'AFTER', gated: false },
+      { trigger: 'facts_refuse_purged', timing: 'AFTER' },
+      { trigger: 'page_segment_derivations_refuse_purging', timing: 'BEFORE' },
+      { trigger: 'page_segment_derivations_refuse_stored_purging', timing: 'AFTER' },
+      { trigger: 'pages_refuse_purged', timing: 'AFTER' },
+      { trigger: 'takes_refuse_purged', timing: 'AFTER' },
     ]);
   });
 

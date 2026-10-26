@@ -4,7 +4,7 @@
  * Postgres only (PGLite has one role). Fails when one of the seven guards is not SECURITY DEFINER with search_path
  * `pg_catalog, public, pg_temp`, is executable by PUBLIC/anon/authenticated, or is owned by a role that does not
  * bypass RLS on a table it reads; when a raising guard's trigger still fires BEFORE ROW or the derivation guard's
- * trigger lacks its gbrain_caller_sees_page gate; or when any gbrain function's search_path still ends without pg_temp.
+ * AFTER ROW check is missing; or when any gbrain function's search_path still ends without pg_temp.
  * Migration v276 makes every change the migrating role owns and names the rest on stderr: this check carries the SQL
  * for them, to run as the owning role. Read-only.
  */
@@ -14,7 +14,7 @@ import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { checkError } from '../check-fix.ts';
 import { AFTER_ROW_PURGE_TRIGGERS, DEFINER_GUARDS, GUARD_SEARCH_PATH, LEGACY_SEARCH_PATH_SETTINGS } from '../../../core/guard-definer.ts';
-import { DERIVATION_GUARD_GATE_SQL, DERIVATION_GUARD_TRIGGER_SQL } from '../../../core/page-body/schema.ts';
+import { DERIVATION_STORED_GUARD_SQL } from '../../../core/page-body/schema.ts';
 
 interface GuardRow { fn: string; secdef: boolean; pinned: boolean; executable_by: string[]; owner: string; reads_under_rls: string[] }
 
@@ -49,18 +49,18 @@ export async function guardFunctionProblems(engine: BrainEngine): Promise<{ prob
       fix.push(`-- give ${g.fn}() an owner that bypasses RLS (ALTER FUNCTION ${g.fn}() OWNER TO <owner of the tables>), or ALTER ROLE ${g.owner} BYPASSRLS;`);
     }
   }
-  const triggers = await engine.executeRaw<{ trigger: string; before: boolean; gated: boolean }>(
-    `SELECT t.tgname AS trigger, (t.tgtype & 2) <> 0 AS before, pg_get_triggerdef(t.oid) LIKE '%gbrain_caller_sees_page(%' AS gated
-       FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgname = ANY($1::text[])`,
-    [[...AFTER_ROW_PURGE_TRIGGERS.map(t => t.trigger), 'page_segment_derivations_refuse_purging']]);
+  const triggers = await engine.executeRaw<{ trigger: string; before: boolean }>(
+    `SELECT t.tgname AS trigger, (t.tgtype & 2) <> 0 AS before FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgname = ANY($1::text[])`,
+    [[...AFTER_ROW_PURGE_TRIGGERS.map(t => t.trigger), 'page_segment_derivations_refuse_stored_purging']]);
   for (const t of AFTER_ROW_PURGE_TRIGGERS) {
     if (!triggers.some(row => row.trigger === t.trigger && row.before)) continue;
     problems.push(`${t.trigger} on ${t.table} still fires BEFORE ROW`);
     fix.push(t.sql);
   }
-  if (triggers.some(row => row.trigger === 'page_segment_derivations_refuse_purging' && !row.gated)) {
-    problems.push('page_segment_derivations_refuse_purging has no gbrain_caller_sees_page gate');
-    fix.push(DERIVATION_GUARD_GATE_SQL, DERIVATION_GUARD_TRIGGER_SQL);
+  const [derivations] = await engine.executeRaw<{ present: boolean }>(`SELECT to_regclass('page_segment_derivations') IS NOT NULL AS present`);
+  if (derivations?.present && !triggers.some(row => row.trigger === 'page_segment_derivations_refuse_stored_purging' && !row.before)) {
+    problems.push('page_segment_derivations has no page_segment_derivations_refuse_stored_purging AFTER ROW check');
+    fix.push(DERIVATION_STORED_GUARD_SQL);
   }
   const unpinned = await engine.executeRaw<{ sig: string; path: string }>(
     `SELECT p.oid::regprocedure::text AS sig, substr(c.setting, 13) AS path

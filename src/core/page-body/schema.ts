@@ -239,17 +239,29 @@ export function derivationScopeLockSql(sourceId: string): string {
   return `hashtextextended('gbrain:derivation-scope:' || ${sourceId}, 0)`;
 }
 
-/** Whether the calling role can see a page, under its own row-level security: the derivation guard's trigger gate. */
-export const DERIVATION_GUARD_GATE_SQL = `CREATE OR REPLACE FUNCTION gbrain_caller_sees_page(page INTEGER) RETURNS boolean LANGUAGE sql STABLE SECURITY INVOKER
-  SET search_path = ${GUARD_SEARCH_PATH} AS $func$ SELECT EXISTS (SELECT 1 FROM pages WHERE id = page) $func$;`;
-
 /**
- * The derivation guard stays BEFORE (it drops the row and its callers count stored rows), so its trigger fires only
- * when the writer can see the page: the definer then never answers a role RLS will refuse.
+ * The derivation guard's AFTER ROW half (#7632): raises derivation_purge_pending for a stored row that a fact purge's
+ * sweep would delete. The BEFORE ROW half (gbrain_refuse_purging_derivation) runs as the writer and drops such a row
+ * silently, so this one fires only for a row that passed it unseen and that RLS then accepted: a writer with no policy
+ * on the sweep records. It reads them as its owner, so that writer is refused instead of storing the row; a role RLS
+ * refuses never reaches it, so it learns nothing about a sweep.
  */
-export const DERIVATION_GUARD_TRIGGER_SQL = `DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
-CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
-  FOR EACH ROW WHEN (gbrain_caller_sees_page(NEW.page_id)) EXECUTE FUNCTION gbrain_refuse_purging_derivation();`;
+export const DERIVATION_STORED_GUARD_SQL = `CREATE OR REPLACE FUNCTION gbrain_refuse_stored_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = ${GUARD_SEARCH_PATH} AS $func$
+BEGIN
+  IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
+    WHERE p.id = NEW.page_id AND ${derivationSweepScopeSql('NEW', 'p', 'x.page_ids')}
+      AND ${derivationHoldsClaimSql('NEW', 'x.needles', 'x.patterns')}) THEN
+    RAISE EXCEPTION USING ERRCODE = 'P0001',
+      MESSAGE = 'derivation_purge_pending: a fact purge''s sweep of stored derivation results is still running and this row holds its claim',
+      DETAIL = json_build_object('table', 'page_segment_derivations')::text;
+  END IF;
+  RETURN NULL;
+END
+$func$ LANGUAGE plpgsql;
+${revokeExecuteSql('gbrain_refuse_stored_purging_derivation')}
+DROP TRIGGER IF EXISTS page_segment_derivations_refuse_stored_purging ON page_segment_derivations;
+CREATE TRIGGER page_segment_derivations_refuse_stored_purging AFTER INSERT OR UPDATE OF output, receipt ON page_segment_derivations
+  FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_stored_purging_derivation();`;
 
 /**
  * Per-segment derivation watermarks (migration v273): one row per page, pipeline and manifest occurrence, recording
@@ -271,9 +283,10 @@ CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE O
  * before the purge committed is refused by its own generation guard instead. A row can also enter the scope without a
  * write, when its occurrence is retired or its page soft-deleted: the triggers on page_body_manifest and pages note the
  * page in page_segment_derivation_purge_pages for every sweep of the source, and the sweep checks those pages again
- * before it ends. Both trigger functions read the sweep records as their owner (SECURITY DEFINER, ../guard-definer.ts),
- * so a writer without a policy on them still meets the guard; the dropping trigger fires only when the writer can see
- * the page (gbrain_caller_sees_page runs as the writer), so a role RLS refuses learns nothing about a sweep.
+ * before it ends. The dropping trigger reads the sweep records as the writer, as RLS lets it; a row it passes unseen
+ * that RLS accepts meets DERIVATION_STORED_GUARD_SQL, which reads them as its owner and refuses the write
+ * (derivation_purge_pending). The scope-entry trigger reads and notes them as its owner (SECURITY DEFINER,
+ * ../guard-definer.ts). A role RLS refuses meets neither definer, so it learns nothing about a sweep.
  *
  * PR 4 (Wave B incremental derivation, transcripts): page_derivation_spend is the per-page lifetime spend ledger of each
  * paid derivation family (`facts`, `synopsis`; page-spend.ts), each capped by `derive.max_usd_per_page` on its own,
@@ -355,8 +368,7 @@ CREATE TRIGGER page_body_manifest_derivation_scope_delete AFTER DELETE ON page_b
 DROP TRIGGER IF EXISTS pages_derivation_scope_delete ON pages;
 CREATE TRIGGER pages_derivation_scope_delete AFTER UPDATE OF deleted_at ON pages
   FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) EXECUTE FUNCTION gbrain_mark_derivation_scope_entry();
-${DERIVATION_GUARD_GATE_SQL}
-CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SECURITY DEFINER SET search_path = ${GUARD_SEARCH_PATH} AS $func$
+CREATE OR REPLACE FUNCTION gbrain_refuse_purging_derivation() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   IF EXISTS (SELECT 1 FROM page_segment_derivation_purges x JOIN pages p ON p.source_id = x.source_id
     WHERE p.id = NEW.page_id AND ${derivationSweepScopeSql('NEW', 'p', 'x.page_ids')}
@@ -366,8 +378,10 @@ BEGIN
   RETURN NEW;
 END
 $func$ LANGUAGE plpgsql;
-${revokeExecuteSql('gbrain_refuse_purging_derivation')}
-${DERIVATION_GUARD_TRIGGER_SQL}`;
+DROP TRIGGER IF EXISTS page_segment_derivations_refuse_purging ON page_segment_derivations;
+CREATE TRIGGER page_segment_derivations_refuse_purging BEFORE INSERT OR UPDATE OF output, receipt ON page_segment_derivations
+  FOR EACH ROW EXECUTE FUNCTION gbrain_refuse_purging_derivation();
+${DERIVATION_STORED_GUARD_SQL}`;
 
 /**
  * The segment tables hold page text (`page_segment_texts`, `page_body_staging_parts`) or a page's shape and
