@@ -540,7 +540,7 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
     const lean = readOnlyServeSkipsResidentDuties(!!session.readOnly, engine.kind);
     const persistence = lean ? undefined : await createPersistenceIpcProvider(engine, residentPersistenceConfig(config) ?? { engine: engine.kind });
     bootPhase('resolve_ipc_bind');
-    ipcBinding = await bindResolveIpcForServe(engine, ipcSourceId, persistence, { rememberCallable: () => !session.allowedOps || session.allowedOps.has('remember'), readOnly: lean });
+    ipcBinding = await bindResolveIpcForServe(engine, ipcSourceId, persistence, { rememberCallable: () => !session.allowedOps || session.allowedOps.has('remember'), lean });
     import('../core/onboard/mcp-onboarding.ts').then(m => m.startOnboardingRefresher(engine, { idle: () => _stdioRpcsInFlight === 0 })).catch(() => { /* coaching is best-effort */ });
     if (lean) return void process.stderr.write(READ_ONLY_SERVE_NOTE);
 

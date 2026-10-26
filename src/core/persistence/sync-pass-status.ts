@@ -115,7 +115,7 @@ export function passStatusNext(sourceId: string, reason: PassStatusReason, row: 
       return { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
         why: `The last ${abandonedPasses(row, Date.now(), interrupted)} sync passes of ${sourceId} stopped before they ended (the drain abandoned them for making no progress, or their process was killed), so another plain sync is likely to stop the same way. Report what doctor shows, with the gbrain version and the newest sync run's drain.stall (read-only).` };
     case 'pass_interrupted':
-      return { ...sync, why: `The newest pass of ${sourceId} stopped before it ended and no process holds its drain lease: its process was killed or crashed (an out-of-memory kill or a timeout), so nothing recorded a failure. The plain sync continues it from the current level; if that pass stops the same way, status reads pass_abandoned.` };
+      return { ...sync, why: `The newest pass of ${sourceId} stopped before it ended and no process holds its drain lease: its process was killed or crashed (an out-of-memory kill or a timeout), or stopped on an error it does not record (a dropped connection), so nothing recorded a failure. The plain sync continues it from the current level; if that pass stops the same way, status reads pass_abandoned.` };
     case 'selection_scoped':
       return { ...sync, why: 'The last pass converged at a narrower selection and did not advance last_commit; the plain sync runs the configured selection.' };
     default:

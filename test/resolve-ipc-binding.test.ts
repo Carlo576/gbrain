@@ -103,16 +103,16 @@ describe('bindResolveIpcForServe (#4474)', () => {
     mkdirSync(join(tmp, '.gbrain'), { recursive: true });
     writeFileSync(join(tmp, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite', database_path: dataDir }));
     await withEnv({ GBRAIN_HOME: tmp, GBRAIN_DATABASE_URL: undefined, DATABASE_URL: undefined, GBRAIN_SERVE_SYNC_IPC: undefined }, async () => {
-      for (const readOnly of [true, false]) {
-        const binding = await bindResolveIpcForServe({} as unknown as BrainEngine, 'default', undefined, { readOnly });
+      for (const lean of [true, false]) {
+        const binding = await bindResolveIpcForServe({} as unknown as BrainEngine, 'default', undefined, { lean });
         try {
           const secret = readIpcSecret(dataDir) ?? '';
           const sync = await requestSyncStatus(binding.socketPath!, { secret, jobId: 'no-such-job' });
           const sweep = await requestSweepStatus(binding.socketPath!, { secret, jobId: 'no-such-job' });
-          const want = readOnly ? 'unsupported_kind' : 'unknown_job';
+          const want = lean ? 'unsupported_kind' : 'unknown_job';
           expect((sync as { error?: string }).error).toBe(want);
           expect((sweep as { error?: string }).error).toBe(want);
-          if (!readOnly) continue;
+          if (!lean) continue;
           for (const write of [requestSyncStart, requestSyncAbort, requestSyncNudge, requestSweepStart]) {
             expect(((await write(binding.socketPath!, { secret } as never)) as { error?: string }).error).toBe('unsupported_kind');
           }
