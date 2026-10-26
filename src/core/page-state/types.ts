@@ -84,13 +84,16 @@ export interface PageSnapshot {
  * supplied none and the page exists (#5385 → `revision_required`: the caller's omission, not a race, so a client
  * can read the page and resubmit instead of treating it as contention).
  */
+/** A stale expected revision; stored on receipts (#7602 matches it for fact entity requests refused before the fix). */
+export const PAGE_CHANGED_AFTER_READ_MESSAGE = 'The page changed after it was read. Read its current revision before retrying.';
+
 export class PageRevisionConflictError extends Error {
   readonly code: 'revision_conflict' | 'revision_required' | 'revision_backfill_pending';
   constructor(readonly expectedRevision: string | null | undefined, readonly currentRevision: string | null) {
     super(currentRevision === null ? 'The page no longer exists at the expected revision.'
       : expectedRevision === undefined ? 'The page already exists; an expected revision is required.'
       : expectedRevision === null ? 'The page was created after it was read. Read its current revision before retrying.'
-      : 'The page changed after it was read. Read its current revision before retrying.');
+      : PAGE_CHANGED_AFTER_READ_MESSAGE);
     this.name = 'PageRevisionConflictError';
     this.code = expectedRevision === undefined && currentRevision !== null ? 'revision_required' : 'revision_conflict';
   }

@@ -54,7 +54,7 @@ import { submitRememberMutation } from '../persistence/memory-mutations.ts';
 import { getWorktreeBinding } from '../persistence/ownership.ts';
 import { prepareFileTarget } from '../persistence/page-prepare.ts';
 import { PENDING_IMPORT, SYNC_HELD } from '../persistence/pending-import.ts';
-import { FACTS_ENTITY_MOVED_MESSAGES } from '../persistence/verb-errors.ts';
+import { FACTS_ENTITY_MOVED_MESSAGES, isEntityMovedRefusal } from '../persistence/verb-errors.ts';
 import { MAX_FILE_REFUSAL_RETRIES } from '../persistence/facts-maintenance.ts';
 import { factsAbsorbWriteKey, factsRetryDeadCommand } from '../facts/dead-absorb-retry.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
@@ -80,7 +80,23 @@ const FACTS_RECOVERED = `EXISTS (SELECT 1 FROM persistence_requests c WHERE r.op
   AND COALESCE(c.intent->>'batchKey', c.outcome->>'batch_key') IS DISTINCT FROM r.intent->>'batchKey')`;
 
 /** One managed fact entity request of an extraction (every request sharing its source and input digest). */
-interface ExtractionRequest { slug: string; state: string; error_code: string | null; error_message: string | null; batch_key: string | null }
+interface ExtractionRequest { source_id: string; input_digest: string; slug: string; state: string; error_code: string | null; error_message: string | null; batch_key: string | null }
+
+const extractionKey = (sourceId: string, inputDigest: unknown) => `${sourceId}\n${String(inputDigest)}`;
+
+/** Every entity request of the listed fact rows' extractions, read in one query and grouped by extraction. */
+async function factExtractions(engine: BrainEngine, sourceIds: string[], rows: FailedWrite[]): Promise<Map<string, ExtractionRequest[]>> {
+  const extractions = new Map<string, ExtractionRequest[]>();
+  const digests = [...new Set(rows.filter(row => row.operation === 'extract_facts').map(row => String(row.intent.inputDigest)))];
+  if (!digests.length) return extractions;
+  for (const row of await engine.executeRaw<ExtractionRequest>(`SELECT source_id, intent->>'inputDigest' AS input_digest, slug, state, error_code, error_message,
+      intent->>'batchKey' AS batch_key FROM persistence_requests WHERE operation='extract_facts' AND source_id = ANY($1::text[])
+      AND intent->>'kind'='managed_facts_entity' AND intent->>'inputDigest' = ANY($2::text[])`, [sourceIds, digests])) {
+    const key = extractionKey(row.source_id, row.input_digest);
+    extractions.set(key, [...(extractions.get(key) ?? []), row]);
+  }
+  return extractions;
+}
 
 interface FailedWrite {
   id: string; request_id: string; sequence: string; operation: string; source_id: string; slug: string; digest: string; state: string;
@@ -110,13 +126,8 @@ async function factsRecovery(engine: BrainEngine, write: FailedWrite, extraction
   const job = typeof write.intent.originalRequestId === 'string' ? write.intent.originalRequestId : null;
   const extractAgain = `re-extract: gbrain call extract_facts again on the current text of ${origin ?? 'the source turn'} with a new request_id (one model call)`;
   if (!job || write.state !== 'conflict') return extractAgain;
-  const extraction = `${write.source_id}\n${String(write.intent.inputDigest)}`;
-  if (!extractions.has(extraction)) extractions.set(extraction, await engine.executeRaw<ExtractionRequest>(
-    `SELECT slug, state, error_code, error_message, intent->>'batchKey' AS batch_key FROM persistence_requests
-      WHERE operation='extract_facts' AND source_id=$1 AND intent->>'inputDigest'=$2 AND intent->>'kind'='managed_facts_entity'`, [write.source_id, write.intent.inputDigest]));
-  const open = extractions.get(extraction)!.filter(row => row.state !== 'committed');
-  const moved = (row: ExtractionRequest) => row.error_code === 'revision_conflict' && FACTS_ENTITY_MOVED_MESSAGES.includes(row.error_message ?? '');
-  if (!open.every(moved) && !open.every(row => row.error_code === 'source_changed')) {
+  const open = (extractions.get(extractionKey(write.source_id, write.intent.inputDigest)) ?? []).filter(row => row.state !== 'committed');
+  if (!open.every(isEntityMovedRefusal) && !open.every(row => row.error_code === 'source_changed')) {
     return `${extractAgain}; its extraction also holds refusals one job retry does not re-admit together`;
   }
   if (write.error_code === 'revision_conflict') {
@@ -362,7 +373,7 @@ export const failedWritesRepair: RepairHandler = {
     const command = previewCommand(scope);
     if (!opts?.apply) {
       const rows = await failedWrites(engine, scope.source_ids, { facts: true });
-      const extractions = new Map<string, ExtractionRequest[]>();
+      const extractions = await factExtractions(engine, scope.source_ids, rows);
       const residuals: Record<string, number> = {};
       const listing: NonNullable<RepairPlan['listing']> = [];
       const producers = new Map<string, string>();

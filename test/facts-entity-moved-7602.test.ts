@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { configureGateway, resetGateway, __setChatTransportForTests, type ChatResult } from '../src/core/ai/gateway.ts';
 import { FENCE_FACTS_INTENT } from '../src/core/cycle/extract-facts.ts';
 import type { FactsBackstopCtx } from '../src/core/facts/backstop.ts';
+import { PAGE_CHANGED_AFTER_READ_MESSAGE } from '../src/core/page-state/types.ts';
 import { RECOVERY_VERSION } from '../src/core/markdown.ts';
 import { FACTS_DEFAULT_VISIBILITY_KEY } from '../src/core/facts/visibility.ts';
 import { makeFactsAbsorbHandler } from '../src/core/minions/handlers/facts-absorb.ts';
@@ -195,6 +196,7 @@ for (const backend of testBackends()) {
     for (const entry of listing) {
       expect(entry.class).toBe('producer_owned');
       expect(entry.detail).toStartWith(`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id`);
+      expect(entry.detail).toEndWith('; its follow-up batches were refused as well, so a job retry replays the refusal');
       expect(entry.detail).not.toContain('extract --stale');
     }
   }, { databaseUrl }), 120_000);
@@ -216,6 +218,15 @@ for (const backend of testBackends()) {
     expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`pending: its facts-absorb job (${key}) is waiting; preview again once it ends`]);
     expect(await jobStatus('completed')).toHaveLength(1);
     expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call); its facts-absorb job is completed, so gbrain facts retry-dead has no dead job to reset`]);
+    // Value: protects=a cancelled or vanished facts-absorb job is listed for re-extraction, never as pending or with the job reset;
+    // fails_when=the pending check stops excluding cancelled (an endless "preview again") or a missing job gets retry-dead; why_new=the
+    // rows above cover waiting, completed and dead only; seam=none; no_claim=the status and the job's absence are set by SQL
+    expect(await jobStatus('cancelled')).toHaveLength(1);
+    expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call); its facts-absorb job is cancelled, so gbrain facts retry-dead has no dead job to reset`]);
+    const rekey = (from: string, to: string) => engine.executeRaw("UPDATE minion_jobs SET idempotency_key=$2 WHERE name='facts-absorb' AND idempotency_key=$1 RETURNING id", [from, to]);
+    expect(await rekey(key, `${key}:elsewhere`)).toHaveLength(1);
+    expect((await factsListing(engine)).map(entry => entry.detail)).toEqual([`re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call); its facts-absorb job is gone, so gbrain facts retry-dead has no dead job to reset`]);
+    expect(await rekey(`${key}:elsewhere`, key)).toHaveLength(1);
     expect(await jobStatus('dead')).toHaveLength(1);
     const [entry, ...others] = await factsListing(engine);
     expect(others).toEqual([]);
@@ -245,6 +256,54 @@ for (const backend of testBackends()) {
     });
     expect((await factsListing(engine)).map(entry => [entry.class, entry.detail])).toEqual([['producer_owned',
       `re-extract: gbrain call extract_facts again on the current text of ${loser.slug} with a new request_id (one model call)`]]);
+    // Value: protects=the preview's producer warning for fact requests points at each listed request's own command; fails_when=the
+    // warning names extract --stale again or one request's recover command for every fact request; why_new=no #7602 row reads the
+    // preview warnings; seam=none; no_claim=one fact request only, so the per-request commands are not compared to each other
+    const preview = await (await repairRunner(engine, { apply: false, logger: { info() {}, warn() {}, error() {} } }))
+      .run('failed-writes', await resolveRepairScope(engine, 'default'), { explicit: true, sourceFlag: 'default' });
+    expect((preview.warnings ?? []).filter(warning => warning.includes('extract_facts'))).toEqual([
+      'extract_facts:managed_facts_entity in default: produced by gbrain itself, not replayed here; each listed request names the command that recovers its facts']);
+  }, { databaseUrl }), 120_000);
+
+  // Value: protects=a moved-entity refusal of an extraction with its own request id (no page write, no facts-absorb job) is listed for
+  // re-extraction with no job advice; fails_when=the listing drops refusals that have no job or offers retry-dead/pending for them;
+  // why_new=every other #7602 listing row is page-triggered; seam=none; no_claim=the move is the wrapped entity read; no MCP caller
+  test(`#7602 [${backend}]: a moved-entity refusal with no page write is listed for re-extraction of the source turn`, () => managedBrain(async brain => {
+    const { engine } = brain;
+    const { move, loser } = await setup(brain, 1);
+    const backstop: FactsBackstopCtx = { ...loser.backstop, persistenceRequestId: undefined, requestId: randomUUID() };
+    const session = Object.assign((await prepareManagedFactsSession(backstop, { turnText: loser.input.turnText }))!, { reportRefusals: true });
+    expect([session.originalRequestId, session.entityMoveRetry]).toEqual([null, undefined]);
+    const race = raceEntityReads(engine, 1, move);
+    const refused = await publishManagedFacts(engine, session, backstop, [fact(CLAIM_B)], 'private').catch(error => error).finally(race.restore);
+    expect(race.moves()).toBe(1);
+    expect([refused.code, refused.retryable]).toEqual(['revision_conflict', false]);
+    expect(await claimB(engine)).toEqual([]);
+    expect((await factsListing(engine)).map(entry => [entry.class, entry.detail])).toEqual([['producer_owned',
+      're-extract: gbrain call extract_facts again on the current text of the source turn with a new request_id (one model call)']]);
+  }, { databaseUrl }), 120_000);
+
+  // Value: protects=a move during preparation refused before the fix (stored with the page layer's stale-revision message) is
+  // listed with the job reset and re-admitted by it; fails_when=that message is missing from FACTS_ENTITY_MOVED_MESSAGES, so the
+  // receipt is never listed and a reset replays it; why_new=the row above stores the admission-time message; seam=the stored message
+  // is set by SQL to the pre-fix text; no_claim=does not reproduce the pre-fix preparation path itself
+  test(`#7602 [${backend}]: a pre-fix refusal stored with the stale-revision message is listed for the job reset and re-admitted`, () => managedBrain(async brain => {
+    const { engine } = brain;
+    const { move, loser } = await setup(brain, 1);
+    const before = await loser.session();
+    before.entityMoveRetry = false;
+    const race = raceEntityReads(engine, 1, move);
+    expect((await publishManagedFacts(engine, before, loser.backstop, [fact(CLAIM_B)], 'private', loser.slug).catch(error => error).finally(race.restore)).code).toBe('revision_conflict');
+    await engine.transaction(async tx => {
+      await declarePersistenceProtocol(tx);
+      expect(await tx.executeRaw("UPDATE persistence_requests SET error_message=$2 WHERE operation='extract_facts' AND slug=$1 AND state='conflict' RETURNING id", [TARGET, PAGE_CHANGED_AFTER_READ_MESSAGE])).toHaveLength(1);
+    });
+    const key = `facts-absorb:write:${loser.write}`;
+    expect(await engine.executeRaw("UPDATE minion_jobs SET status='dead' WHERE name='facts-absorb' AND idempotency_key=$1 RETURNING id", [key])).toHaveLength(1);
+    expect((await factsListing(engine)).map(entry => entry.detail?.split(' (')[0])).toEqual([`recover: gbrain facts retry-dead --reset '${key}'`]);
+    expect((await resumeManagedFacts(engine, await loser.session()))?.inserted).toBe(1);
+    expect(await claimB(engine)).toEqual([{ fact: CLAIM_B, source_markdown_slug: TARGET }]);
+    expect(await factsListing(engine)).toEqual([]);
   }, { databaseUrl }), 120_000);
 
   // Value: protects=a re-admitted fact is never wider than the current default visibility, and keeps world under a world default;

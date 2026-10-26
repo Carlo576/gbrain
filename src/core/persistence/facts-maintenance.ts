@@ -30,7 +30,7 @@ import { MaintenanceWriteWait } from './maintenance-wait.ts';
 import { digest, requireUuid, sha256 } from './digest.ts';
 import { isTerminal, type WriteAuthority, type WriteRequest } from './model.ts';
 import type { WriteReceipt } from './types.ts';
-import { FACTS_BATCH_INCOMPLETE_MESSAGE, FACTS_ENTITY_MOVED_MESSAGES } from './verb-errors.ts';
+import { FACTS_BATCH_INCOMPLETE_MESSAGE, isEntityMovedRefusal } from './verb-errors.ts';
 import { assertAmbientCaptureAdmissible, captureGateLaneForSource } from '../facts/capture-sources.ts';
 import { declareDerivation, type DerivationDeclaration } from '../trust/taint.ts';
 import type { TaintInput, WriteTrust } from '../trust/tier.ts';
@@ -451,11 +451,7 @@ async function followEntityMoves(engine: BrainEngine, session: ManagedFactsSessi
       : session.wait.observe((await awaitWrite(engine, row, session.config, { waitMs: session.wait.ms(), signal: session.signal })).row));
     return settled;
   };
-  return followRefusals(engine, session, await settle(rows), 'entity-moved-retry', entityMovedRefusal, readmitMovedFacts, settle);
-}
-
-function entityMovedRefusal(row: WriteRequest): boolean {
-  return row.error_code === 'revision_conflict' && FACTS_ENTITY_MOVED_MESSAGES.includes(row.error_message ?? '');
+  return followRefusals(engine, session, await settle(rows), 'entity-moved-retry', isEntityMovedRefusal, readmitMovedFacts, settle);
 }
 
 function withdrawalRefusal(row: WriteRequest): boolean {
