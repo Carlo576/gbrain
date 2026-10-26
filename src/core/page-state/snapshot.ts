@@ -30,6 +30,10 @@ export async function resolveGlobalPurges(query: ReadQuery, sourceId: string, ma
   return rows.map(r => typeof r.w === 'string' ? JSON.parse(r.w) as PageWithdrawal : r.w);
 }
 
+/** The ledger fingerprint text of `text` (a SQL expression): each line lowercased, whitespace runs collapsed to one space. */
+const normalizedLines = (text: string) => `(SELECT string_agg(regexp_replace(lower(line),'[[:space:]]+',' ','g'),chr(10) ORDER BY ord)
+      FROM unnest(string_to_array(${text},chr(10))) WITH ORDINALITY AS lines(line,ord))`;
+
 /**
  * Normalize filesystem bytes with the exact ledger fingerprint rules before comparing them. `global` names the
  * snapshot's source and '*' purge marker, resolved against this text's fence rows (not the stored page's).
@@ -39,15 +43,32 @@ export async function overlayCanonicalBodies(query: ReadQuery, body: string, tim
   const pending = global?.marker && global.marker.count > 0 ? global : undefined;
   if (!withdrawals.length && !pending) return { compiled_truth: body, timeline };
   if (!body.includes('gbrain:facts:begin') && !timeline.includes('gbrain:facts:begin')) return { compiled_truth: body, timeline };
-  const [normalized] = await query<{ body: string; timeline: string }>(`SELECT
-    (SELECT string_agg(regexp_replace(lower(line),'[[:space:]]+',' ','g'),chr(10) ORDER BY ord)
-      FROM unnest(string_to_array($1::text,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS body,
-    (SELECT string_agg(regexp_replace(lower(line),'[[:space:]]+',' ','g'),chr(10) ORDER BY ord)
-      FROM unnest(string_to_array($2::text,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS timeline`, [body, timeline]);
+  const [normalized] = await query<{ body: string; timeline: string }>(`SELECT ${normalizedLines('$1::text')} AS body, ${normalizedLines('$2::text')} AS timeline`, [body, timeline]);
   const resolved = pending ? await resolveGlobalPurges(query, pending.sourceId, pending.marker, [normalized.body ?? '', normalized.timeline ?? '']) : [];
   const all = resolved.length ? [...withdrawals, ...resolved] : withdrawals;
   return { compiled_truth: overlayWithdrawalBody(body, normalized.body ?? '', all),
     timeline: overlayWithdrawalBody(timeline, normalized.timeline ?? '', all) };
+}
+
+/**
+ * overlayCanonicalBodies (without a '*' purge marker) of many texts: the texts that need it are normalized in one
+ * statement, so a batch of pages costs one round trip instead of one per page. Results are in `items` order.
+ */
+export async function overlayCanonicalBodiesBatch(query: ReadQuery, items: ReadonlyArray<{ body: string; timeline: string; withdrawals: PageWithdrawal[] }>):
+  Promise<Array<{ compiled_truth: string; timeline: string }>> {
+  const out = items.map(item => ({ compiled_truth: item.body, timeline: item.timeline }));
+  const pending = items.flatMap((item, i) => item.withdrawals.length
+    && (item.body.includes('gbrain:facts:begin') || item.timeline.includes('gbrain:facts:begin')) ? [i] : []);
+  if (!pending.length) return out;
+  const rows = await query<{ i: number; body: string | null; timeline: string | null }>(`SELECT t.i::int AS i, ${normalizedLines('t.body')} AS body,
+    ${normalizedLines('t.timeline')} AS timeline FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS t(body, timeline, i)`,
+    [pending.map(i => items[i]!.body), pending.map(i => items[i]!.timeline)]);
+  for (const row of rows) {
+    const at = pending[Number(row.i) - 1]!, item = items[at]!;
+    out[at] = { compiled_truth: overlayWithdrawalBody(item.body, row.body ?? '', item.withdrawals),
+      timeline: overlayWithdrawalBody(item.timeline, row.timeline ?? '', item.withdrawals) };
+  }
+  return out;
 }
 
 /**

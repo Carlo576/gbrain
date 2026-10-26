@@ -17,7 +17,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { OperationError } from '../core/ops/contract.ts';
 import { cliRenderContext, toAgentError } from '../core/agent-output.ts';
-import { readExportPage, readExportWithdrawals, type ExportWithdrawal } from '../core/export-snapshot.ts';
+import { readExportPages, readExportWithdrawals, type ExportSnapshot, type ExportWithdrawal } from '../core/export-snapshot.ts';
 import { RestoreTargetError, restoreFilePath } from '../core/restore-target.ts';
 import { privatePagesFilterFragment, readHonorAliases } from '../core/search/private-visibility.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
@@ -121,7 +121,8 @@ interface Checkout { root: string; head: HeadTree; mode: Awaited<ReturnType<type
 
 const refuse = (message: string, suggestion: string) => new OperationError('storage_error', message, suggestion, GIT_GAP_DOCS);
 
-export async function censusGitGap(engine: BrainEngine, sourceId: string, opts: { sample: number; deadlineAt?: number; collect?: (page: GitGapPage) => void }): Promise<GitGapCensus> {
+/** `collect` receives each classified page, with the export snapshot the census compared for a database_ahead or git_ahead page. */
+export async function censusGitGap(engine: BrainEngine, sourceId: string, opts: { sample: number; deadlineAt?: number; collect?: GitGapCollect }): Promise<GitGapCensus> {
   await resolveSourceId(engine, sourceId, undefined, { skipLocalSignals: true });
   const [source] = await engine.executeRaw<{ local_path: string | null; incarnation: string }>('SELECT local_path, incarnation::text AS incarnation FROM sources WHERE id=$1', [sourceId]);
   const root = source?.local_path && existsSync(source.local_path) ? source.local_path : null;
@@ -158,8 +159,10 @@ export async function censusGitGap(engine: BrainEngine, sourceId: string, opts: 
   return census;
 }
 
+export type GitGapCollect = (page: GitGapPage, snapshot?: ExportSnapshot) => void;
+
 interface BatchContext { checkout: Checkout | null; policy: { mirror: boolean; databaseOnlySource: boolean; dbOnly: (slug: string) => boolean; ignored: Set<string> }; incarnation: string; sample: number;
-  collect?: (page: GitGapPage) => void }
+  collect?: GitGapCollect }
 
 const collected = (key: Key, path: string | null, state: PageState, extra: Partial<GitGapPage> = {}): GitGapPage =>
   ({ id: key.id, slug: key.slug, revision: key.revision, path, state, segmented: key.segmented === true, ...extra });
@@ -240,9 +243,10 @@ async function compareBatch(tx: BrainEngine, compare: Array<{ key: Key; path: st
   if (!blobs) throw refuse(`Git could not read committed files of the checkout at ${checkout.root}.`,
     `Nothing changed. Check the checkout with git -C ${checkout.root} fsck, then rerun gbrain sources git-gap ${sourceId}.`);
   const withdrawals: ExportWithdrawal[] = await readExportWithdrawals(tx, sourceId);
-  const differs: Array<{ key: Key; rel: string; blob: TreeBlob; worktree: WorktreeState; fields: string[] }> = [];
-  for (const item of compare) {
-    const snapshot = await readExportPage(tx, item.key, withdrawals);
+  const differs: Array<{ key: Key; rel: string; blob: TreeBlob; worktree: WorktreeState; fields: string[]; snapshot: ExportSnapshot }> = [];
+  const snapshots = await readExportPages(tx, compare.map(item => item.key), withdrawals);
+  for (const [i, item] of compare.entries()) {
+    const snapshot = snapshots[i]!;
     const compared: ExportFileComparison = item.key.segmented ? await compareSegmentedExportBlob(tx, snapshot, withdrawals, item.blob, checkout.head.format)
       : compareInlineExportFile(blobs.get(item.blob.oid)!, scannerSourcePath(checkout.root, item.path, checkout.mode), snapshot);
     if (compared.state === 'equal') { census.states.equal++; ctx.collect?.(collected(item.key, item.rel, 'equal', { worktree: item.worktree, headBlob: item.blob.oid })); continue; }
@@ -252,7 +256,7 @@ async function compareBatch(tx: BrainEngine, compare: Array<{ key: Key; path: st
       note(census, ctx.sample, { slug: item.key.slug, path: item.rel, state: 'unparseable', worktree: item.worktree });
       continue;
     }
-    differs.push({ ...item, fields: compared.paths });
+    differs.push({ ...item, fields: compared.paths, snapshot });
   }
   if (!differs.length) return;
   const records = await readSyncImportProvenances(tx, sourceId, ctx.incarnation, differs.map(item => Number(item.key.id)));
@@ -265,7 +269,7 @@ async function compareBatch(tx: BrainEngine, compare: Array<{ key: Key; path: st
     if (!imported.length) census.database_ahead_without_import_record++;
     const databaseAlsoMoved = gitMoved && record?.revision != null && String(record.revision) !== String(item.key.revision);
     if (databaseAlsoMoved) census.git_ahead_database_also_moved++;
-    ctx.collect?.(collected(item.key, item.rel, state, { worktree: item.worktree, headBlob: item.blob.oid, databaseAlsoMoved }));
+    ctx.collect?.(collected(item.key, item.rel, state, { worktree: item.worktree, headBlob: item.blob.oid, databaseAlsoMoved }), item.snapshot);
     note(census, ctx.sample, { slug: item.key.slug, path: item.rel, state, fields: item.fields, basis: imported.length ? 'import_record' : 'no_import_record', worktree: item.worktree });
   }
 }

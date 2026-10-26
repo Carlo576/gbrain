@@ -23,7 +23,8 @@ import { localHostId } from '../src/core/persistence/identity.ts';
 import { acquireWorktree } from '../src/core/persistence/ownership.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { resolveManagedSyncContext } from '../src/core/persistence/sync-discovery.ts';
-import { applyGitConversion, applyMixedConversion, CONVERSION_GROUP_MAX, planGitConversion, planMixedConversion } from '../src/core/persistence/git-conversion.ts';
+import { ADOPTION_BATCH, applyGitConversion, applyMixedConversion, CONVERSION_GROUP_MAX, planGitConversion, planMixedConversion } from '../src/core/persistence/git-conversion.ts';
+import { renderFactsTable } from '../src/core/facts-fence.ts';
 import { withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import { censusGitGap } from '../src/commands/sources-git-gap.ts';
 import { runSourcesCanonical } from '../src/commands/sources-canonical.ts';
@@ -96,6 +97,23 @@ const bulkSetup = ({ root }: { root: string }) => {
   for (let i = 0; i < BULK; i++) writeFileSync(join(root, `bulk/p${String(i).padStart(3, '0')}.md`), note(`bulk/p${i}`, `Committed body ${i}.`));
   git(root, 'add', '-A'); git(root, 'commit', '-qm', 'bulk');
 };
+
+const WIDE = 300, FENCED_EVERY = 5;
+const factsFence = (claim: string) => renderFactsTable([{ rowNum: 1, claim, kind: 'fact', confidence: 1, visibility: 'world', notability: 'medium', active: true, context: '' }]);
+const wideSetup = ({ root }: { root: string }) => {
+  mkdirSync(join(root, 'wide'), { recursive: true }); git(root, 'init', '-q');
+  git(root, 'config', 'user.name', 'Example Writer'); git(root, 'config', 'user.email', 'writer@example.invalid');
+  for (let i = 0; i < WIDE; i++) {
+    writeFileSync(join(root, `wide/p${String(i).padStart(3, '0')}.md`), note(`wide/p${String(i).padStart(3, '0')}`, i % FENCED_EVERY ? `Committed body ${i}.` : `Committed body ${i}.\n\n${factsFence(`Wide claim ${i}`)}`));
+  }
+  git(root, 'add', '-A'); git(root, 'commit', '-qm', 'wide');
+};
+/**
+ * Statements that read a page's export view: the per-page read (readExportPage), the batch read (readExportPages) and the
+ * fence normalization of either (overlayCanonicalBodies, overlayCanonicalBodiesBatch). Page snapshot reads by background
+ * projection work normalize stored columns, never a parameter, so they do not match.
+ */
+const EXPORT_READ = /export_page AS MATERIALIZED|AS k\(id, source_id, slug\)|string_to_array\(\$1::text|AS t\(body, timeline, i\)/;
 
 /** The page loses its sync import record, as a page imported before records were written has none. */
 async function dropImportRecord(engine: BrainEngine, slug: string): Promise<void> {
@@ -273,6 +291,30 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
       [`gbrain: persist ${CONVERSION_GROUP_MAX} canonical memory updates`, CONVERSION_GROUP_MAX], ['gbrain: persist canonical memory update', 1]]);
     expect(git(root, 'status', '--porcelain')).toBe('');
   }, { databaseUrl, setup: bulkSetup }), 300_000);
+
+  test('#7617: the plan reads export views a batch at a time, never one page per round trip', () => managedBrain(async brain => {
+    const { engine } = brain;
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], async () => {
+      await tx.executeRaw(`UPDATE pages SET compiled_truth=compiled_truth || ' Edited in the database.', knowledge_revision=gen_random_uuid(), revision_write_request_id=NULL
+        WHERE source_id='default' AND slug LIKE 'wide/%' AND right(slug,1)::int % 2 = 1`);
+      await tx.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,timeline,frontmatter)
+        SELECT 'default','dbonly/p'||lpad(n::text,3,'0'),'concept','dbonly/p'||lpad(n::text,3,'0'),CASE WHEN n%$2::int=0 THEN 'Only in the database '||n||'.'||chr(10)||chr(10)||$3 ELSE 'Only in the database '||n||'.' END,'',
+          jsonb_build_object('type','concept','title','dbonly/p'||lpad(n::text,3,'0'))
+        FROM generate_series(0,$1::int - 1) n`, [WIDE, FENCED_EVERY, factsFence('A database-only claim')]);
+      // An unrelated withdrawal: every fenced page's export view runs the overlay, and none changes.
+      await tx.executeRaw("INSERT INTO fact_withdrawals(source_id,visibility,fact_hash) VALUES ('default','world',gbrain_fact_fingerprint('An unrelated withdrawn claim'))");
+    }, TEST_WRITE_ATTRIBUTION));
+    const real = engine.executeRaw;
+    let reads = 0;
+    engine.executeRaw = async function (query, params, options) { if (EXPORT_READ.test(query)) reads++; return real.call(this, query, params, options) as never; };
+    let preview;
+    try { ({ preview } = await planGitConversion(engine, 'default')); } finally { engine.executeRaw = real; }
+    expect(preview).toMatchObject({ pages: 2 * WIDE, equal: WIDE / 2, adopt: { count: WIDE / 2 + WIDE, by: { database_ahead: WIDE / 2, undeclared_database_only: WIDE } }, discard: { count: 0 } });
+    // The census reads each batch of compared pages in one statement plus one fence normalization; adoption reuses the
+    // census's view of a database_ahead page and reads the database-only pages ADOPTION_BATCH at a time the same way.
+    expect(reads).toBeLessThanOrEqual(2 * (Math.ceil(2 * WIDE / 256) + Math.ceil(WIDE / ADOPTION_BATCH)));
+  }, { databaseUrl, setup: wideSetup }), 300_000);
 
   test('work that lands after the strict-equivalent pass leaves the source strict and reports incomplete', () => managedBrain(async brain => {
     const { engine, root } = brain;

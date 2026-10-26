@@ -39,7 +39,7 @@ import { resolveSourceId } from '../source-resolver.ts';
 import { opError, type OperationError } from '../ops/contract.ts';
 import { trustedCliRequired } from '../ops/op-fix.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
-import { inlineExportMarkdown, readExportPage, readExportWithdrawals } from '../export-snapshot.ts';
+import { inlineExportMarkdown, readExportPage, readExportPages, readExportWithdrawals, type ExportSnapshot } from '../export-snapshot.ts';
 import { scannerSlugRootMode, scannerSourcePath } from '../write-through.ts';
 import { censusGitGap, type GitGapCensus, type GitGapPage } from '../../commands/sources-git-gap.ts';
 import { compareInlineExportFile, ignoredPaths } from './git-gap.ts';
@@ -58,6 +58,8 @@ import { previewChangedError, previewHash } from './preview-approval.ts';
 import { sha256 } from './digest.ts';
 
 export const CONVERSION_GROUP_MAX = 200;
+/** Adoption candidates whose export view the plan reads per read-only transaction (the census's batch size). */
+export const ADOPTION_BATCH = 256;
 export const CONVERSION_OP = 'git-canonical-conversion';
 const DOCS = 'docs/designs/GIT_CANONICAL_MEMORY.md#conversion';
 const SAMPLE = 20;
@@ -132,7 +134,12 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   const context = await resolveManagedSyncContext(engine, { sourceId, noPull: true, dryRun: true });
   const pages: GitGapPage[] = [];
   const equal = new Set<string>();
-  const census = await censusGitGap(engine, sourceId, { sample: 0, collect: page => { if (page.state !== 'equal') pages.push(page); else if (page.path) equal.add(page.path); } });
+  const exported = new ExportChecks(context.root, await scannerSlugRootMode(engine, sourceId, context.root));
+  const census = await censusGitGap(engine, sourceId, { sample: 0, collect: (page, snapshot) => {
+    if (page.state === 'equal') { if (page.path) equal.add(page.path); return; }
+    pages.push(page);
+    if (snapshot && page.state === 'database_ahead' && page.path && !page.segmented) exported.add(page.id, page.path, snapshot);
+  } });
   if (!census.checkout || realpathSync(census.checkout) !== context.root) {
     throw opError('source_changed', `Source ${sourceId}'s registered checkout is not its owner's root, so nothing was planned.`,
       `Check the owner with gbrain sources writer status --source ${sourceId} --json, then preview again.`);
@@ -186,7 +193,7 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
       default: continue;
     }
   }
-  await planAdoption(engine, sourceId, root, candidates, preview, adopt, discard);
+  await planAdoption(engine, sourceId, root, candidates, exported, preview, adopt, discard);
   const parked = await readParked(engine, sourceId);
   for (const item of parked) for (const code of item.codes) preview.parked_effects.by_code[`${item.kind}:${code}`] = (preview.parked_effects.by_code[`${item.kind}:${code}`] ?? 0) + 1;
   preview.parked_effects.count = parked.length;
@@ -218,26 +225,49 @@ function holdItem(hold: GitHoldRecord): HoldItem {
 }
 
 /**
- * Each adoption candidate's export bytes must read back equal under the census contract, its target must not be ignored,
- * and the working tree must hold HEAD's bytes, the export's, or nothing: an uncommitted edit is never overwritten.
+ * What the adoption plan needs of a page's export view, kept instead of the view: the sha256 of its exported bytes, and
+ * whether those bytes read back equal under the census contract.
  */
-async function planAdoption(engine: BrainEngine, sourceId: string, root: string, candidates: Array<{ page: GitGapPage; state: AdoptState }>, preview: GitConversionPreview,
-  adopt: AdoptItem[], discard: (category: DiscardCategory, path: string) => void): Promise<void> {
+class ExportChecks {
+  private readonly checks = new Map<string, { digest: string; readsBack: boolean }>();
+  constructor(private readonly root: string, private readonly mode: Awaited<ReturnType<typeof scannerSlugRootMode>>) {}
+  add(id: string, path: string, snapshot: ExportSnapshot): void {
+    const bytes = Buffer.from(inlineExportMarkdown(snapshot));
+    this.checks.set(id, { digest: sha256(bytes), readsBack: compareInlineExportFile(bytes, scannerSourcePath(this.root, join(this.root, path), this.mode), snapshot).state === 'equal' });
+  }
+  get(id: string) { return this.checks.get(id); }
+}
+
+/**
+ * Each adoption candidate's export bytes must read back equal under the census contract, its target must not be ignored,
+ * and the working tree must hold HEAD's bytes, the export's, or nothing: an uncommitted edit is never overwritten. A
+ * database_ahead page's export view is the one the census compared; the other candidates are read ADOPTION_BATCH at a
+ * time in read-only transactions (#7617).
+ */
+async function planAdoption(engine: BrainEngine, sourceId: string, root: string, candidates: Array<{ page: GitGapPage; state: AdoptState }>, exported: ExportChecks,
+  preview: GitConversionPreview, adopt: AdoptItem[], discard: (category: DiscardCategory, path: string) => void): Promise<void> {
   if (!candidates.length) return;
   const ignored = await ignoredPaths(root, candidates.map(({ page }) => page.path!));
-  const mode = await scannerSlugRootMode(engine, sourceId, root);
-  const withdrawals = await readExportWithdrawals(engine, sourceId);
+  const unread = candidates.map(({ page }) => page).filter(page => ignored && !ignored.has(page.path!) && !page.segmented && !exported.get(page.id));
+  const withdrawals = unread.length ? await readExportWithdrawals(engine, sourceId) : [];
+  for (let start = 0; start < unread.length; start += ADOPTION_BATCH) {
+    const batch = unread.slice(start, start + ADOPTION_BATCH);
+    const snapshots = await engine.transaction(async tx => {
+      await tx.executeRaw('SET TRANSACTION READ ONLY');
+      return readExportPages(tx, batch.map(page => ({ ...page, source_id: sourceId })), withdrawals);
+    });
+    batch.forEach((page, i) => exported.add(page.id, page.path!, snapshots[i]!));
+  }
   for (const { page, state } of candidates) {
     const path = page.path!;
     // Fail-closed fallback: an ignored path with no file is already declared git_ignored by the census, and Git commits a
     // tracked file whatever its ignore rules say, so this fires only when reading the ignore rules fails (ignored is null).
     if (!ignored || ignored.has(path)) { discard('ignored_target', path); continue; }
     if (page.segmented) { discard('segmented_page', path); continue; }
-    const snapshot = await readExportPage(engine, { ...page, source_id: sourceId }, withdrawals);
-    const bytes = Buffer.from(inlineExportMarkdown(snapshot));
-    if (compareInlineExportFile(bytes, scannerSourcePath(root, join(root, path), mode), snapshot).state !== 'equal') { discard('export_mismatch', path); continue; }
+    const check = exported.get(page.id)!;
+    if (!check.readsBack) { discard('export_mismatch', path); continue; }
     const disk = diskBytes(join(root, path));
-    if (page.worktree !== 'clean' && page.worktree !== 'absent' && !disk?.equals(bytes)) { discard('uncommitted_edit', path); continue; }
+    if (page.worktree !== 'clean' && page.worktree !== 'absent' && !(disk && sha256(disk) === check.digest)) { discard('uncommitted_edit', path); continue; }
     adopt.push({ id: page.id, source_id: sourceId, slug: page.slug, revision: page.revision, path, state, disk: disk ? sha256(disk) : null });
     tally(preview.adopt, state, path);
   }

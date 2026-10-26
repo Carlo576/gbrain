@@ -1,5 +1,5 @@
 import type { BrainEngine } from './engine.ts';
-import { overlayCanonicalBodies } from './page-state/snapshot.ts';
+import { overlayCanonicalBodies, overlayCanonicalBodiesBatch } from './page-state/snapshot.ts';
 import type { PageWithdrawal } from './page-state/types.ts';
 import { rowToPage } from './utils.ts';
 import { EXPORT_PAYLOAD_LIMIT } from './export-stage.ts';
@@ -42,6 +42,31 @@ export async function readExportPage(tx: BrainEngine, key: { id: string; source_
 }
 
 export type ExportSnapshot = Awaited<ReturnType<typeof readExportPage>>;
+
+/**
+ * readExportPage of every key, in key order, in two statements however many keys there are: the rows with their tags,
+ * and one fence normalization for the pages whose overlay needs it (#7617: a per-page read made a large source's
+ * conversion plan one round trip per page). Each snapshot is exactly the one readExportPage returns for its key.
+ */
+export async function readExportPages(tx: BrainEngine, keys: ReadonlyArray<{ id: string; source_id: string; slug: string }>, withdrawals: ExportWithdrawal[]): Promise<ExportSnapshot[]> {
+  if (!keys.length) return [];
+  const rows = await tx.executeRaw<Record<string, unknown>>(`SELECT p.*,
+    COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS export_tags
+    FROM unnest($1::bigint[], $2::text[], $3::text[]) AS k(id, source_id, slug)
+    JOIN pages p ON p.id=k.id AND p.source_id=k.source_id AND p.slug=k.slug AND p.deleted_at IS NULL`,
+  [keys.map(key => key.id), keys.map(key => key.source_id), keys.map(key => key.slug)]);
+  const byId = new Map(rows.map(row => [String(row.id), row]));
+  const snapshots = keys.map(key => {
+    const row = byId.get(String(key.id));
+    if (!row) throw new Error('Export snapshot unexpectedly lost a selected page.');
+    return { page: rowToPage(row), tags: row.export_tags as string[] };
+  });
+  const fenced = snapshots.filter(({ page }) => !isSegmentedPage(page) && (page.compiled_truth.includes('gbrain:facts:') || page.timeline.includes('gbrain:facts:')));
+  const overlaid = await overlayCanonicalBodiesBatch(tx.executeRaw.bind(tx),
+    fenced.map(({ page }) => ({ body: page.compiled_truth, timeline: page.timeline, withdrawals: applicableWithdrawals(page.slug, withdrawals) })));
+  fenced.forEach(({ page }, i) => Object.assign(page, overlaid[i]));
+  return snapshots;
+}
 
 /**
  * The frontmatter and header fields of a page's exported file. #5966: the slug stamp rule lives in
