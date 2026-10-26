@@ -908,7 +908,7 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
   }
   const rawRepoPath = parseArg(args, '--repo') || await installRepoFallback(engine);
   if (!rawRepoPath) {
-    console.error('No repo path. Use --repo or run gbrain sync --repo first.');
+    console.error('No repo path: sync.repo_path and the default source local_path are unset or relative. Use --repo <absolute-directory>.');
     process.exit(1);
   }
   // #3696: the daemon runs with an arbitrary cwd (launchd: `/`), so a

@@ -87,6 +87,7 @@ describe('autopilot --install repo resolution (#6755)', () => {
     const refused = await install({ syncRepoPath: '.', defaultSourcePath: 'notes' });
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr).toContain('No repo path');
+    expect(refused.stderr).toContain('unset or relative');
     expect(refused.wrapper).toBeNull();
   });
 

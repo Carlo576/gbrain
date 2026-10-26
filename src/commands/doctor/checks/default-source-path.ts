@@ -15,7 +15,7 @@
  * source has a relative local_path, so the caller pushes nothing.
  */
 import { existsSync, statSync } from 'fs';
-import { isAbsolute } from 'path';
+import { isAbsolute, posix, win32 } from 'path';
 import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
 import { assessDefaultSourcePath } from '../../../core/default-source-path-check.ts';
@@ -36,7 +36,7 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
   // #7630: any other source with a relative local_path is refused by sync the same way, so name it here too.
   const relative = (await engine.executeRaw<{ id: string; local_path: string }>(
     `SELECT id, local_path FROM sources WHERE id <> 'default' AND local_path IS NOT NULL AND local_path <> '' AND archived IS NOT TRUE ORDER BY id`,
-  )).filter(row => !isAbsolute(row.local_path));
+  )).filter(row => !posix.isAbsolute(row.local_path) && !win32.isAbsolute(row.local_path));
   // Only gather the fallback-topology inputs when the pointer is actually
   // null — the set case resolves from the row alone.
   if (defaultSource && !defaultSource.local_path) {

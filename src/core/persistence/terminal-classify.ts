@@ -347,7 +347,7 @@ const RESUBMITTED_WRITES = new Set(['put_page', 'put_pages', 'capture', 'delete_
  * grandfather) is stored as `put_page` under its own intent kind, which names it while the intent survives.
  */
 export function faultOperation(operation: string, intentKind: string | null | undefined): string {
-  return operation !== 'submit_job' && intentKind && (intentKind === 'canonical_reconcile' || intentKind.startsWith('managed_')) ? intentKind : operation;
+  return operation === 'put_page' && intentKind && (intentKind === 'canonical_reconcile' || intentKind.startsWith('managed_')) ? intentKind : operation;
 }
 
 /**

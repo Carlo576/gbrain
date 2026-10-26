@@ -407,7 +407,7 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     await seed({ slug: 'notes/t2', operation: 'takes_resolve', state: 'failed', code: 'preparation_stalled' });
     await seed({ slug: 'notes/rc', operation: 'put_page', state: 'failed', code: 'preparation_stalled', kind: 'canonical_reconcile' });
     await seed({ slug: 'notes/mi', operation: 'put_page', state: 'failed', code: 'preparation_stalled', kind: 'managed_file_import' });
-    await seed({ slug: 'notes/ef', operation: 'extract_facts', state: 'failed', code: 'preparation_stalled' });
+    await seed({ slug: 'notes/ef', operation: 'extract_facts', state: 'failed', code: 'preparation_stalled', kind: 'managed_facts_entity' });
     const grouped = await readTerminalFailures(engine, { sourceId: SOURCE, groupBy: 'category' });
     if (grouped.status !== 'ok') throw new Error('unknown');
     const stalled = grouped.groups!.filter(g => g.code === 'preparation_stalled');
@@ -415,6 +415,7 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     for (const op of ['submit_job', 'canonical_reconcile']) expect(stalled.find(g => g.operation === op)!.fix.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
     expect(stalled.find(g => g.operation === 'managed_file_import')!.fix.why).toContain('rerun the command that wrote it');
     expect(stalled.find(g => g.operation === 'extract_facts')!.fix.why).not.toContain('request_id');
+    expect(stalled.find(g => g.operation === 'extract_facts')!.fix.why).not.toContain('rerun the command');
     const flat = await readTerminalFailures(engine, { sourceId: SOURCE, limit: 50 });
     if (flat.status !== 'ok') throw new Error('unknown');
     for (const g of stalled) for (const s of g.samples) expect(flat.rows!.find(r => r.request_id === s.request_id)!.fix).toEqual(g.fix);

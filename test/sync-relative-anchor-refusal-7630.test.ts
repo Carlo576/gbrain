@@ -230,6 +230,11 @@ for (const backend of testBackends()) {
       await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [folder]);
       expect((await clearConnectorLocalPath(engine, 'default').catch(error => error)).code).toBe('invalid_params');
       expect((await engine.executeRaw<{ local_path: string | null }>("SELECT local_path FROM sources WHERE id='default'"))[0]!.local_path).toBe(folder);
+      // A Windows-absolute path stored by another host sharing the brain is never relative: --clear refuses it and doctor does not list it.
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-w', 'notes-w', $1)", ['C:\\brain-example']);
+      expect((await clearConnectorLocalPath(engine, 'notes-w').catch(error => error)).code).toBe('invalid_params');
+      expect((await defaultSourceLocalPathCheck(engine))?.message ?? '').not.toContain('notes-w');
+      await engine.executeRaw("DELETE FROM sources WHERE id='notes-w'");
       // Value: protects=a relative local_path whose source has a canonical owner binding is never cleared (writer_transfer_required);
       //   fails_when=the relative-path clear is moved ahead of the binding check; why_new=sources-set-path-clear covers only a bound
       //   connector; seam=none; no_claim=a real activated managed brain (the binding row is inserted directly)
