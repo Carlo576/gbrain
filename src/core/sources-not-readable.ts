@@ -1,7 +1,8 @@
 /**
  * GBRA-156: `sources_not_readable`, the refusal of an unscoped remote read
- * that came back empty because its readable sources hold no page (and, for
- * recall and query, no world fact) while other sources hold pages.
+ * that came back empty because its readable sources hold no page it may read
+ * (and, for recall and query, no world fact) while other sources hold such
+ * pages. Private pages count on neither side when remote reads exclude them.
  *
  * A connection with no source grant (a legacy token minted without --sources,
  * whose hasSourceGrant is false, or an unbound agent stdio connection) reads the default source plus the
@@ -20,6 +21,7 @@ import type { OperationContext } from './ops/contract.ts';
 import { opError } from './ops/contract.ts';
 import { federatedSearchScope } from './ops/context.ts';
 import { hostFix } from './ops/op-fix.ts';
+import { privatePagesFilterFragment, resolveExcludePrivatePages } from './search/private-visibility.ts';
 
 const UNSCOPED_READ_OPS: ReadonlySet<string> = new Set(['search', 'query', 'recall', 'list_pages']);
 
@@ -40,10 +42,11 @@ export async function assertUnscopedReadReachesPages(op: string, params: Record<
     const readableFacts = op === 'recall' || op === 'query'
       ? ` OR EXISTS (SELECT 1 FROM facts WHERE source_id = ANY($1::text[]) AND visibility = 'world')`
       : '';
+    const visible = await resolveExcludePrivatePages(ctx.engine, ctx.remote) ? ` AND ${privatePagesFilterFragment('p')}` : '';
     const [row] = await ctx.engine.executeRaw<{ refuse: boolean }>(
-      `SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE source_id = ANY($1::text[]) AND deleted_at IS NULL)${readableFacts} THEN false
+      `SELECT CASE WHEN EXISTS (SELECT 1 FROM pages p WHERE p.source_id = ANY($1::text[]) AND p.deleted_at IS NULL${visible})${readableFacts} THEN false
                    ELSE EXISTS (SELECT 1 FROM pages p JOIN sources s ON s.id = p.source_id
-                                 WHERE p.deleted_at IS NULL AND s.archived IS NOT TRUE AND NOT (p.source_id = ANY($1::text[])))
+                                 WHERE p.deleted_at IS NULL AND s.archived IS NOT TRUE AND NOT (p.source_id = ANY($1::text[]))${visible})
               END AS refuse`,
       [readable],
     );

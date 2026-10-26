@@ -133,6 +133,18 @@ describe('sources add next step when the no-grant floor holds no page', () => {
     }
   });
 
+  // Value: protects=a floor holding only a private page still gets the next step, since remote reads never show that page;
+  // fails_when=the floor read counts pages a remote caller cannot read;
+  // why_new=no test puts a private page on the floor; seam=none; no_claim=search.remote_private_pages visible
+  test('a floor holding only a private page still prints the next step', async () => {
+    await engine.putPage('notes/private-floor', { type: 'note', title: 'Private', compiled_truth: 'A private page in the default source.', timeline: '', frontmatter: { visibility: 'private' } } as never);
+    try {
+      expect((await add(['source-k'])).stdout).toContain('next: gbrain sources federate source-k');
+    } finally {
+      await engine.executeRaw("DELETE FROM pages WHERE source_id = 'default' AND slug = 'notes/private-floor'");
+    }
+  });
+
   test('once the floor holds a page, the add warns but prints no next step', async () => {
     await engine.putPage('notes/floor-page', { type: 'note', title: 'Floor', compiled_truth: 'A page in the default source.', timeline: '' });
     const human = await add(['source-f']);

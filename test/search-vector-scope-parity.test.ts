@@ -133,7 +133,7 @@ for (const kind of testBackends()) {
         for (const c of CASES) {
           const out = await callTool(serve.base, tokens[c.token]!, path.tool, { ...path.args, ...c.scope, limit: 50 });
           if (c.reads === null) {
-            expect({ case: c.name, isError: out.isError, code: envelopeOf(out).code }).toMatchObject({ case: c.name, isError: true });
+            expect({ case: c.name, isError: out.isError, code: envelopeOf(out).code }).toEqual({ case: c.name, isError: true, code: 'permission_denied' });
             expect(JSON.stringify(out.content)).not.toContain('quillmarsh ledger kept');
             continue;
           }
