@@ -688,7 +688,7 @@ export const CODES = {
   sync_anchor_relative: { class: 'consent', exit: 3, actor: 'user', docs: 'docs/guides/troubleshooting.md#relative-source-path',
     summary: "Sync refused: the source's stored directory (sources.local_path, or sync.repo_path) is a relative path such as \".\", which names whatever directory gbrain runs from.",
     why: "A relative stored path cannot prove which folder is the brain. Before #7630 a sync run from an unrelated folder treated that folder as the brain repo: it Git-initialized it, committed everything in it and imported its markdown. gbrain now refuses before any Git probe or import, and nothing is changed.",
-    suggestion: 'Ask the user which directory holds the source, then gbrain sources set-path <id> <absolute-directory>; or clear the pointer with gbrain sources set-path <id> --clear.' },
+    suggestion: 'Ask the user which directory holds the source, then gbrain sources set-path <id> <absolute-directory>; or clear the pointer with gbrain sources set-path <id> --clear. A path that is absolute only on another operating system (a Windows drive path read on Linux or macOS) is refused the same way; set-path fixes it and --clear does not apply.' },
   sync_not_applicable: { class: 'caller', summary: "Sync does not apply to this source: its directory is not a Git checkout.", why: "Sync imports changes between Git commits. A gbrain-owned content directory (created by init) holds files gbrain manages itself and is not a Git repository, so there is nothing to sync; gbrain never initializes Git on its own.", reasons: ['content_directory'] },
   // #6712 PR 1: the drain lease (src/core/persistence/sync-lease.ts).
   sync_admission_restricted: { class: 'host_only', retryable: false, actor: 'user',

@@ -544,6 +544,49 @@ for (const backend of testBackends()) {
       expect(await assertNoOverlappingPath(engine, 'default', folder).then(() => null, (error: { code?: string }) => error.code ?? String(error))).toBeNull();
     }, 120_000);
 
+    // Value: protects=the foreign-OS cells of both stored-anchor holds: a Windows-absolute legacy sync.repo_path refuses without calling
+    //   itself relative and keeps the config fix, config set over it stores this host's directory, config set of a Windows path is refused
+    //   on POSIX with nothing written, and set-path over a Windows-absolute local_path releases the sync refusal; fails_when=the
+    //   sync.repo_path branch keeps the relative wording beside the foreign why, or either exit (config set, set-path) does not settle the
+    //   hold; why_new=the foreign cases above cover only sources.local_path refusals; seam=none; no_claim=Windows hosts (rooted, absolute)
+    test.skipIf(process.platform === 'win32')('a Windows-absolute sync.repo_path or local_path on POSIX: refusal wording and both exits', async () => {
+      await engine.executeRaw("UPDATE sources SET local_path=NULL WHERE id='default'");
+      await engine.setConfig('sync.repo_path', 'C:\\brain-example');
+      const refused = await sync({}) as { code?: string; message?: string; fix?: { argv?: string[]; user_message?: string } } | null;
+      expect(refused?.code).toBe('sync_anchor_relative');
+      expect(refused?.message).toContain('not an absolute path on this host');
+      expect(refused?.message).not.toContain('relative path');
+      expect(refused?.fix?.user_message ?? '').not.toContain('relative path');
+      expect(refused?.fix?.argv).toEqual(['gbrain', 'config', 'set', 'sync.repo_path', '<dir>']);
+      const { runConfig } = await import('../src/commands/config.ts');
+      expect((await cli(() => runConfig(engine, ['set', 'sync.repo_path', folder]))).exit).toBeUndefined();
+      expect(await engine.getConfig('sync.repo_path')).toBe(folder);
+      expect((await cli(() => runConfig(engine, ['set', 'sync.repo_path', 'C:\\brain-example']))).exit).toBe(1);
+      expect(await engine.getConfig('sync.repo_path')).toBe(folder);
+      await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", ['C:\\brain-example']);
+      await cli(async () => {
+        const { runSources } = await import('../src/commands/sources.ts');
+        await runSources(engine, ['set-path', 'default', folder]);
+      });
+      expect((await engine.executeRaw<{ local_path: string | null }>("SELECT local_path FROM sources WHERE id='default'"))[0]!.local_path).toBe(folder);
+      expect((await sync({ sourceId: 'default' }))?.code).not.toBe('sync_anchor_relative');
+    }, 120_000);
+
+    // Value: protects=an explicit absolute --repo that passes the refusal never stamps its HEAD into, or repoints, a source whose stored
+    //   local_path is relative; fails_when=sourceCommitAnchorAllowed or ownsSourceSyncAnchor resolve "." against the cwd, so a cwd that
+    //   contains (or is) the --repo directory proves ownership and poisons the source's incremental anchor; why_new=the cases above cover
+    //   isAnchorOwnedSyncPath only; seam=none; no_claim=the default source's repo_path repoint (ownsGlobalSyncAnchor, follow-up #7646)
+    test('a relative local_path proves no ownership to the commit-anchor and repoint guards', async () => {
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.')");
+      const { ownsSourceSyncAnchor, sourceCommitAnchorAllowed } = await import('../src/core/sync-anchor.ts');
+      expect(await sourceCommitAnchorAllowed(engine, 'notes-a', folder)).toEqual({ owns: false, configured: '.' });
+      expect(await sourceCommitAnchorAllowed(engine, 'notes-a', join(folder, 'nested'))).toEqual({ owns: false, configured: '.' });
+      expect(await ownsSourceSyncAnchor(engine, 'notes-a', folder)).toEqual({ owns: false, configured: '.' });
+      await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='notes-a'", [folder]);
+      expect((await sourceCommitAnchorAllowed(engine, 'notes-a', folder)).owns).toBe(true);
+      expect((await ownsSourceSyncAnchor(engine, 'notes-a', folder)).owns).toBe(true);
+    }, 120_000);
+
     // Value: protects=the remote sources_resolve_path read and the fence census never treat a relative local_path as the host's cwd;
     //   fails_when=resolveSourcePaths realpaths "." (the cwd's Git repo answers) or the census walks the cwd's files;
     //   why_new=the reader cases above cover write and maintenance roots, not these two reads; seam=none; no_claim=the MCP transport

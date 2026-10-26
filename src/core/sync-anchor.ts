@@ -143,6 +143,7 @@ export async function ownsSourceSyncAnchor(
     );
     const configured = rows[0]?.local_path ?? null;
     if (configured === null) return { owns: true, configured: null };
+    if (!isAbsolute(configured)) return { owns: false, configured };
     return { owns: sameRepoDir(configured, dir), configured };
   } catch {
     return { owns: true, configured: null };
@@ -215,6 +216,7 @@ export async function sourceCommitAnchorAllowed(
       configured = rows[0]?.local_path ?? null;
     }
     if (configured === null) return { owns: true, configured: null };
+    if (!isAbsolute(configured)) return { owns: false, configured };
     return { owns: sameOrNestedRepoDir(configured, repoDir), configured };
   } catch {
     return { owns: true, configured: null };

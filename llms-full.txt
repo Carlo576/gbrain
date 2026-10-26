@@ -11010,6 +11010,14 @@ Ask the user which directory holds the source, then do one of:
   is set again. On a managed brain, a source with a canonical owner refuses
   `--clear` (`writer_transfer_required`); point it at its directory instead.
 
+A path that is absolute only on another operating system (a Windows drive path
+such as `C:\brain-example`, set by another host sharing the brain, read on Linux
+or macOS) is refused the same way, as not an absolute path on this host. Use
+`set-path` with this host's directory (or `gbrain config set sync.repo_path` for
+the legacy key); `--clear` refuses such a path. An explicit absolute `--repo`
+passes the refusal, but it never advances the sync position of a source whose
+stored path is relative.
+
 Until the path is absolute, the main readers do not treat the folder gbrain
 runs from as the source either: page and fact writes skip the file and stay in
 the database (`repo_not_found`, `no_repo_configured`), a captured file keeps

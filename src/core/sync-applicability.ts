@@ -98,11 +98,12 @@ export function syncAnchorRelativeError(sourceId: string | undefined, anchor: st
     ? `The path is absolute only on another operating system (another host sharing this brain may have set it); on this host it would name a folder inside whatever directory gbrain runs from, so sync cannot use it here. Nothing was changed.`
     : `A relative path names whatever directory gbrain runs from, not a fixed folder, so it cannot prove which folder is the brain; syncing it from an unrelated folder would Git-initialize that folder, commit everything in it and import its markdown. Nothing was changed.`;
   if (!sourceId) {
-    return opError('sync_anchor_relative', `Sync refused: sync.repo_path is the relative path "${anchor}".`,
+    const named = foreign ? `sync.repo_path is "${anchor}", which is not an absolute path on this host` : `sync.repo_path is the relative path "${anchor}"`;
+    return opError('sync_anchor_relative', `Sync refused: ${named}.`,
       'Ask the user which directory holds the brain repo, then set it as an absolute path: gbrain config set sync.repo_path <absolute-directory>.',
       { why, fix: { argv: ['gbrain', 'config', 'set', 'sync.repo_path', '<dir>'], consent: [], actor: 'user', ask_user: true, requires_exclusive: false,
         inputs: [{ name: 'dir', how: 'The absolute path of the brain repo, from the user; never the current directory by default.' }],
-        user_message: `gbrain's brain repo setting (sync.repo_path) is the relative path "${anchor}", so sync cannot tell which folder is the brain. Which directory holds your brain repo?`,
+        user_message: `gbrain's brain repo setting (${named}), so sync cannot tell which folder is the brain. Which directory holds your brain repo?`,
         why: 'Points sync.repo_path at an absolute directory; no file or page changes.', verify: { argv: ['gbrain', 'config', 'get', 'sync.repo_path'] } } });
   }
   if (foreign) {
