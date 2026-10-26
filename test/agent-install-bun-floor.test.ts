@@ -1,31 +1,86 @@
 /**
  * An in-agent helper written before Bun 1.4.4 became the floor stages Bun 1.4.3
- * for --upgrade. The new package's setup entry must refuse that runtime before
- * it commits an artifact the CLI then refuses to start (#7674).
+ * for --upgrade. Setup must refuse the bundle's own runtime (the binary the
+ * launcher is pinned to) before it writes anything, and say exactly how to
+ * rerun (#7674).
  */
 import { afterEach, expect, spyOn, test } from 'bun:test';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runAgentSetupCli } from '../src/core/agent-install/entry.ts';
 import { MINIMUM_BUN_VERSION } from '../src/core/runtime-version.ts';
 
-const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+const HELPER_URL = 'https://raw.githubusercontent.com/garrytan/gbrain/latest-stable/scripts/setup-in-agent.sh';
+const temporaries: string[] = [];
+afterEach(() => { for (const dir of temporaries.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-test('setup refuses a staged Bun below the floor before touching the install root', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'gbrain-agent-floor-'));
-  roots.push(root);
-  const calls: string[] = [];
-  const output = spyOn(console, 'log').mockImplementation((line: string) => { calls.push(line); });
+function fixture(stagedBunVersion: string) {
+  const temporary = mkdtempSync(join(tmpdir(), 'gbrain-agent-floor-'));
+  temporaries.push(temporary);
+  const bundle = join(temporary, 'bundle');
+  const pkg = join(bundle, 'app', 'node_modules', 'gbrain');
+  mkdirSync(join(pkg, 'src'), { recursive: true });
+  mkdirSync(join(pkg, 'scripts'), { recursive: true });
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'gbrain', version: '0.0.0-floor-test' }));
+  writeFileSync(join(pkg, 'src', 'cli.ts'), '');
+  writeFileSync(join(pkg, 'scripts', 'setup-in-agent.sh'), '');
+  writeFileSync(join(bundle, 'bun'), `#!/bin/sh\nif [ "$1" = --version ]; then echo '${stagedBunVersion}'; exit 0; fi\nexit 7\n`);
+  chmodSync(join(bundle, 'bun'), 0o700);
+  return { root: join(temporary, 'brain dir'), bundle };
+}
+
+async function run(args: string[]): Promise<{ exit: number; result: Record<string, unknown> }> {
+  const lines: string[] = [];
+  const log = spyOn(console, 'log').mockImplementation((line: string) => { lines.push(line); });
+  const error = spyOn(console, 'error').mockImplementation(() => {});
+  const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true);
   try {
-    const args = ['--root', root, '--harness', 'grok-bot', '--bundle', join(root, 'bundle'), '--source-ref', 'a'.repeat(40), '--json'];
-    expect(await runAgentSetupCli(args, '1.4.3')).toBe(1);
-  } finally { output.mockRestore(); }
-  const result = JSON.parse(calls.pop()!);
+    const exit = await runAgentSetupCli(args);
+    return { exit, result: JSON.parse(lines.pop() ?? '{}') };
+  } finally { log.mockRestore(); error.mockRestore(); stderr.mockRestore(); }
+}
+
+const setupArgs = (root: string, bundle: string, extra: string[] = []) =>
+  ['--root', root, '--harness', 'grok-bot', '--bundle', bundle, '--source-ref', 'a'.repeat(40), ...extra, '--json'];
+
+test('setup refuses a bundle carrying Bun below the floor before writing anything', async () => {
+  const { root, bundle } = fixture('1.4.3');
+  const { exit, result } = await run(setupArgs(root, bundle, ['--upgrade', '--skills', 'memory-only']));
+  expect(exit).toBe(1);
   expect(result).toMatchObject({ ok: false, reason: 'runtime_below_floor' });
-  expect(result.message).toContain(`needs Bun ${MINIMUM_BUN_VERSION} or newer, but the setup helper staged Bun 1.4.3`);
-  expect(result.message).toContain('--upgrade');
-  expect(readdirSync(root)).toEqual([]);
-  expect(existsSync(join(root, '.gbrain'))).toBe(false);
+  expect(result.message).toContain(`needs Bun ${MINIMUM_BUN_VERSION} or newer, but the setup bundle carries Bun 1.4.3`);
+  expect(result.message).toContain('Make a verified backup first');
+  expect(result.message).toContain(`curl --fail --silent --show-error --location ${HELPER_URL} --output /tmp/gbrain-setup.sh && bash /tmp/gbrain-setup.sh --root '${root}' --harness grok-bot --upgrade --skills memory-only`);
+  expect(existsSync(root)).toBe(false);
+});
+
+test('a prerelease of the floor and an unparseable version are refused too', async () => {
+  for (const staged of [`${MINIMUM_BUN_VERSION}-canary.1`, '']) {
+    const { root, bundle } = fixture(staged);
+    const { exit, result } = await run(setupArgs(root, bundle));
+    expect(exit).toBe(1);
+    expect(result.reason).toBe('runtime_below_floor');
+    expect(result.message).not.toContain('backup');
+    expect(existsSync(root)).toBe(false);
+  }
+});
+
+test('a bundle carrying the floor itself passes the gate', async () => {
+  const { root, bundle } = fixture(MINIMUM_BUN_VERSION);
+  const { exit, result } = await run(setupArgs(root, bundle));
+  expect(exit).toBe(1);
+  expect(result.reason).not.toBe('runtime_below_floor');
+  expect(existsSync(root)).toBe(true);
+});
+
+test('missing arguments still answer usage (exit 2) before the floor check', async () => {
+  const { bundle } = fixture('1.4.3');
+  const { exit, result } = await run(['--harness', 'grok-bot', '--bundle', bundle, '--source-ref', 'a'.repeat(40), '--json']);
+  expect(exit).toBe(2);
+  expect(result.reason).toBe('usage');
+});
+
+test('the documented helper URL matches the one the refusal names', () => {
+  expect(readFileSync(join(import.meta.dir, '..', 'docs', 'guides', 'in-agent-setup.md'), 'utf8')).toContain(HELPER_URL);
 });

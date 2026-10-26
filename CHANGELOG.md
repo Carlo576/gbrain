@@ -25,6 +25,7 @@ On Bun 1.4.0 to 1.4.2 a postgres.js connection over TLS keeps every chunk it rec
 | `gbrain upgrade` or autopilot on a source install whose host Bun is below 1.4.4 | upgraded | stops before swapping (autopilot holds) with the same fix |
 | Code importing gbrain as a library on an older Bun | ran | guarded outbound HTTP calls (URL checks, remote images, HTTP integrations) throw `UNSUPPORTED_RUNTIME` |
 | Cloud sandbox setup with a preinstalled older Bun | used it | installs a current Bun with npm and stops before cloning if that Bun is still below 1.4.4 |
+| In-agent setup (Grok Bot, Muse) from a helper that stages Bun below 1.4.4 | installed a runtime the CLI then refused | stops with `runtime_below_floor` before writing anything and prints the exact command to fetch the current helper and rerun |
 
 ### What to watch for after you upgrade
 
@@ -36,6 +37,7 @@ On Bun 1.4.0 to 1.4.2 a postgres.js connection over TLS keeps every chunk it rec
 
 - `src/core/runtime-version.ts`, `package.json` `engines.bun`: `MINIMUM_BUN_VERSION` and `SECURE_BUN_VERSION` are both 1.4.4; the CLI gate, doctor's `bun_runtime`, the guarded-HTTP check and the upgrade floor gate read them.
 - `src/core/behavior-change-notice.ts`: a `bun_floor_1_4_4` row tells existing installs about the new floor.
+- `src/core/agent-install/setup.ts`: in-agent setup checks the Bun in its bundle (the runtime the launcher is pinned to) against the floor before it writes anything (`test/agent-install-bun-floor.test.ts`).
 - `templates/bootstrap/cloud-setup-script.sh`: the preinstalled-Bun check uses the 1.4.4 floor and checks the npm-installed Bun before cloning.
 - CI: the Bun 1.4.0 matrix cells are gone from `test.yml`, `native-locks.yml`, `persistence-validation.yml`, `convergence-nightly.yml` and `promote-stable.yml`. The remaining `unit-postgres-arms` cell runs both the PGLite and Postgres arms, so the PGLite side of the `*.slow.test.ts` suites still runs on GitHub CI (guarded by `test/scripts/postgres-unit-arms.test.ts`). `docs/test-audit/2026-10-04/expected-deltas.tsv` records the moved receipt lane.
 - Bench and VM setup scripts, the System One Ubicloud runner and the stable-promotion workflow pin Bun 1.4.4.
