@@ -502,6 +502,48 @@ for (const backend of testBackends()) {
       }
     }, 120_000);
 
+    // Value: protects=a local_path that is absolute only for another OS (a Windows drive path read on POSIX, stored by a host sharing
+    //   the brain) still refuses sync, but the refusal neither calls it relative nor offers `set-path --clear`, which refuses that
+    //   path; fails_when=syncAnchorRelativeError gives it the relative-path text and the --clear suggestion, a dead end;
+    //   why_new=the --clear case only pins that --clear refuses it, and no sync case stores a foreign path; seam=none;
+    //   no_claim=a POSIX path read on Windows (rooted, so absolute there)
+    test.skipIf(process.platform === 'win32')('sync of a Windows-absolute local_path on POSIX refuses with set-path only, not as relative', async () => {
+      await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", ['C:\\brain-example']);
+      const refused = await sync({ sourceId: 'default' }) as { code?: string; message?: string; suggestion?: string; fix?: { argv?: string[]; user_message?: string } } | null;
+      expect(refused?.code).toBe('sync_anchor_relative');
+      expect(refused?.message).toContain('not an absolute path on this host');
+      expect(refused?.message).not.toContain('relative local_path');
+      expect(`${refused?.suggestion ?? ''} ${refused?.fix?.user_message ?? ''}`).not.toContain('--clear');
+      expect(refused?.fix?.argv).toEqual(['gbrain', 'sources', 'set-path', 'default', '<dir>']);
+      expect(existsSync(join(folder, '.git'))).toBe(false);
+      expect((await clearConnectorLocalPath(engine, 'default').catch(error => error)).code).toBe('invalid_params');
+    }, 120_000);
+
+    // Value: protects=the untested cells of the relative-anchor hold: set-path over a stored "." stores the absolute directory, --clear
+    //   leaves a relative legacy sync.repo_path alone (its fix is config set), and a sibling stored as another OS's absolute path is
+    //   never matched to a folder nor counted as an overlap; fails_when=set-path keeps the relative row, --clear rewrites the config key,
+    //   or resolveSourceForDir/assertNoOverlappingPath resolve the foreign path against the cwd; why_new=the existing cases start from an
+    //   absolute prior or a "." sibling; seam=none; no_claim=the CLI rendering of set-path (covered by sources-set-path tests)
+    test('set-path over ".", --clear beside a relative sync.repo_path, and a foreign-OS sibling in folder matching and overlap', async () => {
+      await engine.executeRaw("UPDATE sources SET local_path=NULL WHERE id='default'");
+      await engine.setConfig('sync.repo_path', '.');
+      expect(await clearConnectorLocalPath(engine, 'default')).toEqual({ prior: null, connector: false });
+      expect(await engine.getConfig('sync.repo_path')).toBe('.');
+      await engine.setConfig('sync.repo_path', folder);
+      await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+      await cli(async () => {
+        const { runSources } = await import('../src/commands/sources.ts');
+        await runSources(engine, ['set-path', 'default', folder]);
+      });
+      expect((await engine.executeRaw<{ local_path: string | null }>("SELECT local_path FROM sources WHERE id='default'"))[0]!.local_path).toBe(folder);
+      await engine.executeRaw("UPDATE sources SET local_path=NULL WHERE id='default'");
+      await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('win-host', 'win-host', $1)", ['C:\\brain-example']);
+      const { resolveSourceForDir } = await import('../src/core/cycle.ts');
+      expect(await resolveSourceForDir(engine, folder)).toBeUndefined();
+      const { assertNoOverlappingPath } = await import('../src/core/sources-ops.ts');
+      expect(await assertNoOverlappingPath(engine, 'default', folder).then(() => null, (error: { code?: string }) => error.code ?? String(error))).toBeNull();
+    }, 120_000);
+
     // Value: protects=the remote sources_resolve_path read and the fence census never treat a relative local_path as the host's cwd;
     //   fails_when=resolveSourcePaths realpaths "." (the cwd's Git repo answers) or the census walks the cwd's files;
     //   why_new=the reader cases above cover write and maintenance roots, not these two reads; seam=none; no_claim=the MCP transport

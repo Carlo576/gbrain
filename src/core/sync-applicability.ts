@@ -15,7 +15,7 @@
  * whatever directory gbrain runs from.
  */
 import { existsSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, posix, relative, resolve, win32 } from 'node:path';
 import type { BrainEngine } from './engine.ts';
 import { gbrainPath, loadConfig } from './config.ts';
 import { opError, type OperationError } from './ops/contract.ts';
@@ -93,7 +93,10 @@ export function syncNotApplicableError(dir: SyncContentDirectory): OperationErro
  * everything in it, an import of its markdown). Refused before any Git probe, cost estimate or import.
  */
 export function syncAnchorRelativeError(sourceId: string | undefined, anchor: string): OperationError {
-  const why = `A relative path names whatever directory gbrain runs from, not a fixed folder, so it cannot prove which folder is the brain; syncing it from an unrelated folder would Git-initialize that folder, commit everything in it and import its markdown. Nothing was changed.`;
+  const foreign = posix.isAbsolute(anchor) || win32.isAbsolute(anchor);
+  const why = foreign
+    ? `The path is absolute only on another operating system (another host sharing this brain may have set it); on this host it would name a folder inside whatever directory gbrain runs from, so sync cannot use it here. Nothing was changed.`
+    : `A relative path names whatever directory gbrain runs from, not a fixed folder, so it cannot prove which folder is the brain; syncing it from an unrelated folder would Git-initialize that folder, commit everything in it and import its markdown. Nothing was changed.`;
   if (!sourceId) {
     return opError('sync_anchor_relative', `Sync refused: sync.repo_path is the relative path "${anchor}".`,
       'Ask the user which directory holds the brain repo, then set it as an absolute path: gbrain config set sync.repo_path <absolute-directory>.',
@@ -101,6 +104,15 @@ export function syncAnchorRelativeError(sourceId: string | undefined, anchor: st
         inputs: [{ name: 'dir', how: 'The absolute path of the brain repo, from the user; never the current directory by default.' }],
         user_message: `gbrain's brain repo setting (sync.repo_path) is the relative path "${anchor}", so sync cannot tell which folder is the brain. Which directory holds your brain repo?`,
         why: 'Points sync.repo_path at an absolute directory; no file or page changes.', verify: { argv: ['gbrain', 'config', 'get', 'sync.repo_path'] } } });
+  }
+  if (foreign) {
+    return opError('sync_anchor_relative', `Sync refused: source "${sourceId}" has the local_path "${anchor}", which is not an absolute path on this host.`,
+      `Ask the user which directory on this host holds this source's files and run gbrain sources set-path ${sourceId} <absolute-directory>.`,
+      { why, fix: { argv: ['gbrain', 'sources', 'set-path', sourceId, '<dir>'], consent: [], actor: 'user', ask_user: true, requires_exclusive: false,
+        inputs: [{ name: 'dir', how: "The absolute path on this host of the directory that holds this source's files, from the user; never the current directory by default." }],
+        user_message: `Source "${sourceId}" has "${anchor}" as its directory, which is not an absolute path on this host, so sync refused. Which directory on this host holds its files? I'll point the source there (gbrain sources set-path ${sourceId} <absolute-directory>).`,
+        why: 'Points the source at an absolute directory on this host; it only updates the pointer, no file or page changes.',
+        verify: { argv: ['gbrain', 'sources', 'status', sourceId, '--json'] } } });
   }
   return opError('sync_anchor_relative', `Sync refused: source "${sourceId}" has the relative local_path "${anchor}".`,
     `Ask the user which directory holds this source's files and run gbrain sources set-path ${sourceId} <absolute-directory>, or clear the pointer with gbrain sources set-path ${sourceId} --clear.`,
