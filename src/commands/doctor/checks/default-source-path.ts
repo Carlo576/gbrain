@@ -11,8 +11,8 @@
  * for every other source whose local_path is relative.
  *
  * Lives in the doctor module dir per the peeled-façade rule — new code goes
- * here, not back into doctor.ts. Returns null for the 'skip' verdict so the
- * caller pushes nothing.
+ * here, not back into doctor.ts. Returns null for the 'skip' verdict when no
+ * source has a relative local_path, so the caller pushes nothing.
  */
 import { existsSync, statSync } from 'fs';
 import { isAbsolute } from 'path';
@@ -31,7 +31,12 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
   let repoPath: string | null = null;
   let repoPathIsDir = false;
   let collidingSourceId: string | null = null;
+  let blockedByRelative = false;
   let sharedPages = 0;
+  // #7630: any other source with a relative local_path is refused by sync the same way, so name it here too.
+  const relative = (await engine.executeRaw<{ id: string; local_path: string }>(
+    `SELECT id, local_path FROM sources WHERE id <> 'default' AND local_path IS NOT NULL AND local_path <> '' AND archived IS NOT TRUE ORDER BY id`,
+  )).filter(row => !isAbsolute(row.local_path));
   // Only gather the fallback-topology inputs when the pointer is actually
   // null — the set case resolves from the row alone.
   if (defaultSource && !defaultSource.local_path) {
@@ -53,6 +58,10 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
       // Mirror resolvePageWriteTarget's #2018 leak guard: sync.repo_path
       // being another source's own working tree silently skips the write.
       collidingSourceId = await otherSourceOwning(engine, 'default', repoPath);
+      if (collidingSourceId && relative.some(row => row.id === collidingSourceId)) {
+        blockedByRelative = true;
+        collidingSourceId = null;
+      }
       if (collidingSourceId) {
         const [shared] = await engine.executeRaw<{ n: number }>(
           `SELECT COUNT(*)::int AS n FROM pages a
@@ -74,15 +83,12 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
     collidingSourceId,
     sharedPages,
   });
-  // #7630: any other source with a relative local_path is refused by sync the same way, so name it here too.
-  const relative = (await engine.executeRaw<{ id: string; local_path: string }>(
-    `SELECT id, local_path FROM sources WHERE id <> 'default' AND local_path IS NOT NULL AND archived IS NOT TRUE ORDER BY id`,
-  )).filter(row => !isAbsolute(row.local_path));
   if (assessment.status === 'skip' && relative.length === 0) return null;
   const relativeNote = relative.length === 0 ? '' :
     `${relative.map(row => `source "${row.id}" has the relative local_path "${row.local_path}"`).join('; ')}, which names whatever directory ` +
     'gbrain runs from, so sync refuses it (sync_anchor_relative). Ask the user which directory holds its files, then run ' +
-    '`gbrain sources set-path <id> <absolute-directory>`, or clear the pointer with `gbrain sources set-path <id> --clear`.';
+    '`gbrain sources set-path <id> <absolute-directory>`, or clear the pointer with `gbrain sources set-path <id> --clear`.' +
+    (blockedByRelative ? ' Until then, default-source pages are saved to the database only, not written under sync.repo_path.' : '');
   return {
     name: 'default_source_local_path',
     status: relative.length > 0 || assessment.status === 'skip' ? 'warn' : assessment.status,

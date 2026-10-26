@@ -27,6 +27,9 @@ import { categorizeCheck } from '../src/core/doctor-categories.ts';
 import { WAVE_CHECKS } from '../src/commands/doctor/wave-checks.ts';
 import { runRemoteDoctorTier } from '../src/commands/doctor/remote-tier.ts';
 import { renderWriterFailures } from '../src/commands/sources-writer-failures.ts';
+import { parsePersistenceAdminArgs } from '../src/commands/persistence-admin.ts';
+import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
+import type { TerminalFailureListing } from '../src/core/persistence/terminal-failures.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 
 let engine: BrainEngine;
@@ -415,7 +418,9 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     }
     for (const g of stalled) {
       expect(g.drill_down).toContain('--operation');
-      const rows = await readTerminalFailures(engine, { sourceId: SOURCE, ...g.filter, origin: g.filter.origin ?? 'none' });
+      const parsed = parsePersistenceAdminArgs('writer', g.drill_down.slice(3));
+      expect(parsed.params.operation).toBe(g.operation);
+      const rows = await runPersistenceAdministration(engine, parsed.operation, parsed.params) as TerminalFailureListing;
       if (rows.status !== 'ok') throw new Error('unknown');
       expect(rows.rows!.map(r => r.operation)).toEqual([g.operation ?? '']);
     }

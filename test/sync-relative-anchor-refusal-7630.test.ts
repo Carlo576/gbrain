@@ -497,17 +497,42 @@ for (const backend of testBackends()) {
       expect(seen.find(s => s.sourceId === 'notes-a')).toEqual({ sourceId: 'notes-a', brainDir: null });
     }, 120_000);
 
-    // Value: protects=the repair command (sources set-path) and the #2018 write-through leak guard never treat a sibling's relative
-    //   local_path as the cwd's tree; fails_when=assertNoOverlappingPath or otherSourceOwning realpaths "." to the cwd, so set-path
-    //   refuses overlapping_path and default writes under sync.repo_path skip as another source's tree; why_new=no other case has a
-    //   relative sibling; seam=none; no_claim=company-brain admission (same helper)
-    test('a sibling with a relative local_path overlaps nothing: set-path to the cwd passes and the leak guard ignores it', async () => {
+    // Value: protects=the repair command (sources set-path) never treats a sibling's relative local_path as the cwd's tree, and the
+    //   #2018 write-through leak guard fails closed on it wherever gbrain runs; fails_when=assertNoOverlappingPath realpaths "." to the
+    //   cwd, so set-path refuses overlapping_path, or otherSourceOwning ignores the relative sibling (or matches it only when run from
+    //   its tree); why_new=no other case has a relative sibling; seam=none; no_claim=company-brain admission (same helper)
+    test('a sibling with a relative local_path: set-path to the cwd passes and the leak guard fails closed on it', async () => {
       await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
       await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.')");
       const { assertNoOverlappingPath } = await import('../src/core/sources-ops.ts');
       expect(await assertNoOverlappingPath(engine, 'notes-a', folder).then(() => null, (error: { code?: string }) => error.code ?? String(error))).toBeNull();
       const { otherSourceOwning } = await import('../src/core/write-through.ts');
+      expect(await otherSourceOwning(engine, 'default', join(folder, 'notes.md'))).toBe('notes-a');
+      expect(await otherSourceOwning(engine, 'default', join(tmpdir(), 'elsewhere', 'notes.md'))).toBe('notes-a');
+      await engine.executeRaw("UPDATE sources SET archived=true, archived_at=now() WHERE id='notes-a'");
       expect(await otherSourceOwning(engine, 'default', join(folder, 'notes.md'))).toBeNull();
+    }, 120_000);
+
+    // /ship review fixes (GBRA-207, #7630).
+    // Value: protects=doctor reports a relative sibling that blocks default write-through as a relative path, never as a #2018 containment
+    //   with an invented alias diagnosis, and ignores an empty local_path; fails_when=the wrapper passes the relative leak-guard match to
+    //   the assessor ("own working tree") or the relative query keeps ''; why_new=no doctor case has a null default local_path beside a
+    //   relative sibling; seam=none; no_claim=other doctor checks (only this check runs)
+    test('doctor names a relative sibling that blocks default writes as relative, not as a containment, and skips an empty local_path', async () => {
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-7630-repo-')));
+      try {
+        await engine.setConfig('sync.repo_path', repo);
+        await engine.putPage('notes/live', { type: 'note', title: 'Live', compiled_truth: 'A live default page.', timeline: '' }, { sourceId: 'default' });
+        await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.'), ('notes-b', 'notes-b', '')");
+        const check = await defaultSourceLocalPathCheck(engine);
+        expect(check?.status).toBe('warn');
+        expect(check?.message).toContain('source "notes-a" has the relative local_path "."');
+        expect(check?.message).toContain('default-source pages are saved to the database only');
+        expect(check?.message).not.toContain('own working tree');
+        expect(check?.message).not.toContain('notes-b');
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
     }, 120_000);
 
     test('gbrain import of the cwd into a source whose local_path is "." does not stamp it fresh', async () => {

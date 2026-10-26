@@ -287,15 +287,15 @@ export async function scannerSlugRootMode(engine: BrainEngine, sourceId: string,
  * resolved counts as a match: the leak guard fails closed.
  */
 export async function otherSourceOwning(engine: BrainEngine, sourceId: string, path: string): Promise<string | null> {
-  const rows = await engine.executeRaw<{ id: string; local_path: string }>(
-    `SELECT id, local_path FROM sources WHERE id <> $1 AND local_path IS NOT NULL AND local_path <> '' ORDER BY id`,
+  const rows = await engine.executeRaw<{ id: string; local_path: string; archived: boolean }>(
+    `SELECT id, local_path, archived IS TRUE AS archived FROM sources WHERE id <> $1 AND local_path IS NOT NULL AND local_path <> '' ORDER BY id`,
     [sourceId],
   );
   const identity = (spelling: string) => { try { return canonicalFilesystemPath(msysToNativePath(spelling)); } catch { return null; } };
   const target = identity(path);
   return rows.find(row => {
-    // #7630: a relative local_path names whatever directory gbrain runs from, never a tree, so it owns nothing.
-    if (!isAbsolute(msysToNativePath(row.local_path))) return false;
+    // #7630: a live source's relative local_path names no known tree, so like any unresolvable spelling it counts as a match.
+    if (!isAbsolute(msysToNativePath(row.local_path))) return !row.archived;
     const other = identity(row.local_path);
     if (target === null || other === null) return true;
     const rel = relative(other, target);
