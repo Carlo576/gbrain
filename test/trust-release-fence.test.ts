@@ -424,6 +424,18 @@ for (const backend of testBackends()) {
     // Value: protects=a release into a page of an archived source refuses source_changed before admission: the fact stays held, no request, the file is unchanged;
     // fails_when=the sources.archived check in submitTrustRelease is dropped or inverted; why_new=no test released with the source archived;
     // seam=none; no_claim=gbrain sources archive itself (it refuses the default source; a raw UPDATE of sources.archived under gbrain.topology_change stands in)
+    test('a hold re-gated after the owner approved it is not published under the older approval: preview_changed, nothing admitted', () => managedBrain(async ({ engine, ctx }) => {
+      await seedPage(engine, ctx);
+      const ref = await holdRemember(engine, ctx);
+      const preview = await previewOwnerAction(engine, { action: 'release', ref });
+      await engine.executeRaw("UPDATE write_gate_holds SET last_seen_at = last_seen_at + interval '1 second' WHERE id = $1", [Number(ref.slice(1))]);
+      const error = await currentHoldStore().publish!(engine, Number(ref.slice(1)), 'owner-example', undefined, preview.binding).then(() => null, (e: { code?: string }) => e);
+      expect(error?.code).toBe('preview_changed');
+      expect(await holdStatus(engine, ref)).toBe('held');
+      expect(await factRows(engine)).toEqual([]);
+      expect(await engine.executeRaw("SELECT id FROM persistence_requests WHERE operation='trust_release'")).toEqual([]);
+    }, { setup, databaseUrl }), 180_000);
+
     test('a release into a page of an archived source refuses source_changed: the fact stays held and nothing is admitted', () => managedBrain(async ({ engine, ctx, root }) => {
       await seedPage(engine, ctx);
       const ref = await holdRemember(engine, ctx);

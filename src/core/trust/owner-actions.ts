@@ -146,7 +146,7 @@ export interface HoldStoreAdapter {
   release(tx: BrainEngine, id: number, by: string): Promise<boolean>;
   drop(tx: BrainEngine, id: number, by: string): Promise<boolean>;
   /** A managed release published through the page-mutation door (trust/release-publish.ts); null when the hold takes `release`. */
-  publish?(engine: BrainEngine, id: number, by: string, config?: GBrainConfig): Promise<boolean | null>;
+  publish?(engine: BrainEngine, id: number, by: string, config?: GBrainConfig, approved?: string): Promise<boolean | null>;
 }
 async function holdTableExists(engine: BrainEngine): Promise<boolean> {
   const [row] = await engine.executeRaw<{ t: string | null }>(`SELECT to_regclass('write_gate_holds')::text AS t`);
@@ -185,7 +185,13 @@ const defaultHoldStore: HoldStoreAdapter = {
     return true;
   },
   async drop(tx, id, by) { return (await tx.executeRaw(decideHoldSql('dropped'), [id, by])).length === 1; },
-  async publish(engine, id, by, config) { return (await import('./release-publish.ts')).submitTrustRelease(engine, id, by, config); },
+  async publish(engine, id, by, config, approved) {
+    return (await import('./release-publish.ts')).submitTrustRelease(engine, id, by, config,
+      approved === undefined ? undefined : async hold => {
+        const row = await defaultHoldStore.get(engine, hold.id);
+        return !!row && bindingOf({ id: row.id, status: row.status, last_seen_at: row.last_seen_at }) === approved;
+      });
+  },
 };
 /**
  * The transactional release: the fact enters memory as the owner's confirmed row, database-only (its embedding is
@@ -468,7 +474,7 @@ export async function applyOwnerAction(engine: BrainEngine, input: OwnerActionIn
       }
       if (ref?.kind === 'proposal') return fromDecision('confirm', await decideTrustProposal(engine, ref.id, 'accept', decision));
       if (ref?.kind === 'hold') {
-        const released = await holdStore.publish?.(engine, ref.id, principalLabel(by), opts.config)
+        const released = await holdStore.publish?.(engine, ref.id, principalLabel(by), opts.config, opts.binding)
           ?? await engine.transaction(tx => holdStore.release(tx, ref.id, principalLabel(by)));
         if (!released) throw opError('preview_changed', `h${ref.id} was decided meanwhile; nothing was changed.`, 'Run gbrain trust review.');
         return { action: 'release', ref: preview.ref, status: 'released', tier: 'user_confirmed', prior_tier: preview.tier };

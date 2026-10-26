@@ -60,7 +60,8 @@ function releaseTarget(hold: WriteGateHold): { slug: string; mode: ReleaseIntent
  * transactional release instead (see the module comment); false when it is no longer held and no request of this
  * approval exists.
  */
-export async function submitTrustRelease(engine: BrainEngine, holdId: number, by: string, config?: GBrainConfig): Promise<boolean | null> {
+export async function submitTrustRelease(engine: BrainEngine, holdId: number, by: string, config?: GBrainConfig,
+  approved?: (hold: WriteGateHold) => Promise<boolean>): Promise<boolean | null> {
   if (!(await managedPersistenceEnabled(engine))) return null;
   const hold = await getWriteGateHold(engine, holdId);
   if (!hold || hold.kind !== 'fact') return null;
@@ -87,6 +88,10 @@ export async function submitTrustRelease(engine: BrainEngine, holdId: number, by
   }
   if (prior) { writeResponse(await waitForWrite(engine, prior, cfg, DOOR_WAIT_MS)); return true; }
   if (hold.status !== 'held') return false;
+  if (approved && !(await approved(hold))) {
+    throw opError('preview_changed', `h${hold.id} changed after you approved it; nothing was changed.`,
+      'Run the command again: it shows the current state and asks for a new confirmation.');
+  }
   const ref = `${hold.source_id}/${target.slug}`;
   if (snapshot.page.deleted_at) {
     throw opError('page_not_found', `The page h${hold.id} would be released into (${ref}) is deleted; nothing was changed and the fact stays held.`,
