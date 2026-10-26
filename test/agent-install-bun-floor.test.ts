@@ -124,6 +124,18 @@ test('an unreadable bundle is still journaled on the install receipt', async () 
   expect(receipt.last_failure?.code).toBe('invalid_artifact');
 });
 
+test('a bundle whose first runtime probe fails is still checked against the floor before install', async () => {
+  const { root, bundle } = fixture('1.4.3');
+  const probed = join(bundle, '.probed');
+  writeFileSync(join(bundle, 'bun'), `#!/bin/sh\nif [ ! -e '${probed}' ]; then : > '${probed}'; exit 9; fi\nif [ "$1" = --version ]; then echo 1.4.3; exit 0; fi\nexit 7\n`);
+  const { exit, result } = await run(setupArgs(root, bundle));
+  expect(exit).toBe(1);
+  expect(result.reason).toBe('runtime_below_floor');
+  expect(existsSync(join(root, 'runtime'))).toBe(false);
+  const receipt = JSON.parse(readFileSync(join(root, '.gbrain', 'agent-install', 'receipt.json'), 'utf8'));
+  expect(receipt.last_failure?.code).toBe('runtime_below_floor');
+});
+
 test('missing arguments still answer usage (exit 2) before the floor check', async () => {
   const { bundle } = fixture('1.4.3');
   const { exit, result } = await run(['--harness', 'grok-bot', '--bundle', bundle, '--source-ref', 'a'.repeat(40), '--json']);
