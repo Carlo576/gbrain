@@ -41,6 +41,7 @@
 import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
+import type { SyncOpts } from '../../commands/sync.ts';
 import { loadConfig } from '../config.ts';
 import { resolveSourceId } from '../source-resolver.ts';
 import { opError, type OperationError } from '../ops/contract.ts';
@@ -74,6 +75,17 @@ const DOCS = 'docs/designs/GIT_CANONICAL_MEMORY.md#conversion';
 const SAMPLE = 20;
 const LOCK_WAIT_MS = 30_000;
 const MOVED_BATCH = 10_000;
+
+/** The steps of an apply, in order (`ConversionProgress.phase`). */
+export const CONVERSION_PHASES = ['adopt', 'withhold', 'recheck', 'holds', 'strict_pass_1', 'strict_pass_2'] as const;
+export type ConversionPhase = typeof CONVERSION_PHASES[number];
+/**
+ * Where an apply stands: its phase, the door commits it made (adoption and withholding groups), and the items the phase
+ * went through of its total. In a strict pass, `round` is the pass round, `total` the paths its level read until it
+ * admits, then its batch, and `scanned` the batch entries settled.
+ */
+export interface ConversionProgress { phase: ConversionPhase; groups_committed: number; scanned: number; total: number; round?: number }
+type ConversionReporter = (patch: Partial<ConversionProgress>) => void;
 
 export const ADOPT_STATES = ['database_ahead', 'undeclared_database_only', 'worktree_only'] as const;
 export type AdoptState = typeof ADOPT_STATES[number];
@@ -449,14 +461,20 @@ const blockedError = (preview: GitConversionPreview): OperationError => {
 };
 
 /** The apply of `--to git` (see the header). Throws preview_changed or git_conversion_blocked before writing anything. */
-export async function applyGitConversion(engine: BrainEngine, sourceId: string, expect: string, opts: { noEmbed?: boolean; noExtract?: boolean } = {}): Promise<GitConversionResult> {
+export async function applyGitConversion(engine: BrainEngine, sourceId: string, expect: string,
+  opts: { noEmbed?: boolean; noExtract?: boolean; onProgress?: (progress: ConversionProgress) => void } = {}): Promise<GitConversionResult> {
   const previewCommand = `gbrain sources canonical ${sourceId} --to git --dry-run`;
   const plan = await planGitConversion(engine, sourceId);
   if (plan.preview.preview_hash !== expect) throw previewChangedError(expect, previewCommand);
   if (plan.preview.discard.count) throw blockedError(plan.preview);
-  const committed = await adoptGroups(engine, plan, previewCommand);
-  const withheld = await withholdGroups(engine, plan, previewCommand);
+  const progress: ConversionProgress = { phase: 'adopt', groups_committed: 0, scanned: 0, total: plan.adopt.length };
+  const report: ConversionReporter = patch => { Object.assign(progress, patch); opts.onProgress?.({ ...progress }); };
+  report({});
+  const committed = await adoptGroups(engine, plan, previewCommand, report);
+  report({ phase: 'withhold', scanned: 0, total: plan.withhold.length });
+  const withheld = await withholdGroups(engine, plan, previewCommand, groups => report({ scanned: progress.scanned + groups.pages, groups_committed: committed.groups + groups.commits }));
   const parked = await settleParked(engine, sourceId, plan.parked);
+  report({ phase: 'recheck', scanned: 0, total: 0 });
   // The planned holds are cleared only once this check passes, so a refusal keeps them: a held path is judged as the
   // strict pass will see it once its hold is cleared. A page the plan settled as equal to its file is judged again once it
   // moved since (its equality no longer holds).
@@ -471,18 +489,30 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
     if (!result.settled && !result.inFlight && result.gitWins) tally(preview.discard, 'git_overwrites_database', path);
   }
   if (preview.discard.count) throw blockedError(preview);
+  report({ phase: 'holds', scanned: 0, total: plan.holds.length });
   let holdsCleared = 0;
   for (const hold of plan.holds) {
     if (await engine.transaction(tx => clearGitHold(tx, { sourceId, incarnation: plan.incarnation, path: hold.path, observedAt: hold.observed_at }))) holdsCleared++;
+    report({ scanned: progress.scanned + 1 });
   }
   const processing = { noEmbed: opts.noEmbed, noExtract: opts.noExtract };
   const { performManagedSync } = await import('./sync-run.ts');
-  passOrThrow(sourceId, await performManagedSync(engine, { sourceId, noPull: true, full: true, ...processing, canonicalOverride: 'git' }));
+  report({ phase: 'strict_pass_1', scanned: 0, total: 0 });
+  passOrThrow(sourceId, await performManagedSync(engine, { sourceId, noPull: true, full: true, ...processing, canonicalOverride: 'git', onProgress: passProgress(report) }));
   await faultPoint('conversion:before_flip', { sourceId });
   await recordConversion(engine, sourceId, plan.incarnation, 'git', expect, plan.preview.head);
-  passOrThrow(sourceId, await performManagedSync(engine, { sourceId, noPull: true, full: true, ...processing }));
+  report({ phase: 'strict_pass_2', scanned: 0, total: 0, round: undefined });
+  passOrThrow(sourceId, await performManagedSync(engine, { sourceId, noPull: true, full: true, ...processing, onProgress: passProgress(report) }));
   const after = (await planGitConversion(engine, sourceId)).preview;
   return { status: after.remaining === 0 ? 'converted' : 'incomplete', source_id: sourceId, head: after.head, committed, withheld, holds_cleared: holdsCleared, parked, after };
+}
+
+/** A strict pass's progress events as the apply's: a round's level read sets the total, its batch the scanned entries. */
+function passProgress(report: ConversionReporter): NonNullable<SyncOpts['onProgress']> {
+  return event => {
+    if (event.round) report({ round: event.round.round, scanned: 0, total: event.phase === 'managed_sync.round_admit' ? (event.round.imports ?? 0) + (event.round.deletes ?? 0) : event.round.paths });
+    else if (event.bankedFiles !== undefined && event.phase !== 'managed_sync.level_progress' && event.phase !== 'managed_sync.legacy_swept') report({ scanned: event.bankedFiles, ...(event.total !== undefined ? { total: event.total } : {}) });
+  };
 }
 
 /** The paths of `compared` whose page has another revision than the plan compared, or is gone. */
@@ -512,7 +542,7 @@ function passOrThrow(sourceId: string, result: { status: string; reason?: string
  * tree moved since the preview stops the apply (preview_changed) before anything else changes: the groups already
  * committed hold the bytes the database has, so the rerun preview reads them equal.
  */
-async function adoptGroups(engine: BrainEngine, plan: GitConversionPlan, previewCommand: string): Promise<GitConversionResult['committed']> {
+async function adoptGroups(engine: BrainEngine, plan: GitConversionPlan, previewCommand: string, report: ConversionReporter): Promise<GitConversionResult['committed']> {
   const { context, adopt } = plan;
   const root = context.root;
   const commits: string[] = [];
@@ -535,6 +565,7 @@ async function adoptGroups(engine: BrainEngine, plan: GitConversionPlan, preview
       const commit = await commitThroughDoor(root, files.map(file => ({ path: file.path })), lock);
       if (commit) commits.push(commit);
     } finally { await lock.release(); }
+    report({ scanned: start + group.length, groups_committed: commits.length });
     await faultPoint('conversion:group_committed', { sourceId: context.sourceId, round: start / CONVERSION_GROUP_MAX + 1 });
   }
   return { groups: commits.length, pages: adopt.length, commits };
@@ -548,7 +579,8 @@ async function adoptGroups(engine: BrainEngine, plan: GitConversionPlan, preview
  * is already absent from HEAD only gets the stamp. A page whose revision or working tree moved since the preview stops
  * the apply (preview_changed); after a crash between a commit and its stamp, the rerun preview lists the page as file_absent.
  */
-async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, previewCommand: string): Promise<GitConversionResult['withheld']> {
+async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, previewCommand: string,
+  onGroup: (done: { pages: number; commits: number }) => void): Promise<GitConversionResult['withheld']> {
   const { context } = plan;
   const root = context.root;
   const commits: string[] = [];
@@ -580,10 +612,11 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
       if (commit) commits.push(commit);
       await stamp(group);
     } finally { await lock.release(); }
+    onGroup({ pages: group.length, commits: commits.length });
   }
   const absent = plan.withhold.filter(item => item.kind === 'file_absent');
   for (const item of absent) await assertUnchanged(item);
-  if (absent.length) await stamp(absent);
+  if (absent.length) { await stamp(absent); onGroup({ pages: absent.length, commits: commits.length }); }
   return { pages: plan.withhold.length, commits };
 }
 

@@ -8,11 +8,16 @@ import type { BrainEngine } from '../core/engine.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { OperationError, opError } from '../core/ops/contract.ts';
 import { cliRenderContext, toAgentError } from '../core/agent-output.ts';
+import { registerSignalOwner, triggerCleanupAndExit } from '../core/process-cleanup.ts';
+import { startMemoryTrace } from '../core/memory-trace.ts';
 import { applyGitConversion, applyMixedConversion, assertConversionCaller, CONVERSION_GROUP_MAX, planGitConversion, planMixedConversion,
-  type GitConversionPreview, type GitConversionResult, type MixedConversionPreview } from '../core/persistence/git-conversion.ts';
+  type ConversionProgress, type GitConversionPreview, type GitConversionResult, type MixedConversionPreview } from '../core/persistence/git-conversion.ts';
 
 const USAGE = 'Usage: gbrain sources canonical <source-id> --to git|mixed [--dry-run | --apply --expect <hash> [--no-embed] [--no-extract]] [--json]';
 const DOCS = 'docs/designs/GIT_CANONICAL_MEMORY.md#conversion';
+/** How often a running apply says where it stands (stderr), besides each change of phase. */
+export const PROGRESS_EVERY_MS = 10_000;
+const SIGNAL_EXIT: Record<string, number> = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
 
 export function parseCanonicalArgs(args: string[]): { sourceId: string; to: 'git' | 'mixed'; apply: boolean; expect: string | null; json: boolean; noEmbed: boolean; noExtract: boolean } {
   const positional: string[] = [];
@@ -65,6 +70,52 @@ function describeMixed(p: MixedConversionPreview): string {
     : `Source ${p.source_id} is not git-canonical; there is nothing to change.`;
 }
 
+const progressText = (p: ConversionProgress) =>
+  `[sources canonical] ${p.phase}${p.round ? ` round ${p.round}` : ''}: ${p.scanned}/${p.total} scanned, ${p.groups_committed} group(s) committed`;
+
+/** The source's canonical state as its row says now: `git` once the flag is set, else `mixed`; `unknown` when the read fails or takes over 2 s. */
+async function canonicalState(engine: BrainEngine, sourceId: string): Promise<'git' | 'mixed' | 'unknown'> {
+  const read = engine.executeRaw<{ canonical: string | null }>("SELECT config->>'canonical' AS canonical FROM sources WHERE id=$1", [sourceId])
+    .then(([row]) => row ? (row.canonical === 'git' ? 'git' as const : 'mixed' as const) : 'unknown' as const, () => 'unknown' as const);
+  return Promise.race([read, new Promise<'unknown'>(resolve => setTimeout(() => resolve('unknown'), 2_000).unref?.())]);
+}
+
+/**
+ * #7644: runs an apply that reports where it stands: a stderr line (a JSON line with --json) at each phase and every
+ * PROGRESS_EVERY_MS. SIGTERM, SIGINT or SIGHUP prints a partial report on stdout (its phase, groups committed, items
+ * scanned of the phase's total and the source's canonical state) and exits 128 + the signal. The conversion is crash-safe
+ * on its own; the report only tells the operator where it stopped. GBRAIN_MEMORY_TRACE adds the memory trace (memory-trace.ts).
+ */
+async function withConversionReport<T>(engine: BrainEngine, sourceId: string, json: boolean, apply: (onProgress: (progress: ConversionProgress) => void) => Promise<T>): Promise<T> {
+  let progress: ConversionProgress | null = null, stopping = false;
+  const say = () => { if (progress) process.stderr.write(`${json ? JSON.stringify({ event: 'conversion_progress', source_id: sourceId, ...progress }) : progressText(progress)}\n`); };
+  const onProgress = (next: ConversionProgress) => { const moved = next.phase !== progress?.phase; progress = next; if (moved) say(); };
+  const timer = setInterval(say, PROGRESS_EVERY_MS);
+  timer.unref?.();
+  const stopTrace = startMemoryTrace('sources canonical --apply', () => progress ? { ...progress } : undefined);
+  const interrupted = (signal: NodeJS.Signals) => {
+    if (stopping) return;
+    stopping = true;
+    clearInterval(timer);
+    void (async () => {
+      const canonical = await canonicalState(engine, sourceId);
+      const at = progress ?? { phase: 'adopt', groups_committed: 0, scanned: 0, total: 0 };
+      const error = opError('git_conversion_incomplete', `The conversion of source ${sourceId} was interrupted by ${signal} during ${at.phase}; the source is ${canonical === 'git' ? 'git-canonical' : canonical === 'mixed' ? 'still mixed' : 'in an unknown state'}.`,
+        `Preview again with gbrain sources canonical ${sourceId} --to git --dry-run once gbrain sync status --source ${sourceId} --json shows the source idle, then apply the new hash; the groups already committed read equal.`,
+        { docs: DOCS, detail: 'interrupted' });
+      const report = { status: 'interrupted', signal, source_id: sourceId, ...at, canonical };
+      process.stdout.write(`${json ? JSON.stringify({ ...report, ...toAgentError(error, { transport: 'cli', command: 'sources canonical', render: cliRenderContext() }) })
+        : `Conversion interrupted (${signal}) during ${at.phase}${at.round ? ` round ${at.round}` : ''}: ${at.scanned}/${at.total} scanned, ${at.groups_committed} group(s) committed; source canonical state: ${canonical}.\nNext: ${error.suggestion}`}\n`);
+      await triggerCleanupAndExit(SIGNAL_EXIT[signal] ?? 1);
+    })();
+  };
+  const onSigint = () => interrupted('SIGINT');
+  const release = registerSignalOwner('sources canonical --apply', interrupted);
+  process.on('SIGINT', onSigint);
+  try { return await apply(onProgress); }
+  finally { clearInterval(timer); stopTrace(); release(); process.off('SIGINT', onSigint); }
+}
+
 export async function runSourcesCanonical(engine: BrainEngine, args: string[]): Promise<void> {
   const json = args.includes('--json');
   if (args.includes('--help') || args.includes('-h')) { console.log(`${USAGE}\nPreview first: lists, by category, what converting the source to git-canonical (or back) does (${DOCS}).`); return; }
@@ -79,7 +130,8 @@ export async function runSourcesCanonical(engine: BrainEngine, args: string[]): 
       return;
     }
     if (!parsed.apply) { const { preview } = await planGitConversion(engine, parsed.sourceId); print(preview, describeGitPreview(preview)); return; }
-    const result = await applyGitConversion(engine, parsed.sourceId, parsed.expect!, { noEmbed: parsed.noEmbed, noExtract: parsed.noExtract });
+    const result = await withConversionReport(engine, parsed.sourceId, json,
+      onProgress => applyGitConversion(engine, parsed.sourceId, parsed.expect!, { noEmbed: parsed.noEmbed, noExtract: parsed.noExtract, onProgress }));
     if (result.status === 'incomplete') {
       const error = opError('git_conversion_incomplete', `Source ${parsed.sourceId} is git-canonical, and ${result.after.remaining} item(s) were still open after its strict pass.`,
         `Writes landed during the conversion. Git wins on the source now; preview again with gbrain sources canonical ${parsed.sourceId} --to git --dry-run and apply the new hash.`,
