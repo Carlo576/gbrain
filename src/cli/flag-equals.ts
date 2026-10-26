@@ -14,12 +14,14 @@
  *    `--yes=n` is never answered with `--yes <value>`;
  *  - refuse a true/false word (`--apply=false`) with the bare-switch fix
  *    even without the command's own table, so it never suggests
- *    `--apply false`, which turns the switch on;
+ *    `--apply false`, which turns the switch on; a 0 or 1 there names both
+ *    readings and says a value never turns a switch off;
  *  - after a bare `--` the handler reads past, refuse an `=` token that is
  *    not a registered flag: the unknown-flag validator stops at `--`;
- *  - refuse an empty value or one that looks like a flag (`-y`, `--x`);
  *  - keep the token where the handler on this path reads the `=` form
- *    (EQUALS_READERS, keyed by command or `command sub`);
+ *    (EQUALS_READERS, keyed by command or `command sub`), empty values
+ *    included: that handler owns refusing them;
+ *  - elsewhere, refuse an empty value or one that looks like a flag (`-y`, `--x`);
  *  - split `--flag value` when the command's own table declares a value;
  *  - refuse every other `=` form with the separate-token spelling. Splitting
  *    a flag the subcommand never reads would leave its value as a stray
@@ -40,7 +42,7 @@
  */
 import type { OperationError } from '../core/ops/contract.ts';
 import { CLI_FLAG_REGISTRY } from '../core/cli-flag-registry.generated.ts';
-import { usageError } from './cli-error.ts';
+import { unknownFlagError, usageError } from './cli-error.ts';
 import { loadCuratedHelp } from './help/render.ts';
 import { OPERATION_MANIFEST } from '../core/operation-manifest.generated.ts';
 import { SYNC_FLAGS } from '../core/sync-flags.ts';
@@ -249,6 +251,8 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
         ? [`the value is empty or looks like a flag`, `Write ${flag} <value> with the value as the next argument.`]
         : own === undefined && /^(true|false|yes|no|y|n|on|off)$/i.test(value)
           ? [`${flag} takes no true/false value`, `Write ${flag} on its own to turn it on, or leave it out to turn it off.`]
+          : own === undefined && /^[01]$/.test(value)
+          ? [`${flag} takes no 0/1 value after =`, `If ${flag} is a switch, write it on its own to turn it on, or leave it out to turn it off: a value never turns it off. If it takes a number, write ${flag} <number>.`]
           : own === undefined
           ? [`this command takes ${flag} <value> as two arguments`, `Write ${flag} <value>, or ${flag} on its own if it is a switch.`]
           : null;
@@ -258,13 +262,34 @@ export async function splitFlagEquals(command: string, args: readonly string[]):
   return { args: out };
 }
 
-/** A command module's direct `bun run` entry: main's pass-through for own `=` parsers, the `=` rule, and main's unknown-flag check (which stops at `--`). */
-export async function directEntryArgs(command: string, raw: string[]): Promise<{ args: string[] } | { refusal: OperationError }> {
+/** CLI_ONLY lane: token scan against the generated legal set. */
+export function findUnknownFlag(args: string[], legal: ReadonlySet<string>): string | null {
+  for (const a of args) {
+    if (a === '--') break;
+    const m = /^--([a-z0-9][a-z0-9-]*)(?:=.*)?$/i.exec(a);
+    if (!m) continue;
+    // Casing typo = unknown flag: every handler in the repo is
+    // case-sensitive-lowercase, so `--MIGRATE-ONLY` passing validation would
+    // just be silently ignored downstream — the exact class this validator
+    // exists to kill.
+    if (/[A-Z]/.test(m[1])) return `--${m[1]}`;
+    const name = `--${m[1]}`;
+    if (legal.has(name)) continue;
+    // --no-<flag> negation of a known flag is legal.
+    if (name.startsWith('--no-') && legal.has(`--${name.slice(5)}`)) continue;
+    return name;
+  }
+  return null;
+}
+
+/** A command module's direct `bun run` entry: main's pass-through for own `=` parsers, the `=` rule, and main's unknown-flag check with its envelope (legacy keys included). */
+export async function directEntryArgs(command: string, raw: string[]): Promise<{ args: string[] } | { refusal: OperationError; legacy?: Record<string, string> }> {
   if (OWN_EQUALS_PARSERS.has(`${command} ${raw[0]}`)) return { args: raw };
   const split = await splitFlagEquals(command, raw);
   if ('refusal' in split) return split;
-  const legal = new Set(CLI_FLAG_REGISTRY[command]);
-  const end = split.args.indexOf('--');
-  const unknown = split.args.slice(0, end < 0 ? undefined : end).map(a => /^--[^=\s]+/.exec(a)?.[0]).find(f => f && !legal.has(f) && !(f.startsWith('--no-') && legal.has(`--${f.slice(5)}`)));
-  return unknown ? { refusal: usageError(`gbrain ${command}: unknown flag ${unknown}.`, `Run gbrain ${command} --help for the flags it takes.`) } : split;
+  const unknown = findUnknownFlag(split.args, new Set(CLI_FLAG_REGISTRY[command]));
+  if (!unknown) return split;
+  const message = `unknown flag ${unknown} for 'gbrain ${command}'`;
+  const known = (await loadCuratedHelp(command))?.flags.map(f => f.name) ?? CLI_FLAG_REGISTRY[command] ?? [];
+  return { refusal: unknownFlagError(command, unknown, message, known), legacy: { status: 'error', reason: 'invalid_flag', message } };
 }

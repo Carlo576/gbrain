@@ -12,7 +12,8 @@ import { readFileSync } from 'node:fs';
 import { Glob } from 'bun';
 import { CLI_ONLY, cliOnlyFlagArgs, validateCommandFlags } from '../src/cli/main.ts';
 import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
-import { END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, knownSwitches } from '../src/cli/flag-equals.ts';
+import { END_OF_OPTIONS, EQUALS_READERS, OWN_EQUALS_PARSERS, directEntryArgs, knownSwitches } from '../src/cli/flag-equals.ts';
+import { SEARCH_SUBCOMMANDS } from '../src/cli/subcommands.ts';
 import { SYNC_FLAGS } from '../src/core/sync-flags.ts';
 import { strictSpecFor } from '../src/cli/strict-args.ts';
 import { surfaceFileSource } from './helpers/source-surface.ts';
@@ -75,7 +76,7 @@ describe('#7619 table: every registered CLI_ONLY flag', () => {
     expect(outcomes.refused).toBeGreaterThan(1000);
   });
 
-  test('an empty or flag-like value refuses on every flag, and no refusal echoes the value', async () => {
+  test('an empty or flag-like value refuses on every flag outside EQUALS_READERS, and no refusal echoes the value', async () => {
     const wrong: string[] = [];
     for (const command of CLI_ONLY) {
       const legal = CLI_FLAG_REGISTRY[command];
@@ -130,6 +131,39 @@ describe('#7619 split rules', () => {
     }
   });
 
+  test('a 0/1 value on a switch with no table entry says a value never turns it off', async () => {
+    for (const [command, args] of [['maintain', ['--apply=0']], ['trust', ['claim-sources', '--accept-all=0']], ['quarantine', ['--accept-all=1']], ['status', ['--force-break-lock=1']], ['transcripts', ['recover', 'codex', '--apply=0']]] as const) {
+      const r = await cliOnlyFlagArgs(command, [...args]);
+      const text = 'refusal' in r ? `${r.refusal.message} ${r.refusal.suggestion}` : '';
+      expect(text).toContain('a value never turns it off');
+      expect(text).not.toContain('<value>');
+    }
+  });
+
+  test('consent and mutation switches never get the value-form fix for a true/false or 0/1 value', async () => {
+    const consent: [string, string[], string][] = [
+      ['maintain', [], '--apply'], ['reindex', [], '--apply'], ['quarantine', [], '--accept-all'], ['trust', ['claim-sources'], '--accept-all'],
+      ['status', [], '--force-break-lock'], ['transcripts', ['recover', 'codex'], '--apply'], ['reinit-pglite', [], '--yes'], ['dream', [], '--unsafe-bypass-dream-guard'],
+    ];
+    for (const [command, pre, flag] of consent) {
+      for (const value of ['0', '1', 'false', 'true', 'no', 'off']) {
+        const r = await cliOnlyFlagArgs(command, [...pre, `${flag}=${value}`]);
+        const text = 'refusal' in r ? `${r.refusal.message} ${r.refusal.suggestion}` : '';
+        expect(text).toContain(`${flag}=…`);
+        expect(text).not.toContain('<value>');
+      }
+    }
+  });
+
+  test('the direct entry refuses an unknown flag with the envelope main uses', async () => {
+    const r = await directEntryArgs('auth', ['create', 'agent-a', '--bogus', 'x']);
+    expect('refusal' in r && r.refusal.code).toBe('unknown_flag');
+    expect('refusal' in r && r.refusal.fix?.argv).toEqual(['gbrain', 'auth', '--help']);
+    expect('refusal' in r && r.legacy).toEqual({ status: 'error', reason: 'invalid_flag', message: "unknown flag --bogus for 'gbrain auth'" });
+    expect('refusal' in await directEntryArgs('auth', ['create', 'agent-a', '--Scopes', 'read'])).toBe(true);
+    expect(await directEntryArgs('auth', ['create', 'agent-a', '--scopes', 'read'])).toEqual({ args: ['create', 'agent-a', '--scopes', 'read'] });
+  });
+
   test('sources pull --path= refuses instead of falling through to the engine route', async () => {
     expect(await refusalFor('sources', ['pull', '--path=/repo-example'])).toContain('takes --path <value> as two arguments');
   });
@@ -137,9 +171,8 @@ describe('#7619 split rules', () => {
   test('the = gate list matches the hand-dispatched search dashboard subcommands', () => {
     const src = surfaceFileSource('cli', 'src/cli/main.ts');
     const dispatch = /command === 'search' && (\[[^\]]+\])\.includes\(subArgs\[0\] \?\? ''\)/.exec(src)?.[1];
-    const gate = /const SEARCH_DASHBOARD_SUBCOMMANDS = (\[[^\]]+\]);/.exec(src)?.[1];
     expect(dispatch).toBeDefined();
-    expect(gate).toBe(dispatch);
+    expect(JSON.parse(dispatch!.replace(/'/g, '"'))).toEqual([...SEARCH_SUBCOMMANDS]);
   });
 
   test('an unknown flag keeps its token so the validator names it', async () => {

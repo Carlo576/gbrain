@@ -1406,7 +1406,7 @@ if (import.meta.main) {
   const argv = await directEntryArgs('auth', process.argv.slice(2));
   if ('refusal' in argv) {
     const { exitCliError } = await import('../cli/cli-error.ts');
-    exitCliError(argv.refusal, 'auth');
+    exitCliError(argv.refusal, 'auth', { legacy: argv.legacy });
   } else {
     await runAuth(argv.args);
   }
