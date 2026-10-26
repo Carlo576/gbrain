@@ -80,7 +80,7 @@ export interface WriteThroughResult {
    *     or DB work.
    *   - no_repo_configured: the resolved target (source `local_path` or, for a
    *     sole-source brain, `sync.repo_path`) is unset (DB-only by design).
-   *   - repo_not_found: target set but missing / not a directory.
+   *   - repo_not_found: target set but relative (#7630), missing, or not a directory.
    *   - source_repo_belongs_to_other_source: the assigned source has no
    *     `local_path`, and `sync.repo_path` is another source's own working tree
    *     — #2018: writing here would pollute that sibling's repo, so we skip.

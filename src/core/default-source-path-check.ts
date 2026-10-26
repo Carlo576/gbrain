@@ -21,9 +21,9 @@
  *     nor a resolvable `sync.repo_path` names the tree they live in, so
  *     write-through, fence writes, and delete-reconcile cannot find them.
  *
- *   - RELATIVE PATH (#7630): a set `local_path` that is not absolute (a
- *     legacy "."). It names whatever directory gbrain runs from, and sync
- *     refuses it `sync_anchor_relative`.
+ *   - RELATIVE PATH (#7630): a set `local_path`, or with a null one a
+ *     `sync.repo_path`, that is not absolute (a legacy "."). It names whatever
+ *     directory gbrain runs from, and sync refuses it `sync_anchor_relative`.
  *
  * Everything else (no pages yet, resolvable repo fallback, deliberate
  * DB-only brain) reports ok. The repair for a genuinely broken pointer is
@@ -82,6 +82,16 @@ export function assessDefaultSourcePath(
     return {
       status: 'ok',
       message: `default source local_path is set: ${defaultSource.local_path}`,
+    };
+  }
+  if (repoPath && !isAbsolute(repoPath)) {
+    return {
+      status: 'warn',
+      message:
+        `default source has no local_path and sync.repo_path is the relative path "${repoPath}", which names whatever ` +
+        'directory gbrain runs from, so sync refuses it (sync_anchor_relative) and default-source page writes skip the ' +
+        'repository. Ask the user which directory holds the brain, then run ' +
+        '`gbrain config set sync.repo_path <absolute-directory>`.',
     };
   }
   // null local_path — the designed fallback topology. Only warn when the

@@ -158,7 +158,7 @@ for (const backend of testBackends()) {
       await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
       for (let i = 0; i < 5; i++) writeFileSync(join(folder, `page-${i}.md`), `---\ntype: note\ntitle: Page ${i}\n---\n\n${'word '.repeat(200)}\n`);
       configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: { OPENAI_API_KEY: 'sk-test-7630' } });
-      const fetchSpy = spyOn(globalThis, 'fetch');
+      const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async () => { throw new Error('#7630 test: no provider call'); }) as never);
       let result: Awaited<ReturnType<typeof runSyncCli>>, fetchCalls: number;
       try {
         result = await runSyncCli(['--source', 'default', '--no-pull']);
@@ -419,6 +419,62 @@ for (const backend of testBackends()) {
       }
     }, 120_000);
 
+    // /ship review fixes (GBRA-207, #7630).
+    // Value: protects=doctor names a relative legacy sync.repo_path behind a null default local_path instead of reporting the fallback healthy;
+    //   fails_when=the wrapper resolves "." against the cwd (existsSync is true) and the assessor reports "write through sync.repo_path (.)";
+    //   why_new=the doctor cases above set a relative local_path, never the legacy key; seam=none; no_claim=other doctor checks
+    test('doctor default_source_local_path warns on a relative sync.repo_path behind a null default local_path', async () => {
+      await engine.setConfig('sync.repo_path', '.');
+      await engine.putPage('notes/live', { type: 'note', title: 'Live', compiled_truth: 'A live default page.', timeline: '' }, { sourceId: 'default' });
+      const check = await defaultSourceLocalPathCheck(engine);
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('sync.repo_path is the relative path "."');
+      expect(check?.message).toContain('gbrain config set sync.repo_path <absolute-directory>');
+    }, 120_000);
+
+    // Value: protects=a successful sync of another source never runs .gitignore upkeep on the cwd's Git repo through a stored relative root;
+    //   fails_when=post-sync upkeep takes getDefaultSourcePath's "." (a second non-default source keeps the cwd chain on default)
+    //   and writes the managed block into the cwd repo's .gitignore;
+    //   why_new=the --all case above never reaches the single-source post-sync upkeep; seam=none;
+    //   no_claim=watch mode (the same expression at its second call site), parallel import workers (--workers 1)
+    test('gbrain sync --source of an absolute source leaves the cwd repo\'s .gitignore alone when default\'s local_path is "."', async () => {
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-7630-repo-')));
+      try {
+        execSync('git init -q && git config user.email t@example.com && git config user.name T', { cwd: repo, stdio: 'pipe' });
+        writeFileSync(join(repo, 'kept.md'), '---\ntype: note\ntitle: Kept\n---\n\nA page of the absolute source.\n');
+        execSync('git add -A && git commit -q -m initial', { cwd: repo, stdio: 'pipe' });
+        execSync('git init -q', { cwd: folder, stdio: 'pipe' });
+        writeFileSync(join(folder, 'gbrain.yml'), 'storage:\n  db_only:\n    - media/x/\n');
+        await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+        await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', $1)", [repo]);
+        await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-b', 'notes-b', $1)", [join(repo, 'elsewhere')]);
+        const { exit } = await cli(async () => {
+          const { runSync } = await import('../src/commands/sync.ts');
+          await runSync(engine, ['--source', 'notes-a', '--no-pull', '--no-embed', '--workers', '1']);
+        });
+        expect(exit ?? 0).toBe(0);
+        expect(await pagesOf('notes-a')).toBe(1);
+        expect(existsSync(join(folder, '.gitignore'))).toBe(false);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    }, 120_000);
+
+    // Value: protects=the remote sources_resolve_path read and the fence census never treat a relative local_path as the host's cwd;
+    //   fails_when=resolveSourcePaths realpaths "." (the cwd's Git repo answers) or the census walks the cwd's files;
+    //   why_new=the reader cases above cover write and maintenance roots, not these two reads; seam=none; no_claim=the MCP transport
+    test('sources_resolve_path refuses and the fence census walks no files for a relative local_path', async () => {
+      execSync('git init -q && git config user.email t@example.com && git config user.name T && git add -A && git commit -q -m initial', { cwd: folder, stdio: 'pipe' });
+      await engine.executeRaw("UPDATE sources SET local_path='.' WHERE id='default'");
+      const { resolveSourcePaths } = await import('../src/core/persistence/resolve-paths.ts');
+      const refused = await resolveSourcePaths(engine, 'default', ['notes.md']).then(() => null, (error: { code?: string; message?: string }) => error);
+      expect(refused?.code).toBe('not_found');
+      expect(refused?.message).toContain('relative local_path');
+      const { runFenceCensus } = await import('../src/core/fence-repair/census.ts');
+      const [run] = await runFenceCensus(engine, { sourceIds: ['default'], deadline: Date.now() + 60_000 });
+      expect(run?.files).toBe('none');
+    }, 120_000);
+
     test('gbrain import of the cwd into a source whose local_path is "." does not stamp it fresh', async () => {
       await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('notes-a', 'notes-a', '.')");
       const { runImport } = await import('../src/commands/import.ts');
@@ -442,6 +498,15 @@ describe('#7630: a stalled write\'s diagnosis matches its operation', () => {
       expect(verdict.action.why).toContain('new request_id');
       const rendered = renderAction(verdict.action, mcp);
       expect(rendered.command).not.toContain('gbrain sync');
+    });
+  }
+
+  for (const operation of ['extract_facts', 'writer_deactivate']) {
+    test(`a stalled ${operation} (maintenance or administration) inspects the writer, with no resubmit and no sync`, () => {
+      const verdict = receipt(operation);
+      expect(verdict.action.argv).toEqual(['gbrain', 'sources', 'writer', 'status', '--source', 'default', '--json']);
+      expect(verdict.action.why).not.toContain('request_id');
+      expect(renderAction(verdict.action, mcp).command).not.toContain('gbrain sync');
     });
   }
 

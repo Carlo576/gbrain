@@ -47,6 +47,9 @@ import { cliRenderContext, renderNotice } from '../../core/agent-output.ts';
 /** D2: under the `--json` guard only writeStdoutFinal reaches fd 1 (writeJsonDocument). */
 const emitJson = (text: string): void => { void writeJsonDocument(text); };
 
+/** #7630: a stored root that is not absolute names the cwd, so post-sync .gitignore upkeep skips it. */
+const absoluteStoredPath = (path: string | null): string | null => path && isAbsolute(path) ? path : null;
+
 type SyncAllSourceRow = { id: string; name: string; local_path: string | null; config: Record<string, unknown>; last_commit: string | null; chunker_version: string | null };
 
 // Per-source result accumulator for the optional --json envelope.
@@ -967,7 +970,7 @@ async function runSingleSourceSync(
       result.status !== 'blocked_by_failures' &&
       result.status !== 'partial'
     ) {
-      const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
+      const effectiveRepoPath = opts.repoPath ?? absoluteStoredPath(await getDefaultSourcePath(engine));
       if (effectiveRepoPath && !companyPolicy) {
         manageGitignoreAtGitRoot(effectiveRepoPath, engine.kind);
       }
@@ -1034,7 +1037,7 @@ async function runSingleSourceSync(
         result.status !== 'blocked_by_failures' &&
         result.status !== 'partial'
       ) {
-        const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
+        const effectiveRepoPath = opts.repoPath ?? absoluteStoredPath(await getDefaultSourcePath(engine));
         if (effectiveRepoPath) {
           manageGitignoreAtGitRoot(effectiveRepoPath, engine.kind);
         }

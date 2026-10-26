@@ -338,12 +338,19 @@ function schemaMissingVerdict(input: TerminalInput, code: string, origin: string
       why: `The write needed ${what}. Read-only: when doctor's schema_version reports the schema behind, run gbrain apply-migrations --yes as the database role that owns the gbrain tables and resubmit; when it is at head, its schema_missing_tables check names what is missing (gbrain repair missing-tables previews it).` } };
 }
 
+/** #7630: the foreground page and memory writes a caller resubmits; no sync replays them. */
+const RESUBMITTED_WRITES = new Set(['put_page', 'put_pages', 'capture', 'delete_page', 'restore_page', 'revert_version', 'edit_page', 'append_page', 'remember', 'forget']);
+
 /**
- * #7630: a sync write (and a recorded sync fault, read as one) is stored as `submit_job`; its retry is the sync. Any other
- * operation is a foreground write (`remember`, `put_page`, ...) that no sync replays: its caller resubmits it.
+ * #7630: a sync write (and a recorded sync fault, read as one) is stored as `submit_job`; its retry is the sync. A
+ * foreground write (`remember`, `put_page`, ...) is resubmitted by its caller. Any other operation (maintenance,
+ * administration) is neither: writer status names what holds it.
  */
 function faultAction(code: string, input: TerminalInput): Action {
   const v = classifySyncFault({ code });
+  if (v.safe_actions[0] === 'retry' && input.operation !== 'submit_job' && !RESUBMITTED_WRITES.has(input.operation)) {
+    return inspect(input.source_id, `The ${input.operation} operation ended ${code}; it was not part of a sync, so a sync does not retry it. Writer status names what holds it, read-only.`, v.human_reason);
+  }
   if (v.safe_actions[0] === 'retry' && input.operation !== 'submit_job') {
     return inspect(input.source_id, `The ${input.operation} write ended ${code}; it was not part of a sync, so a sync does not retry it. `
       + `Writer status names the step it stopped at and what held it, read-only. Once that clears, resubmit the same ${input.operation} with a new request_id (for a page an import or repair wrote, rerun that command).`);

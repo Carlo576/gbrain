@@ -43,7 +43,7 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
     livePages = Number(counts?.live ?? 0);
     fileBackedPages = Number(counts?.file_backed ?? 0);
     repoPath = (await engine.getConfig('sync.repo_path')) || null;
-    if (repoPath) {
+    if (repoPath && isAbsolute(repoPath)) {
       try {
         repoPathIsDir = existsSync(repoPath) && statSync(repoPath).isDirectory();
       } catch {
