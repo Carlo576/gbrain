@@ -82,7 +82,8 @@ for (const backend of testBackends()) describe('[' + backend + '] #7644: a conve
     finally { process.stderr.write = write; console.log = log; _resetCliExitVerdictForTests(); process.exitCode = priorExitCode ?? 0; }
     expect(JSON.parse(out.at(-1)!)).toMatchObject({ status: 'converted' });
     const lines = err.join('').split('\n').filter(line => line.includes('"conversion_progress"')).map(line => JSON.parse(line));
-    expect(lines.map(line => line.phase)).toEqual([...CONVERSION_PHASES]);
+    // A line at each change of phase; a phase longer than PROGRESS_EVERY_MS repeats its line on the interval.
+    expect(lines.map(line => line.phase).filter((phase, i, all) => phase !== all[i - 1])).toEqual([...CONVERSION_PHASES]);
     expect(lines.at(-1)).toMatchObject({ event: 'conversion_progress', source_id: 'default', phase: 'strict_pass_2', groups_committed: 2 });
   }, { databaseUrl, setup: bulkSetup }), 300_000);
 
