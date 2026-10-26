@@ -160,8 +160,9 @@ async function resolveCaptureFile(ctx: OperationContext, sourceId: string, p: Re
   delete p.local_file;
   const [source] = await ctx.engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [sourceId]);
   const binding = await getWorktreeBinding(ctx.engine, sourceId);
-  const root = binding ? binding.owner_host_id === localHostId() && binding.local_path ? join(binding.local_path, binding.relative_path) : null
+  let root = binding ? binding.owner_host_id === localHostId() && binding.local_path ? join(binding.local_path, binding.relative_path) : null
     : source?.local_path || (sourceId === 'default' ? await ctx.engine.getConfig('sync.repo_path') : null);
+  if (root && !isAbsolute(root)) root = null;
   let origin: string | null = null;
   try { if (root) origin = relative(realpathSync(root), realpathSync(file)); } catch { /* unreadable or absent root */ }
   if (!root || !origin || isAbsolute(origin) || origin === '..' || origin.startsWith(`..${sep}`) || !/\.mdx?$/i.test(origin)) {
@@ -396,7 +397,8 @@ export async function preparePageAdmission(ctx: OperationContext,
   const sandbox = ctx.viaSubagent === true && !(ctx.allowedSlugPrefixes?.length);
   const configuredWriteThrough = !/^(false|0|off|no)$/i.test(writeThroughSetting ?? 'true');
   const writeThrough = configuredWriteThrough && !sandbox && !input.databaseOnly;
-  const root = source.local_path || repoPath;
+  const configuredRoot = source.local_path || repoPath;
+  const root = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : null;
   if (sandbox) authority.databaseOnlyReason = 'subagent_sandbox';
   else if (input.databaseOnly) authority.databaseOnlyReason = input.databaseOnly;
   else if (!configuredWriteThrough) authority.databaseOnlyReason = 'disabled_by_config';
