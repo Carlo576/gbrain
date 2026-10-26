@@ -51,7 +51,7 @@ test('setup refuses a bundle carrying Bun below the floor before writing anythin
   expect(result).toMatchObject({ ok: false, reason: 'runtime_below_floor' });
   expect(result.message).toContain(`needs Bun ${MINIMUM_BUN_VERSION} or newer, but the setup bundle carries Bun 1.4.3`);
   expect(result.message).toContain('Make a verified backup first');
-  expect(result.message).toContain(`curl --fail --silent --show-error --location ${HELPER_URL} --output /tmp/gbrain-setup.sh && bash /tmp/gbrain-setup.sh --root '${root}' --harness grok-bot --upgrade --skills memory-only`);
+  expect(result.message).toContain(`curl --fail --silent --show-error --location ${HELPER_URL} --output /tmp/gbrain-setup.sh && bash /tmp/gbrain-setup.sh --root '${root}' --harness grok-bot --upgrade --skills memory-only --json`);
   expect(existsSync(root)).toBe(false);
 });
 
@@ -104,6 +104,24 @@ test('a bundle carrying the floor itself passes the gate', async () => {
   expect(exit).toBe(1);
   expect(result.reason).not.toBe('runtime_below_floor');
   expect(existsSync(root)).toBe(true);
+});
+
+test('a human-mode refusal reruns without --json', async () => {
+  const { root, bundle } = fixture('1.4.3');
+  const lines: string[] = [];
+  const error = spyOn(console, 'error').mockImplementation((line: string) => { lines.push(line); });
+  try { expect(await runAgentSetupCli(setupArgs(root, bundle).filter(arg => arg !== '--json'))).toBe(1); } finally { error.mockRestore(); }
+  expect(lines.join('\n')).toEndWith(`bash /tmp/gbrain-setup.sh --root '${root}' --harness grok-bot`);
+});
+
+test('an unreadable bundle is still journaled on the install receipt', async () => {
+  const { root, bundle } = fixture(MINIMUM_BUN_VERSION);
+  rmSync(join(bundle, 'app', 'node_modules', 'gbrain', 'src', 'cli.ts'));
+  const { exit, result } = await run(setupArgs(root, bundle));
+  expect(exit).toBe(1);
+  expect(result.reason).toBe('invalid_artifact');
+  const receipt = JSON.parse(readFileSync(join(root, '.gbrain', 'agent-install', 'receipt.json'), 'utf8'));
+  expect(receipt.last_failure?.code).toBe('invalid_artifact');
 });
 
 test('missing arguments still answer usage (exit 2) before the floor check', async () => {

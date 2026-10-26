@@ -18,6 +18,8 @@ import {
 import { bunSpawn, bunSpawnSync } from '../spawn.ts';
 import { MINIMUM_BUN_VERSION, bunVersionMeets } from '../runtime-version.ts';
 
+const SETUP_HELPER_URL = 'https://raw.githubusercontent.com/garrytan/gbrain/latest-stable/scripts/setup-in-agent.sh';
+
 export interface AgentSetupOptions {
   root: string;
   harness: AgentHarness;
@@ -27,6 +29,8 @@ export interface AgentSetupOptions {
   adopt?: boolean;
   upgrade?: boolean;
   skills?: 'follow' | 'memory-only';
+  /** The caller reads JSON output; a refusal's rerun command keeps `--json`. */
+  json?: boolean;
 }
 export interface AgentSetupResult {
   status: 'installed' | 'repaired' | 'unchanged';
@@ -184,10 +188,15 @@ export async function setupInAgent(options: AgentSetupOptions): Promise<AgentSet
   const root = checkedRoot(options.root);
   const adapter = harnessAdapter(options.harness);
   if (!['grok-bot', 'muse'].includes(adapter.id) || !adapter.modes.includes('local-cli')) throw new AgentInstallError('unsupported_harness', 'This local setup supports Grok Bot and Muse personal agents.');
-  const identity = artifactFromBundle(options.bundle, options.sourceRef);
-  if (!bunVersionMeets(identity.bun_version, MINIMUM_BUN_VERSION)) {
-    const rerun = ['--root', root, '--harness', options.harness, ...(options.adopt ? ['--adopt'] : []), ...(options.upgrade ? ['--upgrade'] : []), ...(options.skills ? ['--skills', options.skills] : [])].map(shellQuote).join(' ');
-    throw new AgentInstallError('runtime_below_floor', `This GBrain release needs Bun ${MINIMUM_BUN_VERSION} or newer, but the setup bundle carries Bun ${identity.bun_version || 'of unknown version'}, so the helper that staged it is out of date. Nothing was changed. ${options.upgrade ? 'Make a verified backup first (docs/guides/in-agent-setup.md), then fetch' : 'Fetch'} the current helper and rerun setup: curl --fail --silent --show-error --location https://raw.githubusercontent.com/garrytan/gbrain/latest-stable/scripts/setup-in-agent.sh --output /tmp/gbrain-setup.sh && bash /tmp/gbrain-setup.sh ${rerun}`);
+  // A bundle that cannot be read is reported inside the install below, where the receipt journals it.
+  let identity: ReturnType<typeof artifactFromBundle> | undefined;
+  try { identity = artifactFromBundle(options.bundle, options.sourceRef); } catch { identity = undefined; }
+  if (identity && !bunVersionMeets(identity.bun_version, MINIMUM_BUN_VERSION)) {
+    const rerunArgs = ['--root', root, '--harness', options.harness, ...(options.adopt ? ['--adopt'] : []), ...(options.upgrade ? ['--upgrade'] : []),
+      ...(options.skills ? ['--skills', options.skills] : []), ...(options.json ? ['--json'] : [])];
+    const rerun = `curl --fail --silent --show-error --location ${SETUP_HELPER_URL} --output /tmp/gbrain-setup.sh && bash /tmp/gbrain-setup.sh ${rerunArgs.map(shellQuote).join(' ')}`;
+    const next = options.upgrade ? 'Make a verified backup first (docs/guides/in-agent-setup.md), then fetch' : 'Fetch';
+    throw new AgentInstallError('runtime_below_floor', `This GBrain release needs Bun ${MINIMUM_BUN_VERSION} or newer, but the setup bundle carries Bun ${identity.bun_version || 'of unknown version'}, so the helper that staged it is out of date. Nothing was changed. ${next} the current helper and rerun setup: ${rerun}`);
   }
   if (!existsSync(dirname(root))) throw new AgentInstallError('parent_missing', 'Create and verify the persistent parent directory first.');
   const existed = existsSync(root);
@@ -245,6 +254,7 @@ export async function setupInAgent(options: AgentSetupOptions): Promise<AgentSet
     writeInstallReceipt(receipt);
     delete receipt.last_failure;
     let changed = false;
+    identity ??= artifactFromBundle(options.bundle, options.sourceRef);
     if (receipt.artifact && !options.upgrade && identity.source_ref !== receipt.artifact.source_ref) throw new AgentInstallError('artifact_version_mismatch', 'Repair must use the recorded source commit; use --upgrade to explicitly change versions.');
     const upgrade = !!options.upgrade && receipt.artifact?.source_ref !== identity.source_ref;
     if (!receipt.artifact || upgrade || !artifactUsable(root, receipt.artifact)) {
