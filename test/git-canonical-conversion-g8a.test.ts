@@ -11,7 +11,7 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -27,7 +27,7 @@ import { ADOPTION_BATCH, applyGitConversion, applyMixedConversion, CONVERSION_GR
 import { renderFactsTable } from '../src/core/facts-fence.ts';
 import { withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import { censusGitGap } from '../src/commands/sources-git-gap.ts';
-import { runSourcesCanonical } from '../src/commands/sources-canonical.ts';
+import { describeGitPreview, runSourcesCanonical } from '../src/commands/sources-canonical.ts';
 import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import { managedBrain, type ManagedBrain } from './helpers/managed-brain.ts';
 import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
@@ -119,6 +119,23 @@ const EXPORT_READ = /export_page AS MATERIALIZED|AS k\(id, source_id, slug\)|str
 async function dropImportRecord(engine: BrainEngine, slug: string): Promise<void> {
   const [row] = await engine.executeRaw<{ id: string }>("SELECT id::text FROM pages WHERE source_id='default' AND slug=$1", [slug]);
   await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='sync-import-provenance' AND fingerprint LIKE $1", [`default:%:${row!.id}`]);
+}
+
+/**
+ * notes/same moved on both sides with no import record, so sync holds it (file_drift, side unknown), and then turned
+ * private in the database: a declared page whose committed file differs from its row, at a held path.
+ */
+async function heldPrivateDrift(brain: ManagedBrain): Promise<void> {
+  const { engine, root } = brain;
+  expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+  await databaseOnlyEdit(engine, 'notes/same', 'Written to the database alone: notes/same.');
+  writeFileSync(join(root, 'notes/same.md'), note('notes/same', 'The committed edit of notes/same.'));
+  git(root, 'commit', '-qam', 'edit same');
+  await dropImportRecord(engine, 'notes/same');
+  await performManagedSync(engine, OPTS);
+  expect(await holds(engine)).toEqual(['notes/same.md file_drift']);
+  await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(
+    `UPDATE pages SET frontmatter=frontmatter || '{"visibility":"private"}'::jsonb WHERE source_id='default' AND slug='notes/same'`), TEST_WRITE_ATTRIBUTION));
 }
 
 const DRIFT_COMMITTED = 'The committed edit of notes/drift.';
@@ -315,6 +332,50 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     // census's view of a database_ahead page and reads the database-only pages ADOPTION_BATCH at a time the same way.
     expect(reads).toBeLessThanOrEqual(2 * (Math.ceil(2 * WIDE / 256) + Math.ceil(WIDE / ADOPTION_BATCH)));
   }, { databaseUrl, setup: wideSetup }), 300_000);
+
+  test('#7618: a hold at a declared page\'s path is judged by the strict verdict, so a page Git would overwrite is a discard', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await heldPrivateDrift(brain);
+    const base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ declared: { by: { private: 1 } }, holds: { count: 1, unplaced: { count: 1, by: { 'file_drift:unknown': 1 } } },
+      discard: { count: 1, by: { git_overwrites_database: 1 }, sample: ['notes/same.md'] } });
+    expect(Object.values(preview.discard.detail.git_overwrites_database)).toEqual([{ 'declared:private': 1 }]);
+    await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'git_conversion_blocked', detail: 'git_overwrites_database' });
+    expect(await holds(engine)).toEqual(['notes/same.md file_drift']);
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect((await page(engine, 'notes/same'))!.body).toContain('Written to the database alone: notes/same.');
+  }, { databaseUrl, setup }), 180_000);
+
+  test('#7618: the preview counts each discard by its cause', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await heldPrivateDrift(brain);
+    for (const slug of ['notes/ahead', 'notes/legacy']) await databaseOnlyEdit(engine, slug, `Written to the database alone: ${slug}.`);
+    writeFileSync(join(root, 'notes/ahead.md'), note('notes/ahead', 'An uncommitted edit of notes/ahead.'));
+    rmSync(join(root, 'notes/legacy.md'));
+    await databaseOnlyPage(brain, 'notes/dbonly', note('notes/dbonly', 'Only in the database.'));
+    writeFileSync(join(root, 'notes/dbonly.md'), note('notes/dbonly', 'An untracked file that differs.'));
+    // Committed without a sync: a broken frontmatter, bytes that are not UTF-8, and a symlink where a page's file was.
+    writeFileSync(join(root, 'notes/gitmoved.md'), '---\ntitle: [unclosed\n---\nBody\n');
+    writeFileSync(join(root, 'notes/removed.md'), Buffer.from([0xff, 0xfe, 0x00]));
+    rmSync(join(root, 'notes/drift.md')); symlinkSync('same.md', join(root, 'notes/drift.md'));
+    git(root, 'add', 'notes/gitmoved.md', 'notes/removed.md', 'notes/drift.md'); git(root, 'commit', '-qm', 'unreadable files');
+    // Database-only rows whose export reads back different: a padded title, and frontmatter tags with no tag rows.
+    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,timeline,frontmatter)
+      VALUES ('default','notes/padded','concept','  Padded title  ','Body.','','{}'::jsonb), ('default','notes/tagged','concept','Tagged','Body.','',$1::text::jsonb)`,
+      [JSON.stringify({ tags: ['alpha-example'] })]), TEST_WRITE_ATTRIBUTION));
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview.discard.by).toMatchObject({ git_overwrites_database: 1, uncommitted_edit: 3, unparseable: 3, export_mismatch: 2 });
+    expect(preview.discard.detail).toMatchObject({ uncommitted_edit: { modified: 1, deleted: 1, untracked: 1 }, unparseable: { frontmatter: 1, not_utf8: 1, symlink: 1 },
+      export_mismatch: { '/title': 1, '/tags': 1 } });
+    expect(Object.values(preview.discard.detail.git_overwrites_database)).toEqual([{ 'declared:private': 1 }]);
+    const lines = describeGitPreview(preview);
+    expect(lines).toContain('uncommitted_edit deleted 1');
+    expect(lines).toContain('1 at a path nothing else placed (file_drift:unknown 1)');
+    // The hash binds the counts (discard.by), not the causes, and reading the plan again gives the same one.
+    const again = (await planGitConversion(engine, 'default')).preview;
+    expect(again.preview_hash).toBe(preview.preview_hash);
+  }, { databaseUrl, setup }), 180_000);
 
   test('work that lands after the strict-equivalent pass leaves the source strict and reports incomplete', () => managedBrain(async brain => {
     const { engine, root } = brain;

@@ -42,12 +42,13 @@ import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { inlineExportMarkdown, readExportPage, readExportPages, readExportWithdrawals, type ExportSnapshot } from '../export-snapshot.ts';
 import { scannerSlugRootMode, scannerSourcePath } from '../write-through.ts';
 import { censusGitGap, type GitGapCensus, type GitGapPage } from '../../commands/sources-git-gap.ts';
-import { compareInlineExportFile, ignoredPaths } from './git-gap.ts';
+import { compareInlineExportFile, ignoredPaths, type DeclaredClass, type ExportFileComparison } from './git-gap.ts';
 import { commitThroughDoor } from './git-door.ts';
 import { currentVerifiedLocalWriter, localHostId } from './identity.ts';
 import { acquireWorktree, readManagedMode } from './ownership.ts';
 import { resolveManagedSyncContext, type ManagedSyncContext } from './sync-discovery.ts';
 import { readShadowLevel } from './sync-pass.ts';
+import { classifySyncPath } from './sync-classify.ts';
 import { clearGitHold, fileDriftSide, readGitSourceHolds, readSyncImportProvenances, type GitHoldRecord } from './sync-holds.ts';
 import { readDeletionProvenance } from './sync-origin-evidence.ts';
 import { retryParkedEffects } from './effect-retry.ts';
@@ -75,6 +76,18 @@ export const DISCARD_CATEGORIES = ['both_moved', 'held_drift_both', 'held_drift_
 export type DiscardCategory = typeof DISCARD_CATEGORIES[number];
 
 interface Counted<K extends string> { count: number; by: Record<K, number>; sample: string[] }
+/**
+ * Counts behind some discard categories (outside the preview hash). git_overwrites_database: the class the path has on a
+ * source that is not strict (with its sub, side or state), then the page's kind (`declared:<class>`, `live`, or
+ * `tombstone_or_none`); uncommitted_edit: the working-tree state; unparseable: why the committed file cannot be read;
+ * export_mismatch: each field the page's export reads back different (`unparseable:<reason>` when it does not parse).
+ */
+export interface DiscardDetail {
+  git_overwrites_database: Record<string, Record<string, number>>;
+  uncommitted_edit: Record<string, number>;
+  unparseable: Record<string, number>;
+  export_mismatch: Record<string, number>;
+}
 /** `disk`: sha256 of the working-tree bytes the preview saw (HEAD's or the export's), null when the file was absent. */
 export interface AdoptItem { id: string; source_id: string; slug: string; revision: string | null; path: string; state: AdoptState; disk: string | null }
 interface HoldItem { path: string; code: string; side: string | null; observed_at: string; action: 'git_wins' | 'rescreen' | 'blocked' }
@@ -92,11 +105,12 @@ export interface GitConversionPreview {
   adopt: Counted<AdoptState> & { action: 'commit_through_door'; groups: number };
   declared: Counted<string> & { action: 'none' };
   git_wins: Counted<GitWinsReason> & { action: 'index_committed_blob' };
-  holds: Counted<string> & { action: 'clear' };
+  /** `unplaced`: holds at a path no category above placed (a declared page, no live page), which the index check judges as the strict pass will see them. */
+  holds: Counted<string> & { action: 'clear'; unplaced: { count: number; by: Record<string, number> } };
   parked_effects: { count: number; retry: number; reclassify: number; by_code: Record<string, number> };
   /** What a strict pass would import or delete that no page row loses (files with no row, removals Git committed). */
   index: { imports: number; deletes: number };
-  discard: Counted<DiscardCategory>;
+  discard: Counted<DiscardCategory> & { detail: DiscardDetail };
   /** Every item the apply still has to act on (adopt, git_wins, holds, parked retries, discard); 0 on a converted source. */
   remaining: number;
   preview_hash: string;
@@ -107,6 +121,8 @@ export interface GitConversionPreview {
 export interface GitConversionPlan { preview: GitConversionPreview; context: ManagedSyncContext; adopt: AdoptItem[]; holds: HoldItem[]; parked: ParkedItem[]; settled: Set<string>; incarnation: string }
 
 const counted = <K extends string>(keys: readonly K[]): Counted<K> => ({ count: 0, by: Object.fromEntries(keys.map(key => [key, 0])) as Record<K, number>, sample: [] });
+const bump = (into: Record<string, number>, key: string) => { into[key] = (into[key] ?? 0) + 1; };
+const emptyDiscard = () => ({ ...counted(DISCARD_CATEGORIES), detail: { git_overwrites_database: {}, uncommitted_edit: {}, unparseable: {}, export_mismatch: {} } as DiscardDetail });
 function tally<K extends string>(into: Counted<K>, key: K, path: string): void {
   into.count++;
   into.by[key] = (into.by[key] ?? 0) + 1;
@@ -169,7 +185,7 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
     const side = hold?.code === 'file_drift' ? fileDriftSide(hold.meta) ?? null : null;
     switch (page.state) {
       case 'declared_database_only': tally(preview.declared, page.declared!, path); continue;
-      case 'unparseable': discard('unparseable', path); continue;
+      case 'unparseable': discard('unparseable', path); bump(preview.discard.detail.unparseable, page.unparseable ?? 'unknown'); continue;
       case 'unsafe_path': discard('unsafe_path', path); continue;
       case 'git_ahead':
         if (side === 'unknown') discard('held_drift_unknown_differs', path);
@@ -200,7 +216,12 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
   preview.parked_effects.retry = parked.filter(item => item.action === 'retry').length;
   preview.parked_effects.reclassify = parked.filter(item => item.action === 'reclassify').length;
   const settled = new Set([...equal, ...adopt.map(item => item.path), ...accepted]);
-  await planIndex(engine, context, preview, new Set([...settled, ...held.keys(), ...discarded]), discard);
+  const placed = new Set([...settled, ...discarded]);
+  const unplaced = holds.filter(hold => !placed.has(hold.path));
+  for (const hold of unplaced) bump(preview.holds.unplaced.by, hold.side ? `${hold.code}:${hold.side}` : hold.code);
+  preview.holds.unplaced.count = unplaced.length;
+  const declared = new Map(pages.flatMap(page => page.declared ? [[page.id, page.declared] as const] : []));
+  await planIndex(engine, context, preview, placed, new Set(unplaced.map(hold => hold.path)), declared, discard);
   preview.adopt.groups = Math.ceil(adopt.length / CONVERSION_GROUP_MAX);
   preview.remaining = preview.adopt.count + preview.git_wins.count + preview.holds.count + preview.parked_effects.retry + preview.discard.count;
   preview.preview_hash = previewHash({ source: sourceId, incarnation, to: 'git', strict: preview.strict, head: preview.head, states: census.states, declared: census.declared,
@@ -213,8 +234,8 @@ export async function planGitConversion(engine: BrainEngine, sourceId: string): 
 function emptyPreview(sourceId: string, context: ManagedSyncContext, census: GitGapCensus): GitConversionPreview {
   return { status: 'preview', source_id: sourceId, to: 'git', strict: context.source.config?.canonical === 'git', head: census.head, pages: census.pages, equal: census.states.equal,
     adopt: { ...counted(ADOPT_STATES), action: 'commit_through_door', groups: 0 }, declared: { ...counted<string>([]), action: 'none' },
-    git_wins: { ...counted(GIT_WINS_REASONS), action: 'index_committed_blob' }, holds: { ...counted<string>([]), action: 'clear' },
-    parked_effects: { count: 0, retry: 0, reclassify: 0, by_code: {} }, index: { imports: 0, deletes: 0 }, discard: counted(DISCARD_CATEGORIES), remaining: 0, preview_hash: '', apply: [] };
+    git_wins: { ...counted(GIT_WINS_REASONS), action: 'index_committed_blob' }, holds: { ...counted<string>([]), action: 'clear', unplaced: { count: 0, by: {} } },
+    parked_effects: { count: 0, retry: 0, reclassify: 0, by_code: {} }, index: { imports: 0, deletes: 0 }, discard: emptyDiscard(), remaining: 0, preview_hash: '', apply: [] };
 }
 
 /** A hold's fate: a held deletion or an unknown-side drift goes to Git (planGitConversion discards the drift when its row differs), a both-sides drift is database content Git would discard, the rest re-screen. */
@@ -226,14 +247,14 @@ function holdItem(hold: GitHoldRecord): HoldItem {
 
 /**
  * What the adoption plan needs of a page's export view, kept instead of the view: the sha256 of its exported bytes, and
- * whether those bytes read back equal under the census contract.
+ * how those bytes read back under the census contract.
  */
 class ExportChecks {
-  private readonly checks = new Map<string, { digest: string; readsBack: boolean }>();
+  private readonly checks = new Map<string, { digest: string; readBack: ExportFileComparison }>();
   constructor(private readonly root: string, private readonly mode: Awaited<ReturnType<typeof scannerSlugRootMode>>) {}
   add(id: string, path: string, snapshot: ExportSnapshot): void {
     const bytes = Buffer.from(inlineExportMarkdown(snapshot));
-    this.checks.set(id, { digest: sha256(bytes), readsBack: compareInlineExportFile(bytes, scannerSourcePath(this.root, join(this.root, path), this.mode), snapshot).state === 'equal' });
+    this.checks.set(id, { digest: sha256(bytes), readBack: compareInlineExportFile(bytes, scannerSourcePath(this.root, join(this.root, path), this.mode), snapshot) });
   }
   get(id: string) { return this.checks.get(id); }
 }
@@ -265,9 +286,18 @@ async function planAdoption(engine: BrainEngine, sourceId: string, root: string,
     if (!ignored || ignored.has(path)) { discard('ignored_target', path); continue; }
     if (page.segmented) { discard('segmented_page', path); continue; }
     const check = exported.get(page.id)!;
-    if (!check.readsBack) { discard('export_mismatch', path); continue; }
+    const { readBack } = check;
+    if (readBack.state !== 'equal') {
+      discard('export_mismatch', path);
+      for (const field of readBack.state === 'differs' ? readBack.paths : [`unparseable:${readBack.reason}`]) bump(preview.discard.detail.export_mismatch, field);
+      continue;
+    }
     const disk = diskBytes(join(root, path));
-    if (page.worktree !== 'clean' && page.worktree !== 'absent' && !(disk && sha256(disk) === check.digest)) { discard('uncommitted_edit', path); continue; }
+    if (page.worktree !== 'clean' && page.worktree !== 'absent' && !(disk && sha256(disk) === check.digest)) {
+      discard('uncommitted_edit', path);
+      bump(preview.discard.detail.uncommitted_edit, page.worktree ?? 'unknown');
+      continue;
+    }
     adopt.push({ id: page.id, source_id: sourceId, slug: page.slug, revision: page.revision, path, state, disk: disk ? sha256(disk) : null });
     tally(preview.adopt, state, path);
   }
@@ -296,19 +326,26 @@ async function readParked(engine: BrainEngine, sourceId: string): Promise<Parked
 
 /**
  * The level a strict pass reads (G3's reindex preview): what it imports or deletes, and every page version it would
- * replace that the plan has not placed (`git_overwrites_database`). `planned`: paths already placed (equal, adopted,
- * accepted, held or counted as discard).
+ * replace that the plan has not placed (`git_overwrites_database`). `placed`: paths the plan already placed (equal,
+ * adopted, accepted or counted as discard). A hold the plan did not place is cleared before the strict pass, so its path
+ * is judged as that pass will see it, without the hold. `declared`: the census's declared class by page id.
  */
-async function planIndex(engine: BrainEngine, context: ManagedSyncContext, preview: GitConversionPreview, planned: ReadonlySet<string>,
-  discard: (category: DiscardCategory, path: string) => void): Promise<void> {
+async function planIndex(engine: BrainEngine, context: ManagedSyncContext, preview: GitConversionPreview, placed: ReadonlySet<string>, unplacedHolds: ReadonlySet<string>,
+  declared: ReadonlyMap<string, DeclaredClass>, discard: (category: DiscardCategory, path: string) => void): Promise<void> {
   const level = await readShadowLevel(engine, { sourceId: context.sourceId, full: true, context: strictContext(context) });
   if (!level) return;
   for (const entry of level.paths) {
-    if (entry.result.settled || entry.result.inFlight || (entry.result.action !== 'import' && entry.result.action !== 'delete')) continue;
     const path = sourcePath(level.scope, entry.path);
-    if (planned.has(path)) continue;
-    if (entry.result.gitWins) discard('git_overwrites_database', path);
-    else preview.index[entry.result.action === 'import' ? 'imports' : 'deletes']++;
+    if (placed.has(path)) continue;
+    const state = unplacedHolds.has(path) ? { ...entry.state, hold: null } : entry.state;
+    const result = state === entry.state ? entry.result : classifySyncPath(state, { strict: true });
+    if (result.settled || result.inFlight || (result.action !== 'import' && result.action !== 'delete')) continue;
+    if (!result.gitWins) { preview.index[result.action === 'import' ? 'imports' : 'deletes']++; continue; }
+    discard('git_overwrites_database', path);
+    const before = classifySyncPath(state);
+    const detail = before.cls === result.gitWins ? before.sub ?? before.side ?? before.state : undefined;
+    const kind = !state.page?.live ? 'tombstone_or_none' : declared.has(String(entry.pageId)) ? `declared:${declared.get(String(entry.pageId))}` : 'live';
+    bump(preview.discard.detail.git_overwrites_database[detail ? `${result.gitWins}:${detail}` : result.gitWins] ??= {}, kind);
   }
 }
 
@@ -345,7 +382,7 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   }
   const parked = await settleParked(engine, sourceId, plan.parked);
   const recheck = await readShadowLevel(engine, { sourceId, full: true, context: strictContext(plan.context) });
-  const preview = { ...plan.preview, discard: counted(DISCARD_CATEGORIES) };
+  const preview = { ...plan.preview, discard: emptyDiscard() };
   for (const entry of recheck?.paths ?? []) {
     const path = sourcePath(recheck!.scope, entry.path);
     if (!entry.result.settled && !entry.result.inFlight && entry.result.gitWins && !plan.settled.has(path)) tally(preview.discard, 'git_overwrites_database', path);

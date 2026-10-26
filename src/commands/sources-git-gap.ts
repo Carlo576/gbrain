@@ -27,7 +27,7 @@ import { GIT_HOLD_OP, readSyncImportProvenances } from '../core/persistence/sync
 import { DERIVED_LINK_SOURCES } from '../core/persistence/twin-merge.ts';
 import { scannerSlugRootMode, scannerSourcePath } from '../core/write-through.ts';
 import { compareInlineExportFile, compareSegmentedExportBlob, DECLARED_CLASSES, declaredDatabaseOnly, ignoredPaths, readBlobs, readHeadTree, worktreeBlobOid,
-  type DeclaredClass, type ExportFileComparison, type HeadTree, type TreeBlob } from '../core/persistence/git-gap.ts';
+  type DeclaredClass, type ExportFileComparison, type HeadTree, type TreeBlob, type UnparseableReason } from '../core/persistence/git-gap.ts';
 
 const USAGE = 'Usage: gbrain sources git-gap <source-id> [--sample <n>] [--json]';
 export const GIT_GAP_DOCS = 'docs/designs/GIT_CANONICAL_MEMORY.md#the-git-gap-census';
@@ -40,7 +40,7 @@ export type WorktreeState = typeof WORKTREE_STATES[number];
 
 /** One page as the census classified it, handed to a caller that plans per page (G8 conversion, persistence/git-conversion.ts). */
 export interface GitGapPage { id: string; slug: string; revision: string | null; path: string | null; state: PageState; segmented: boolean;
-  declared?: DeclaredClass; worktree?: WorktreeState; headBlob?: string; databaseAlsoMoved?: boolean }
+  declared?: DeclaredClass; worktree?: WorktreeState; headBlob?: string; databaseAlsoMoved?: boolean; unparseable?: UnparseableReason }
 
 export interface GitGapSample { slug: string; path: string; state: PageState; fields?: string[]; declared?: DeclaredClass; basis?: 'import_record' | 'no_import_record'; worktree?: WorktreeState }
 
@@ -225,7 +225,7 @@ async function censusBatch(tx: BrainEngine, batch: Key[], census: GitGapCensus, 
     census.worktree![worktree]++;
     if (blob.mode !== '100644' && blob.mode !== '100755') {
       census.states.unparseable++;
-      ctx.collect?.(collected(key, rel, 'unparseable', { worktree, headBlob: blob.oid }));
+      ctx.collect?.(collected(key, rel, 'unparseable', { worktree, headBlob: blob.oid, unparseable: blob.mode === '120000' ? 'symlink' : 'non_regular_mode' }));
       note(census, ctx.sample, { slug: key.slug, path: rel, state: 'unparseable', worktree });
       continue;
     }
@@ -252,7 +252,7 @@ async function compareBatch(tx: BrainEngine, compare: Array<{ key: Key; path: st
     if (compared.state === 'equal') { census.states.equal++; ctx.collect?.(collected(item.key, item.rel, 'equal', { worktree: item.worktree, headBlob: item.blob.oid })); continue; }
     if (compared.state === 'unparseable') {
       census.states.unparseable++;
-      ctx.collect?.(collected(item.key, item.rel, 'unparseable', { worktree: item.worktree, headBlob: item.blob.oid }));
+      ctx.collect?.(collected(item.key, item.rel, 'unparseable', { worktree: item.worktree, headBlob: item.blob.oid, unparseable: compared.reason }));
       note(census, ctx.sample, { slug: item.key.slug, path: item.rel, state: 'unparseable', worktree: item.worktree });
       continue;
     }

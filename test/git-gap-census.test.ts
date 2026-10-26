@@ -85,8 +85,8 @@ for (const backend of testBackends()) describe(`git-gap census (git-canonical G1
     const snapshot = await snapshotOf('cmp/page');
     const text = inlineExportMarkdown(snapshot);
     expect(compareInlineExportFile(Buffer.from(text.replace('Original body.', 'Edited body.')), 'cmp/page.md', snapshot)).toEqual({ state: 'differs', paths: ['/compiled_truth'] });
-    expect(compareInlineExportFile(Buffer.from('---\ntitle: [unclosed\n---\nBody\n'), 'cmp/page.md', snapshot)).toEqual({ state: 'unparseable' });
-    expect(compareInlineExportFile(Buffer.from([0xff, 0xfe, 0x00]), 'cmp/page.md', snapshot)).toEqual({ state: 'unparseable' });
+    expect(compareInlineExportFile(Buffer.from('---\ntitle: [unclosed\n---\nBody\n'), 'cmp/page.md', snapshot)).toEqual({ state: 'unparseable', reason: 'frontmatter' });
+    expect(compareInlineExportFile(Buffer.from([0xff, 0xfe, 0x00]), 'cmp/page.md', snapshot)).toEqual({ state: 'unparseable', reason: 'not_utf8' });
     expect(compareInlineExportFile(Buffer.from(text.replace('validate: false\n', '')), 'cmp/page.md', snapshot)).toEqual({ state: 'equal' });
   });
 

@@ -74,7 +74,9 @@ export async function ignoredPaths(root: string, relativePaths: string[]): Promi
   return result.reason === 'exit' && result.status === 1 && ignored.size === 0 ? ignored : null;
 }
 
-export type ExportFileComparison = { state: 'equal' } | { state: 'differs'; paths: string[] } | { state: 'unparseable' };
+/** Why a committed file cannot be compared: a symlink (or another non-regular mode), bytes that are not UTF-8, or frontmatter that does not parse. */
+export type UnparseableReason = 'symlink' | 'non_regular_mode' | 'not_utf8' | 'frontmatter';
+export type ExportFileComparison = { state: 'equal' } | { state: 'differs'; paths: string[] } | { state: 'unparseable'; reason: UnparseableReason };
 
 /**
  * The equality contract for an inline page: the file, parsed the way reconcile parses a canonical file (aligned with the
@@ -84,10 +86,10 @@ export type ExportFileComparison = { state: 'equal' } | { state: 'differs'; path
 export function compareInlineExportFile(raw: Buffer, importPath: string, snapshot: ExportSnapshot): ExportFileComparison {
   const { page, tags } = snapshot;
   const text = raw.toString('utf8');
-  if (!Buffer.from(text).equals(raw)) return { state: 'unparseable' };
+  if (!Buffer.from(text).equals(raw)) return { state: 'unparseable', reason: 'not_utf8' };
   const reading = reconcileFileReading(text, importPath, page);
   const parsed = parseMarkdown(reading.content, `${page.slug}.md`, { validate: true, expectedSlug: page.slug });
-  if (parsed.errors?.some(e => !['MISSING_OPEN', 'EMPTY_FRONTMATTER'].includes(e.code))) return { state: 'unparseable' };
+  if (parsed.errors?.some(e => !['MISSING_OPEN', 'EMPTY_FRONTMATTER'].includes(e.code))) return { state: 'unparseable', reason: 'frontmatter' };
   if (parsed.slug !== page.slug) return { state: 'differs', paths: ['/slug'] };
   alignWithStored(parsed, page, reading.inferred);
   const file = reconcileCanonical(parsed, parsed.tags), database = reconcileCanonical(page, tags);

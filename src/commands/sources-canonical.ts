@@ -37,14 +37,18 @@ const counts = (record: Record<string, number>) => Object.entries(record).filter
 const sample = (paths: string[]) => paths.map(path => `    ${path}`);
 
 export function describeGitPreview(p: GitConversionPreview): string {
+  const { detail } = p.discard;
+  const causes = [...Object.entries(detail.git_overwrites_database).flatMap(([cls, kinds]) => Object.entries(kinds).map(([kind, n]) => `git_overwrites_database ${cls} on ${kind} ${n}`)),
+    ...(['uncommitted_edit', 'unparseable', 'export_mismatch'] as const).flatMap(category => Object.entries(detail[category]).map(([key, n]) => `${category} ${key} ${n}`))];
   const lines = [`Source ${p.source_id}${p.strict ? ' (already git-canonical)' : ''} at ${p.head?.slice(0, 12) ?? 'no commit'}: ${p.pages} live page(s), ${p.equal} equal to HEAD.`,
     `Adopt (write the database's page to its file and commit it through the door, ${p.adopt.groups} commit(s) of up to ${CONVERSION_GROUP_MAX}): ${p.adopt.count} (${counts(p.adopt.by)}).`, ...sample(p.adopt.sample),
     `Declared database-only (nothing written, nothing deleted): ${p.declared.count} (${counts(p.declared.by)}).`,
     `Git wins (the strict pass indexes the committed file): ${p.git_wins.count} (${counts(p.git_wins.by)}).`, ...sample(p.git_wins.sample),
-    `Holds cleared so Git's verdict runs: ${p.holds.count} (${counts(p.holds.by)}).`,
+    `Holds cleared so Git's verdict runs: ${p.holds.count} (${counts(p.holds.by)})${p.holds.unplaced.count ? `; ${p.holds.unplaced.count} at a path nothing else placed (${counts(p.holds.unplaced.by)}), counted below by the strict pass's verdict` : ''}.`,
     `Parked effects: ${p.parked_effects.count} (retry ${p.parked_effects.retry}, reclassify as declared ${p.parked_effects.reclassify}; ${counts(p.parked_effects.by_code)}).`,
     `The strict pass also imports ${p.index.imports} and deletes ${p.index.deletes} page(s) where the database holds nothing Git lacks.`,
-    `Database content that would be discarded: ${p.discard.count}${p.discard.count ? ` (${counts(p.discard.by)}); the apply refuses until it is 0` : ''}.`, ...sample(p.discard.sample)];
+    `Database content that would be discarded: ${p.discard.count}${p.discard.count ? ` (${counts(p.discard.by)}); the apply refuses until it is 0` : ''}.`,
+    ...(causes.length ? [`  By cause: ${causes.join(', ')}.`] : []), ...sample(p.discard.sample)];
   lines.push(p.remaining === 0 && p.strict ? 'Nothing is left to convert.' : `Nothing changed. To apply: ${p.apply.join(' ')}`);
   return lines.join('\n');
 }
