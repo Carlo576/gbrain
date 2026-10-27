@@ -19,6 +19,9 @@ import { SAVED_FACT_COLLAPSE_COLUMNS, type CollapseColumns } from './entity-fact
 /** Words too common to count toward a saved-fact match; also the coverage relevance stopwords in ops/search.ts. */
 export const FACT_MATCH_STOPWORDS = new Set(['the', 'and', 'for', 'who', 'what', 'when', 'where', 'which', 'with', 'from', 'that', 'this', 'are', 'was', 'were', 'our', 'your', 'their', 'now', 'current', 'currently', 'should', 'does', 'did', 'has', 'have', 'how', 'any', 'all', 'about', 'into', 'its', 'next']);
 
+/** Words that frame a question about a figure ("seat count", "total revenue") and that the fact stating it rarely repeats; they count toward neither side of the threshold. */
+const QUESTION_FRAME_WORDS = new Set(['count', 'number', 'total', 'amount']);
+
 export interface SavedFactMatch { id: number; fact: string; entity_slug: string | null; kind: string; valid_from: string; source: string;
   /** #7043: every entity of the copies this row stands for, and how many rows it stands for. */
   entity_slugs?: string[]; collapsed_count?: number;
@@ -68,7 +71,7 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
   // A query naming one of two declared names also matches facts saved under the other.
   if (otherNames.length) queryText += ` ${otherNames.join(' ')}`;
   const terms = [...new Set(queryText.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}'-]+/gu) ?? [])]
-    .filter(t => t.length >= 3 && !FACT_MATCH_STOPWORDS.has(t)).slice(0, 12);
+    .filter(t => t.length >= 3 && !FACT_MATCH_STOPWORDS.has(t) && !QUESTION_FRAME_WORDS.has(t)).slice(0, 12);
   if (terms.length === 0 || !ctx.emitResponseMeta) return [];
   const sources = scope.sourceIds?.length ? scope.sourceIds : [scope.sourceId ?? ctx.sourceId ?? 'default'];
   const [excludePrivate, supersede] = await Promise.all([resolveExcludePrivatePages(ctx.engine, ctx.remote), savedFactsSupersedeEnabled(ctx.engine)]);
@@ -122,17 +125,20 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
       at: new Date(at as string).getTime(), words: new Set(matched.map(Number)), need: Number(need), cue, figures: cue ? figures(fact.fact) : new Set<string>() }));
     const admitted = found.filter(r => r.words.size >= r.need);
     if (supersede) {
+      const correcting = new Set<number>();
       for (const older of admitted) {
         // Posts saved in one flush share a time; the later id is the later post.
         // An acknowledgement is not a correction: a cue fact that adds no figure to the older fact
         // corrects it only when it restates no figure and the older fact is not a correction itself.
         const olderFigures = figures(older.fact.fact);
-        const correction = found.filter(n => n.cue && (n.at > older.at || (n.at === older.at && n.fact.id > older.fact.id))
+        const corrections = found.filter(n => n.cue && (n.at > older.at || (n.at === older.at && n.fact.id > older.fact.id))
           && [...n.words].filter(w => older.words.has(w)).length >= Math.min(2, n.need)
-          && !([...n.figures].every(x => olderFigures.has(x)) && (n.figures.size > 0 || older.cue))).sort((a, b) => b.at - a.at || b.fact.id - a.fact.id)[0];
-        if (correction) older.fact.corrected_by = correction.fact.id;
+          && !([...n.figures].every(x => olderFigures.has(x)) && (n.figures.size > 0 || older.cue))).sort((a, b) => b.at - a.at || b.fact.id - a.fact.id);
+        if (corrections.length) older.fact.corrected_by = corrections[0].fact.id;
+        for (const c of corrections) correcting.add(c.fact.id);
       }
-      const correcting = new Set(admitted.flatMap(r => r.fact.corrected_by ? [r.fact.corrected_by] : []));
+      // Every correction of a returned fact comes back, not only the newest: an acknowledgement
+      // saved after the correction must not crowd out the post that made it.
       admitted.push(...found.filter(r => correcting.has(r.fact.id) && r.words.size < r.need));
     }
     const ordered = supersede ? [...admitted.filter(r => !r.fact.corrected_by), ...admitted.filter(r => r.fact.corrected_by)] : admitted;

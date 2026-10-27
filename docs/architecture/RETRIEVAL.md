@@ -345,14 +345,17 @@ Two cross-cutting seams sit around the pipeline rather than inside it:
   full-text language, the facts keyword index's expression, so "renewal" finds
   "renews" and "count" does not match inside "countersigned"; words of a CJK
   script match as substrings. A fact needs three quarters of the query's words
-  (both of a two-word query); the most matched words come first, then the
+  (both of a two-word query), not counting words that frame a question about a
+  figure (count, number, total, amount); the most matched words come first, then the
   newest. This is the only place `search` returns saved facts: the
   facts arm, the facts block and the temporal reserve run in `query` alone.
   With `search.saved_facts_supersede` (default on; `false` turns it off), a newer fact with a
   correction cue ("correction", "ignore the ...", "not what I posted") that
   shares at least two matched words with a returned fact is returned too, even
   below the threshold, every fact it corrects moves below the facts nothing
-  corrects, and those carry `corrected_by` (the correcting fact's id). An
+  corrects, and those carry `corrected_by` (the correcting fact's id, the
+  newest when several correct it). Every correction comes back, so an
+  acknowledgement saved after a correction does not crowd it out. An
   acknowledgement corrects nothing: a cue fact that adds no figure (a number
   other than a date or time) to the older fact, when it restates one of its
   figures or the older fact is itself a correction. The cue is a fixed word list, so

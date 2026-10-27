@@ -66,6 +66,13 @@ beforeAll(async () => {
   ids.olderLease = await remember('The warehouse lease runs five years.', '2026-08-01T09:00:00Z');
   ids.newerLease = await remember('The warehouse lease renews in March.', '2026-08-15T09:00:00Z');
   ids.otherAccount = await remember('Kappa Example renews at 30 seats.', '2026-09-01T10:00:00Z');
+  // A correction posted days before the question that asks for the figure, in the words a question uses.
+  ids.zentra = await remember('Dana Example (dana-example, Strategic account manager) wrote in #pod-a on 2026-08-14 09:00: For your records, no action needed: the Q3 digest has Zentra wrong. Zentra Medical Supply is at 50 seats, not 55.', '2026-08-14T09:00:00Z');
+  ids.zentraQuestion = await remember('Erin Example (erin-example, revenue lead) wrote in #pod-a on 2026-08-16 09:00: What is the current Zentra Medical Supply seat count? I am filling in the pod sheet.', '2026-08-16T09:00:00Z');
+  // A correction and an acknowledgement of it saved in one flush: the acknowledgement is the later post.
+  ids.quellin = await remember('Quellin Freight renews at 30 seats.', '2026-05-01T09:00:00Z');
+  ids.quellinFix = await remember('Correction: Quellin Freight is at 24 seats, ignore the 30.', '2026-05-02T09:00:00Z');
+  ids.quellinAck = await remember('Thanks for the correction, noted: Quellin Freight at 24 seats.', '2026-05-02T09:00:00Z');
   ids.delta = await remember('Delta Example has 50 seats, not 55.', '2026-08-01T09:00:00Z');
   ids.deltaAck = await remember('Correction noted: Delta Example has 50 seats, not 55.', '2026-08-01T09:05:00Z');
   ids.omega = await remember('Correction for the record: Omega Example stays with Carol Example.', '2026-07-01T09:00:00Z');
@@ -93,7 +100,7 @@ describe('search saved facts: stem-aware whole-word matching', () => {
   });
 
   test('a query word matches whole words only', async () => {
-    const { facts } = await search('count lease');
+    const { facts } = await search('counter lease');
     expect(facts.map(f => f.id)).not.toContain(ids.lease);
   });
 
@@ -101,6 +108,15 @@ describe('search saved facts: stem-aware whole-word matching', () => {
     const { facts } = await search('warehouse lease');
     expect(order(facts, ids.newerLease)).toBeGreaterThanOrEqual(0);
     expect(order(facts, ids.newerLease)).toBeLessThan(order(facts, ids.olderLease));
+  });
+
+  test('a question\'s framing words ("count") do not keep out the fact that states the figure', async () => {
+    for (const flag of ['false', 'true']) {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, flag);
+      const { facts } = await search('Zentra seat count');
+      expect(facts.map(f => f.id), flag).toEqual(expect.arrayContaining([ids.zentra, ids.zentraQuestion]));
+    }
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
   });
 
   test('a fact the remote caller may not read never comes back', async () => {
@@ -157,6 +173,19 @@ describe('search.saved_facts_supersede on', () => {
       // A correction of a correction that brings a new figure still corrects it.
       const sigma = await search('Sigma seats');
       expect(sigma.facts.find(f => f.id === ids.sigma)?.corrected_by).toBe(ids.sigmaAgain);
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+
+  test('an acknowledgement saved after a correction does not crowd it out', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      const { facts } = await search('Quellin seats renewal');
+      expect(order(facts, ids.quellinFix)).toBeGreaterThanOrEqual(0);
+      expect(order(facts, ids.quellinFix)).toBeLessThan(order(facts, ids.quellin));
+      expect(order(facts, ids.quellinAck)).toBeLessThan(order(facts, ids.quellin));
+      expect(facts.find(f => f.id === ids.quellin)?.corrected_by).toBeDefined();
     } finally {
       await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
     }
