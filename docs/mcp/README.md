@@ -140,3 +140,15 @@ pass it to `get_page`.
 ```
 
 `search.query_facts_arm=false` turns fact rows off.
+
+## Recent facts in `_meta.brain_hot_memory`
+
+Most successful tool calls carry `_meta.brain_hot_memory`: up to 10 recent
+facts from the connection's own source. For a token, that is its write source,
+the first id of its source grant. For a member token whose first source is the
+member's private source, the block holds that member's own facts. A harness
+that answers a channel or other shared session should send
+`_meta.hot_memory: "off"` with each call, on the request beside `arguments`
+or inside the arguments, so those facts can't ride into a reply other people
+read. Without it, the block is unchanged. When it appears and which facts it
+holds: [MCP_META_CHANNELS.md](../protocol/MCP_META_CHANNELS.md#brain_hot_memory-when-it-appears-and-how-to-turn-it-off).

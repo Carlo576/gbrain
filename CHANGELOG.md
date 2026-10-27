@@ -24,6 +24,7 @@ identifiers and attribution are available in the pre-removal Git revision
 | `context_pack`, `delta` and writes | world-only | world-only, for every caller |
 | `--private-pages none` | | hides them again on the next request |
 | `gbrain auth list`, `auth clients`, `auth rescope`, the `serve --http` dashboard API key list and `whoami` | | show the setting; `gbrain auth list --json` is new |
+| A harness answering a channel or other shared session | every successful tool call could carry `_meta.brain_hot_memory`, which holds recent facts from the connection's write source (a member token's own private source), and there was no way to turn it off for one call | `_meta.hot_memory: "off"`, on the request or inside the arguments, drops the block for that call. Without it, nothing changes. `docs/protocol/MCP_META_CHANNELS.md`, `docs/mcp/README.md` and the install guide now say when the block appears and which source it reads |
 
 ### What to watch for after you upgrade
 

@@ -231,6 +231,13 @@ export interface DispatchOpts {
    */
   sessionId?: string;
   /**
+   * GBRA-156: the request asked for no `_meta.brain_hot_memory` block (MCP request-level
+   * `_meta.hot_memory: "off"`, resolved by the transport). The same value inside the tool
+   * arguments' `_meta` works too. A channel or shared session sets it so a requester's own
+   * facts never ride into a reply other people read.
+   */
+  hotMemoryOff?: boolean;
+  /**
    * v0.31 (eD3): hook called by the dispatcher AFTER op.handler succeeds
    * to compute `_meta.brain_hot_memory` for the response. Wrapped in its
    * own try/catch (eE4) so a DB blip in the helper degrades to no _meta
@@ -806,6 +813,11 @@ export function requestMetaSessionId(requestParams: unknown): string | undefined
   return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
 }
 
+/** GBRA-156: `_meta.hot_memory: "off"` on the request (pass `request.params`) or inside the tool arguments (pass the arguments). */
+export function hotMemoryOffIn(params: unknown): boolean {
+  return (params as { _meta?: { hot_memory?: unknown } } | undefined)?._meta?.hot_memory === 'off';
+}
+
 /**
  * Read `_meta.session_id` out of the tool arguments when present. The MCP
  * spec carries `_meta` as a sibling of `arguments`, but several clients (and
@@ -884,7 +896,8 @@ export async function dispatchToolCall(
   // context_pack and delta stay world-only for every caller unless a trusted local one passes include_private, so no grant widens them.
   const readOnly = operations.find(o => o.name === name)?.mutating === false;
   const privateSources = readOnly && opts.remote !== false && !WORLD_ONLY_PACK_OPS.has(name) ? opts.auth?.privatePages?.sources : undefined;
-  const run = () => withPrivateReadableSources(privateSources, () => withRequestIdentityMemo(() => dispatchResolvedCall(engine, name, params, opts)));
+  const resolved = opts.metaHook && (opts.hotMemoryOff === true || hotMemoryOffIn(params)) ? { ...opts, metaHook: undefined } : opts;
+  const run = () => withPrivateReadableSources(privateSources, () => withRequestIdentityMemo(() => dispatchResolvedCall(engine, name, params, resolved)));
   if (name === 'search' || name === 'query') return withSearchConnectionBudget(() => withRequestConfigSnapshot(engine, run));
   return readOnly
     ? withRequestConfigSnapshot(engine, run)
