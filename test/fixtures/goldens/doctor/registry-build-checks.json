@@ -1010,6 +1010,10 @@
         "name": "fence_integrity"
       },
       {
+        "category": "brain",
+        "name": "outside_content_fences"
+      },
+      {
         "category": "ops",
         "name": "search_mode"
       },
