@@ -69,6 +69,9 @@ beforeAll(async () => {
   // A correction posted days before the question that asks for the figure, in the words a question uses.
   ids.zentra = await remember('Dana Example (dana-example, Strategic account manager) wrote in #pod-a on 2026-08-14 09:00: For your records, no action needed: the Q3 digest has Zentra wrong. Zentra Medical Supply is at 50 seats, not 55.', '2026-08-14T09:00:00Z');
   ids.zentraQuestion = await remember('Erin Example (erin-example, revenue lead) wrote in #pod-a on 2026-08-16 09:00: What is the current Zentra Medical Supply seat count? I am filling in the pod sheet.', '2026-08-16T09:00:00Z');
+  // Replies that report the correction or acknowledge it on a named date: neither makes a correction.
+  ids.zentraAck = await remember('Correction noted on 14 Aug: Zentra Medical Supply has 50 seats, not 55.', '2026-08-14T09:05:00Z');
+  ids.zentraReport = await remember('Erin, Zentra Medical Supply is at 50 seats. Dana posted that on 14 Aug, correcting the 55 in the Q3 digest.', '2026-08-16T09:05:00Z');
   // A correction and an acknowledgement of it saved in one flush: the acknowledgement is the later post.
   ids.quellin = await remember('Quellin Freight renews at 30 seats.', '2026-05-01T09:00:00Z');
   ids.quellinFix = await remember('Correction: Quellin Freight is at 24 seats, ignore the 30.', '2026-05-02T09:00:00Z');
@@ -115,6 +118,15 @@ describe('search saved facts: stem-aware whole-word matching', () => {
       await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, flag);
       const { facts } = await search('Zentra seat count');
       expect(facts.map(f => f.id), flag).toEqual(expect.arrayContaining([ids.zentra, ids.zentraQuestion]));
+    }
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+  });
+
+  test('a long natural question finds the short earlier correction that answers it', async () => {
+    for (const flag of ['false', 'true']) {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, flag);
+      const { facts } = await search('What is the current Zentra Medical Supply seat count? I am filling in the quarterly sheet.');
+      expect(facts.map(f => f.id), flag).toContain(ids.zentra);
     }
     await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
   });
@@ -186,6 +198,17 @@ describe('search.saved_facts_supersede on', () => {
       expect(order(facts, ids.quellinFix)).toBeLessThan(order(facts, ids.quellin));
       expect(order(facts, ids.quellinAck)).toBeLessThan(order(facts, ids.quellin));
       expect(facts.find(f => f.id === ids.quellin)?.corrected_by).toBeDefined();
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+
+  test('a reply reporting a correction, or acknowledging it on a named date, relabels nothing', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      const { facts } = await search('What is the current Zentra Medical Supply seat count? I am filling in the quarterly sheet.');
+      expect(facts.map(f => f.id)).toEqual(expect.arrayContaining([ids.zentra, ids.zentraAck, ids.zentraReport]));
+      expect(facts.some(f => f.corrected_by !== undefined)).toBe(false);
     } finally {
       await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
     }

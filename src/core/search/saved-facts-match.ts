@@ -30,12 +30,15 @@ export interface SavedFactMatch { id: number; fact: string; entity_slug: string 
 
 /** Default on (set false to turn off): a newer saved fact carrying a correction cue is returned ahead of the older fact it corrects, which is labelled `corrected_by`. */
 export const SAVED_FACTS_SUPERSEDE_KEY = 'search.saved_facts_supersede';
-/** What marks a saved fact as a correction (Postgres ARE, matched case-insensitively). */
-const CORRECTION_CUE = String.raw`\m(correction|corrected|correcting|retract(s|ed|ing|ion)?|disregard|scratch that|i misspoke|i was wrong|not what (i|we) (posted|said|wrote)|ignore (the|my|that|what))\M`;
+/** What marks a saved fact as making a correction (Postgres ARE, matched case-insensitively); "corrected" and "correcting" report one made elsewhere. */
+const CORRECTION_CUE = String.raw`\m(correction|retract(s|ed|ing|ion)?|disregard|scratch that|i misspoke|i was wrong|not what (i|we) (posted|said|wrote)|ignore (the|my|that|what))\M`;
 
-/** The figures a fact states: its numbers, with dates and clock times left out. */
+const MONTH = String.raw`(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\.?`;
+const DATES = new RegExp(String.raw`\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?|\b\d{1,2}:\d{2}\b|\b\d{1,2}(?:st|nd|rd|th)? ${MONTH}|\b${MONTH} \d{1,2}(?:st|nd|rd|th)?\b`, 'gi');
+
+/** The figures a fact states: its numbers, with dates ("2026-10-14", "14 Oct", "July 1") and clock times left out. */
 function figures(text: string): Set<string> {
-  return new Set(text.replace(/\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?|\b\d{1,2}:\d{2}\b/g, ' ').match(/\d+(?:[.,]\d+)*/g) ?? []);
+  return new Set(text.replace(DATES, ' ').match(/\d+(?:[.,]\d+)*/g) ?? []);
 }
 
 async function savedFactsSupersedeEnabled(engine: { getConfig(key: string): Promise<string | null> }): Promise<boolean> {
@@ -52,7 +55,8 @@ async function savedFactsSupersedeEnabled(engine: { getConfig(key: string): Prom
  * page search never returns them (gbrain-evals Cat 40: agents saved a
  * correction with remember and the next session's search missed it). This
  * finds active facts that contain at least three quarters of the query's words
- * (both words of a two-word query), under the same source scope and
+ * (both words of a two-word query, and never more than four: a question asked in
+ * full carries words the short fact answering it does not repeat), under the same source scope and
  * visibility rules recall applies, copies of one claim collapsed before the cap
  * (#7043).
  * Words match whole after stemming with the brain's full-text language, as the
@@ -108,7 +112,7 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
          SELECT f.id, f.fact, f.entity_slug, f.kind, f.valid_from::text AS valid_from, f.source, f.valid_from AS at, ${SAVED_FACT_COLLAPSE_COLUMNS},
            ARRAY(SELECT w.i FROM w WHERE CASE WHEN w.pat IS NOT NULL THEN lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE w.pat
              ELSE ${doc} @@ w.tq END ORDER BY w.i) AS matched,
-           GREATEST(LEAST(2, k.n), ceil(k.n * 0.75)::int) AS need,
+           LEAST(4, GREATEST(LEAST(2, k.n), ceil(k.n * 0.75)::int)) AS need,
            ($6::boolean AND f.fact ~* $5) AS cue
          FROM facts f, k
          WHERE ${active}
