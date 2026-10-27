@@ -22,8 +22,8 @@ import {
 // re-creating the triggers would take ACCESS EXCLUSIVE locks on the largest
 // tables. No privilege changes, no SECURITY DEFINER, no row is read or written.
 // Provisional number: renumbered at the merge slot.
-export const v277: Migration = {
-  version: 277,
+export const v278: Migration = {
+  version: 278,
   name: 'writer_fence_fail_closed',
   idempotent: true,
   sql: [MANAGED_WRITER_GUARD_FUNCTION_SQL, GIT_CANONICAL_COUNT_FUNCTION_SQL, REQUEST_PROTOCOL_GUARD_SQL,
