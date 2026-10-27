@@ -59,7 +59,7 @@ Before, a write on a source with `canonical: git` committed whatever the file he
 
 | Situation | Before | Now |
 |---|---|---|
-| A page's file is edited on disk while a strict write publishes it | Git committed the edit; the database recorded the write's content | refuses `git_target_changed`: nothing is committed, the edit stays on disk, and the source's writes pause until `gbrain repair stuck-recovery` resolves it |
+| A page's file is edited on disk while a strict write publishes it | Git committed the edit; the database recorded the write's content | refuses `git_target_changed`: nothing is committed and the edit stays on disk. When the file holds neither the write's bytes nor the version before it, the source's writes pause until `gbrain repair stuck-recovery` resolves it; when it holds the version before the write, the write fails with nothing held |
 | The page's file has a staged change when a strict write starts | the write replaced the staged change in the index | refuses `git_index_conflict` with the index untouched; commit or unstage, then retry |
 | The index still holds the version from before an earlier gbrain commit whose index update failed | no notice said the entry was replaced | the next write restores the entry to HEAD and reports a `git_index_restored` notice naming the path |
 | A strict write to a path no ignore rule could match | ran `git check-ignore`, which reads the whole index | skips it; any path a rule might match still goes to Git, which stays the only judge |
@@ -67,7 +67,7 @@ Before, a write on a source with `canonical: git` committed whatever the file he
 
 ### Things to watch after you upgrade
 
-- A write refused with `git_target_changed` pauses that source's writes on purpose. `gbrain sources writer status --json` shows the state, and `gbrain repair stuck-recovery --source <id> --keep disk|prior` previews and applies the choice of which version wins.
+- A write refused with `git_target_changed` while the file holds neither the write's bytes nor the version before it pauses that source's writes on purpose. `gbrain sources writer status --json` shows the state, and `gbrain repair stuck-recovery --source <id> --keep disk|prior` previews and applies the choice of which version wins. When the file holds the version before the write, nothing pauses: the write fails, so read the page before resubmitting it.
 - A staged edit to a page's file now blocks gbrain writes to that page until you commit or unstage it.
 - Git decides alone, with no filter in front, on sparse checkouts, skip-worktree entries, split or sparse indexes, unresolvable ignore includes, and gitlinks or symlinks on the path.
 - Nothing rewrites your data on upgrade.
