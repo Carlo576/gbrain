@@ -240,4 +240,19 @@ describe('paths named with glob characters or a leading colon match literally', 
     expect(await door(root, [':lead.md'])).toBe(git(root, 'rev-parse', 'HEAD'));
     expect(commitPaths(root)).toEqual([':lead.md']);
   });
+
+  /**
+   * Value: protects=the Git effect's git_target_ignored refusal of a colon-named file names the rule that ignores it;
+   * fails_when=refuseIgnoredTarget drops the ./ prefix, so check-ignore asks about lead.md and the detail falls back to
+   * a bare .gitignore; why_new=only the plumbing door's colon check-ignore is covered; seam=none;
+   * no_claim=Windows path spelling (real git and repository; Linux only)
+   */
+  test('the Git effect names the rule that ignores a colon-named file, not the decoy its magic reading names', async () => {
+    const { root } = checkout({ '.gitignore': ':lead.md\n' }, false);
+    put(root, ':lead.md', 'colon page\n');
+    const head = git(root, 'rev-parse', 'HEAD');
+    const refusal = (await commitGitTargets(root, [':lead.md'])).get(':lead.md');
+    expect(refusal).toMatchObject({ code: 'git_target_ignored', detail: '.gitignore:1: :lead.md' });
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(head);
+  });
 });
