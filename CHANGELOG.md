@@ -10,6 +10,27 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**`gbrain pages ghosts` and `gbrain repair ghost-pages` no longer flag live code pages as ghosts, so applying the repair can no longer soft-delete a synced `.json` (or any other code or image) page whose file is right there.**
+
+Before, the ghost check looked for a code page's file at `<slug>.md`, because the path resolver it shared with Markdown pages rejected every recorded path that did not end in `.md` or `.mdx`. A synced `projects/example/decisions.active.json` page was looked for at `projects-example-decisions-active-json.md`, found missing, and proposed for soft-delete; the repair's own recheck used the same path, so it agreed. Applying the repair removed live pages, and after the 72-hour purge they were gone for good. Now a page that records a non-Markdown file is checked at that file, both in the scan and in the recheck the repair runs before each soft delete.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A code or image page whose recorded file exists | listed as a ghost (missing `<slug>.md`); the apply soft-deleted it | not a ghost |
+| A code or image page whose recorded file is gone and no `<slug>.md` exists | listed at `<slug>.md` | listed at its recorded path; the apply soft-deletes it on managed and unmanaged brains |
+| A page whose recorded non-Markdown path names no file inside the source (absolute, `..`) | checked at `<slug>.md` and proposed for soft-delete | never a ghost, never removed; listed apart as `recorded_path_unresolvable` by doctor, `gbrain pages ghosts` and the preview |
+| `gbrain repair uncommitted-deletions` on a soft-deleted code page | read Git evidence for `<slug>.md` | reads it for the recorded file |
+
+### How to get it
+
+Upgrade. If you previewed `gbrain repair ghost-pages` on an older version, preview again before applying: the apply rechecks every page and keeps a code page whose file is present (`file_restored`).
+
+Reported by @Kkkkkuro (#7736).
+
 ## [0.60.472.0] - 2026-10-27
 
 **A `gbrain sources refresh` whose process dies mid-refresh no longer wedges the managed checkout. The next refresh finishes it, and status tells you who holds a refresh and whether it is still running.**
