@@ -36,7 +36,7 @@ async function runOutsideContentFences(ctx: DoctorContext): Promise<Check[]> {
                OR p.frontmatter ? 'transcript_import')
         GROUP BY p.source_id, p.slug, p.type
         ORDER BY p.source_id, p.slug`);
-    const details = { pages: items.length, items, docs: 'docs/guides/troubleshooting.md#outside-content-fences' };
+    const details = { pages: items.length, items, docs: 'docs/guides/repair.md#outside-content-fences' };
     if (!items.length) {
       checks.push({ name: NAME, status: 'ok', details,
         message: 'No fact, take or link is indexed from a fence on an imported email, calendar, GitHub or transcript page.' });
