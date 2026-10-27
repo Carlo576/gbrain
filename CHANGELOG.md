@@ -10,6 +10,45 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.471.0] - 2026-10-27
+
+**A `gbrain sources refresh` whose process dies mid-refresh no longer wedges the managed checkout. The next refresh finishes it, and status tells you who holds a refresh and whether it is still running.**
+
+Before, if the refreshing process was killed while its refresh was syncing (a container replaced mid-refresh, an OOM kill), every later `gbrain sources refresh` refused with `refresh_in_progress` and every page write to that checkout refused with `worktree_refreshing`, until someone ran `--resume` by hand. Now the next scheduled refresh on the owner host finishes the orphaned refresh the same way `--resume` would, then runs its own. The owner's background scan also completes an orphaned refresh once every source on the checkout has synced to its target. A refresh whose process is still running, or whose holder is on another host, is never taken over.
+
+### How to get it
+
+Upgrade. Nothing to run: an orphaned refresh left by an older version is picked up by the next refresh on the owner host. To see a refresh's state:
+
+```bash
+gbrain sources writer status <source> --json   # worktree_refreshes: holder, liveness, auto_recovery, fix
+gbrain sync status --source <source> --json     # worktree_refresh
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A refresh's process died and the next scheduled `gbrain sources refresh` runs on the owner host | refused `refresh_in_progress` forever; page writes refused `worktree_refreshing` | finishes the orphan through the `--resume` path (reported under `recovered`, also in text mode), then refreshes |
+| An orphaned refresh whose sources already synced to its target, or past it | stayed active until `--resume` | the owner completes it on its own (`completed_by: owner_recovery`) |
+| A refresh still running, or held on another host | `refresh_in_progress` | unchanged: never taken over; the refusal names the holder's pid and host |
+| `gbrain sources writer status` / `gbrain sync status` on an active refresh | state only | `holder`, `liveness` (`live`, `orphaned`, `unknown`), `auto_recovery` and a `fix` naming `--resume` when no process will move it on |
+| `gbrain sources refresh --json` refusal with a structured next step (`refresh_diverged`, `refresh_in_progress`, a git read failure) | `fix` was the prose string; the structured publish step was dropped | `fix` is the v1 object (`argv`, `next`, `actor`); the prose moves to `suggestion` |
+| A plain refresh of a checkout whose interrupted refresh needs a reset decision | `refresh_in_progress` | `refresh_recovery_required`, naming both ways out |
+
+### Things to watch after you upgrade
+
+- Scripts that read `fix` from `gbrain sources refresh --json` as a string should read `suggestion` for the text; refusals without a structured step keep the string.
+- An orphan is not adopted while the checkout's HEAD cannot be read, or while publication or topology recovery is pending on it; status then reports `auto_recovery: none`. `--dry-run` never adopts.
+- A refresh whose interrupted state needs a reset still waits for you: `--resume` prints the two ways out, and resetting is your call.
+
+### Itemized changes
+
+- `src/core/persistence/worktree-refresh.ts`: refresh rows record `outcome.holder` (host, pid, process start) and keep the first replaced holder as `previous_holder` (no migration); a plain refresh adopts an orphan (refresh lock free, holder on this host, HEAD readable, worktree active, no pending recovery) through `resumeHeld`; the owner topology scan selects `syncing` rows and completes one whose members all reached the target or a descendant and whose HEAD is at or past the target, re-checking a lagging one after a member moves or a minute passes; `refreshLiveness` / `refreshHolderReport` drive status; the main refresh waits up to 1 s for its lock so a status probe never makes it refuse.
+- `src/core/persistence/sync-status.ts`: `worktree_refresh` with holder and liveness, read in the existing source statement; an orphaned refresh's fix leads `next`.
+- `src/commands/sources-refresh.ts`: structured refusal fixes in `--json` (#7685) and a text-mode `Recovered orphaned refresh` line.
+- Tests: `test/worktree-refresh-orphan-7679.test.ts` (a real child process SIGKILLed at `syncing`, PGLite and Postgres), state-matrix tests 7c/7d over every interrupted-row kind and guard, and 7e-7h in `test/persistence-worktree-refresh.test.ts`.
+
 ## [0.60.470.0] - 2026-10-26
 
 **A temporary table can no longer slip purged or forgotten content past gbrain's guards. Before, any database session, including gbrain's own role, could create an empty table named like a purge list and have a purged claim, page or take stored again, or a forgotten fact saved active.**
