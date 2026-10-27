@@ -560,7 +560,7 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
   }, { databaseUrl, setup }), 180_000);
 
   /**
-   * Value: protects=the withhold never removes a file or stamps a row that moved after the preview; fails_when=assertUnchanged
+   * Value: protects=the withhold never removes a file or stamps a row that moved after the preview; fails_when=the stamp's revision compare-and-set
    * or the disk-hash check in withholdGroups is removed; why_new=preview_changed is otherwise tested only for a stale hash
    * before any write; seam=none; no_claim=the writer_busy and git_target_unsafe branches of withholdGroups
    */
@@ -699,6 +699,41 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect(await applyGitConversion(engine, 'default', rerun.preview_hash, PROCESSING)).toMatchObject({ status: 'converted', after: { remaining: 0 } });
     expect(await strict(engine)).toBe(true);
     expect(await pageRow(engine, 'notes/private')).toMatchObject({ body: before.body, deleted: false, withheld: 'notes/private.md' });
+  }, { databaseUrl, setup }), 180_000);
+
+  /**
+   * Value: protects=a crash after the withhold stamp and before its removal commit loses nothing: a mixed sync keeps the
+   * page live and unchanged, and the rerun finds the file at the path the stamp withheld and removes it; fails_when=the
+   * census resolves a withheld page's file from its slug alone (a file at another path is then left in HEAD unplanned);
+   * why_new=the crash test crashes after the commit, at a slug path; seam=the conversion:withhold_stamped fault point;
+   * no_claim=a crash inside commitThroughDoor itself
+   */
+  test('#7618: a crash between the withhold stamp and its commit keeps the page through a mixed sync, and the rerun withholds the file at its recorded path', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    writeFileSync(join(root, 'notes/Private Note.md'), PRIVATE('notes/private-note', 'A private note.'));
+    git(root, 'add', 'notes/Private Note.md'); git(root, 'commit', '-qm', 'a private note');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const [{ slug }] = await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id='default' AND source_path='notes/Private Note.md'");
+    await databaseOnlyEdit(engine, slug, 'A private note, edited in the database.');
+    const before = await pageRow(engine, slug), base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ withhold: { count: 1, by: { file_committed: 1 }, sample: ['notes/Private Note.md'] }, discard: { count: 0 } });
+    installFaultHook(point => { if (point === 'conversion:withhold_stamped') throw new Error('crash before the withhold commit'); });
+    try { await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toThrow('crash before the withhold commit'); }
+    finally { installFaultHook(undefined); }
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(atHead(root, 'notes/Private Note.md')).toBe('notes/Private Note.md');
+    const stamped = { body: before.body, deleted: false, source_path: null, withheld: 'notes/Private Note.md', reason: 'private' };
+    expect(await pageRow(engine, slug)).toEqual(stamped);
+    await performManagedSync(engine, OPTS);
+    expect(await pageRow(engine, slug)).toEqual(stamped);
+    const rerun = (await planGitConversion(engine, 'default')).preview;
+    expect(rerun).toMatchObject({ withhold: { count: 1, by: { file_committed: 1 }, sample: ['notes/Private Note.md'] }, discard: { count: 0 } });
+    expect(await applyGitConversion(engine, 'default', rerun.preview_hash, PROCESSING)).toMatchObject({ status: 'converted', withheld: { pages: 1 }, after: { remaining: 0 } });
+    expect(conversionCommits(root, base)).toEqual([{ subject: expect.any(String), paths: ['notes/Private Note.md'] }]);
+    expect(atHead(root, 'notes/Private Note.md')).toBe('');
+    expect(await pageRow(engine, slug)).toEqual(stamped);
+    expect(await strict(engine)).toBe(true);
   }, { databaseUrl, setup }), 180_000);
 
   /**

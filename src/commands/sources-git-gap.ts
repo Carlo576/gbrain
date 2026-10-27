@@ -177,7 +177,9 @@ function note(census: GitGapCensus, limit: number, item: GitGapSample): void {
 async function censusBatch(tx: BrainEngine, batch: Key[], census: GitGapCensus, ctx: BatchContext): Promise<void> {
   const { checkout } = ctx;
   const target = (key: Key): string | null => {
-    try { return restoreFilePath(checkout!.root, key.slug, key.source_path, Number(key.source_path_bytes), checkout!.mode); }
+    // A withheld page's file is looked for where its private transition removed it, as page-prepare writes it there again.
+    const recorded = key.source_path || key.withheld_source_path;
+    try { return restoreFilePath(checkout!.root, key.slug, recorded, key.source_path ? Number(key.source_path_bytes) : Buffer.byteLength(recorded ?? ''), checkout!.mode); }
     catch (error) { if (error instanceof RestoreTargetError) return null; throw error; }
   };
   const rows = batch.map(key => {

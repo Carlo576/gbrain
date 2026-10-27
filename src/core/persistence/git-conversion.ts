@@ -14,8 +14,9 @@
  *     reads back equal to it (the census contract) keeps that file in HEAD and is settled: a strict import changes nothing.
  *   - withhold: a private, alias-private or lineage-private page whose row still records a file that is absent from HEAD
  *     or differs from it. The apply takes G7a's
- *     private transition: a committed file's removal goes through the door, then the row withholds its origin
- *     (withheld_source_path), so the strict pass leaves the page live; with no file at HEAD, only the row changes. Any
+ *     private transition: the row withholds its origin (withheld_source_path), then a committed file's removal goes
+ *     through the door, so no sync reads the removal as a deletion and the page stays live; with no file at HEAD, only
+ *     the row changes. Any
  *     other declared page with a committed file is a discard (git_overwrites_database), as Git's import would replace it.
  *   - git_wins: Git's verdict replaces the row and loses nothing (Git moved and the database did not; Git deleted a page
  *     the database had not edited; a held deletion; a held file_drift whose side is unknown and whose row already equals
@@ -142,7 +143,7 @@ export interface GitConversionPreview {
   /** `committed_equal`: declared pages whose committed file reads back equal to the page, so the file stays in HEAD. */
   declared: Counted<string> & { action: 'none'; committed_equal: number };
   git_wins: Counted<GitWinsReason> & { action: 'index_committed_blob' };
-  /** G7a's private transition for a privacy-class page that still records a file: its file's removal is committed, then the row withholds its origin. */
+  /** G7a's private transition for a privacy-class page that still records a file: the row withholds its origin, then its file's removal is committed. */
   withhold: Counted<WithholdKind> & { action: 'commit_removal_and_withhold'; groups: number };
   /** `unplaced`: holds at a path no category above placed (a declared page, no live page), which the index check judges as the strict pass will see them. */
   holds: Counted<string> & { action: 'clear'; unplaced: { count: number; by: Record<string, number> } };
@@ -614,19 +615,17 @@ async function adoptGroups(engine: BrainEngine, plan: GitConversionPlan, preview
  * branch), which runs only inside a publication: group by group under the writer lock, a transaction stamps the class and
  * moves `source_path` to `withheld_source_path`, then the files' removal goes through the door. Stamped first, no sync
  * (the strict pass or a mixed one run before a rerun) reads the removal as the deletion of a live page; a crash between
- * the stamp and the commit leaves the file in HEAD, which a mixed sync holds and the rerun preview withholds again. A page
- * whose file is already absent from HEAD only gets the stamp. A page whose revision or working tree moved since the
- * preview stops the apply (preview_changed) before anything is stamped.
+ * the stamp and the commit leaves the file in HEAD, which a mixed sync holds and the rerun preview (which reads a withheld
+ * page's file at withheld_source_path) withholds again. A page whose file is already absent from HEAD only gets the stamp,
+ * CONVERSION_GROUP_MAX at a time. The stamp updates only the planned revision: a page whose revision or working tree moved
+ * since the preview stops the apply (preview_changed) before its group is stamped; the groups before it stay withheld and
+ * the rerun lists only what is left.
  */
 async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, previewCommand: string,
   onGroup: (done: { pages: number; commits: number }) => void): Promise<GitConversionResult['withheld']> {
   const { context } = plan;
   const root = context.root;
   const commits: string[] = [];
-  const assertUnchanged = async (item: WithholdItem) => {
-    const [live] = await engine.executeRaw<{ revision: string | null }>('SELECT knowledge_revision::text AS revision FROM pages WHERE id=$1::bigint AND deleted_at IS NULL', [item.id]);
-    if (!live || live.revision !== item.revision) throw previewChangedError(plan.preview.preview_hash, previewCommand);
-  };
   const stamp = (items: WithholdItem[]) => engine.transaction(async tx => {
     await declarePersistenceProtocol(tx);
     for (const item of items) {
@@ -640,14 +639,14 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
     const group = committed.slice(start, start + CONVERSION_GROUP_MAX);
     const lock = await acquireWorktree(context.binding, LOCK_WAIT_MS, undefined, engine, { yieldLanes: true });
     if (!lock) throw opError('writer_busy', `The writer lock of source ${context.sourceId}'s checkout stayed busy for ${LOCK_WAIT_MS / 1000}s, so the removal of private pages' files was not committed.`,
-      `Run ${previewCommand} again; the removals already committed read as file_absent, so the new plan holds only what is left.`, { retryable: true });
+      `Run ${previewCommand} again; the pages already withheld drop out of the plan, so the new plan holds only what is left.`, { retryable: true });
     try {
       for (const item of group) {
-        await assertUnchanged(item);
         const disk = diskBytes(join(root, item.path));
         if ((disk ? sha256(disk) : null) !== item.disk) throw previewChangedError(plan.preview.preview_hash, previewCommand);
       }
       await stamp(group);
+      await faultPoint('conversion:withhold_stamped', { sourceId: context.sourceId, round: start / CONVERSION_GROUP_MAX + 1 });
       for (const item of group) removeConfined(root, join(root, item.path));
       const commit = await commitThroughDoor(root, group.map(item => ({ path: join(root, item.path), planned: null })), lock);
       if (commit) commits.push(commit);
