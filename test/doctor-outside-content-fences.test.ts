@@ -1,10 +1,12 @@
 /**
- * GBRA-221 outside_content_fences: live fence rows on imported pages whose body is outside-authored text are listed for
- * review (location and counts only, never a cell value); pages a gbrain writer owns are not. PGLite in-memory ($0).
+ * GBRA-221 outside_content_fences: fence rows extract_facts indexed from imported pages whose body is outside-authored
+ * text are listed for review (location and counts only, never a cell value); pages a gbrain writer owns are not.
+ * PGLite in-memory ($0).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
+import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
 import { outsideContentFencesEntry } from '../src/commands/doctor/checks/outside-content-fences.ts';
 import { categorizeCheck } from '../src/core/doctor-categories.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
@@ -38,6 +40,9 @@ async function page(sourceId: string, slug: string, type: string, body: string, 
 }
 
 async function run(): Promise<Check> {
+  for (const sourceId of ['google-example', 'notes-example', 'github-example']) {
+    if ((await engine.executeRaw('SELECT 1 FROM sources WHERE id = $1', [sourceId])).length) await runExtractFacts(engine, { sourceId });
+  }
   const checks = await outsideContentFencesEntry.run({ engine } as unknown as DoctorContext) as Check[];
   expect(checks).toHaveLength(1);
   return checks[0]!;
@@ -62,10 +67,10 @@ describe('outside_content_fences doctor check', () => {
     await page('notes-example', 'conversations/chat-example', 'conversation', FENCE, 'transcript_import:\n  harness: example\n  session_id: s1\n');
     const check = await run();
     expect(check.status).toBe('warn');
-    const items = (check.details as { items: Array<{ source_id: string; slug: string; facts: number }> }).items;
+    const items = (check.details as { items: Array<{ source_id: string; slug: string; facts: number; world_facts: number }> }).items;
     expect(items.map(item => `${item.source_id}:${item.slug}`).sort()).toEqual([
       'github-example:gh/acme-example/app/1', 'google-example:emails/2026/01/planted-thread', 'notes-example:conversations/chat-example']);
-    expect(items.every(item => item.facts === 1)).toBe(true);
+    expect(items.every(item => item.facts === 1 && item.world_facts === 1)).toBe(true);
     expect(check.message).not.toContain(CLAIM);
     expect(JSON.stringify(check.details)).not.toContain(CLAIM);
     expect((check.fix as { ask_user?: boolean }).ask_user).toBe(true);

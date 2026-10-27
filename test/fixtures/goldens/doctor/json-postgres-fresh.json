@@ -3390,6 +3390,18 @@
           "status": "ok"
         },
         {
+          "category": "brain",
+          "details": {
+            "docs": "docs/guides/troubleshooting.md#outside-content-fences",
+            "items": [],
+            "pages": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No fact, take or link is indexed from a fence on an imported email, calendar, GitHub or transcript page.",
+          "name": "outside_content_fences",
+          "status": "ok"
+        },
+        {
           "category": "ops",
           "elapsed_ms": "<volatile>",
           "message": "Mode: conservative (no per-key overrides — mode bundle is canonical).",

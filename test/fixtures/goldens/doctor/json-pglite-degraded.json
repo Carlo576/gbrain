@@ -3351,7 +3351,7 @@
             "pages": 0
           },
           "elapsed_ms": "<volatile>",
-          "message": "No imported email, calendar, GitHub or transcript page holds a live facts, takes or links fence row.",
+          "message": "No fact, take or link is indexed from a fence on an imported email, calendar, GitHub or transcript page.",
           "name": "outside_content_fences",
           "status": "ok"
         },
