@@ -18,7 +18,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { serializeMarkdown } from '../src/core/markdown.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
-import { SAVED_FACTS_SUPERSEDE_KEY } from '../src/core/ops/search.ts';
+import { SAVED_FACTS_SUPERSEDE_KEY } from '../src/core/search/saved-facts-match.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const WRITER = { remote: true, transport: 'http' as const, sourceId: 'default' };

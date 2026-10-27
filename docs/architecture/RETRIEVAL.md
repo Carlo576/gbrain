@@ -341,7 +341,7 @@ Two cross-cutting seams sit around the pipeline rather than inside it:
   `retrieval.saved_facts` and a text block after the rows, up to five active
   saved facts: first those about the entity page the query names, then facts
   that share the query's words (`matchingSavedFacts` in
-  `src/core/ops/search.ts`). Words match whole after stemming with the brain's
+  `src/core/search/saved-facts-match.ts`). Words match whole after stemming with the brain's
   full-text language, the facts keyword index's expression, so "renewal" finds
   "renews" and "count" does not match inside "countersigned"; words of a CJK
   script match as substrings. A fact needs two words of a two- or three-word
