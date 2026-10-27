@@ -38,8 +38,8 @@
  * waiting at the door to join. Batching independent writes needs those three to change; until then a batch commits
  * once through publishGroup.
  */
-import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import type { Notice } from '../agent-output.ts';
 import { OperationError, opError } from '../ops/contract.ts';
@@ -431,22 +431,42 @@ async function replacedEntries(session: GitSession, commit: string, targets: Tar
  * Points the checkout's index entries of the targets at `commit`'s (a removed target leaves the index) and touches no
  * other entry. An entry that changed since `seen` was read (someone staged it during the write) is left as it is. A
  * failure here comes after the commit landed, so it says so instead of claiming nothing was published.
+ *
+ * The compare and the write run under Git's own index lock (`<index>.lock`, created exclusively): the entries are read
+ * and a copy of the index is updated while the lock is held, and the copy is renamed onto the lock and the lock onto the
+ * index, as Git commits an index. No writer that takes the lock can change the index between the compare and the write.
+ * A writer that reads the index before locking it (a raw `git commit -- <path>`) is outside this guarantee.
  */
 async function syncIndex(session: GitSession, root: string, prefix: string, index: string, targets: Target[], commit: string, seen: IndexSnapshot): Promise<void> {
-  let failure = '', restaged: Target[] = [];
+  let failure = '', restaged: Target[] = [], held = false;
+  const lock = `${index}.lock`, copy = `${index}.gbrain-${process.pid}-${randomBytes(6).toString('hex')}`;
   try {
-    if (indexSignature(index) !== seen.signature) {
-      const now = await readIndex(session, index, targets);
-      restaged = targets.filter(target => now.entries.get(target.rel) !== seen.entries.get(target.rel));
+    try { closeSync(openSync(lock, 'wx')); held = true; } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      failure = `Unable to create '${lock}': File exists; another git process holds the index lock`;
     }
-    const synced = targets.filter(target => !restaged.includes(target));
-    const kept = synced.filter(target => target.oid), removed = synced.filter(target => !target.oid);
-    if (synced.length) {
-      const updated = await git(session, ['update-index', '--add', ...kept.flatMap(target => ['--cacheinfo', `${target.mode},${target.oid},${prefix}${target.rel}`]),
-        ...(removed.length ? ['--force-remove', '--', ...removed.map(target => target.rel)] : [])]);
-      if (updated.code !== 0) failure = updated.stderr.trim().slice(0, 300) || `exit ${updated.code}`;
+    if (held) {
+      const moved = indexSignature(index) !== seen.signature;
+      // Git never rewrites an index in place (it writes <file>.lock and renames it), so a hard link is a safe copy.
+      if (existsSync(index)) try { linkSync(index, copy); } catch { copyFileSync(index, copy); }
+      if (moved) {
+        const now = await readIndex({ ...session, indexFile: copy }, copy, targets);
+        restaged = targets.filter(target => now.entries.get(target.rel) !== seen.entries.get(target.rel));
+      }
+      const synced = targets.filter(target => !restaged.includes(target));
+      const kept = synced.filter(target => target.oid), removed = synced.filter(target => !target.oid);
+      if (synced.length) {
+        const updated = await git({ ...session, indexFile: copy }, ['update-index', '--add', ...kept.flatMap(target => ['--cacheinfo', `${target.mode},${target.oid},${prefix}${target.rel}`]),
+          ...(removed.length ? ['--force-remove', '--', ...removed.map(target => target.rel)] : [])]);
+        if (updated.code !== 0) failure = updated.stderr.trim().slice(0, 300) || `exit ${updated.code}`;
+        else { renameSync(copy, lock); renameSync(lock, index); held = false; }
+      }
     }
   } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+  finally {
+    rmSync(copy, { force: true });
+    if (held) rmSync(lock, { force: true });
+  }
   if (!failure && !restaged.length) return;
   const error = failure
     ? opError('git_unavailable', `The strict source's commit ${commit.slice(0, 12)} landed, but the index of ${root} was not updated for ${targets.map(target => target.rel).join(', ')}.`,
