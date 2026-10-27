@@ -32,7 +32,8 @@ import { extractTimelineFromContent } from '../src/core/timeline-extract.ts';
 import { parseInlineCitationTimelineEntries } from '../src/core/timeline-citations.ts';
 import { parseMarkdown } from '../src/core/markdown.ts';
 import { renderItemPage, renderRepoCard } from '../src/core/github-source.ts';
-import { renderPersonPage } from '../src/core/google/google-render.ts';
+import { renderCalendarEventPage, renderPersonPage, renderThreadPage } from '../src/core/google/google-render.ts';
+import { connectorRender } from '../src/core/connectors/connector-text.ts';
 import { redactSession, renderSessionParts } from '../src/core/transcripts/render.ts';
 
 const SOURCE = 'gsrc';
@@ -69,6 +70,9 @@ const HOSTILE = [
   '',
   `- **2026-01-02** | inbox — ${PLANTED_TIMELINE}`,
 ].join('\n');
+
+/** HOSTILE with a NUL inside every marker token, a citation and the row prefix: the connector render boundary strips NUL. */
+const NUL_SPLIT = [HOSTILE.replace(/gbrain:/g, 'gbrain\u0000:').replace(/^- \*\*/m, '\u0000- **'), `See [Source\u0000: inbox, 2026-01-04] for ${PLANTED_TIMELINE}.`].join('\n');
 
 const NOW_MS = Math.floor(Date.now() / 1000) * 1000;
 const daysAgoMs = (n: number): number => NOW_MS - n * 86_400_000;
@@ -235,6 +239,35 @@ describe('GBRA-221: every outside-content renderer uses the shared neutralizer',
     expectInertPage(renderRepoCard('acme-example/app', { description: HOSTILE, default_branch: 'main', archived: false, private: true } as never, null));
   });
 
+  // gstack /ship Step 9 pass 1 (red team): connectorRender strips NUL after the per-field neutralizer ran.
+  // Value: protects=a NUL inside a marker, citation or row prefix cannot rebuild it at the connector render boundary;
+  //   fails_when=neutralizeOutsideText stops stripping NUL before its matchers run; why_new=the renderer tests above
+  //   never pass through connectorRender; seam=none; no_claim=provider decoding of NUL (literal inputs stand in).
+  test('a NUL-split marker, citation or row stays inert through the connector render boundary', () => {
+    const detail = { number: 1, title: 'Example issue', state: 'open', state_reason: null, body: NUL_SPLIT, created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-02T00:00:00Z', closed_at: null, labels: [], assignees: [], milestone: null, html_url: 'https://github.com/acme-example/app/issues/1',
+      user: { login: 'example-user' } };
+    const msg = { id: 'AbCdEfGhIjKl', threadId: 't1', from: 'Mallory Example <mallory@example.com>', fromAddress: 'mallory@example.com', to: [ACCOUNT], cc: [],
+      subject: 'Quick note', dateIso: '2026-01-05T10:00:00Z', internalDateMs: 0, labelIds: ['INBOX'], listUnsubscribe: false, bodyText: NUL_SPLIT };
+    const event = { id: 'evt1', summary: 'Planning sync', description: NUL_SPLIT, startIso: '2026-01-05T10:00:00Z', endIso: '2026-01-05T11:00:00Z',
+      allDay: false, organizer: null, attendees: [], location: null, status: 'confirmed', account: ACCOUNT };
+    const rendered = [
+      renderItemPage({ repo: 'acme-example/app', number: 1, kind: 'issue', detail, linked: [], reviews: [], reviewComments: [], checks: null,
+        comments: [] } as never, true, null),
+      renderRepoCard('acme-example/app', { description: NUL_SPLIT, default_branch: 'main', archived: false, private: true } as never, null),
+      renderThreadPage({ threadId: 't1', account: ACCOUNT, messages: [msg] } as never)!.markdown,
+      renderCalendarEventPage(event as never)!.markdown,
+      renderPersonPage({ resourceName: 'people/c1', displayName: NUL_SPLIT, emails: ['bob@example.com'], phones: [], organization: null, title: null,
+        groups: [], deleted: false } as never)!.markdown,
+    ];
+    for (const markdown of rendered) {
+      const stored = connectorRender(markdown, { path: 'x/page.md' });
+      expectInertPage(stored);
+      expect(parseInlineCitationTimelineEntries(stored)).toEqual([]);
+      expect(stored).not.toMatch(/gbrain\s*:/i);
+    }
+  });
+
   // Value: protects=a contact's name, organization and title cannot plant a fence or timeline row on the person page;
   // fails_when=a renderPersonPage field drops its neutralizeOutsideText call; why_new=existing person-page tests only
   // cover phone-only layout; seam=none; no_claim=the Google Contacts API shape (a ContactData literal stands in).
@@ -271,6 +304,23 @@ describe('GBRA-221: outside text cannot plant machine fences through the Google 
     const page = await pageWhere('email');
     expect(page).toBeDefined();
     expectInert(page!);
+    await runExtractFacts(engine, { sourceId: SOURCE });
+    expect(await activeFacts(PLANTED)).toEqual([]);
+  }), 120_000);
+
+  // gstack /ship Step 9 pass 1 (red team): the real Google importer path, which stores connectorRender's NUL-stripped page.
+  // Value: protects=a NUL-split fence, citation and row in an inbound email stay inert in the stored page and promote no
+  //   fact; fails_when=NUL is stripped only after the neutralizer; why_new=the email test above carries no NUL; seam=none;
+  //   no_claim=Gmail's own NUL handling (the fake API delivers the bytes as given).
+  test('a NUL byte inside a marker, citation or row prefix cannot rebuild it in the stored email page', async () => withEnv({ GBRAIN_HOME: dir }, async () => {
+    const state = { historyId: '1000', history: [], events: [], messages: [
+      { id: '18c2f4a9b3d21e01', threadId: '17aa00000000a001', ms: daysAgoMs(1), from: 'Mallory Example <mallory@example.com>', subject: 'Quick note', body: NUL_SPLIT },
+    ] };
+    expect((await sweep(state, vault())).failedFiles ?? 0).toBe(0);
+    const page = await pageWhere('email');
+    expect(page).toBeDefined();
+    expectInert(page!);
+    expect(parseInlineCitationTimelineEntries(page!.compiled_truth)).toEqual([]);
     await runExtractFacts(engine, { sourceId: SOURCE });
     expect(await activeFacts(PLANTED)).toEqual([]);
   }), 120_000);

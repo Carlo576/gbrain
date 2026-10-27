@@ -7,7 +7,8 @@
  * fence row still indexed from such a page was planted before the fix or added by a gbrain writer (`remember`, loop
  * extraction) on purpose; the check cannot tell which, so it lists each page for review and removes nothing. It reads
  * the derived rows (`facts.row_num`, `takes`, `links.origin_field = 'links_fence'`), never a page body, so a
- * segmented page is covered too. Contact pages are out of scope: their single-line fields cannot hold a fence.
+ * segmented page is covered too. Contact (person) pages are out of scope: gbrain's own writers put most person facts
+ * there, so the list would bury the rare planted row; their rendered name, organization and title are neutralized too.
  * Location and counts only, never a cell value. Reads the database only.
  */
 import type { Check } from '../../doctor.ts';

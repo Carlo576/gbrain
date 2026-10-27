@@ -31,7 +31,7 @@ beforeAll(async () => {
 afterAll(async () => { if (engine) await engine.disconnect(); }, 60_000);
 
 async function source(id: string, config: Record<string, unknown>) {
-  await engine.executeRaw('INSERT INTO sources (id, name, local_path, config) VALUES ($1, $1, NULL, $2::text::jsonb)', [id, JSON.stringify(config)]);
+  await engine.executeRaw('INSERT INTO sources (id, name, local_path, config) VALUES ($1, $1, NULL, $2::text::jsonb) ON CONFLICT (id) DO NOTHING', [id, JSON.stringify(config)]);
 }
 
 async function page(sourceId: string, slug: string, type: string, body: string, extra = '') {
@@ -61,6 +61,8 @@ describe('outside_content_fences doctor check', () => {
   }, 60_000);
 
   test('a planted fence on an email, GitHub or transcript page is listed for review and nothing is removed', async () => {
+    await source('google-example', { kind: 'google', g_account: 'owner@example.com' });
+    await source('notes-example', {});
     await source('github-example', { kind: 'github', gh_repos: 'acme-example/app' });
     await page('google-example', 'emails/2026/01/planted-thread', 'email', FENCE);
     await page('github-example', 'gh/acme-example/app/1', 'note', FENCE);
@@ -95,6 +97,26 @@ describe('outside_content_fences doctor check', () => {
     const checks = await outsideContentFencesEntry.run({ engine } as unknown as DoctorContext) as Check[];
     const items = (checks[0]!.details as { items: Array<{ source_id: string; slug: string}> }).items.filter(i => i.source_id.startsWith('scope-'));
     expect(items.map(i => `${i.source_id}:${i.slug}`)).toEqual(['scope-google:emails/2026/02/live-thread']);
+  }, 60_000);
+
+  // gstack /ship Step 9 pass 1 (testing specialist).
+  // Value: protects=active takes and links-fence links on an imported email page are counted like facts; fails_when=the
+  //   takes or links arm of the query is dropped or reads the wrong flag or origin; why_new=every test above plants only a
+  //   facts fence; seam=none; no_claim=how takes and links fences are projected (rows are inserted directly).
+  test('counts active takes and links-fence links on an imported page, not inactive takes or other links', async () => {
+    await source('arms-google', { kind: 'google', g_account: 'owner@example.com' });
+    await page('arms-google', 'emails/2026/03/arms-thread', 'email', 'A plain message.');
+    await page('arms-google', 'companies/acme-example', 'company', 'A company page.');
+    const id = async (slug: string) => (await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id = $1 AND slug = $2', ['arms-google', slug]))[0]!.id;
+    const thread = await id('emails/2026/03/arms-thread'), company = await id('companies/acme-example');
+    await engine.executeRaw(`INSERT INTO takes (page_id, row_num, claim, kind, holder, weight)
+      VALUES ($1, 1, 'Synthetic take', 'take', 'owner', 0.5), ($1, 2, 'Withdrawn take', 'take', 'owner', 0.5)`, [thread]);
+    await engine.executeRaw('UPDATE takes SET active = false WHERE page_id = $1 AND row_num = 2', [thread]);
+    await engine.executeRaw(`INSERT INTO links (from_page_id, to_page_id, link_type, origin_page_id, origin_field)
+      VALUES ($1, $2, 'invested_in', $1, 'links_fence'), ($1, $2, 'mentions', $1, 'body')`, [thread, company]);
+    const checks = await outsideContentFencesEntry.run({ engine } as unknown as DoctorContext) as Check[];
+    const items = (checks[0]!.details as { items: Array<Record<string, unknown>> }).items.filter(i => i.source_id === 'arms-google');
+    expect(items).toEqual([{ source_id: 'arms-google', slug: 'emails/2026/03/arms-thread', type: 'email', facts: 0, world_facts: 0, takes: 1, links: 1 }]);
   }, 60_000);
 
   // Value: protects=the check reports an error check instead of throwing when the query fails;
