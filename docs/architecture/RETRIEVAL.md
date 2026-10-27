@@ -337,6 +337,24 @@ Two cross-cutting seams sit around the pipeline rather than inside it:
   with correction-dated writes it lifted forget-then-remember from 92% to 100%
   correct. `search.query_facts_arm=false` turns it off. Verdict and gates:
   `docs/eval/decisions/query-facts-arm/`.
+- **Saved facts beside `search` and `query` results.** Both ops return, in
+  `retrieval.saved_facts` and a text block after the rows, up to five active
+  saved facts: first those about the entity page the query names, then facts
+  that share the query's words (`matchingSavedFacts` in
+  `src/core/ops/search.ts`). Words match whole after stemming with the brain's
+  full-text language, the facts keyword index's expression, so "renewal" finds
+  "renews" and "count" does not match inside "countersigned"; words of a CJK
+  script match as substrings. A fact needs two words of a two- or three-word
+  query and three quarters of a longer one; the most matched words come first,
+  then the newest. This is the only place `search` returns saved facts: the
+  facts arm, the facts block and the temporal reserve run in `query` alone.
+  With `search.saved_facts_supersede=true` (default off), a newer fact with a
+  correction cue ("correction", "ignore the ...", "not what I posted") that
+  shares at least two matched words with a returned fact is returned too, every
+  fact it corrects moves below the facts nothing corrects, and those carry
+  `corrected_by` (the correcting fact's id). The cue is a fixed word list, so
+  an unmarked correction is not caught and a marked unrelated post can relabel
+  a fact; nothing stored changes.
 - **Temporal fact reserve (default off).** With `search.temporal_fact_reserve=true`,
   a `query` with a deterministic temporal cue (when, before, after, how long,
   since, until, ordinal-time words, ISO dates, month names) and a token budget

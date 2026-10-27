@@ -1,6 +1,6 @@
 /**
  * The saved-fact match beside search/query blocks (ops/search.ts
- * matchingSavedFacts) gates its LIKE scan on an uncorrelated EXISTS probe so
+ * matchingSavedFacts) gates its keyword scan on an uncorrelated EXISTS probe so
  * a brain with no qualifying fact skips the scan. The probe must read the
  * facts table alone: with the page-eligibility filters inside it (private
  * provenance, quarantine, needs-rederive), Postgres planned it as merge anti
@@ -59,7 +59,7 @@ beforeAll(async () => {
   // Unbound and called with the caller's `this`: a transaction-scoped view of the engine must keep its own executor.
   const run = engine.executeRaw;
   engine.executeRaw = function (this: PGLiteEngine, ...args: Parameters<typeof run>) {
-    if (args[0].includes('LIKE ANY($3::text[])') && args[0].includes('FROM facts f')) statements.push(args[0]);
+    if (args[0].includes('FROM facts f, k') && args[0].includes('AND EXISTS (SELECT 1 FROM facts f WHERE')) statements.push(args[0]);
     return run.apply(this, args);
   } as typeof engine.executeRaw;
 }, 120_000);
