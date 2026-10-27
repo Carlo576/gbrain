@@ -187,11 +187,12 @@ describe('#7644: GBRAIN_MEMORY_TRACE', () => {
     const lines: string[] = [];
     expect(startMemoryTrace('off', undefined, {}, line => lines.push(line))()).toBeUndefined();
     const stop = startMemoryTrace('sync', () => ({ round: 1 }), { GBRAIN_MEMORY_TRACE: '1' }, line => lines.push(line));
-    await Bun.sleep(2_300);
+    for (const deadline = Date.now() + 10_000; lines.length === 0 && Date.now() < deadline;) await Bun.sleep(50);
     stop();
     const seen = lines.length;
     expect(seen).toBeGreaterThanOrEqual(1);
     expect(lines.every(line => line.includes('"label":"sync"') && line.includes('"state":{"round":1}'))).toBe(true);
+    // gstack-timing-ok: a stopped trace must stay silent past one full interval; only a regression can add a line here.
     await Bun.sleep(1_200);
     expect(lines.length).toBe(seen);
   });
