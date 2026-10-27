@@ -10,6 +10,39 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A page write on a Git-canonical source now commits exactly what it published, or nothing, and costs less Git time per write. A full sync stops reparsing pages that are already current.**
+
+Before, a write on a source with `canonical: git` committed whatever the file held on disk when Git staged it, so an edit made while the write was publishing could land in the commit while the database recorded the write's own content. A staged change of the same file was silently replaced. Both now refuse with a named code and leave your files and index as they were. Separately, every write on a large checkout ran `git check-ignore` up to three times; most writes now skip it, so per-write overhead drops on big brains. And `gbrain sync --full` (including the two passes inside `gbrain sources canonical --apply`) admits an unchanged, fully current page without re-reading it, which makes a conversion with nothing to adopt much faster.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page's file is edited on disk while a strict write publishes it | Git committed the edit; the database recorded the write's content | refuses `git_target_changed`: nothing is committed, the edit stays on disk, and the source's writes pause until `gbrain repair stuck-recovery` resolves it |
+| The page's file has a staged change when a strict write starts | the write replaced the staged change in the index | refuses `git_index_conflict` with the index untouched; commit or unstage, then retry |
+| The index still holds the version from before an earlier gbrain commit whose index update failed | no notice said the entry was replaced | the next write restores the entry to HEAD and reports a `git_index_restored` notice naming the path |
+| A strict write to a path no ignore rule could match | ran `git check-ignore`, which reads the whole index | skips it; any path a rule might match still goes to Git, which stays the only judge |
+| `gbrain sync --full` over a page whose content, parser, chunks, text projection and contextual mode are all current | reparsed the page | admits it in place; any stale state, a hold or a moved origin still reparses |
+
+### Things to watch after you upgrade
+
+- A write refused with `git_target_changed` pauses that source's writes on purpose. `gbrain sources writer status --json` shows the state, and `gbrain repair stuck-recovery --source <id> --keep disk|prior` previews and applies the choice of which version wins.
+- A staged edit to a page's file now blocks gbrain writes to that page until you commit or unstage it.
+- Git decides alone, with no filter in front, on sparse checkouts, skip-worktree entries, split or sparse indexes, unresolvable ignore includes, and gitlinks or symlinks on the path.
+- Nothing rewrites your data on upgrade.
+
+### Itemized changes
+
+- `src/core/persistence/git-door.ts`: the door stages the planned blob (`hash-object -w` then `update-index --cacheinfo`), refuses a changed file (`git_target_changed`) or a foreign staged entry (`git_index_conflict`), restores a stale entry left by an interrupted door refresh and reports it, sizes its step deadline from one stat of the index, and asks `check-ignore` only for filter candidates.
+- `src/core/persistence/ignore-rules.ts`: the over-approximating ignore filter (every `.gitignore` down the path, `info/exclude`, `core.excludesFile`); `sync-origin-evidence.ts` uses it too.
+- `src/core/persistence/sync-classify.ts`, `sync-pass.ts`, `sync-pass-episode.ts`, `sync-prepare.ts`: a full episode admits a current page without a reparse.
+- `src/core/error-registry.ts`, `docs/guides/error-codes.md`: `git_target_changed`, `git_index_conflict`.
+- `src/core/behavior-change-notice.ts`: one behavior notice for the door's refusals and the restore notice.
+- `scripts/bench/door-write-overhead.ts`: measures strict-write door overhead on a synthetic checkout.
+- Tests: `test/git-door-planned-state.test.ts`, `test/git-door-write-cost.test.ts`, `test/ignore-rules.test.ts`, `test/sync-pass-episode-in-place.test.ts`, `test/bench-door-write-overhead.test.ts`.
+
 ## [0.60.469.0] - 2026-10-26
 
 **`gbrain sync` no longer turns whatever folder you run it from into your brain when a source's stored directory is a relative path like `.`. It stops and asks which folder holds the brain.**
