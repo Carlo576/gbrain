@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runSourcesRefresh } from '../src/commands/sources-refresh.ts';
+import { printRefreshOutcome, runSourcesRefresh } from '../src/commands/sources-refresh.ts';
 import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
@@ -210,6 +210,13 @@ test('#7679: an orphan written before holders were recorded is reported orphaned
     expect(status.fix.why).toContain('a process that recorded no holder');
     const result = await refreshWorktree(f.engine, f.alpha);
     expect(result).toMatchObject({ status: 'already_current', recovered: { refresh_id: orphan.id, state: 'completed', status: 'completed', previous_holder: null } });
+    // Ship review: text mode (the cron default) reports the recovery too. Value: protects=a plain refresh's text output names the orphan it
+    // recovered; fails_when=describe drops the recovered field; why_new=only --json read it; seam=none; no_claim=none beyond protects.
+    const out: string[] = [];
+    const log = console.log;
+    console.log = (line: string) => { out.push(line); };
+    try { printRefreshOutcome({ result }, false); } finally { console.log = log; }
+    expect(out.join('\n')).toContain(`Recovered orphaned refresh ${orphan.id} (completed; previous holder: not recorded).`);
     const rows = await f.refreshRows() as Row[];
     expect(rows.map(row => row.state)).toEqual(['completed']);
     expect(rows[0].outcome.holder.pid).toBe(process.pid);

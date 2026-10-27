@@ -419,7 +419,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const human = holds.find(hold => hold.needs_human) ?? (liveError?.needs_human ? liveError : undefined);
   const refreshRow = typeof source.refresh === 'string' ? JSON.parse(source.refresh) as RefreshProbeRow : source.refresh;
   const worktreeRefresh = refreshRow ? { refresh_id: refreshRow.id, state: refreshRow.state, updated_at: new Date(refreshRow.updated_at).toISOString(),
-    ...await (await import('./worktree-refresh.ts')).refreshHolderReport(refreshRow) } : null;
+    ...await (await import('./worktree-refresh.ts')).refreshHolderReport(engine, refreshRow) } : null;
   // An orphaned or recovery_required refresh wedges the worktree, so its fix leads; one whose holder this host cannot probe is only the last fallback.
   const refreshFix = worktreeRefresh?.liveness === 'orphaned' || worktreeRefresh?.state === 'recovery_required' ? worktreeRefresh.fix : null;
   // #6643: a knock-on or a superseded run is not a failure of its page: the resume re-freezes the entry.
