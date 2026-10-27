@@ -287,5 +287,5 @@ if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 if (command === 'seed') await seed();
 else if (command === 'run') await run();
 else if (command === 'cli' || command === 'embed-seed') await cliRun();
-else throw new Error('usage: seed | run');
+else throw new Error('usage: seed | run | cli | embed-seed');
 process.exit(0);

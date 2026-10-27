@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { operations } from '../src/core/operations.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
@@ -26,6 +26,7 @@ import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { resolveManagedSyncContext } from '../src/core/persistence/sync-discovery.ts';
 import { ADOPTION_BATCH, applyGitConversion, applyMixedConversion, CONVERSION_GROUP_MAX, planGitConversion, planMixedConversion } from '../src/core/persistence/git-conversion.ts';
 import { renderFactsTable } from '../src/core/facts-fence.ts';
+import { inlineExportMarkdown, readExportPage, readExportWithdrawals } from '../src/core/export-snapshot.ts';
 import { withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import { censusGitGap } from '../src/commands/sources-git-gap.ts';
 import { describeGitPreview, runSourcesCanonical } from '../src/commands/sources-canonical.ts';
@@ -111,7 +112,7 @@ const wideSetup = ({ root }: { root: string }) => {
 };
 /**
  * Statements that read a page's export view: the per-page read (readExportPage), the batch read (readExportPages) and the
- * fence normalization of either (overlayCanonicalBodies, overlayCanonicalBodiesBatch). Page snapshot reads by background
+ * fence normalization of either (overlayCanonicalBodies, or readExportPages' batch normalization). Page snapshot reads by background
  * projection work normalize stored columns, never a parameter, so they do not match.
  */
 const EXPORT_READ = /export_page AS MATERIALIZED|AS k\(id, source_id, slug\)|string_to_array\(\$1::text|AS t\(body, timeline, i\)/;
@@ -153,6 +154,17 @@ async function committedPrivatePage(brain: ManagedBrain): Promise<void> {
   expect(atHead(root, 'notes/private.md')).toBe('notes/private.md');
   expect((await pageRow(engine, 'notes/private')).source_path).toBe('notes/private.md');
 }
+
+/** setup, with a bare tracking remote beside the checkout whose pre-receive hook rejects every push. */
+const remoteOf = (root: string) => join(dirname(root), 'remote.git');
+const closedRemoteSetup = (brain: { root: string }) => {
+  setup(brain);
+  execFileSync('git', ['init', '-q', '--bare', remoteOf(brain.root)]);
+  git(brain.root, 'remote', 'add', 'origin', remoteOf(brain.root));
+  git(brain.root, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+  git(brain.root, 'branch', '--set-upstream-to=origin/main');
+  writeFileSync(join(remoteOf(brain.root), 'hooks', 'pre-receive'), '#!/bin/sh\necho "pushes are closed" >&2\nexit 1\n', { mode: 0o755 });
+};
 
 /** That private page, edited in the database, whose file is then removed by hand: sync holds it (file_drift, deleted). */
 async function privateRemovedByHand(brain: ManagedBrain): Promise<void> {
@@ -252,8 +264,17 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     const base = git(root, 'rev-parse', 'HEAD');
     const { preview } = await planGitConversion(engine, 'default');
     expect(preview).toMatchObject({ git_wins: { by: { held_drift_unknown: 0 } }, discard: { count: 1, by: { held_drift_unknown_differs: 1 }, sample: ['notes/drift.md'] } });
+    const before = await revisions(engine), status = git(root, 'status', '--porcelain');
     await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'git_conversion_blocked', detail: 'held_drift_unknown_differs' });
     expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(git(root, 'status', '--porcelain')).toBe(status);
+    // Nothing the plan placed moved: the declared pages stay live with no file, and Git's verdicts are not applied.
+    expect(await revisions(engine)).toEqual(before);
+    expect((await page(engine, 'notes/secret'))!.deleted).toBe(false);
+    expect(existsSync(join(root, 'notes/secret.md'))).toBe(false);
+    expect(existsSync(join(root, 'scratch/ignored.md'))).toBe(false);
+    expect((await page(engine, 'notes/removed'))!.deleted).toBe(false);
+    expect((await page(engine, 'notes/gitmoved'))!.body).not.toContain('The committed edit of notes/gitmoved.');
     expect(await strict(engine)).toBe(false);
     expect(await holds(engine)).toEqual(['notes/drift.md file_drift', 'notes/removed.md file_drift']);
     expect((await page(engine, 'notes/drift'))!.body).toContain('Written to the database alone: notes/drift.');
@@ -371,6 +392,13 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect(preview.adopt).toMatchObject({ count: WIDE - 1, by: { undeclared_database_only: WIDE - 1 } });
     expect(preview.discard).toMatchObject({ count: 1, by: { ignore_status_unknown: 1, ignored_target: 0 }, sample: ['link/beyond.md'], detail: { ignore_status_unknown: { symlink: 1 } } });
     expect(describeGitPreview(preview)).toContain('ignore_status_unknown symlink 1');
+    const base = git(root, 'rev-parse', 'HEAD'), before = await revisions(engine);
+    await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'git_conversion_blocked', detail: 'ignore_status_unknown' });
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(existsSync(join(root, 'real/beyond.md'))).toBe(false);
+    expect(existsSync(join(root, 'dbonly'))).toBe(false);
+    expect(await revisions(engine)).toEqual(before);
+    expect(await strict(engine)).toBe(false);
   }, { databaseUrl, setup }), 300_000);
 
   test('#7618: a hold at a declared page\'s path is judged by the strict verdict, so a page Git would overwrite is a discard', () => managedBrain(async brain => {
@@ -507,6 +535,183 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect(conversionCommits(root, base)).toHaveLength(1);
     expect((await page(engine, 'notes/same'))!.body).toContain('A late database edit.');
   }, { databaseUrl, setup }), 180_000);
+
+  /**
+   * Value: protects=a private page's uncommitted edit to its committed file is never removed by the withhold; fails_when=the
+   * worktree==='modified' guard in planGitConversion's declared case is dropped (the withhold's disk check would match the
+   * edited bytes and remove them); why_new=the withhold tests use clean or absent files only; seam=none; no_claim=none beyond protects
+   */
+  test('#7618: a private page whose committed file holds an uncommitted edit is an uncommitted_edit discard, and the edit stays', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await committedPrivatePage(brain);
+    await databaseOnlyEdit(engine, 'notes/private', 'A private note, edited in the database.');
+    const edit = PRIVATE('notes/private', 'An uncommitted edit of the private note.');
+    writeFileSync(join(root, 'notes/private.md'), edit);
+    const before = await pageRow(engine, 'notes/private'), base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ declared: { by: { private: 1 } }, withhold: { count: 0 },
+      discard: { count: 1, by: { uncommitted_edit: 1 }, sample: ['notes/private.md'], detail: { uncommitted_edit: { modified: 1 } } } });
+    await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'git_conversion_blocked', detail: 'uncommitted_edit' });
+    expect(readFileSync(join(root, 'notes/private.md'), 'utf8')).toBe(edit);
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(atHead(root, 'notes/private.md')).toBe('notes/private.md');
+    expect(await pageRow(engine, 'notes/private')).toEqual(before);
+    expect(await strict(engine)).toBe(false);
+  }, { databaseUrl, setup }), 180_000);
+
+  /**
+   * Value: protects=the withhold never removes a file or stamps a row that moved after the preview; fails_when=assertUnchanged
+   * or the disk-hash check in withholdGroups is removed; why_new=preview_changed is otherwise tested only for a stale hash
+   * before any write; seam=none; no_claim=the writer_busy and git_target_unsafe branches of withholdGroups
+   */
+  test('#7618: the withhold refuses preview_changed when the private page or its file moved after the preview, and removes nothing', async () => {
+    for (const moved of ['page', 'file'] as const) await managedBrain(async brain => {
+      const { engine, root } = brain;
+      await committedPrivatePage(brain);
+      await databaseOnlyEdit(engine, 'notes/private', 'A private note, edited in the database.');
+      await databaseOnlyEdit(engine, 'notes/ahead', 'Written to the database alone.');
+      const { body: _body, ...before } = await pageRow(engine, 'notes/private');
+      const base = git(root, 'rev-parse', 'HEAD');
+      const { preview } = await planGitConversion(engine, 'default');
+      expect(preview).toMatchObject({ adopt: { count: 1 }, withhold: { count: 1, by: { file_committed: 1 } }, discard: { count: 0 } });
+      const late = PRIVATE('notes/private', 'A late edit on disk.');
+      // The adoption group commits first; the private page or its file moves before the withhold reaches it.
+      installFaultHook(async point => {
+        if (point !== 'conversion:group_committed') return;
+        if (moved === 'page') await databaseOnlyEdit(engine, 'notes/private', 'A late database edit.');
+        else writeFileSync(join(root, 'notes/private.md'), late);
+      });
+      try {
+        await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'preview_changed' });
+      } finally { installFaultHook(undefined); }
+      expect(conversionCommits(root, base)).toEqual([{ subject: expect.any(String), paths: ['notes/ahead.md'] }]);
+      expect(atHead(root, 'notes/private.md')).toBe('notes/private.md');
+      if (moved === 'file') expect(readFileSync(join(root, 'notes/private.md'), 'utf8')).toBe(late);
+      else expect(existsSync(join(root, 'notes/private.md'))).toBe(true);
+      const { body, ...after } = await pageRow(engine, 'notes/private');
+      expect(after).toEqual(before);
+      expect(body).toContain(moved === 'page' ? 'A late database edit.' : 'A private note, edited in the database.');
+      expect(await strict(engine)).toBe(false);
+    }, { databaseUrl, setup });
+  }, 360_000);
+
+  test('#7617: a database-only page whose untracked file equals its export adopts as worktree_only; a refused apply leaves the file uncommitted', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await databaseOnlyPage(brain, 'notes/untracked', note('notes/untracked', 'Only in the database, and untracked on disk.'));
+    const [key] = await engine.executeRaw<{ id: string }>("SELECT id::text FROM pages WHERE source_id='default' AND slug='notes/untracked'");
+    const bytes = inlineExportMarkdown(await readExportPage(engine, { id: key!.id, source_id: 'default', slug: 'notes/untracked' }, await readExportWithdrawals(engine, 'default')));
+    writeFileSync(join(root, 'notes/untracked.md'), bytes);
+    const base = git(root, 'rev-parse', 'HEAD'), before = await revisions(engine);
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ adopt: { count: 1, by: { worktree_only: 1, database_ahead: 0, undeclared_database_only: 0 }, sample: ['notes/untracked.md'] }, discard: { count: 0 } });
+    await expect(applyGitConversion(engine, 'default', 'stale', PROCESSING)).rejects.toMatchObject({ code: 'preview_changed' });
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(git(root, 'status', '--porcelain')).toBe('?? notes/untracked.md');
+    expect(readFileSync(join(root, 'notes/untracked.md'), 'utf8')).toBe(bytes);
+    expect(await revisions(engine)).toEqual(before);
+    expect(await strict(engine)).toBe(false);
+    expect(await applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).toMatchObject({ status: 'converted', committed: { groups: 1, pages: 1 } });
+    expect(conversionCommits(root, base)).toEqual([{ subject: expect.any(String), paths: ['notes/untracked.md'] }]);
+    expect(git(root, 'status', '--porcelain')).toBe('');
+    expect(readFileSync(join(root, 'notes/untracked.md'), 'utf8')).toBe(bytes);
+    expect((await revisions(engine))['notes/untracked']).toBe(before['notes/untracked']);
+  }, { databaseUrl, setup }), 180_000);
+
+  test('#7618: a file_absent withhold refuses preview_changed when the private page moved after the preview, and stamps nothing', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await privateRemovedByHand(brain);
+    await databaseOnlyEdit(engine, 'notes/ahead', 'Written to the database alone.');
+    const { body: _body, ...before } = await pageRow(engine, 'notes/private');
+    expect(before).toMatchObject({ source_path: 'notes/private.md', withheld: null });
+    const base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ adopt: { count: 1 }, withhold: { count: 1, by: { file_absent: 1 } }, discard: { count: 0 } });
+    // The adoption group commits first; the private page moves before the withhold reaches it.
+    installFaultHook(async point => { if (point === 'conversion:group_committed') await databaseOnlyEdit(engine, 'notes/private', 'A late database edit.'); });
+    try {
+      await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'preview_changed' });
+    } finally { installFaultHook(undefined); }
+    expect(conversionCommits(root, base)).toEqual([{ subject: expect.any(String), paths: ['notes/ahead.md'] }]);
+    const { body, ...after } = await pageRow(engine, 'notes/private');
+    expect(after).toEqual(before);
+    expect(body).toContain('A late database edit.');
+    expect(await holds(engine)).toEqual(['notes/private.md file_drift']);
+    expect(await strict(engine)).toBe(false);
+  }, { databaseUrl, setup }), 180_000);
+
+  test('#7618: a hold no category places, whose strict verdict loses nothing, is cleared by a converting apply', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/fresh.md'), note('notes/fresh', 'The committed body of notes/fresh.'));
+    git(root, 'add', 'notes/fresh.md'); git(root, 'commit', '-qm', 'a fresh note');
+    const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'");
+    await engine.transaction(tx => writeGitHold(tx, { source_id: 'default', incarnation, path: 'notes/fresh.md', source_path: 'notes/fresh.md', slug: 'notes/fresh',
+      page_id: null, code: 'concurrent_write', message: 'Held while another writer moved the page.', upstream_version: null, observed_at: new Date().toISOString(),
+      run_id: 'run-1', mode: 'managed', meta: { recovery_version: 1 } }));
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ holds: { count: 1, unplaced: { count: 1, by: { concurrent_write: 1 } } }, discard: { count: 0 }, index: { imports: 1, deletes: 0 } });
+    expect(await applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).toMatchObject({ status: 'converted', holds_cleared: 1, after: { remaining: 0 } });
+    expect(await holds(engine)).toEqual([]);
+    expect(await strict(engine)).toBe(true);
+    expect((await page(engine, 'notes/fresh'))!.body).toContain('The committed body of notes/fresh.');
+  }, { databaseUrl, setup }), 180_000);
+
+  /**
+   * Value: protects=a private page whose removal commit landed is never deleted by the mixed sync that runs before the rerun;
+   * fails_when=withholdGroups stamps the row after the door commit instead of before it (a crash in between leaves a live
+   * row recording a file a commit removed, which a mixed sync deletes); why_new=the crash tests cover adoption groups only;
+   * seam=the conversion:withhold_committed fault point; no_claim=a crash inside commitThroughDoor itself
+   */
+  test('#7618: a crash after a withhold commit leaves the private page live through a mixed sync, and the rerun completes', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await committedPrivatePage(brain);
+    // A commit sync has not read: the row still matches its import, so a mixed sync would delete a live row whose file a commit removed.
+    writeFileSync(join(root, 'notes/private.md'), PRIVATE('notes/private', 'A committed edit of the private note.'));
+    git(root, 'commit', '-qam', 'edit the private note');
+    const before = await pageRow(engine, 'notes/private'), base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ withhold: { count: 1, by: { file_committed: 1 } }, discard: { count: 0 } });
+    installFaultHook(point => { if (point === 'conversion:withhold_committed') throw new Error('crash after the withhold commit'); });
+    try { await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toThrow('crash after the withhold commit'); }
+    finally { installFaultHook(undefined); }
+    expect(conversionCommits(root, base)).toEqual([{ subject: expect.any(String), paths: ['notes/private.md'] }]);
+    expect(await strict(engine)).toBe(false);
+    await performManagedSync(engine, OPTS);
+    expect(await pageRow(engine, 'notes/private')).toEqual({ body: before.body, deleted: false, source_path: null, withheld: 'notes/private.md', reason: 'private' });
+    const rerun = (await planGitConversion(engine, 'default')).preview;
+    expect(rerun).toMatchObject({ withhold: { count: 0 }, discard: { count: 0 } });
+    expect(await applyGitConversion(engine, 'default', rerun.preview_hash, PROCESSING)).toMatchObject({ status: 'converted', after: { remaining: 0 } });
+    expect(await strict(engine)).toBe(true);
+    expect(await pageRow(engine, 'notes/private')).toMatchObject({ body: before.body, deleted: false, withheld: 'notes/private.md' });
+  }, { databaseUrl, setup }), 180_000);
+
+  /**
+   * Value: protects=the text preview and receipt name the withheld page and a push that did not land, with the command that
+   * pushes it; fails_when=describeGitPreview or describeResult drops the Withhold line, the withheld count or the push-pending
+   * line; why_new=only JSON fields and the By-cause line were asserted; seam=none; no_claim=wording beyond the asserted fragments
+   */
+  test('#7618/#7644: the text preview and receipt name the withheld page and a pending push', () => managedBrain(async brain => {
+    const { engine } = brain;
+    await engine.executeRaw("UPDATE persistence_host_bindings SET git_durability='enabled'");
+    await committedPrivatePage(brain);
+    await databaseOnlyEdit(engine, 'notes/private', 'A private note, edited in the database.');
+    const text = async (args: string[]) => {
+      const lines: string[] = [];
+      const log = console.log, write = process.stderr.write, priorExitCode = process.exitCode;
+      console.log = (line: unknown) => { lines.push(String(line)); };
+      process.stderr.write = (() => true) as typeof process.stderr.write;
+      try { await runSourcesCanonical(engine, args); } finally { console.log = log; process.stderr.write = write; _resetCliExitVerdictForTests(); process.exitCode = priorExitCode ?? 0; }
+      return lines.join('\n');
+    };
+    const dry = await text(['default', '--to', 'git', '--dry-run']);
+    expect(dry).toContain("Withhold (a private page's committed file is removed through the door, 1 commit(s), and its row withholds its origin): 1 (file_committed 1).\n    notes/private.md");
+    const { preview } = await planGitConversion(engine, 'default');
+    const applied = await text(['default', '--to', 'git', '--apply', '--expect', preview.preview_hash, '--no-embed', '--no-extract']);
+    expect(applied).toContain('Source default is git-canonical: 0 page(s) committed in 0 door commit(s), 1 private page(s) withheld (1 removal commit(s))');
+    expect(applied).toContain("Push pending (git_push_unavailable): The conversion's door commits are committed locally");
+    expect(applied).toContain(`gbrain git commit-push --push-only --path ${brain.root}`);
+  }, { databaseUrl, setup: closedRemoteSetup }), 180_000);
 
   test('work that lands after the strict-equivalent pass leaves the source strict and reports incomplete', () => managedBrain(async brain => {
     const { engine, root } = brain;

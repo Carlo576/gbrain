@@ -611,11 +611,12 @@ async function adoptGroups(engine: BrainEngine, plan: GitConversionPlan, preview
 
 /**
  * G7a's private transition for each withheld page, mirrored from git-declared.ts `declareStrictPublication` (privacy
- * branch), which runs only inside a publication: a committed file's removal goes through the door group by group under
- * the writer lock, and the transaction after that commit stamps the class and moves `source_path` to
- * `withheld_source_path`, so the strict pass never reads the removal as the deletion of a live page. A page whose file
- * is already absent from HEAD only gets the stamp. A page whose revision or working tree moved since the preview stops
- * the apply (preview_changed); after a crash between a commit and its stamp, the rerun preview lists the page as file_absent.
+ * branch), which runs only inside a publication: group by group under the writer lock, a transaction stamps the class and
+ * moves `source_path` to `withheld_source_path`, then the files' removal goes through the door. Stamped first, no sync
+ * (the strict pass or a mixed one run before a rerun) reads the removal as the deletion of a live page; a crash between
+ * the stamp and the commit leaves the file in HEAD, which a mixed sync holds and the rerun preview withholds again. A page
+ * whose file is already absent from HEAD only gets the stamp. A page whose revision or working tree moved since the
+ * preview stops the apply (preview_changed) before anything is stamped.
  */
 async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, previewCommand: string,
   onGroup: (done: { pages: number; commits: number }) => void): Promise<GitConversionResult['withheld']> {
@@ -645,10 +646,11 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
         const disk = diskBytes(join(root, item.path));
         if ((disk ? sha256(disk) : null) !== item.disk) throw previewChangedError(plan.preview.preview_hash, previewCommand);
       }
+      await stamp(group);
       for (const item of group) removeConfined(root, join(root, item.path));
       const commit = await commitThroughDoor(root, group.map(item => ({ path: join(root, item.path), planned: null })), lock);
       if (commit) commits.push(commit);
-      await stamp(group);
+      await faultPoint('conversion:withhold_committed', { sourceId: context.sourceId, round: start / CONVERSION_GROUP_MAX + 1 });
     } finally { await lock.release(); }
     onGroup({ pages: group.length, commits: commits.length });
   }
