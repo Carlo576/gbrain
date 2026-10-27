@@ -15,10 +15,10 @@
  * Seams: the `hooks.boundary` callback pauses the real state machine at its
  * drained, fenced and merged points; no production behavior is replaced.
  */
-import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { afterAll, beforeAll, expect, setSystemTime, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -559,6 +559,34 @@ test('7e. #7679: the owner scan leaves an orphaned syncing refresh while one mem
   expect(await resumeWorktreeRefreshes(f.engine)).toBe(1);
   const [row] = await f.refreshRows();
   expect(row).toMatchObject({ id: orphan.id, state: 'completed', outcome: { completed_by: 'owner_recovery' } });
+}), 180_000);
+
+test('7h. #7679: a git failure while the owner scan checks an orphaned syncing refresh is re-checked after a minute, not cached for the life of the process', () => each(async f => {
+  // Ship adversarial (Step 11). Value: protects=the owner scan's lagging cache never turns one failed `git merge-base --is-ancestor` (exit 128,
+  // a timeout) into a permanent lagging verdict for a row whose members already synced past its target; fails_when=the cache drops its
+  // re-check window and keys only on member last_commits; why_new=7e and 7g re-check only after a member moves; seam=the git object store is
+  // made unreadable for one scan, and the clock is moved with setSystemTime; no_claim=a real git timeout.
+  const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
+  await expect(refreshWorktree(f.engine, f.alpha, { hooks: { boundary: point => { if (point === 'syncing') throw new Error('simulated crash at syncing'); } } }))
+    .rejects.toThrow('simulated crash');
+  await disposePersistenceConsumer(f.engine);
+  const [orphan] = await f.refreshRows();
+  await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state='syncing',completed_at=NULL WHERE id=$1::uuid`, [orphan.id]);
+  const descendant = commitFile(f.root, 'beta/local.md', page('Local', 'Committed on top of the target.'));
+  for (const member of [f.alpha, f.beta]) await f.engine.transaction(tx => withCoordinatedWrite(tx, [member],
+    () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [member, descendant]), TEST_WRITE_ATTRIBUTION));
+  expect(git(f.root, 'merge-base', '--is-ancestor', target, descendant)).toBe('');
+  const objects = join(f.root, '.git', 'objects');
+  chmodSync(objects, 0o000);
+  try { expect(await resumeWorktreeRefreshes(f.engine)).toBe(0); } finally { chmodSync(objects, 0o755); }
+  expect((await f.refreshRows()).map(r => r.state)).toEqual(['syncing']);
+  // Within the minute the cached verdict stands even though git reads again.
+  expect(await resumeWorktreeRefreshes(f.engine)).toBe(0);
+  expect((await f.refreshRows()).map(r => r.state)).toEqual(['syncing']);
+  setSystemTime(new Date(Date.now() + 61_000));
+  try { expect(await resumeWorktreeRefreshes(f.engine)).toBe(1); } finally { setSystemTime(); }
+  expect(await f.refreshRows()).toMatchObject([{ id: orphan.id, state: 'completed', outcome: { completed_by: 'owner_recovery' } }]);
+  expect(f.head()).toBe(descendant);
 }), 180_000);
 
 test('7f. #7679: a plain refresh whose adopted orphan ends sync_blocked returns that result and does not refresh over it', () => each(async f => {

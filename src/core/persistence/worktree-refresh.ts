@@ -596,11 +596,15 @@ async function recoverOne(engine: BrainEngine, git: Git, row: WorktreeRefreshRow
  * is free) is converged one step, so the scan finds nothing on the next tick.
  * Member syncs are not run here. #7679: an orphaned `syncing` row whose members
  * all synced to the target or a descendant of it (a later cycle sync caught
- * them up) and whose HEAD is still at the target is completed here (a lagging one is re-checked only after a member moves); one whose members lag is finished by the next
+ * them up) and whose HEAD is still at the target is completed here (a lagging one is re-checked after a member moves or a minute passes); one whose members lag is finished by the next
  * plain `gbrain sources refresh`, which runs the `--resume` path, or by `--resume`.
  */
-/** A lagging orphaned `syncing` row, keyed by refresh id, with the member `last_commit`s it lagged at: the scan re-checks it only after a member moves. */
-const laggingSyncing = new Map<string, string>();
+/**
+ * A lagging orphaned `syncing` row, keyed by refresh id, with the member `last_commit`s it lagged at and when: the scan re-checks it once a
+ * member moves, or after LAGGING_RECHECK_MS (a git failure reads as lagging, so a cached verdict never outlives a transient one).
+ */
+const laggingSyncing = new Map<string, { commits: string; at: number }>();
+const LAGGING_RECHECK_MS = 60_000;
 
 export async function resumeWorktreeRefreshes(engine: BrainEngine, opts: { hostId?: string } = {}): Promise<number> {
   const host = opts.hostId ?? localHostId();
@@ -614,12 +618,13 @@ export async function resumeWorktreeRefreshes(engine: BrainEngine, opts: { hostI
     if (!root) continue;
     const commits = row.state === 'syncing' ? (await engine.executeRaw<{ last_commit: string | null }>(
       'SELECT last_commit FROM sources WHERE id=ANY($1::text[]) ORDER BY id', [row.source_ids])).map(source => source.last_commit ?? '').join(',') : null;
-    if (commits !== null && laggingSyncing.get(row.id) === commits) continue;
+    const lagging = commits === null ? undefined : laggingSyncing.get(row.id);
+    if (lagging?.commits === commits && Date.now() - lagging.at < LAGGING_RECHECK_MS) continue;
     const lock = await tryAcquireNativeLock(refreshLockPath(row.worktree_id));
     if (!lock) continue;
     try {
       await withGit(async git => {
-        if (commits !== null && !await membersAtTarget(engine, git, row, root)) { laggingSyncing.set(row.id, commits); return; }
+        if (commits !== null && !await membersAtTarget(engine, git, row, root)) { laggingSyncing.set(row.id, { commits, at: Date.now() }); return; }
         const after = await withTopologyLocks(engine, row.source_ids[0], async () => {
           const current = await readRefresh(engine, row.id);
           return current.state === 'syncing' ? completeSyncedOrphan(engine, git, current, root) : recoverOne(engine, git, current, root, true);
