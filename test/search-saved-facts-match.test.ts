@@ -60,7 +60,8 @@ beforeAll(async () => {
     await importFromContent(engine, slug, serializeMarkdown({}, body, '', { type: 'note', title, tags: [] }), { noEmbed: true, forceRechunk: true });
   }
   ids.first = await remember(FIRST, '2026-09-02T09:00:00Z');
-  ids.correction = await remember(CORRECTION, '2026-09-02T09:30:00Z');
+  // Saved with the same time as the post it corrects, as a flush of both posts saves them.
+  ids.correction = await remember(CORRECTION, '2026-09-02T09:00:00Z');
   ids.question = await remember(QUESTION, '2026-09-04T09:00:00Z');
   ids.lease = await remember('Delta Example countersigned the warehouse lease.', '2026-09-01T09:00:00Z');
   ids.olderLease = await remember('The warehouse lease runs five years.', '2026-08-01T09:00:00Z');

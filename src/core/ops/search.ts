@@ -464,8 +464,9 @@ async function matchingSavedFacts(ctx: OperationContext, scope: SourceScope, que
     const admitted = found.filter(r => r.words.size >= r.need);
     if (supersede) {
       for (const older of admitted) {
-        const correction = found.filter(n => n.cue && n.fact.id !== older.fact.id && n.at > older.at
-          && [...n.words].filter(w => older.words.has(w)).length >= Math.min(2, n.need)).sort((a, b) => b.at - a.at)[0];
+        // Posts saved in one flush share a time; the later id is the later post.
+        const correction = found.filter(n => n.cue && (n.at > older.at || (n.at === older.at && n.fact.id > older.fact.id))
+          && [...n.words].filter(w => older.words.has(w)).length >= Math.min(2, n.need)).sort((a, b) => b.at - a.at || b.fact.id - a.fact.id)[0];
         if (correction) older.fact.corrected_by = correction.fact.id;
       }
       const correcting = new Set(admitted.flatMap(r => r.fact.corrected_by ? [r.fact.corrected_by] : []));
