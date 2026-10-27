@@ -642,12 +642,19 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
       `Run ${previewCommand} again; the pages already withheld drop out of the plan, so the new plan holds only what is left.`, { retryable: true });
     try {
       for (const item of group) {
-        const disk = diskBytes(join(root, item.path));
+        const target = join(root, item.path);
+        const disk = diskBytes(target);
         if ((disk ? sha256(disk) : null) !== item.disk) throw previewChangedError(plan.preview.preview_hash, previewCommand);
+        if (disk) assertConfined(root, target, 'removed');
       }
       await stamp(group);
       await faultPoint('conversion:withhold_stamped', { sourceId: context.sourceId, round: start / CONVERSION_GROUP_MAX + 1 });
-      for (const item of group) removeConfined(root, join(root, item.path));
+      for (const item of group) {
+        const target = join(root, item.path);
+        const disk = diskBytes(target);
+        if (disk && sha256(disk) !== item.disk) throw previewChangedError(plan.preview.preview_hash, previewCommand);
+        removeConfined(root, target);
+      }
       const commit = await commitThroughDoor(root, group.map(item => ({ path: join(root, item.path), planned: null })), lock);
       if (commit) commits.push(commit);
       await faultPoint('conversion:withhold_committed', { sourceId: context.sourceId, round: start / CONVERSION_GROUP_MAX + 1 });
@@ -663,15 +670,19 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
   return { pages: plan.withhold.length, commits };
 }
 
+function assertConfined(root: string, target: string, verb: 'removed' | 'written'): void {
+  if (relative(realpathSync(root), realpathSync(dirname(target))).split(sep)[0] === '..') throw opError('git_target_unsafe', `${target} resolves outside the checkout, so it was not ${verb}.`, 'Reconcile the path first.');
+}
+
 function removeConfined(root: string, target: string): void {
   if (!diskBytes(target)) return;
-  if (relative(realpathSync(root), realpathSync(dirname(target))).split(sep)[0] === '..') throw opError('git_target_unsafe', `${target} resolves outside the checkout, so it was not removed.`, 'Reconcile the path first.');
+  assertConfined(root, target, 'removed');
   rmSync(target);
 }
 
 function writeAtomically(root: string, target: string, bytes: Buffer): void {
   mkdirSync(dirname(target), { recursive: true });
-  if (relative(realpathSync(root), realpathSync(dirname(target))).split(sep)[0] === '..') throw opError('git_target_unsafe', `${target} resolves outside the checkout, so it was not written.`, 'Reconcile the path first.');
+  assertConfined(root, target, 'written');
   const temp = join(dirname(target), `.gbrain-convert-${process.pid}-${Date.now()}.tmp`);
   try { writeFileSync(temp, bytes); renameSync(temp, target); } finally { rmSync(temp, { force: true }); }
 }

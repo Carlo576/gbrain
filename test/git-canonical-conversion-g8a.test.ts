@@ -736,6 +736,27 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect(await strict(engine)).toBe(true);
   }, { databaseUrl, setup }), 180_000);
 
+  test('#7618: a withheld file whose directory resolves outside the checkout refuses before anything is stamped', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    mkdirSync(join(root, 'private'));
+    writeFileSync(join(root, 'private/note.md'), PRIVATE('private/note', 'A private note.'));
+    git(root, 'add', 'private/note.md'); git(root, 'commit', '-qm', 'a private note');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await databaseOnlyEdit(engine, 'private/note', 'A private note, edited in the database.');
+    // The directory is moved out of the checkout and replaced by a symlink to it: the file's bytes still read the same.
+    const outside = join(dirname(root), 'outside-private');
+    execFileSync('mv', [join(root, 'private'), outside]);
+    symlinkSync(outside, join(root, 'private'));
+    const before = await pageRow(engine, 'private/note'), base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ withhold: { count: 1, by: { file_committed: 1 } }, discard: { count: 0 } });
+    await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'git_target_unsafe' });
+    expect(await pageRow(engine, 'private/note')).toEqual(before);
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(existsSync(join(outside, 'note.md'))).toBe(true);
+    expect(await strict(engine)).toBe(false);
+  }, { databaseUrl, setup }), 180_000);
+
   /**
    * Value: protects=the text preview and receipt name the withheld page and a push that did not land, with the command that
    * pushes it; fails_when=describeGitPreview or describeResult drops the Withhold line, the withheld count or the push-pending
