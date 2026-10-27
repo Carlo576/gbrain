@@ -1117,6 +1117,13 @@
             "status": "ok"
           },
           {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "Every gbrain function that pins a search_path ends it with pg_temp",
+            "name": "function_search_path",
+            "status": "ok"
+          },
+          {
             "category": "meta",
             "elapsed_ms": "<volatile>",
             "message": "Version <latest> (latest: <latest>)",
@@ -5854,6 +5861,13 @@
             "elapsed_ms": "<volatile>",
             "message": "RLS enabled on 161/161 public tables",
             "name": "rls",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "elapsed_ms": "<volatile>",
+            "message": "Every gbrain function that pins a search_path ends it with pg_temp",
+            "name": "function_search_path",
             "status": "ok"
           },
           {
