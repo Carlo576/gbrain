@@ -22,6 +22,7 @@ identifiers and attribution are available in the pre-removal Git revision
 gbrain sources canonical <source> --to git                          # preview: what would be adopted, withheld, discarded, and why
 gbrain sources canonical <source> --to git --apply --expect <hash>  # apply the preview you read
 GBRAIN_MEMORY_TRACE=5 gbrain sources canonical <source> --to git --apply --expect <hash>  # also sample memory every 5 seconds on stderr
+GBRAIN_MEMORY_TRACE=5 gbrain sync --source <source>          # the same memory trace for a sync
 ```
 
 ### What changed
@@ -50,7 +51,7 @@ GBRAIN_MEMORY_TRACE=5 gbrain sources canonical <source> --to git --apply --expec
 
 - `src/core/persistence/git-conversion.ts`: batched export reads in the plan; unplaced holds judged in the plan; discards counted by cause; holds cleared after the strict recheck; private pages that record a file are withheld in groups (stamped with a revision check, then the removal committed through the door; a crash in between leaves the page live and the rerun finishes it); confinement checked before the stamp and the file rechecked before its removal; the apply pushes its door commits where durability applies; progress callbacks.
 - `src/commands/sources-canonical.ts`: progress lines, the partial report on signal, the push-pending notice.
-- `src/core/memory-trace.ts`: `GBRAIN_MEMORY_TRACE=<seconds>` (1 to 3600) writes a memory line on stderr.
+- `src/core/memory-trace.ts`: `GBRAIN_MEMORY_TRACE=<seconds>` (1 to 3600) writes a memory line on stderr during a conversion apply and during `gbrain sync`.
 - `src/commands/sources-git-gap.ts`, `src/core/persistence/git-gap.ts`: the census reads a withheld page's file at its withheld path; one unknown ignore status no longer poisons a whole batch.
 - `scripts/bench/sync-pass-memory.ts`: a memory probe for the strict-equivalent pass and the conversion (seed, run, cli, embed-seed).
 - Tests: `test/git-canonical-conversion-g8a.test.ts` (crash, refusal and withhold cases on PGLite and Postgres), `test/git-canonical-conversion-progress.test.ts`, `test/git-gap-census.test.ts`, and a Postgres smoke test for the memory probe.
