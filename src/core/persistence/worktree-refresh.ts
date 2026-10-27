@@ -42,6 +42,8 @@ import { startPersistenceConsumer } from './service.ts';
 import { lockTopologyPrincipal, lockTopologyRows, topologyPrincipal, withTopologyLocks } from './topology-locks.ts';
 import { ACTIVE_REFRESH_STATES_SQL, CHECKOUT_EFFECT_KINDS_SQL, type WorktreeRefreshState } from './worktree-refresh-schema.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { commitAndPush } from '../git/commit-push.ts';
+import { isTruthy } from '../connectors/config-keys.ts';
 import { classifyOriginUniqueViolation } from './origin-guard.ts';
 
 export interface WorktreeRefreshRow {
@@ -68,6 +70,8 @@ export interface WorktreeRefreshResult {
   synced: RefreshMemberSync[]; sync_blocked?: RefreshSyncBlocked[]; next?: string;
   /** #7679: an orphaned refresh this run finished (or rolled back) through the `--resume` path before its own refresh. */
   recovered?: { refresh_id: string; state: WorktreeRefreshState; status: WorktreeRefreshResult['status']; previous_holder: RefreshHolder | null };
+  /** #7686: the diverged checkout's local commits this run published, merged with the upstream, before fast-forwarding (`sources.refresh_publish_diverged`). */
+  published?: { sha: string; local_commits: number; integrated: number };
 }
 /** #7679: the process that holds a refresh's lock, recorded on the row so status can name it. */
 export interface RefreshHolder { host_id: string | null; hostname: string; pid: number; started_at: string }
@@ -216,11 +220,14 @@ async function markRecoveryRequired(engine: BrainEngine, row: WorktreeRefreshRow
 
 interface Plan {
   binding: WorktreeBinding; root: string; members: string[]; upstreamRef: string; oldHead: string; targetHead: string;
-  overlap: string[]; preserved: string[]; incoming: number;
+  overlap: string[]; preserved: string[]; incoming: number; published?: WorktreeRefreshResult['published'];
 }
 
+/** #7686: standing consent, default off, to publish a diverged checkout's local commits before the fast-forward. */
+export const REFRESH_PUBLISH_DIVERGED_KEY = 'sources.refresh_publish_diverged';
+
 /** Steps 1.3/1: refusals before any database state; fetch moves only remote-tracking refs. */
-async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTimeoutMs: number): Promise<Plan> {
+async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTimeoutMs: number, publishDiverged = false): Promise<Plan> {
   if (!await managedPersistenceEnabled(engine)) throw refusal('refresh_not_managed',
     'This brain is not managed, so gbrain sync pulls the checkout itself; there is no worktree fence to coordinate.', `gbrain sync --source ${sourceId}`);
   const binding = await getWorktreeBinding(engine, sourceId, existingLocalHostId());
@@ -274,7 +281,13 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
   const targetHead = await revParse(git, root, '@{upstream}');
   if (!oldHead || !targetHead) throw refusal('refresh_no_upstream', `The checkout HEAD or its upstream ${upstreamRef} does not resolve to a commit.`,
     `git -C ${q(root)} fetch ${remote || 'origin'}, then gbrain sources refresh ${sourceId}`);
-  if (oldHead !== targetHead && !await isAncestor(git, root, oldHead, targetHead)) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead);
+  if (oldHead !== targetHead && !await isAncestor(git, root, oldHead, targetHead)) {
+    if (!publishDiverged) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead);
+    const localCommits = Number((await read(['rev-list', '--count', `${targetHead}..${oldHead}`])).stdout.trim()) || 0;
+    const pushed = commitAndPush({ repo: root, pushOnly: true, keepCheckout: true });
+    const plan = await precheck(engine, git, sourceId, fetchTimeoutMs);
+    return { ...plan, published: { sha: pushed.sha ?? plan.targetHead, local_commits: localCommits, integrated: pushed.integrated } };
+  }
   const dirt = await dirtyOverlap(git, root, oldHead, targetHead);
   if (dirt.overlap.length) throw dirtyRefusal(sourceId, dirt.overlap);
   return { binding, root, members, upstreamRef, oldHead, targetHead, ...dirt };
@@ -290,7 +303,7 @@ async function divergedRefusal(git: Git, root: string, sourceId: string, upstrea
   const argv = ['gbrain', 'git', 'commit-push', '--push-only', '--keep-checkout', '--path', root, '--json'];
   const error = refusal('refresh_diverged',
     `The checkout HEAD ${oldHead} is not an ancestor of ${upstreamRef} (${targetHead}); a fast-forward is impossible and nothing changed.`,
-    `Publish ${local} merged with ${upstreamRef}: ${argv.map(q).join(' ')} (it merges in memory, refuses on a conflict and never moves the checkout), then retry gbrain sources refresh ${sourceId}. Ask the user first, because it pushes those commits (git -C ${q(root)} log --stat ${upstreamRef}..HEAD lists them). gbrain sources reclone ${sourceId} replaces the checkout instead and drops them.`);
+    `Publish ${local} merged with ${upstreamRef}: ${argv.map(q).join(' ')} (it merges in memory, refuses on a conflict and never moves the checkout), then retry gbrain sources refresh ${sourceId}. Ask the user first, because it pushes those commits (git -C ${q(root)} log --stat ${upstreamRef}..HEAD lists them). gbrain sources reclone ${sourceId} replaces the checkout instead and drops them. To let every refresh publish a diverged checkout this way on its own, the user can run gbrain config set ${REFRESH_PUBLISH_DIVERGED_KEY} true.`);
   error.fix = { argv, consent: [], actor: 'user', ask_user: true, requires_exclusive: false,
     why: `HEAD has ${local} that ${upstreamRef} lacks while ${upstreamRef} moved on; pushing HEAD merged with it makes HEAD an ancestor of the upstream, so the refresh can fast-forward.`,
     user_message: `The checkout of source ${sourceId} has ${local} that were never pushed while its remote moved on. Push them, merged with the remote, so gbrain can bring the checkout up to date? Conflicting files stop the push and change nothing.`,
@@ -438,9 +451,11 @@ export async function refreshWorktree(engine: BrainEngine, sourceId: string, opt
 
 async function refreshOnce(engine: BrainEngine, sourceId: string, opts: RefreshOptions, fetchTimeoutMs: number, waitDrainMs: number): Promise<WorktreeRefreshResult> {
   return withGit(async git => {
-    const plan = await precheck(engine, git, sourceId, fetchTimeoutMs);
+    const publishDiverged = !opts.dryRun && isTruthy(await engine.getConfig(REFRESH_PUBLISH_DIVERGED_KEY));
+    const plan = await precheck(engine, git, sourceId, fetchTimeoutMs, publishDiverged);
     const base = { refresh_id: null, worktree_id: plan.binding.worktree_id, source_ids: plan.members, old_head: plan.oldHead,
-      target_head: plan.targetHead, upstream_ref: plan.upstreamRef, preserved_uncommitted: plan.preserved, incoming_files: plan.incoming };
+      target_head: plan.targetHead, upstream_ref: plan.upstreamRef, preserved_uncommitted: plan.preserved, incoming_files: plan.incoming,
+      ...(plan.published ? { published: plan.published } : {}) };
     if (opts.dryRun) return { ...base, status: 'dry_run', synced: [],
       next: plan.oldHead === plan.targetHead ? `Already at ${plan.upstreamRef}; nothing to fast-forward.` : `gbrain sources refresh ${sourceId}` };
     if (plan.oldHead === plan.targetHead) {
@@ -483,7 +498,8 @@ async function refreshOnce(engine: BrainEngine, sourceId: string, opts: RefreshO
       const merged = await fenceAndMerge(engine, git, sourceId, plan, row, opts.hooks);
       await opts.hooks?.boundary?.('syncing', merged);
       const sync = await syncMembers(engine, git, merged, plan.root);
-      return finished(await readRefresh(engine, row.id), sync, plan.preserved);
+      const result = finished(await readRefresh(engine, row.id), sync, plan.preserved);
+      return plan.published ? { ...result, published: plan.published } : result;
     } finally { await refreshLock.release(); }
   });
 }

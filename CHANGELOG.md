@@ -10,6 +10,41 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A managed checkout that gets local commits while a sibling checkout pushes the same branch can now stay current without a person in the loop. Turn on `sources.refresh_publish_diverged` and a diverged `gbrain sources refresh` publishes the local commits merged with the upstream, then fast-forwards.**
+
+Before, such a refresh always refused `refresh_diverged`, and the database lagged the upstream until someone ran the keep-checkout publish by hand or a scheduled publish caught up. That repeated every interval. The setting is the user's standing consent to push those local commits. It defaults to off, so nothing changes for existing brains.
+
+### How to get it
+
+```bash
+gbrain config set sources.refresh_publish_diverged true
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Diverged checkout, setting on | refused `refresh_diverged` | pushes HEAD merged with the upstream in memory (the `gbrain git commit-push --push-only --keep-checkout` publish), fast-forwards to the merge and reports `published` (sha, local commits, upstream commits merged) |
+| Diverged checkout, setting off (the default) | refused `refresh_diverged` | unchanged; the refusal now also names the setting |
+| A file both sides changed, setting on | n/a | refuses `integrate_conflict` naming the file; nothing is pushed, fenced or moved |
+| `--dry-run` | refused `refresh_diverged` | unchanged: a dry run never publishes |
+| `gbrain config set sources.refresh_fetch_timeout_ms` / `sources.refresh_drain_wait_ms` | refused as an unknown key, although the refresh reads both | accepted |
+
+### Things to watch after you upgrade
+
+- The publish needs a Git identity in the checkout for the merge commit, the same as the manual keep-checkout publish.
+- It never uses a `--pull` that moves the checkout: the merge is built in memory and pushed, and the checkout moves only through the refresh's usual fast-forward.
+
+### Itemized changes
+
+- `src/core/persistence/worktree-refresh.ts`: when `sources.refresh_publish_diverged` is on and the run is not a dry run, the precheck runs `commitAndPush` (`pushOnly`, `keepCheckout`) for a diverged checkout, re-fetches and continues; the result carries `published`. The `refresh_diverged` suggestion names the setting.
+- `src/commands/sources-refresh.ts`: a text line for the publish.
+- `src/core/config-runtime-keys.ts`: registers `sources.refresh_publish_diverged`, `sources.refresh_fetch_timeout_ms` and `sources.refresh_drain_wait_ms`.
+- Docs: `docs/guides/live-sync.md`, `docs/guides/write-refusals.md`, `docs/architecture/canonical-writers.md` and its census.
+- Tests: `test/refresh-publish-diverged-7686.test.ts` (setting on, off, a conflict and a dry run, on PGLite and on Postgres through `test/e2e/worktree-refresh-postgres.test.ts`).
+
 ## [0.60.472.0] - 2026-10-27
 
 **A `gbrain sources refresh` whose process dies mid-refresh no longer wedges the managed checkout. The next refresh finishes it, and status tells you who holds a refresh and whether it is still running.**

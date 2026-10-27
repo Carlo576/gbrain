@@ -668,6 +668,15 @@ vars — incident-time escape hatches, not everyday knobs.
    means something commits into the checkout outside gbrain: fix that writer
    instead of forcing the checkout
    ([scripts and the managed checkout](shared-checkout-git.md#scripts-and-the-managed-checkout)).
+   When local commits there are expected (automations committing alongside a
+   sibling checkout that pushes the same branch), the user can give standing
+   consent with `gbrain config set sources.refresh_publish_diverged true`
+   (default off): a diverged refresh then pushes the local commits merged with
+   the upstream in memory, the same publish as
+   `gbrain git commit-push --push-only --keep-checkout`, and fast-forwards to
+   the merge. It never moves the checkout to merge, a conflicting file refuses
+   `integrate_conflict` naming it with nothing pushed, and `--dry-run` never
+   publishes.
 
    **Say to your agent:** *"Bring my notes source up to date with its remote."*
 
