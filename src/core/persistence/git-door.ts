@@ -43,7 +43,7 @@ import { closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mk
 import { join, relative, resolve, sep } from 'node:path';
 import type { Notice } from '../agent-output.ts';
 import { OperationError, opError } from '../ops/contract.ts';
-import { commitMessage, git, gitBytes, gitFailure, gitStepTimeoutMs, ignoredTargetError, withSession, type GitSession } from './effect-git.ts';
+import { commitMessage, git, gitBytes, gitFailure, gitStepTimeoutMs, ignoredTargetError, reclaimAbandonedIndexLock, withSession, type GitSession } from './effect-git.ts';
 import type { GitCommitNote } from './effect-model.ts';
 import { persistenceHome } from './identity.ts';
 import { ignoreCandidates } from './ignore-rules.ts';
@@ -435,16 +435,22 @@ async function replacedEntries(session: GitSession, commit: string, targets: Tar
  * The compare and the write run under Git's own index lock (`<index>.lock`, created exclusively): the entries are read
  * and a copy of the index is updated while the lock is held, and the copy is renamed onto the lock and the lock onto the
  * index, as Git commits an index. No writer that takes the lock can change the index between the compare and the write.
- * A writer that reads the index before locking it (a raw `git commit -- <path>`) is outside this guarantee.
+ * A writer that reads the index before locking it (a raw `git commit -- <path>`) is outside this guarantee. The lock
+ * stays open until its rename, so the #6932 proof never takes it for abandoned; a lock that proof does find abandoned is
+ * reclaimed under the caller's writer lock before the refresh gives up.
  */
 async function syncIndex(session: GitSession, root: string, prefix: string, index: string, targets: Target[], commit: string, seen: IndexSnapshot): Promise<void> {
-  let failure = '', restaged: Target[] = [], held = false;
+  let failure = '', restaged: Target[] = [], held = false, fd: number | null = null;
   const lock = `${index}.lock`, copy = `${index}.gbrain-${process.pid}-${randomBytes(6).toString('hex')}`;
+  const take = () => {
+    try { return openSync(lock, 'wx'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') return null; throw error; }
+  };
   try {
-    try { closeSync(openSync(lock, 'wx')); held = true; } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      failure = `Unable to create '${lock}': File exists; another git process holds the index lock`;
-    }
+    fd = take();
+    const reclaimed = fd === null ? reclaimAbandonedIndexLock(session, lock) : true;
+    if (fd === null && reclaimed === true) fd = take();
+    held = fd !== null;
+    if (!held) failure = `Unable to create '${lock}': File exists; another git process holds the index lock${reclaimed === true ? '' : ` (not reclaimed: ${reclaimed})`}`;
     if (held) {
       const moved = indexSignature(index) !== seen.signature;
       // Git never rewrites an index in place (it writes <file>.lock and renames it), so a hard link is a safe copy.
@@ -456,14 +462,15 @@ async function syncIndex(session: GitSession, root: string, prefix: string, inde
       const synced = targets.filter(target => !restaged.includes(target));
       const kept = synced.filter(target => target.oid), removed = synced.filter(target => !target.oid);
       if (synced.length) {
-        const updated = await git({ ...session, indexFile: copy }, ['update-index', '--add', ...kept.flatMap(target => ['--cacheinfo', `${target.mode},${target.oid},${prefix}${target.rel}`]),
+        const updated = await git({ ...session, indexFile: copy }, ['update-index', '--add', '--force-write-index', ...kept.flatMap(target => ['--cacheinfo', `${target.mode},${target.oid},${prefix}${target.rel}`]),
           ...(removed.length ? ['--force-remove', '--', ...removed.map(target => target.rel)] : [])]);
         if (updated.code !== 0) failure = updated.stderr.trim().slice(0, 300) || `exit ${updated.code}`;
-        else { renameSync(copy, lock); renameSync(lock, index); held = false; }
+        else { closeSync(fd!); fd = null; renameSync(copy, lock); renameSync(lock, index); held = false; }
       }
     }
   } catch (error) { failure = error instanceof Error ? error.message : String(error); }
   finally {
+    if (fd !== null) closeSync(fd);
     rmSync(copy, { force: true });
     if (held) rmSync(lock, { force: true });
   }

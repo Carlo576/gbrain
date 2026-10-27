@@ -100,6 +100,18 @@ const staleLockFix = (root: string, lock: string, why: string): Action => ({
 });
 
 /**
+ * #6932: while this session's caller holds the checkout's writer lock, reclaims `lock` once it is proven abandoned
+ * (index-lock-reclaim.ts). True when it was reclaimed; otherwise why it stays.
+ */
+export function reclaimAbandonedIndexLock(session: GitSession, lock: string): true | string {
+  if (!session.owner || session.owner.writerLock.released) return 'this caller does not hold the checkout\'s writer lock';
+  const verdict = proveIndexLockAbandoned(lock, session.root, INDEX_LOCK_GRACE_MS);
+  const receipt = verdict.abandoned ? reclaimIndexLock(lock, session.root, verdict) : null;
+  if (receipt) { session.owner.onReclaim?.(receipt); return true; }
+  return verdict.abandoned ? 'the lock changed while it was being reclaimed' : verdict.reason;
+}
+
+/**
  * Git refused because another process holds this checkout's index lock. Only the checkout's own index lock
  * (`git rev-parse --git-path index.lock`, so linked worktrees resolve) qualifies; a ref or remote lock with
  * the same wording does not. #6932: while the canonical writer holds its writer lock, a lock it proves
@@ -117,11 +129,10 @@ async function indexLockError(session: GitSession, stderr: string, mayReclaim: b
   let age: number;
   try { age = Date.now() - statSync(lock).mtimeMs; } catch { return null; }
   let why = 'this caller does not hold the checkout\'s writer lock';
-  if (session.owner && !session.owner.writerLock.released && mayReclaim) {
-    const verdict = proveIndexLockAbandoned(lock, session.root, INDEX_LOCK_GRACE_MS);
-    const receipt = verdict.abandoned ? reclaimIndexLock(lock, session.root, verdict) : null;
-    if (receipt) { session.owner.onReclaim?.(receipt); return 'reclaimed'; }
-    why = verdict.abandoned ? 'the lock changed while it was being reclaimed' : verdict.reason;
+  if (mayReclaim) {
+    const reclaimed = reclaimAbandonedIndexLock(session, lock);
+    if (reclaimed === true) return 'reclaimed';
+    why = reclaimed;
   }
   if (age >= 0 && age < INDEX_LOCK_GRACE_MS) {
     return new OperationError('git_index_locked', 'Another Git process holds the canonical checkout index lock.', 'The effect is retried shortly.');
