@@ -177,6 +177,37 @@ for (const backend of testBackends()) describe(`coherent export: ${backend}`, ()
       await expect(readExportPages(tx, [keys[0]!, deleted!], withdrawals)).rejects.toThrow('Export snapshot unexpectedly lost a selected page.');
     });
   }, 60000);
+  /**
+   * Value: protects=a per-page export read (export.ts calls readExportPage once per page) looks its row up by primary key,
+   * so exporting a large source stays linear; fails_when=readExportPages joins pages on the keys and the planner answers a
+   * one-key join from the source index, filtering every page of the source; seam=the plan of the statement itself.
+   */
+  test('#7618: a one-key export read looks its page up by primary key and examines no other page', async () => {
+    await engine.executeRaw('DELETE FROM pages');
+    await engine.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,timeline,frontmatter)
+      SELECT 'default','scale/p'||n,'note','Synthetic','A synthetic body.','','{}'::jsonb FROM generate_series(1,5000) n`);
+    const [key] = await engine.executeRaw<{ id: string; source_id: string; slug: string }>("SELECT id::text AS id, source_id, slug FROM pages WHERE slug='scale/p2500'");
+    const real = engine.executeRaw;
+    let read: { query: string; params: unknown[] } | undefined;
+    engine.executeRaw = async function (query, params, options) {
+      if (!read && query.includes('export_tags')) read = { query, params: params ?? [] };
+      return real.call(this, query, params, options) as never;
+    };
+    try { expect((await readExportPages(engine, [key!], []))[0]!.page.slug).toBe('scale/p2500'); }
+    finally { engine.executeRaw = real; }
+    const [row] = await engine.executeRaw<Record<string, unknown>>(`EXPLAIN (ANALYZE, FORMAT JSON) ${read!.query}`, read!.params);
+    const raw = Object.values(row!)[0];
+    const nodes: Record<string, unknown>[] = [];
+    const walk = (node: Record<string, unknown>) => { nodes.push(node); for (const child of (node.Plans as Record<string, unknown>[] | undefined) ?? []) walk(child); };
+    walk(((typeof raw === 'string' ? JSON.parse(raw) : raw) as { Plan: Record<string, unknown> }[])[0]!.Plan);
+    const scans = nodes.filter(node => node['Relation Name'] === 'pages');
+    expect(scans.length).toBeGreaterThan(0);
+    for (const scan of scans) {
+      expect(scan['Index Name']).toBe('pages_pkey');
+      expect(Number(scan['Rows Removed by Filter'] ?? 0) + Number(scan['Rows Removed by Index Recheck'] ?? 0)).toBe(0);
+    }
+  }, 60000);
+
   test('source/page/tag/raw changes after snapshot do not tear the export', async () => {
     await engine.executeRaw('DELETE FROM pages');
     await engine.executeRaw("INSERT INTO sources (id,name) VALUES ('snapshot-source','Snapshot') ON CONFLICT (id) DO UPDATE SET archived=false");

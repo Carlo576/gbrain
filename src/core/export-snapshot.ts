@@ -36,18 +36,21 @@ export async function readExportPage(tx: BrainEngine, key: { id: string; source_
  * The export snapshots of `keys`, in key order, in at most two statements however many keys there are (#7617: a
  * per-page read made a large source's conversion plan one round trip per page): the rows with their tags, then one
  * fence normalization for every inline page whose withdrawal overlay applies, by overlayCanonicalBodies' rules and SQL.
+ * Rows are looked up by primary key (#7618: a join on the keys let the planner scan the whole source for each key, so a
+ * per-page export went quadratic), and each row must still carry its key's source and slug.
  */
 export async function readExportPages(tx: BrainEngine, keys: ReadonlyArray<{ id: string; source_id: string; slug: string }>, withdrawals: ExportWithdrawal[]): Promise<ExportSnapshot[]> {
   if (!keys.length) return [];
-  const rows = await tx.executeRaw<Record<string, unknown>>(`SELECT p.*,
+  const rows = await tx.executeRaw<Record<string, unknown>>(`WITH export_page AS MATERIALIZED (
+    SELECT * FROM pages WHERE id = ANY($1::bigint[])
+  ) SELECT p.*,
     COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS export_tags
-    FROM unnest($1::bigint[], $2::text[], $3::text[]) AS k(id, source_id, slug)
-    JOIN pages p ON p.id=k.id AND p.source_id=k.source_id AND p.slug=k.slug AND p.deleted_at IS NULL`,
-  [keys.map(key => key.id), keys.map(key => key.source_id), keys.map(key => key.slug)]);
+    FROM export_page p WHERE p.deleted_at IS NULL`,
+  [keys.map(key => key.id)]);
   const byId = new Map(rows.map(row => [String(row.id), row]));
   const snapshots = keys.map(key => {
     const row = byId.get(String(key.id));
-    if (!row) throw new Error('Export snapshot unexpectedly lost a selected page.');
+    if (!row || row.source_id !== key.source_id || row.slug !== key.slug) throw new Error('Export snapshot unexpectedly lost a selected page.');
     return { page: rowToPage(row), tags: row.export_tags as string[] };
   });
   const fenced = snapshots.flatMap(({ page }) => {
