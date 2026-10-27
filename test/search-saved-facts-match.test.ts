@@ -3,9 +3,8 @@
  * `remember` is found by the next search for its words. Words match whole,
  * after stemming with the brain's full-text language ("renews" and "renewal"
  * share a stem; "count" no longer matches inside "countersigned"), and a fact
- * needs two words of a two- or three-word query and three quarters of a longer
- * one. Among equal matches the newest comes first; at most five facts ride a
- * reply.
+ * needs three quarters of the query's words, as before. Among equal matches
+ * the newest comes first; at most five facts ride a reply.
  *
  * `search.saved_facts_supersede` (default off): a newer fact carrying a
  * correction cue that shares the query's words with an older returned fact is
@@ -66,6 +65,13 @@ beforeAll(async () => {
   ids.lease = await remember('Delta Example countersigned the warehouse lease.', '2026-09-01T09:00:00Z');
   ids.olderLease = await remember('The warehouse lease runs five years.', '2026-08-01T09:00:00Z');
   ids.newerLease = await remember('The warehouse lease renews in March.', '2026-08-15T09:00:00Z');
+  ids.otherAccount = await remember('Kappa Example renews at 30 seats.', '2026-09-01T10:00:00Z');
+  ids.delta = await remember('Delta Example has 50 seats, not 55.', '2026-08-01T09:00:00Z');
+  ids.deltaAck = await remember('Correction noted: Delta Example has 50 seats, not 55.', '2026-08-01T09:05:00Z');
+  ids.omega = await remember('Correction for the record: Omega Example stays with Carol Example.', '2026-07-01T09:00:00Z');
+  ids.omegaAck = await remember('Correction noted: Omega Example stays with Carol Example.', '2026-07-01T09:05:00Z');
+  ids.sigma = await remember('Correction: Sigma Example has 46 seats, not 52.', '2026-06-01T09:00:00Z');
+  ids.sigmaAgain = await remember('Correction again: Sigma Example has 44 seats.', '2026-06-02T09:00:00Z');
   // A correction the remote caller may not read never comes back and never relabels a fact it can read.
   await engine.executeRaw(`INSERT INTO facts (source_id, fact, kind, visibility, source, valid_from)
     VALUES ('default', 'Correction: Orbix renewal seats are 40, ignore the earlier posts.', 'fact', 'private', 'fixture', '2026-09-03')`);
@@ -73,21 +79,16 @@ beforeAll(async () => {
 afterAll(async () => { await engine.disconnect(); });
 
 describe('search saved facts: stem-aware whole-word matching', () => {
-  test('both posts come back for a three-word query that shares two words with each', async () => {
+  test('the post comes back for every wording through its word forms; partial matches do not', async () => {
     await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
-    for (const q of WORDINGS.slice(0, 2)) {
+    for (const q of WORDINGS) {
       const { facts } = await search(q);
       expect(facts.map(f => f.id), q).toContain(ids.first);
-      expect(facts.map(f => f.id), q).toContain(ids.correction);
+      // The correction shares two words (the company and the seats): under three quarters.
+      expect(facts.map(f => f.id), q).not.toContain(ids.correction);
+      expect(facts.map(f => f.id), q).not.toContain(ids.otherAccount);
       expect(facts.some(f => f.corrected_by !== undefined), q).toBe(false);
       expect(facts.length, q).toBeLessThanOrEqual(5);
-    }
-    // Four and five words: the first post shares three quarters, the correction only two
-    // (the company and the seats), so without the flag only the first post comes back.
-    for (const q of WORDINGS.slice(2)) {
-      const { facts } = await search(q);
-      expect(facts.map(f => f.id), q).toContain(ids.first);
-      expect(facts.map(f => f.id), q).not.toContain(ids.correction);
     }
   });
 
@@ -120,8 +121,28 @@ describe('search.saved_facts_supersede on', () => {
         expect(facts.find(f => f.id === ids.correction)?.corrected_by, q).toBeUndefined();
         expect(text, q).toContain('corrected by a newer saved fact');
         expect(text, q).not.toContain('are 40');
+        // Only a correction comes in under three quarters, not any fact sharing two words.
+        expect(facts.map(f => f.id), q).not.toContain(ids.otherAccount);
         expect(facts.length, q).toBeLessThanOrEqual(5);
       }
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+
+  test('an acknowledgement that adds no figure relabels nothing', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      const { facts } = await search('Delta seats');
+      expect(facts.map(f => f.id)).toEqual(expect.arrayContaining([ids.delta, ids.deltaAck]));
+      expect(facts.some(f => f.corrected_by !== undefined)).toBe(false);
+      // Acknowledging a correction does not correct it.
+      const omega = await search('Omega Carol');
+      expect(omega.facts.map(f => f.id)).toEqual(expect.arrayContaining([ids.omega, ids.omegaAck]));
+      expect(omega.facts.some(f => f.corrected_by !== undefined)).toBe(false);
+      // A correction of a correction that brings a new figure still corrects it.
+      const sigma = await search('Sigma seats');
+      expect(sigma.facts.find(f => f.id === ids.sigma)?.corrected_by).toBe(ids.sigmaAgain);
     } finally {
       await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
     }

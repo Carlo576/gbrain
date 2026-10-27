@@ -30,6 +30,11 @@ export const SAVED_FACTS_SUPERSEDE_KEY = 'search.saved_facts_supersede';
 /** What marks a saved fact as a correction (Postgres ARE, matched case-insensitively). */
 const CORRECTION_CUE = String.raw`\m(correction|corrected|correcting|retract(s|ed|ing|ion)?|disregard|scratch that|i misspoke|i was wrong|not what (i|we) (posted|said|wrote)|ignore (the|my|that|what))\M`;
 
+/** The figures a fact states: its numbers, with dates and clock times left out. */
+function figures(text: string): Set<string> {
+  return new Set(text.replace(/\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?|\b\d{1,2}:\d{2}\b/g, ' ').match(/\d+(?:[.,]\d+)*/g) ?? []);
+}
+
 async function savedFactsSupersedeEnabled(engine: { getConfig(key: string): Promise<string | null> }): Promise<boolean> {
   try {
     const raw = (await engine.getConfig(SAVED_FACTS_SUPERSEDE_KEY))?.trim().toLowerCase();
@@ -44,7 +49,7 @@ async function savedFactsSupersedeEnabled(engine: { getConfig(key: string): Prom
  * page search never returns them (gbrain-evals Cat 40: agents saved a
  * correction with remember and the next session's search missed it). This
  * finds active facts that contain at least three quarters of the query's words
- * (two of a two- or three-word query), under the same source scope and
+ * (both words of a two-word query), under the same source scope and
  * visibility rules recall applies, copies of one claim collapsed before the cap
  * (#7043).
  * Words match whole after stemming with the brain's full-text language, as the
@@ -52,9 +57,12 @@ async function savedFactsSupersedeEnabled(engine: { getConfig(key: string): Prom
  * inside "countersigned". CJK words, which that parser does not split, match as
  * substrings. Most matched words first, then newest. With
  * `search.saved_facts_supersede` on, a newer fact with a correction cue that
- * shares at least two matched words with a returned fact is returned too, and
- * every fact it corrects moves below the facts nothing corrects, labelled
- * `corrected_by`.
+ * shares at least two matched words with a returned fact is returned too, even
+ * below the threshold, and every fact it corrects moves below the facts nothing
+ * corrects, labelled `corrected_by`. An acknowledgement corrects nothing: a cue
+ * fact that adds no figure (a number other than a date or time) to the older
+ * fact, when it restates one of its figures or the older fact is itself a
+ * correction.
  */
 export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceId?: string; sourceIds?: string[]; minTrust?: TrustTier }, queryText: string, otherNames: string[] = []): Promise<Array<SavedFactMatch & CollapseColumns>> {
   // A query naming one of two declared names also matches facts saved under the other.
@@ -97,7 +105,7 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
          SELECT f.id, f.fact, f.entity_slug, f.kind, f.valid_from::text AS valid_from, f.source, f.valid_from AS at, ${SAVED_FACT_COLLAPSE_COLUMNS},
            ARRAY(SELECT w.i FROM w WHERE CASE WHEN w.pat IS NOT NULL THEN lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE w.pat
              ELSE ${doc} @@ w.tq END ORDER BY w.i) AS matched,
-           CASE WHEN k.n <= 3 THEN LEAST(2, k.n) ELSE ceil(k.n * 0.75)::int END AS need,
+           GREATEST(LEAST(2, k.n), ceil(k.n * 0.75)::int) AS need,
            ($6::boolean AND f.fact ~* $5) AS cue
          FROM facts f, k
          WHERE ${active}
@@ -111,13 +119,17 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
       [sources, [...AUDIT_ROW_SOURCES], terms, terms.map(t => hasCJK(t) ? `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%` : null), CORRECTION_CUE, supersede],
     );
     const found = rows.map(({ at, matched, need, cue, ...fact }) => ({ fact: { ...fact, id: Number(fact.id) } as SavedFactMatch & CollapseColumns,
-      at: new Date(at as string).getTime(), words: new Set(matched.map(Number)), need: Number(need), cue }));
+      at: new Date(at as string).getTime(), words: new Set(matched.map(Number)), need: Number(need), cue, figures: cue ? figures(fact.fact) : new Set<string>() }));
     const admitted = found.filter(r => r.words.size >= r.need);
     if (supersede) {
       for (const older of admitted) {
         // Posts saved in one flush share a time; the later id is the later post.
+        // An acknowledgement is not a correction: a cue fact that adds no figure to the older fact
+        // corrects it only when it restates no figure and the older fact is not a correction itself.
+        const olderFigures = figures(older.fact.fact);
         const correction = found.filter(n => n.cue && (n.at > older.at || (n.at === older.at && n.fact.id > older.fact.id))
-          && [...n.words].filter(w => older.words.has(w)).length >= Math.min(2, n.need)).sort((a, b) => b.at - a.at || b.fact.id - a.fact.id)[0];
+          && [...n.words].filter(w => older.words.has(w)).length >= Math.min(2, n.need)
+          && !([...n.figures].every(x => olderFigures.has(x)) && (n.figures.size > 0 || older.cue))).sort((a, b) => b.at - a.at || b.fact.id - a.fact.id)[0];
         if (correction) older.fact.corrected_by = correction.fact.id;
       }
       const correcting = new Set(admitted.flatMap(r => r.fact.corrected_by ? [r.fact.corrected_by] : []));
