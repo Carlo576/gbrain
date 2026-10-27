@@ -758,6 +758,29 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
   }, { databaseUrl, setup }), 180_000);
 
   /**
+   * Value: protects=an editor save that lands between the withhold stamp and the removal is kept; fails_when=withholdGroups
+   * removes the file without rechecking its bytes after the stamp; why_new=the other withhold_stamped hook crashes and never
+   * changes the file; seam=the conversion:withhold_stamped fault point; no_claim=a save after the removal itself
+   */
+  test('#7618: a file edited between the withhold stamp and its removal refuses preview_changed and keeps the edit', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await committedPrivatePage(brain);
+    await databaseOnlyEdit(engine, 'notes/private', 'A private note, edited in the database.');
+    const before = await pageRow(engine, 'notes/private'), base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ withhold: { count: 1, by: { file_committed: 1 } }, discard: { count: 0 } });
+    const saved = PRIVATE('notes/private', 'Saved by an editor after the stamp.');
+    installFaultHook(point => { if (point === 'conversion:withhold_stamped') writeFileSync(join(root, 'notes/private.md'), saved); });
+    try { await expect(applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).rejects.toMatchObject({ code: 'preview_changed' }); }
+    finally { installFaultHook(undefined); }
+    expect(readFileSync(join(root, 'notes/private.md'), 'utf8')).toBe(saved);
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(base);
+    expect(atHead(root, 'notes/private.md')).toBe('notes/private.md');
+    expect(await pageRow(engine, 'notes/private')).toEqual({ body: before.body, deleted: false, source_path: null, withheld: 'notes/private.md', reason: 'private' });
+    expect(await strict(engine)).toBe(false);
+  }, { databaseUrl, setup }), 180_000);
+
+  /**
    * Value: protects=the text preview and receipt name the withheld page and a push that did not land, with the command that
    * pushes it; fails_when=describeGitPreview or describeResult drops the Withhold line, the withheld count or the push-pending
    * line; why_new=only JSON fields and the By-cause line were asserted; seam=none; no_claim=wording beyond the asserted fragments
