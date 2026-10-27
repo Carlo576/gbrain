@@ -181,6 +181,26 @@ for (const backend of testBackends()) describe(`[${backend}] the door commits on
     expect(git(root, 'status', '--porcelain')).toBe('');
   }, { databaseUrl, setup }), 180_000);
 
+  test('D4 resolution: repair stuck-recovery --keep prior writes the committed bytes back, ends the write failed and frees later writes', () => managedBrain(async ({ engine, ctx, root }) => {
+    await committedPage(engine, ctx);
+    const head = git(root, 'rev-parse', 'HEAD'), committed = git(root, 'rev-parse', `HEAD:${FILE}`);
+    const d4 = await publish(engine, ctx, page('Second'), { boundary: async name => {
+      if (name !== 'after_publication') return;
+      writeFileSync(join(root, FILE), readFileSync(join(root, FILE), 'utf8').replace('title: Second', 'title: USER DISK EDIT'));
+    } });
+    expect(d4).toMatchObject({ state: 'recovering', error_code: 'git_target_changed', blocked_reason: 'unexpected_file_bytes' });
+    const preview = await repairCli(engine, ['stuck-recovery', '--source', 'default', '--json']);
+    const hash = /"preview_hash": "([0-9a-f]{64})"/.exec(preview)![1]!;
+    const applied = await repairCli(engine, ['stuck-recovery', '--source', 'default', '--keep', 'prior', '--apply', '--expect', hash, '--yes', '--json']);
+    expect(applied).toContain('"resolved": 1');
+    expect(await getWriteRequestById(engine, d4.id)).toMatchObject({ state: 'failed', error_code: 'git_target_changed', recovery: null });
+    expect(await standing(engine, root)).toEqual({ row: 'First', head: 'First', disk: 'First', index: committed });
+    expect(git(root, 'rev-parse', 'HEAD')).toBe(head);
+    expect(git(root, 'status', '--porcelain')).toBe('');
+    expect(await publish(engine, ctx, page('Third'))).toMatchObject({ state: 'committed' });
+    expect(await standing(engine, root)).toEqual({ row: 'Third', head: 'Third', disk: 'Third', index: git(root, 'rev-parse', `HEAD:${FILE}`) });
+  }, { databaseUrl, setup }), 180_000);
+
   test('a stale index entry from an interrupted door refresh is restored, and the receipt and notice name the path', () => managedBrain(async ({ engine, ctx, root }) => {
     await committedPage(engine, ctx);
     expect(await publish(engine, ctx, page('Second'))).toMatchObject({ state: 'committed' });
@@ -276,6 +296,19 @@ describe('door plumbing: the planned state', () => {
     expect(git(root, 'rev-parse', ':notes/b.md')).toBe(staged);
     git(root, 'restore', '--staged', '--', 'notes/b.md');
     expect(await publishAt(root, 'notes/b.md', 'door\n')).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect(git(root, 'status', '--porcelain')).toBe('');
+  });
+
+  test('a HEAD entry with a legacy group-writable mode (100664) is not a staged change; the write commits', async () => {
+    const root = repo({ 'notes/a.md': 'a\n' });
+    const blob = execFileSync('git', ['-C', root, 'hash-object', '-w', '--stdin'], { input: 'legacy\n', env, encoding: 'utf8' }).trim();
+    const tree = execFileSync('git', ['-C', root, 'hash-object', '-t', 'tree', '--literally', '-w', '--stdin'],
+      { input: Buffer.concat([Buffer.from('100664 legacy.md\0'), Buffer.from(blob, 'hex')]), env, encoding: 'utf8' }).trim();
+    git(root, 'update-ref', 'refs/heads/main', git(root, 'commit-tree', tree, '-p', 'HEAD', '-m', 'legacy mode'));
+    git(root, 'reset', '-q', '--hard');
+    expect(git(root, 'ls-files', '-s', '--', 'legacy.md')).toStartWith('100644 ');
+    expect(await publishAt(root, 'legacy.md', 'door\n')).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect(git(root, 'show', 'HEAD:legacy.md')).toBe('door');
     expect(git(root, 'status', '--porcelain')).toBe('');
   });
 

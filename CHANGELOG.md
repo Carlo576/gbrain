@@ -12,9 +12,9 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [Unreleased]
 
-**A page write on a Git-canonical source now commits exactly what it published, or nothing, and costs less Git time per write. A full sync stops reparsing pages that are already current.**
+**A page write on a Git-canonical source now commits exactly what it published, or nothing, and a new page costs less Git time to write. A full sync stops reparsing pages that are already current.**
 
-Before, a write on a source with `canonical: git` committed whatever the file held on disk when Git staged it, so an edit made while the write was publishing could land in the commit while the database recorded the write's own content. A staged change of the same file was silently replaced. Both now refuse with a named code and leave your files and index as they were. Separately, every write on a large checkout ran `git check-ignore` up to three times; most writes now skip it, so per-write overhead drops on big brains. And `gbrain sync --full` (including the two passes inside `gbrain sources canonical --apply`) admits an unchanged, fully current page without re-reading it, which makes a conversion with nothing to adopt much faster.
+Before, a write on a source with `canonical: git` committed whatever the file held on disk when Git staged it, so an edit made while the write was publishing could land in the commit while the database recorded the write's own content. A staged change of the same file was silently replaced. Both now refuse with a named code and leave your files and index as they were. Separately, writing a new page on a large checkout ran `git check-ignore` up to three times; most such writes now skip it, so their overhead drops on big brains. And `gbrain sync --full` (including the two passes inside `gbrain sources canonical --apply`) admits an unchanged, fully current page without re-reading it, which makes a conversion with nothing to adopt much faster.
 
 ### What changed
 

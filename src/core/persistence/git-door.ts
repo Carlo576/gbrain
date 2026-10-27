@@ -268,7 +268,8 @@ async function doorCommit(session: GitSession, root: string, files: DoorFile[], 
       for (const target of targets.values()) {
         const dir = dirs.get(target.dir)!;
         const before = dir.found.get(target.name);
-        target.head = before && before.mode !== TREE_MODE ? `${before.mode} ${before.oid.toString('hex')}` : undefined;
+        const indexMode = before && /^100[0-7]{3}$/.test(before.mode) ? (parseInt(before.mode, 8) & 0o100 ? '100755' : '100644') : before?.mode;
+        target.head = before && before.mode !== TREE_MODE ? `${indexMode} ${before.oid.toString('hex')}` : undefined;
         if (target.oid) {
           if (!before || before.mode === TREE_MODE) fresh.push(target);
           if (before && /^100[0-7]{3}$/.test(before.mode) && target.mode !== before.mode) {
@@ -367,7 +368,7 @@ function refuseChanged(root: string, targets: Iterable<Target>): void {
   const moved = [...targets].filter(target => { try { return hashFile(join(root, target.rel)) !== target.planned; } catch { return true; } }).map(target => target.rel);
   if (!moved.length) return;
   throw opError('git_target_changed', `${moved.join(', ')} in ${root} no longer holds the bytes this write published, so nothing was committed and the write was not published.`,
-    'Another process changed the file during the write; recovery leaves the changed file as it is and holds the write, so the source\'s later writes wait. Preview with gbrain repair stuck-recovery --source <id> --json, ask the user which version to keep, then run gbrain repair stuck-recovery --source <id> --keep disk|prior --apply --expect <preview_hash> --yes (disk keeps the edit).', { detail: moved.join(',') });
+    'Another process changed the file during the write. If the file now holds neither this write\'s bytes nor the version before it, recovery leaves it as it is and holds the write, so the source\'s later writes wait: preview with gbrain repair stuck-recovery --json, ask the user which version to keep, then apply that choice with the --keep, --expect and --apply --yes flags the preview lists (--keep disk keeps the edit). If it holds the version before the write, nothing is held and the write failed; read the page before resubmitting it with a new request_id.', { detail: moved.join(',') });
 }
 
 /** Targets whose index entry differs from HEAD's and from the version their path's last commit replaced (a staged change, or a merge conflict) refuse as `git_index_conflict`. */
