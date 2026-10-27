@@ -378,16 +378,16 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
   // --resume (resumeHeld) settles it; fails_when=a kind falls through to a sibling's path (an unverified HEAD adopted as the target, a syncing
   // row with an unrelated HEAD completed or refreshed over, a dead drain left standing); why_new=the #7679 tests cover syncing orphans with HEAD at
   // the target only; seam=none; no_claim=a real process death (the crash is a hook throw; the refresh lock is released as on exit).
-  type Kind = 'draining' | 'fenced_old' | 'fenced_target' | 'fenced_unrelated' | 'merged_target' | 'merged_unrelated' | 'syncing_at_target' | 'syncing_unrelated'
-    | 'syncing_unrelated_synced';
+  type Kind = 'draining' | 'fenced_old' | 'fenced_target' | 'fenced_unrelated' | 'merged_target' | 'merged_unrelated' | 'syncing_at_target' | 'syncing_descendant'
+    | 'syncing_unrelated' | 'syncing_unrelated_synced';
   type Action = 'owner_scan' | 'plain' | 'resume';
-  const kinds: Kind[] = ['draining', 'fenced_old', 'fenced_target', 'fenced_unrelated', 'merged_target', 'merged_unrelated', 'syncing_at_target', 'syncing_unrelated',
-    'syncing_unrelated_synced'];
+  const kinds: Kind[] = ['draining', 'fenced_old', 'fenced_target', 'fenced_unrelated', 'merged_target', 'merged_unrelated', 'syncing_at_target', 'syncing_descendant',
+    'syncing_unrelated', 'syncing_unrelated_synced'];
   const stateOf = (kind: Kind) => kind.split('_')[0] as 'draining' | 'fenced' | 'merged' | 'syncing';
   const crashAt = { draining: 'drained', fenced: 'fenced', merged: 'fenced', syncing: 'syncing' } as const;
   // The owner scan's row and moved count; a merged row's bookkeeping leaves it syncing, and a syncing row with an unrelated HEAD waits for --resume.
   const scanned: Record<Kind, [string, number]> = { draining: ['aborted', 1], fenced_old: ['aborted', 1], fenced_target: ['syncing', 1], fenced_unrelated: ['recovery_required', 1],
-    merged_target: ['syncing', 1], merged_unrelated: ['recovery_required', 1], syncing_at_target: ['completed', 1], syncing_unrelated: ['syncing', 0], syncing_unrelated_synced: ['syncing', 0] };
+    merged_target: ['syncing', 1], merged_unrelated: ['recovery_required', 1], syncing_at_target: ['completed', 1], syncing_descendant: ['syncing', 0], syncing_unrelated: ['syncing', 0], syncing_unrelated_synced: ['syncing', 0] };
   const cells = kinds.flatMap(kind => (['owner_scan', 'plain', 'resume'] as Action[]).map(action => [kind, action] as [Kind, Action]));
   for (const engine of engines) for (const [kind, action] of cells) await withRefreshFixture(engine, async f => {
     const label = `${kind} x ${action}`;
@@ -400,6 +400,7 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
     // The resident consumer's owner scan may already have settled it; restore what the crash left.
     await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state=$2,completed_at=NULL WHERE id=$1::uuid`, [orphan.id, stateOf(kind)]);
     if (kind === 'fenced_target' || kind === 'merged_target') git(f.root, 'merge', '-q', '--ff-only', target);
+    if (kind === 'syncing_descendant') commitFile(f.root, 'beta/local.md', page('Local', 'Committed on top of the target.'));
     if (kind.includes('_unrelated')) { git(f.root, 'reset', '-q', '--hard', old); commitFile(f.root, 'beta/unrelated.md', page('Unrelated', 'Not the upstream commit.')); }
     if (kind === 'syncing_at_target' || kind === 'syncing_unrelated_synced') for (const member of [f.alpha, f.beta]) await f.engine.transaction(tx => withCoordinatedWrite(tx, [member],
       () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [member, target]), TEST_WRITE_ATTRIBUTION));
@@ -427,6 +428,15 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
       expect(f.head(), label).toBe(head);
       return;
     }
+    if (kind === 'syncing_descendant' && action === 'plain') {
+      // The adoption completes the orphan at the descendant HEAD; the refresh itself then refuses the unpushed local commit.
+      await refusedWith(run, 'refresh_diverged');
+      expect(await rows(), label).toEqual(['completed']);
+      expect(f.head(), label).toBe(head);
+      expect(await f.lastCommit(f.alpha), label).toBe(head);
+      expect(await f.lastCommit(f.beta), label).toBe(head);
+      return;
+    }
     const result = await run;
     const rolledBack = kind === 'draining' || kind === 'fenced_old';
     if (action === 'resume') {
@@ -442,9 +452,10 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
       expect(result, label).toMatchObject({ status: 'already_current', recovered: { refresh_id: orphan.id, state: 'completed', status: 'completed', previous_holder: { pid: process.pid } } });
       expect(await rows(), label).toEqual(['completed']);
     }
-    expect(f.head(), label).toBe(target);
-    expect(await f.lastCommit(f.alpha), label).toBe(target);
-    expect(await f.lastCommit(f.beta), label).toBe(target);
+    const synced = kind === 'syncing_descendant' ? head : target;
+    expect(f.head(), label).toBe(synced);
+    expect(await f.lastCommit(f.alpha), label).toBe(synced);
+    expect(await f.lastCommit(f.beta), label).toBe(synced);
   });
 }, 900_000);
 
