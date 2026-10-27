@@ -153,6 +153,19 @@ for (const backend of testBackends()) {
       expect(receipt).toMatchObject({ state: 'failed', error_code: 'preview_changed' });
     }, { setup, databaseUrl }), 180_000);
 
+    test('the preview prints the whole claim and its source with control characters neutralized', () => repoLessBrain(databaseUrl, async (engine, ctx) => {
+      await enableTrustProtections(engine);
+      let ref = '';
+      try { await operationsByName.remember.handler(ctx, { fact: `${CLAIM} ${'and more words '.repeat(6)}tail\u001b[2K`, provenance: 'email\u001b[1A\u001b[2Kend of source',
+        content_origin: 'tool_output', request_id: randomUUID() }); }
+      catch (e) { ref = JSON.parse((e as { detail: string }).detail).hold_ref; }
+      expect(ref).toMatch(/^h\d+$/);
+      const { summary } = await previewOwnerAction(engine, { action: 'release', ref });
+      expect(summary).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+      expect(summary).toContain('more words tail ');
+      expect(summary).toContain('source email [1A [2Kend of source');
+    }), 180_000);
+
     test('on a repo-less brain the preview shows the held payload fields the database-only release raises', () => repoLessBrain(databaseUrl, async (engine, ctx) => {
       await operationsByName.put_page.handler(ctx, { slug, request_id: randomUUID(), content: PAGE });
       const ref = await holdRemember(engine, ctx, slug);

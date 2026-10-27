@@ -18,8 +18,8 @@ async function runTrustReleaseUnpreviewed(ctx: DoctorContext): Promise<Check[]> 
   try {
     const rows = await connectedEngine(ctx).executeRaw<{ id: number; source_id: string; slug: string; row_num: number; hold_id: number; total: number }>(
       `SELECT f.id, f.source_id, f.source_markdown_slug AS slug, f.row_num, h.id AS hold_id, COUNT(*) OVER () AS total
-         FROM facts f JOIN write_gate_holds h ON h.kind = 'fact' AND h.status = 'released' AND h.source_id = f.source_id
-          AND h.slug = f.source_markdown_slug AND h.payload->>'row_num' = f.row_num::text
+         FROM facts f JOIN LATERAL (SELECT id FROM write_gate_holds WHERE kind = 'fact' AND status = 'released' AND source_id = f.source_id
+          AND slug = f.source_markdown_slug AND payload->>'row_num' = f.row_num::text ORDER BY id DESC LIMIT 1) h ON true
         WHERE f.trust_tier = 'user_confirmed' AND f.expired_at IS NULL AND f.write_origin->>'channel' = 'trust_release'
           AND f.write_origin->>'fields_previewed' IS NULL
         ORDER BY f.id LIMIT ${LIMIT}`);

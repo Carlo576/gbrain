@@ -107,8 +107,10 @@ const bindingOf = (value: unknown): string => createHash('sha256')
 /** A hold's approved state; #7656: plus the fence cell fields an index-existing release raises (`releaseCellOf`). */
 const holdBinding = (hold: Pick<HoldRow, 'id' | 'status' | 'last_seen_at'>, cellFields: Record<string, unknown> | null = null): string =>
   bindingOf({ id: hold.id, status: hold.status, last_seen_at: hold.last_seen_at, ...(cellFields ? { cell: cellFields } : {}) });
+/** One printable line: control characters (terminal escapes included) and runs of whitespace become one space. */
+const printable = (text: unknown): string => String(text ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
 const snippet = (text: unknown, max = 80): string => {
-  const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+  const flat = printable(text);
   return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat;
 };
 const trustCommand = (...args: string[]): string[] => ['gbrain', 'trust', ...args];
@@ -216,7 +218,7 @@ async function releaseCellOf(engine: BrainEngine, hold: HoldRow): Promise<{ cell
 /** #7656: what a fact release raises besides its text, for the preview: the fence cell an index-existing release indexes, else the held payload. */
 function releasedFields(hold: HoldRow, cell: ParsedFact | null): string {
   const p = hold.payload;
-  const quoted = (v: unknown) => typeof v === 'string' && v ? `"${snippet(v)}"` : null;
+  const quoted = (v: unknown) => typeof v === 'string' && v ? `"${printable(v)}"` : null;
   const date = (v: unknown) => typeof v === 'string' && v ? v.slice(0, 10) : null;
   const entries: Array<[string, unknown]> = cell
     ? [['kind', cell.kind], ['visibility', cell.visibility], ['confidence', cell.confidence], ['notability', cell.notability], ['valid from', cell.validFrom],
@@ -224,7 +226,7 @@ function releasedFields(hold: HoldRow, cell: ParsedFact | null): string {
       ['attributed to', cell.attributedTo], ['source', cell.source], ['context', quoted(cell.context)]]
     : [['kind', typeof p.kind === 'string' && p.kind ? p.kind : 'fact'], ['visibility', p.visibility === 'world' ? 'world' : 'private'], ['valid from', date(p.valid_from)],
       ['valid until', date(p.valid_until)], ['source', p.source], ['context', quoted(p.context)]];
-  const shown = entries.filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => `${k} ${v}`).join(', ');
+  const shown = entries.filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => `${k} ${printable(v)}`).join(', ');
   return cell ? ` with fence row ${cell.rowNum} as it stands: ${shown}` : ` with ${shown}`;
 }
 /**
@@ -365,7 +367,7 @@ async function previewHold(engine: BrainEngine, id: number, action: 'release' | 
     binding: holdBinding(hold, cell?.fields ?? null), tier: hold.tier,
     ...(action === 'release' ? { target_tier: 'user_confirmed' as TrustTier } : {}),
     summary: action === 'release'
-      ? `Release held ${hold.kind} ${label} ("${snippet(text)}", ${hold.reason_families.join(', ') || 'detector error'})${entity} into memory as "confirmed by you"`
+      ? `Release held ${hold.kind} ${label} ("${hold.kind === 'fact' ? printable(text) : snippet(text)}", ${hold.reason_families.join(', ') || 'detector error'})${printable(entity)} into memory as "confirmed by you"`
         + (hold.kind === 'fact' ? releasedFields(hold, cell?.cell ?? null) : '')
       : `Drop held ${hold.kind} ${label} ("${snippet(text)}"); it stays out of memory` };
 }
