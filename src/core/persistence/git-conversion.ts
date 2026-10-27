@@ -646,7 +646,7 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
         if ((disk ? sha256(disk) : null) !== item.disk) throw previewChangedError(plan.preview.preview_hash, previewCommand);
       }
       for (const item of group) removeConfined(root, join(root, item.path));
-      const commit = await commitThroughDoor(root, group.map(item => ({ path: join(root, item.path) })), lock);
+      const commit = await commitThroughDoor(root, group.map(item => ({ path: join(root, item.path), planned: null })), lock);
       if (commit) commits.push(commit);
       await stamp(group);
     } finally { await lock.release(); }

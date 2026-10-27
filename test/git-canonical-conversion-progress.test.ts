@@ -63,11 +63,14 @@ for (const backend of testBackends()) describe('[' + backend + '] #7644: a conve
       .toEqual([[0, BULK, 0], [CONVERSION_GROUP_MAX, BULK, 1], [BULK, BULK, 2]]);
     for (const phase of ['strict_pass_1', 'strict_pass_2'] as const) {
       const pass = seen.filter(progress => progress.phase === phase);
-      expect(pass.every(progress => progress.groups_committed === 2)).toBe(true);
-      // A round's level read sets the total, and its batch entries settle up to it.
+      expect(pass.every(progress => progress.groups_committed === 2 && progress.scanned <= progress.total)).toBe(true);
+      // A round's level read sets the total.
       expect(pass.some(progress => progress.round === 1 && progress.total >= BULK)).toBe(true);
-      expect(pass.some(progress => progress.round === 1 && progress.scanned > 0 && progress.scanned <= progress.total)).toBe(true);
     }
+    // The first pass settles its batch entries up to the total; the second admits every page, now current, in place, so its round has nothing to settle.
+    expect(seen.some(progress => progress.phase === 'strict_pass_1' && progress.round === 1 && progress.scanned >= BULK)).toBe(true);
+    expect(seen.filter(progress => progress.phase === 'strict_pass_2').every(progress => progress.scanned === 0)).toBe(true);
+    expect(seen.some(progress => progress.phase === 'strict_pass_2' && progress.round === 1 && progress.total === 0)).toBe(true);
   }, { databaseUrl, setup: bulkSetup }), 300_000);
 
   test('the CLI prints a progress line on stderr at each phase, and a JSON line with --json', () => managedBrain(async ({ engine }) => {
