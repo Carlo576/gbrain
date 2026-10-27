@@ -8,7 +8,8 @@
  *     says the commit landed and names the path;
  *   - another writer holding `index.lock` while the door refreshes the index makes the refresh refuse with the landed
  *     failure; the holder's lock is left to its holder and the door leaves no lock or index copy behind;
- *   - plumbing: a failed update of the index copy releases the lock and removes the copy.
+ *   - plumbing: a failed update of the index copy releases the lock and removes the copy; in a linked worktree the lock
+ *     and the refresh are on that worktree's own index (rev-parse --git-path index), never the main checkout's.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -166,5 +167,34 @@ describe('door plumbing: the index lock', () => {
     expect(error).toMatchObject({ code: 'git_unavailable', message: expect.stringContaining('landed, but the index') });
     expect(git(root, 'show', 'HEAD:notes/a.md')).toBe('door');
     expect(leftovers(root)).toEqual([]);
+  });
+
+  test('in a linked worktree the door locks and refreshes that worktree\'s own index, never the main checkout\'s', async () => {
+    const main = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-door-lock-')));
+    dirs.push(main);
+    git(main, 'init', '-q', '-b', 'main');
+    git(main, 'config', 'user.name', 'Example Writer'); git(main, 'config', 'user.email', 'writer@example.invalid');
+    mkdirSync(join(main, 'notes'));
+    writeFileSync(join(main, 'notes/a.md'), 'a\n');
+    git(main, 'add', '-A'); git(main, 'commit', '-qm', 'seed');
+    const root = join(main, '..', `${main.split('/').pop()}-linked`);
+    dirs.push(root);
+    git(main, 'worktree', 'add', '-q', '-b', 'side', root);
+    const lock = `${git(root, 'rev-parse', '--path-format=absolute', '--git-path', 'index')}.lock`;
+    expect(lock).not.toBe(join(main, '.git', 'index.lock'));
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-git-shim-')));
+    dirs.push(bin);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" update-index "*) [ -n "$GIT_INDEX_FILE" ] && { [ -f '${lock}' ] && : > '${bin}/locked'; [ -f '${join(main, '.git', 'index.lock')}' ] && : > '${bin}/main-locked'; };; esac\nPATH='${process.env.PATH}' exec '${realGit()}' "$@"\n`, { mode: 0o755 });
+    const mainIndex = readFileSync(join(main, '.git', 'index'));
+    writeFileSync(join(root, 'notes/a.md'), 'door\n');
+    await withEnv({ PATH: `${bin}:${process.env.PATH}` }, () => commitThroughDoor(root, [{ path: join(root, 'notes/a.md'), planned: sha256('door\n') }]));
+    expect({ locked: existsSync(join(bin, 'locked')), mainLocked: existsSync(join(bin, 'main-locked')) }).toEqual({ locked: true, mainLocked: false });
+    expect(git(root, 'show', 'HEAD:notes/a.md')).toBe('door');
+    expect(git(root, 'rev-parse', ':notes/a.md')).toBe(git(root, 'rev-parse', 'HEAD:notes/a.md'));
+    expect(readFileSync(join(main, '.git', 'index')).equals(mainIndex)).toBe(true);
+    expect(git(main, 'show', 'main:notes/a.md')).toBe('a');
+    const gitDir = join(lock, '..');
+    expect(readdirSync(gitDir).filter(name => name === 'index.lock' || name.startsWith('index.gbrain-'))).toEqual([]);
+    expect(leftovers(main)).toEqual([]);
   });
 });
