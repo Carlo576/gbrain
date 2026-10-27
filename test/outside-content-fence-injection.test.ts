@@ -32,6 +32,7 @@ import { extractTimelineFromContent } from '../src/core/timeline-extract.ts';
 import { parseInlineCitationTimelineEntries } from '../src/core/timeline-citations.ts';
 import { parseMarkdown } from '../src/core/markdown.ts';
 import { renderItemPage, renderRepoCard } from '../src/core/github-source.ts';
+import { renderPersonPage } from '../src/core/google/google-render.ts';
 import { redactSession, renderSessionParts } from '../src/core/transcripts/render.ts';
 
 const SOURCE = 'gsrc';
@@ -232,6 +233,24 @@ describe('GBRA-221: every outside-content renderer uses the shared neutralizer',
     expectInertPage(renderItemPage({ repo: 'acme-example/app', number: 1, kind: 'issue', detail, linked: [], reviews: [], reviewComments: [], checks: null,
       comments: [{ user: { login: 'example-user' }, body: HOSTILE, created_at: '2026-01-01T01:00:00Z' }] } as never, true, null));
     expectInertPage(renderRepoCard('acme-example/app', { description: HOSTILE, default_branch: 'main', archived: false, private: true } as never, null));
+  });
+
+  // Value: protects=a contact's name, organization and title cannot plant a fence or timeline row on the person page;
+  // fails_when=a renderPersonPage field drops its neutralizeOutsideText call; why_new=existing person-page tests only
+  // cover phone-only layout; seam=none; no_claim=the Google Contacts API shape (a ContactData literal stands in).
+  test('Google Contacts person pages: name, organization and title cannot carry a fence', () => {
+    const contact = (over: Record<string, unknown>) => ({ resourceName: 'people/c1', displayName: 'Bob Example', emails: ['bob@example.com'], phones: [],
+      organization: null, title: null, groups: [], deleted: false, ...over }) as never;
+    for (const over of [{ displayName: HOSTILE }, { organization: HOSTILE }, { organization: 'Acme Example', title: HOSTILE }]) {
+      const page = renderPersonPage(contact(over));
+      expect(page).not.toBeNull();
+      const body = page!.markdown.split('\n---\n').slice(1).join('\n---\n');
+      expect(parseFactsFence(body).facts).toEqual([]);
+      expect(parseTakesFence(body).takes).toEqual([]);
+      expect(parseLinksFence(body).rows).toEqual([]);
+      expect(extractTimelineFromContent(body, 'people/bob-example')).toEqual([]);
+      expect(body).not.toMatch(/gbrain\s*:/i);
+    }
   });
 
   test('chat transcripts: every fence kind and the timeline sentinel, not only facts and takes', () => {

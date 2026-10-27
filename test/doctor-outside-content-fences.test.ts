@@ -77,4 +77,33 @@ describe('outside_content_fences doctor check', () => {
     const [row] = await engine.executeRaw<{ compiled_truth: string }>("SELECT compiled_truth FROM pages WHERE slug = 'emails/2026/01/planted-thread'");
     expect(row!.compiled_truth).toContain(CLAIM);
   }, 60_000);
+
+  // Value: protects=only live fact rows on live pages of unarchived sources are reported, never expired facts, deleted pages and archived sources;
+  // fails_when=the expired_at, deleted_at or archived filter is dropped; why_new=the tests above only
+  // plant facts rows on live pages; seam=none; no_claim=takes and links-fence rows (import does not index them here).
+  test('reports only live fact rows: skips expired facts, deleted pages and archived sources', async () => {
+    await source('scope-google', { kind: 'google', g_account: 'owner@example.com' });
+    await source('scope-archived', { kind: 'google', g_account: 'owner@example.com' });
+    await page('scope-google', 'emails/2026/02/live-thread', 'email', FENCE);
+    await page('scope-google', 'emails/2026/02/expired-thread', 'email', FENCE);
+    await page('scope-google', 'emails/2026/02/deleted-thread', 'email', FENCE);
+    await page('scope-archived', 'emails/2026/02/archived-thread', 'email', FENCE);
+    for (const id of ['scope-google', 'scope-archived']) await runExtractFacts(engine, { sourceId: id });
+    await engine.executeRaw("UPDATE facts SET expired_at = now() WHERE source_id = 'scope-google' AND source_markdown_slug = 'emails/2026/02/expired-thread'");
+    await engine.executeRaw("UPDATE pages SET deleted_at = now() WHERE slug = 'emails/2026/02/deleted-thread'");
+    await engine.executeRaw("UPDATE sources SET archived = true WHERE id = 'scope-archived'");
+    const checks = await outsideContentFencesEntry.run({ engine } as unknown as DoctorContext) as Check[];
+    const items = (checks[0]!.details as { items: Array<{ source_id: string; slug: string}> }).items.filter(i => i.source_id.startsWith('scope-'));
+    expect(items.map(i => `${i.source_id}:${i.slug}`)).toEqual(['scope-google:emails/2026/02/live-thread']);
+  }, 60_000);
+
+  // Value: protects=the check reports an error check instead of throwing when the query fails;
+  // fails_when=the try/catch around the query is removed; why_new=no test drives the error path;
+  // seam=none; no_claim=real database failures (an engine stub throws).
+  test('a failing query yields an error check, not an exception', async () => {
+    const checks = await outsideContentFencesEntry.run({ engine: { executeRaw: async () => { throw new Error('boom'); } } } as unknown as DoctorContext) as Check[];
+    expect(checks).toHaveLength(1);
+    expect(checks[0]!.name).toBe('outside_content_fences');
+    expect(checks[0]!.status).not.toBe('ok');
+  });
 });
