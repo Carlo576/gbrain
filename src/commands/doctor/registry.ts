@@ -298,9 +298,9 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   dbAheadOfGitEntry,
   // Git-canonical G3: how far each strict source's index trails the commit at HEAD.
   gitIndexLagEntry,
-  fenceIntegrityEntry,
   // GBRA-221: live fence rows on imported pages whose body is outside-authored text (review only).
   outsideContentFencesEntry,
+  fenceIntegrityEntry,
   searchModeEntry,
 ];
 

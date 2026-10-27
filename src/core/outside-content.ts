@@ -19,6 +19,8 @@
  *   fence-repair near-miss recognizer and its `gbrain:facts:` pre-check, matches the exact token, so no marker of any
  *   kind survives and Tier 1 repair cannot upgrade a near miss into a live marker.
  * - `[Source:` → `[Source\:`, so no inline citation files a timeline entry.
+ * - CR, CRLF, U+2028 and U+2029 become LF first: the multiline (`/m`) timeline extractors treat each as a line start,
+ *   so a line test on `\n` alone would let a separator-joined row through.
  * - A backslash before each line that is a timeline sentinel, a bare `## Timeline` / `## History` heading, a dated
  *   timeline row or heading, a transcript message anchor or a date heading, using the parsers' own predicates.
  */
@@ -61,6 +63,7 @@ function isStructuralLine(line: string): boolean {
 /** Outside-authored text with no live gbrain marker, citation, timeline split or row, or transcript anchor. */
 export function neutralizeOutsideText(text: string): string {
   return text
+    .replace(/\r\n?|[\u2028\u2029]/g, '\n')
     .replace(MARKER_TOKEN_RE, (_m, word: string, ws: string) => `${word}${ws}\\:`)
     .replace(/\[Source:/g, '[Source\\:')
     .split('\n')
