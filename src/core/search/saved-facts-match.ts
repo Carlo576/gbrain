@@ -2,7 +2,7 @@
  * The saved facts `search` and `query` report beside their rows
  * (`retrieval.saved_facts`, after the facts of the entity the query names):
  * active facts that share the query's words, matched as stemmed whole words.
- * `search.saved_facts_supersede` (default off) adds correction-cue ordering.
+ * `search.saved_facts_supersede` (default on) adds correction-cue ordering.
  * Tests: test/search-saved-facts-match.test.ts, test/search-saved-facts.test.ts,
  * test/search/saved-facts-probe.test.ts.
  */
@@ -25,7 +25,7 @@ export interface SavedFactMatch { id: number; fact: string; entity_slug: string 
   /** With `search.saved_facts_supersede` on: the newer returned fact that corrects this one. */
   corrected_by?: number }
 
-/** Default off: a newer saved fact carrying a correction cue is returned ahead of the older fact it corrects, which is labelled `corrected_by`. */
+/** Default on (set false to turn off): a newer saved fact carrying a correction cue is returned ahead of the older fact it corrects, which is labelled `corrected_by`. */
 export const SAVED_FACTS_SUPERSEDE_KEY = 'search.saved_facts_supersede';
 /** What marks a saved fact as a correction (Postgres ARE, matched case-insensitively). */
 const CORRECTION_CUE = String.raw`\m(correction|corrected|correcting|retract(s|ed|ing|ion)?|disregard|scratch that|i misspoke|i was wrong|not what (i|we) (posted|said|wrote)|ignore (the|my|that|what))\M`;
@@ -38,9 +38,9 @@ function figures(text: string): Set<string> {
 async function savedFactsSupersedeEnabled(engine: { getConfig(key: string): Promise<string | null> }): Promise<boolean> {
   try {
     const raw = (await engine.getConfig(SAVED_FACTS_SUPERSEDE_KEY))?.trim().toLowerCase();
-    return raw === 'true' || raw === 'on' || raw === '1' || raw === 'yes';
+    return !(raw === 'false' || raw === 'off' || raw === '0' || raw === 'no');
   } catch {
-    return false;
+    return true;
   }
 }
 

@@ -6,7 +6,7 @@
  * needs three quarters of the query's words, as before. Among equal matches
  * the newest comes first; at most five facts ride a reply.
  *
- * `search.saved_facts_supersede` (default off): a newer fact carrying a
+ * `search.saved_facts_supersede` (default on): a newer fact carrying a
  * correction cue that shares the query's words with an older returned fact is
  * returned ahead of it, and the older one is labelled `corrected_by`. The
  * fixture is the shape of a harness case where a channel post was corrected
@@ -109,6 +109,20 @@ describe('search saved facts: stem-aware whole-word matching', () => {
 });
 
 describe('search.saved_facts_supersede on', () => {
+  test('on by default: with the key unset the correction comes back ahead of the fact it corrects', async () => {
+    await engine.unsetConfig(SAVED_FACTS_SUPERSEDE_KEY);
+    try {
+      for (const q of WORDINGS) {
+        const { facts } = await search(q);
+        expect(order(facts, ids.correction), q).toBeGreaterThanOrEqual(0);
+        expect(order(facts, ids.correction), q).toBeLessThan(order(facts, ids.first));
+        expect(facts.find(f => f.id === ids.first)?.corrected_by, q).toBe(ids.correction);
+      }
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+
   test('the correction comes back ahead of the fact it corrects, which is labelled, for every wording', async () => {
     await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
     try {

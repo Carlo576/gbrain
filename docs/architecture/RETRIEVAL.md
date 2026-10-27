@@ -348,7 +348,7 @@ Two cross-cutting seams sit around the pipeline rather than inside it:
   (both of a two-word query); the most matched words come first, then the
   newest. This is the only place `search` returns saved facts: the
   facts arm, the facts block and the temporal reserve run in `query` alone.
-  With `search.saved_facts_supersede=true` (default off), a newer fact with a
+  With `search.saved_facts_supersede` (default on; `false` turns it off), a newer fact with a
   correction cue ("correction", "ignore the ...", "not what I posted") that
   shares at least two matched words with a returned fact is returned too, even
   below the threshold, every fact it corrects moves below the facts nothing
