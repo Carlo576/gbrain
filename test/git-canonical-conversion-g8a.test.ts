@@ -618,6 +618,21 @@ for (const backend of testBackends()) describe(`[${backend}] G8a: sources canoni
     expect((await revisions(engine))['notes/untracked']).toBe(before['notes/untracked']);
   }, { databaseUrl, setup }), 180_000);
 
+  test('#7618: a private page whose committed file was deleted from the working tree only withholds it: the removal is committed', () => managedBrain(async brain => {
+    const { engine, root } = brain;
+    await committedPrivatePage(brain);
+    await databaseOnlyEdit(engine, 'notes/private', 'A private note, edited in the database.');
+    rmSync(join(root, 'notes/private.md'));
+    const before = await pageRow(engine, 'notes/private'), base = git(root, 'rev-parse', 'HEAD');
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview).toMatchObject({ withhold: { count: 1, by: { file_committed: 1, file_absent: 0 } }, discard: { count: 0 } });
+    expect(await applyGitConversion(engine, 'default', preview.preview_hash, PROCESSING)).toMatchObject({ status: 'converted', withheld: { pages: 1 }, after: { remaining: 0 } });
+    expect(conversionCommits(root, base)).toEqual([{ subject: expect.any(String), paths: ['notes/private.md'] }]);
+    expect(atHead(root, 'notes/private.md')).toBe('');
+    expect(git(root, 'status', '--porcelain')).toBe('');
+    expect(await pageRow(engine, 'notes/private')).toEqual({ body: before.body, deleted: false, source_path: null, withheld: 'notes/private.md', reason: 'private' });
+  }, { databaseUrl, setup }), 180_000);
+
   test('#7618: a file_absent withhold refuses preview_changed when the private page moved after the preview, and stamps nothing', () => managedBrain(async brain => {
     const { engine, root } = brain;
     await privateRemovedByHand(brain);

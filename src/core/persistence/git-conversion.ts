@@ -630,8 +630,9 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
   const stamp = (items: WithholdItem[]) => engine.transaction(async tx => {
     await declarePersistenceProtocol(tx);
     for (const item of items) {
-      await tx.executeRaw(`UPDATE pages SET database_only_reason=$2, withheld_source_path=COALESCE(NULLIF(source_path,''), withheld_source_path),
-        source_path=NULL, source_uri=NULL WHERE id=$1::bigint`, [item.id, item.declared]);
+      const [stamped] = await tx.executeRaw<{ id: string }>(`UPDATE pages SET database_only_reason=$2, withheld_source_path=COALESCE(NULLIF(source_path,''), withheld_source_path),
+        source_path=NULL, source_uri=NULL WHERE id=$1::bigint AND deleted_at IS NULL AND knowledge_revision::text IS NOT DISTINCT FROM $3 RETURNING id`, [item.id, item.declared, item.revision]);
+      if (!stamped) throw previewChangedError(plan.preview.preview_hash, previewCommand);
     }
   });
   const committed = plan.withhold.filter(item => item.kind === 'file_committed');
@@ -655,8 +656,11 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
     onGroup({ pages: group.length, commits: commits.length });
   }
   const absent = plan.withhold.filter(item => item.kind === 'file_absent');
-  for (const item of absent) await assertUnchanged(item);
-  if (absent.length) { await stamp(absent); onGroup({ pages: absent.length, commits: commits.length }); }
+  for (let start = 0; start < absent.length; start += CONVERSION_GROUP_MAX) {
+    const group = absent.slice(start, start + CONVERSION_GROUP_MAX);
+    await stamp(group);
+    onGroup({ pages: group.length, commits: commits.length });
+  }
   return { pages: plan.withhold.length, commits };
 }
 
