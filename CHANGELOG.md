@@ -12,9 +12,9 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.473.0] - 2026-10-27
 
-**Converting a source to Git-canonical now plans quickly on big brains, tells you where it is while it runs, keeps private pages out of Git, and pushes what it commits.**
+**Converting a source to Git-canonical now plans quickly on big brains, tells you where it is while it runs, converts sources with private pages instead of refusing, and pushes what it commits.**
 
-`gbrain sources canonical <source> --to git` previews a conversion and `--apply --expect <hash>` runs it. On a large source the preview used to read every page one at a time, and the apply ran silently: if it was stopped you had no idea how far it got. Now the preview reads pages in batches, the apply prints a progress line per phase, and stopping it prints where it stopped. A private page whose file is still committed is taken out of Git during the conversion and stays in the database. Where the source pushes its commits, the conversion pushes its own commits too.
+`gbrain sources canonical <source> --to git` previews a conversion and `--apply --expect <hash>` runs it. On a large source the preview used to read every page one at a time, and the apply ran silently: if it was stopped you had no idea how far it got. Now the preview reads pages in batches, the apply prints a progress line per phase, and stopping it prints where it stopped. A private page whose committed file differs from it no longer blocks the conversion: the conversion commits the file's removal and the page stays in the database. Where the source pushes its commits, the conversion pushes its own commits too.
 
 ### How to use it
 
@@ -31,8 +31,9 @@ GBRAIN_MEMORY_TRACE=5 gbrain sync --source <source>          # the same memory t
 |---|---|---|
 | Previewing a conversion of a large source | one export read per page | export reads in batches, with the same result |
 | A conversion apply running | silent until it finished | a progress line on stderr at each phase and every 10 seconds (a JSON line with `--json`) |
-| Stopping an apply with SIGTERM, SIGINT or SIGHUP | the process just ended | a partial report on stdout (phase, groups committed, items scanned, canonical state), exit 143, 130 or 129; the source stays mixed and a new preview lists only what is left |
-| A private page whose committed file differs from it | its file stayed committed | the conversion commits the file's removal and keeps the page in the database (`withhold` in the preview) |
+| Stopping an apply with SIGTERM, SIGINT or SIGHUP | the process just ended | a partial report on stdout (phase, groups committed, items scanned, canonical state), exit 143, 130 or 129. The source is git-canonical once `recordConversion` runs, before strict_pass_2, and the report's canonical state is authoritative: a stop before that leaves the source mixed and a new preview lists only what is left |
+| A private page whose committed file differs from it | the apply refused `git_conversion_blocked` and counted the page as `git_overwrites_database` | the conversion commits the file's removal and keeps the page in the database (`withhold` in the preview) |
+| A private page whose file was removed by hand | the conversion's strict pass read it as removed by a commit and deleted the page | the conversion withholds it and keeps the page in the database |
 | A private page whose committed file still equals it | kept in Git | unchanged: the file stays in Git, as before the conversion |
 | One path Git cannot check (for example under a symlinked directory) | every adoption candidate was discarded | only that path is discarded, as `ignore_status_unknown` |
 | Discards in the preview | one total | counted by cause |
@@ -49,7 +50,8 @@ GBRAIN_MEMORY_TRACE=5 gbrain sync --source <source>          # the same memory t
 
 ### Itemized changes
 
-- `src/core/persistence/git-conversion.ts`: batched export reads in the plan; unplaced holds judged in the plan; discards counted by cause; holds cleared after the strict recheck; private pages that record a file are withheld in groups (stamped with a revision check, then the removal committed through the door; a crash in between leaves the page live and the rerun finishes it); confinement checked before the stamp and the file rechecked before its removal; the apply pushes its door commits where durability applies; progress callbacks.
+- `src/core/persistence/git-conversion.ts`: batched export reads in the plan; unplaced holds judged in the plan; discards counted by cause; holds cleared after the strict recheck; private pages whose committed file differs from them, or whose file was removed by hand, are withheld in groups (stamped with a revision check, then the removal committed through the door; a crash in between leaves the page live and the rerun finishes it); confinement checked before the stamp and the file rechecked before its removal; the apply pushes its door commits where durability applies; progress callbacks.
+- `src/core/export-snapshot.ts`: a batched export read looks each page up by its primary key, so `gbrain export` and the preview stay linear on large sources.
 - `src/commands/sources-canonical.ts`: progress lines, the partial report on signal, the push-pending notice.
 - `src/core/memory-trace.ts`: `GBRAIN_MEMORY_TRACE=<seconds>` (1 to 3600) writes a memory line on stderr during a conversion apply and during `gbrain sync`.
 - `src/commands/sources-git-gap.ts`, `src/core/persistence/git-gap.ts`: the census reads a withheld page's file at its withheld path; one unknown ignore status no longer poisons a whole batch.
