@@ -10,6 +10,18 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A trust release confirms only what its preview showed.**
+
+Releasing a held fact that already sits in a page's `## Facts` table confirmed that row's confidence, notability, validity and other cells, though the owner's preview showed only the text (#7656). The database-only release, which every brain without a repository uses, could also release a hold that was re-gated after the owner approved it (#7657).
+
+### What changed
+
+- **The preview names every field the release confirms.** That's the held row's cells as they stand, or the held payload's kind, visibility, validity, source and context. The approval binds them, so a row edited after the approval refuses `preview_changed` and the fact stays held.
+- **The database-only release re-checks the approval** on the locked hold and refuses `preview_changed` when the hold changed after the owner approved it, the same as the managed path.
+- **New doctor check `trust_release_unpreviewed_fields`** lists facts released from a held row before this fix, so the owner can review them. It's read-only and never lowers a tier.
+
 ## [0.60.474.0] - 2026-10-27
 
 **A database role that can't read the writer state is now refused instead of let through.**
