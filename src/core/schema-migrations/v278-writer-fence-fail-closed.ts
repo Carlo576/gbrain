@@ -17,11 +17,12 @@ import {
 // (unreadable state), as does a page or source lookup row-level security
 // hides, the git-canonical recount under RLS on sources, and protocol
 // activation while RLS filters the tables it must see empty. An unmanaged
-// brain, the owner and any role that can read the state behave as before.
+// brain, the owner and any role that can read the state behave as before,
+// except that activation and the recount refuse any caller RLS applies to,
+// whatever its policies: a hidden row cannot be told from an absent one there.
 // Replaces only the five functions: their triggers already call them, and
 // re-creating the triggers would take ACCESS EXCLUSIVE locks on the largest
 // tables. No privilege changes, no SECURITY DEFINER, no row is read or written.
-// Provisional number: renumbered at the merge slot.
 export const v278: Migration = {
   version: 278,
   name: 'writer_fence_fail_closed',
