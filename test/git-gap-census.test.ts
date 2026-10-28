@@ -221,7 +221,7 @@ for (const backend of testBackends()) describe(`git-gap census (git-canonical G1
     expect((await censusGitGap(engine, 'default', { sample: 0 })).declared.mirror_source).toBe(13);
   }, 120000);
 
-  test('#7618: a batch with a page beyond a symlink is classified, not refused', async () => {
+  test('#7618: in the conversion plan, a batch with a page beyond a symlink is classified, not refused', async () => {
     const root = tempDir('git-gap-census-symlink-');
     git(root, 'init', '-q');
     await useCheckout(root);
@@ -230,17 +230,19 @@ for (const backend of testBackends()) describe(`git-gap census (git-canonical G1
     commitAll(root, 'init');
     mkdirSync(join(root, 'real'));
     symlinkSync('real', join(root, 'link'));
-    const census = await censusGitGap(engine, 'default', { sample: 10 });
+    const collected: Array<{ slug: string; state: string }> = [];
+    const census = await censusGitGap(engine, 'default', { sample: 10, collect: page => collected.push(page) });
     expect(census).toMatchObject({ complete: true, pages: 3, states: { equal: 1, undeclared_database_only: 2 } });
     expect(census.sample.find(item => item.slug === 'link/beyond')).toMatchObject({ path: 'link/beyond.md', state: 'undeclared_database_only' });
+    expect(collected.find(page => page.slug === 'link/beyond')).toMatchObject({ state: 'undeclared_database_only' });
   });
 
   /**
-   * Value: protects=a page whose ignore status Git refuses to read is reported as unknown by git-gap and doctor, never as a
-   * plain undeclared or worktree count; fails_when=the census drops ignoredPaths' unknown set (the pre-#7618 census refused
-   * instead); seam=none (a real check-ignore refusal beyond a symlink); no_claim=timeout and outside-repo reasons.
+   * Value: protects=a page whose ignore status Git cannot read is never counted as a plain undeclared page by git-gap or doctor;
+   * the report refuses as the pre-#7617 census did; fails_when=the report path classifies it as if not ignored;
+   * seam=none (a real check-ignore refusal beyond a symlink); no_claim=timeout and outside-repo reasons.
    */
-  test('#7618: a page whose ignore status Git cannot read is counted and named as unknown by git-gap and doctor', async () => {
+  test('#7618: git-gap and doctor refuse a source with a page whose ignore status Git cannot read', async () => {
     const root = tempDir('git-gap-census-unknown-');
     git(root, 'init', '-q');
     await useCheckout(root);
@@ -249,12 +251,12 @@ for (const backend of testBackends()) describe(`git-gap census (git-canonical G1
     commitAll(root, 'init');
     mkdirSync(join(root, 'real'));
     symlinkSync('real', join(root, 'link'));
-    const census = await censusGitGap(engine, 'default', { sample: 0 });
-    expect(census).toMatchObject({ pages: 2, ignore_status_unknown: { symlink: 1 } });
-    expect(describeGitGap(census)).toContain('1 page(s) have a path whose ignore status Git could not read (symlink 1)');
+    const refusal = 'Git could not say whether link/beyond.md in the checkout at';
+    await expect(censusGitGap(engine, 'default', { sample: 0 })).rejects.toMatchObject({ code: 'storage_error', message: expect.stringContaining(refusal) });
     const [check] = await dbAheadOfGitEntry.run({ engine, progress: { heartbeat: () => {} } } as never) as Array<{ message: string; details: any }>;
-    expect(check!.details.sources.find((s: { source_id: string }) => s.source_id === 'default')).toMatchObject({ ignore_status_unknown: { symlink: 1 } });
-    expect(check!.message).toContain('default: 1 equal, 1 undeclared_database_only (ignore status unknown for 1)');
+    expect(check!.details.sources.find((s: { source_id: string }) => s.source_id === 'default')).toBeUndefined();
+    expect(check!.details.errors).toEqual([expect.objectContaining({ source_id: 'default', message: expect.stringContaining('(symlink)') })]);
+    expect(check!.message).toContain(`Could not compare: default (${refusal}`);
   });
 
   test('a repository filter, textconv or fsmonitor never runs: HEAD and the working tree are read without them', async () => {
