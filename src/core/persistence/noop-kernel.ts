@@ -34,6 +34,8 @@ import type { WriteRequest } from './model.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import { belowSafeChunkFence, chunkGenerationFilter, chunkManifestReads } from '../search/safe-chunks.ts';
 import { fileContentHash } from './large-file.ts';
+import { embeddingWriteTarget } from '../page-state/projections.ts';
+import { quoteIdentifier } from '../search/embedding-column.ts';
 
 export interface NoopKernelResult {
   contentUnchanged: boolean;
@@ -112,4 +114,18 @@ export async function inspectUnchanged(engine: Pick<BrainEngine, 'kind' | 'execu
     }
   }
   return result(undefined, waived.length ? { waived } : {});
+}
+
+/**
+ * #7866: whether a content no-op leaves the page no embedding work: every chunk of its current generation has a vector in
+ * the active column for its exact text. Such a no-op queues no embedding effect (a re-sync, a conversion's strict pass);
+ * a page with a chunk never embedded, or embedded for other text, still gets one, as before. A model change keeps
+ * the column's vectors until `gbrain embed --stale`, as for any page that was not written.
+ */
+export async function chunksEmbeddedAsIs(engine: Pick<BrainEngine, 'kind' | 'executeRaw'>, pageId: number): Promise<boolean> {
+  const { column } = await embeddingWriteTarget(engine);
+  const [row] = await engine.executeRaw<{ owed: boolean }>(`SELECT EXISTS (SELECT 1 FROM content_chunks c JOIN pages p ON p.id=c.page_id
+      WHERE p.id=$1 AND ${chunkGenerationFilter('p', 'c', await chunkManifestReads(engine))}
+        AND (c.${quoteIdentifier(column.name)} IS NULL OR c.embedded_at IS NULL OR c.embedded_text_hash IS DISTINCT FROM md5(c.chunk_text))) AS owed`, [pageId]);
+  return row?.owed === false;
 }
