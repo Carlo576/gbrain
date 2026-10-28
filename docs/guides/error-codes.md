@@ -4343,6 +4343,16 @@ More: [docs/guides/write-refusals.md#timeline_rows_would_be_removed](../../docs/
 
 More: [docs/guides/data-ingestion.md#credential-redaction](../../docs/guides/data-ingestion.md#credential-redaction)
 
+### transcript_source_mismatch
+
+<a id="transcript_source_mismatch"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An explicit atom retry was refused before it started: its transcript does not resolve to the retry's source (a captured session of another source, a session with no known source, or a transcript outside the session corpus on a source other than default). | A batch that failed before session routing may hold another source's session transcript; retrying it would write that session's atoms into the wrong source. Captured sessions resolve through their stamp, frozen record or the registered path containing their cwd, and nothing falls back to the retry's source. | Run the atom drain for the source the session belongs to (corpus_source_other), or map a held session with gbrain sweep --assign-corpus <source> (preview first) and run that source. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `corpus_source_other`, `corpus_source_unresolved`, `corpus_legacy_unstamped`, `corpus_stamp_missing`, `corpus_source_missing`, `corpus_source_archived`, `corpus_source_incarnation_changed`, `corpus_path_unresolvable`, `transcript_outside_corpus`.
+
 ### triage_unreliable_backoff
 
 <a id="triage_unreliable_backoff"></a>
