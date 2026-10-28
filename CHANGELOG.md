@@ -32,7 +32,7 @@ To make a page private, write `visibility: private` on its own frontmatter line,
 |---|---|---|
 | A session of another source during `dream` for source A | written into source A | left for `gbrain dream --source <id> --phase synthesize` |
 | A session whose source never resolved, or an older file on a brain with several sources | written into the running source | held until `gbrain sweep --assign-corpus <source>` maps it, already-extracted ones included |
-| A write asking for `visibility: private` spelled `Private`, `PRIVATE`, `Visibility`, on the next line, as a block scalar, a list, a flow mapping, or an explicit or merged key | stored, page world-readable, reported as done | refused with `visibility_not_applied`, nothing written |
+| A write asking for `visibility: private` spelled `Private`, `PRIVATE`, `Visibility`, on the next line, as a block scalar, a list, a flow mapping, or an explicit or merged key | stored, page world-readable, reported as done | refused with `visibility_not_applied` (`invalid_frontmatter` when the frontmatter is unreadable or ambiguous), nothing written |
 
 ### Things to watch after you upgrade
 
@@ -57,7 +57,7 @@ Contributed by @exGeni (#7805) and @TGreen87 (#7841), who reported the two bugs.
 - `src/core/cycle/synthesize-source-routing.ts`: resolves each session file's source from the `.src-<id>` name or its frozen record, passes through files outside the session corpus, and holds the unresolved ones.
 - `src/core/cycle/synthesize.ts`: the synthesize phase uses that routing and reports both counts in `details.source_routing`.
 - `src/core/context/corpus-source.ts`, `src/commands/sweep.ts`: holds list already-extracted sessions, so `--assign-corpus` can release them.
-- `src/core/persistence/visibility-request.ts`, `src/core/persistence/page-prepare.ts`: a write for `put_page`, `edit_page` or `capture` whose frontmatter parses to a private request that the stored page would not keep is refused `visibility_not_applied` (`noncanonical_value` or `not_kept`). The YAML parse decides; a line scan is the fallback.
+- `src/core/persistence/visibility-request.ts`, `src/core/persistence/page-prepare.ts`, `src/core/persistence/upload-streamed.ts`: a write for `put_page`, `edit_page` or `capture` whose frontmatter parses to a private request that the stored page would not keep is refused `visibility_not_applied` (`noncanonical_value` or `not_kept`). The guard reads the caller's content before the server rewrites it (core marking carry, protected takes, timeline materialize), and content the importer would hold is refused with the importer's typed `invalid_frontmatter` instead. A streamed upload over 24 MiB runs the same check on its prepared frontmatter. The YAML parse decides; a line scan is the fallback.
 - `src/core/error-registry.ts`, `docs/guides/error-codes.md`, `docs/guides/write-refusals.md`, `src/core/behavior-change-notice.ts`: the new code, its fix and the upgrade notices.
 - `test/fixtures/goldens/exports/types.json`: the exported error union lists `visibility_not_applied`, so typed clients see the new code.
 

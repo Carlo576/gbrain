@@ -4643,7 +4643,7 @@ More: [docs/ENGINES.md#vector-index-prewarm](../../docs/ENGINES.md#vector-index-
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A page write asked for visibility: private, but the page would have stayed world-readable, so nothing was written. | A write that reports success while the page stays world-readable leaves the caller believing it is hidden. Page privacy reads only the exact lowercase key and value visibility: private (#7841). | Read the page and its revision, write visibility: private on its own frontmatter line (lowercase key and value), then submit again with a new request_id. Run: gbrain get --source '{source_id}' -- '{slug}' | agent | `repeat the read that failed` | 1 | no |
+| A page write asked for visibility: private, but the page would have stayed world-readable, so nothing was written. | A write that reports success while the page stays world-readable leaves the caller believing it is hidden. Page privacy reads only the exact lowercase key and value visibility: private (#7841). When the frontmatter is unreadable or ambiguous, the write is refused invalid_frontmatter instead. | Read the page and its revision, write visibility: private on its own frontmatter line (lowercase key and value), then submit again with a new request_id. Run: gbrain get --source '{source_id}' -- '{slug}' | agent | `repeat the read that failed` | 1 | no |
 
 Reasons: `noncanonical_value`, `not_kept`.
 
