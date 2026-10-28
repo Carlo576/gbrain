@@ -24,7 +24,8 @@ import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
-import { TERMINAL_AUDIT_SOURCE } from '../src/core/facts/audit-sources.ts';
+import { TERMINAL_AUDIT_SOURCE, outcomeMarkerSql } from '../src/core/facts/audit-sources.ts';
+import { GUARD_OUTCOME_MARKER_SQL } from '../src/core/facts/insert-guard-schema.ts';
 
 let engine: BrainEngine;
 
@@ -89,6 +90,10 @@ async function convergesDespiteMarkerTombstone(put: (slug: string, title: string
   expect(second.n).toBe(0);
   expect(await markerTombstones()).toBe(1);
 }
+
+test('the insert guard spells out the same outcome-marker predicate as audit-sources.ts', () => {
+  expect(GUARD_OUTCOME_MARKER_SQL).toBe(outcomeMarkerSql('i'));
+});
 
 for (const backend of testBackends()) {
   describe(backend, () => {
