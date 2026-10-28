@@ -280,7 +280,6 @@ or a physical projection that leaves attribution untouched):
 - `src/core/persistence/derived-retirement-hold.ts` (3): `retireDerivedPages` versions, soft-deletes and stamps retired derived pages (unmanaged extract_atoms stale atoms) in 500-page `maintenanceTransaction` chunks.
 - `src/core/persistence/facts-prepare.ts` (3): managed `extract_facts` request preparer.
 - `src/core/persistence/file-repair.ts` (2): `managed_file_repair` request preparer (#5988).
-- `src/core/persistence/grandfather.ts` (2): request preparer.
 - `src/core/persistence/links-maintenance.ts` (1): coordinated maintenance.
 - `src/core/persistence/loop-fact-retirement.ts` (1): request preparer.
 - `src/core/persistence/memory-mutations.ts` (1): `forget` inside its request's coordinated write.

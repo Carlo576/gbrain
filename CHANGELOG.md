@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.479.0] - 2026-10-28
+
+**Upgrading an older brain no longer rewrites every page.**
+
+A brain created by `gbrain init` before v0.60.412.0 never recorded the old v0.13.1 migration, so upgrading it ran that migration, and it wrote `validate: false` into the frontmatter of every page. Every page's content hash changed, and on a repo brain the database stopped matching the files in Git (or the stamp was committed into them). The same happened to an existing brain opened from a new `GBRAIN_HOME`. The stamp only opted pages out of validators that never refuse a write and out of `gbrain integrity` scans; those scans now cover such a brain's pages the way they cover a fresh brain's.
+
+v0.13.1 now records itself as complete and changes no page (#7814).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain apply-migrations` (or `gbrain upgrade`) on a brain whose ledger never recorded v0.13.1 | `validate: false` written into every page; every content hash moved | no page changes |
+| A managed repo brain in that state | the stamp committed into every Markdown file | no file or commit |
+| A grandfather write an older gbrain queued and left pending | published after the upgrade | ends `conflict` without writing |
+
+### For operators
+
+Pages an older release already stamped keep the stamp; sync and writes already accept it (#6429). Their frontmatter from before the stamp is in `~/.gbrain/migrations/v0_13_1-rollback.jsonl` on the machine that ran the migration. A page that carries `validate` because someone set it keeps it.
+
 ## [0.60.478.0] - 2026-10-28
 
 **A page purge no longer stops conversation-fact extraction from ever finishing (#7778).**
