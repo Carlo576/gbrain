@@ -41,6 +41,10 @@ gbrain dream --dry-run --phase synthesize         # preview now records nothing 
 - Sessions an earlier release already froze, and pages or atoms already written into the wrong source, are not changed or moved. Repair stays a separate, preview-first step.
 - Held sessions and held generation members are counted in the phase summary and `details.source_routing`, with the command that releases them.
 
+### Private files in another spelling
+
+**Git sync and `gbrain import` hold a file that asks for `visibility: private` in a spelling privacy does not read, instead of publishing it world-readable (#7848).** Page privacy reads only the exact lowercase `visibility: private`. A file that wrote `Visibility: private`, `visibility: Private`, a block scalar, a list, a flow mapping or a merge key used to sync or import as a page anyone could read. Now classic and managed sync hold it as `visibility_noncanonical` (the rest of the source syncs, and an existing page keeps its last imported version), and `gbrain import`, with or without a Git checkout, refuses it and imports the rest. Write `visibility: private` on its own frontmatter line and commit, or import the file again. `gbrain doctor` (`git_held_files`) counts the held files and the stored pages that already ask for private this way; nothing rewrites them.
+
 ### Itemized changes
 
 - `src/core/context/corpus-source.ts`: the deferred resolution of an unresolved session accepts only tier 4 (`resolveRegisteredLocalPathSource`, new in `src/core/source-resolver.ts`); a single-source brain resolves unfrozen (`sole_source`); `resolveCorpusFileSource(..., { readOnly })` freezes and binds nothing; `listCorpusSourceHolds` stops counting a sole-source brain's sessions that resolve (#7868, #7850).
@@ -48,8 +52,9 @@ gbrain dream --dry-run --phase synthesize         # preview now records nothing 
 - `src/core/cycle/synthesize.ts`, `src/core/minions/types.ts`, `src/core/minions/handlers/subagent.ts`: synthesis child jobs carry `corpus_source`, and the child re-resolves it before any model call (#7850).
 - `src/core/persistence/atom-retry.ts`, `src/core/error-registry.ts`: the explicit atom retry refuses a transcript of another source with `transcript_source_mismatch` (#7869).
 - `src/core/persistence/atom-maintenance.ts`, `src/core/cycle/extract-atoms.ts`: resumed generation members of another source's session are held and reported; dry runs resolve read-only (#7870, #7850).
-- `src/core/behavior-change-notice.ts`: four rows for these changes.
-- Tests, each on PGLite and Postgres (the resolver, routing and dry-run tests use brain directories with no Git checkout): `test/corpus-source-deferred-7868.test.ts`, `test/synthesize-session-source-recheck-7850.test.ts`, `test/atom-retry-session-source-7869.test.ts`, `test/extract-atoms-resume-session-source-7870.test.ts`, `test/synthesize-source-routing-realpath-7871.test.ts`, with `test/e2e/` wrappers.
+- `src/core/persistence/visibility-request.ts`, `src/core/import-screen.ts`, `src/core/import-file.ts`, `src/commands/sync/holds.ts`, `src/core/page-body/streamed-import.ts`, `src/core/persistence/sync-prepare.ts`, `src/core/persistence/import-prepare.ts`: classic and managed sync and `gbrain import` hold a file whose private request would not be stored canonically as `visibility_noncanonical`; `src/commands/doctor/checks/git-holds.ts` counts the held files and stored pages (`details.visibility_noncanonical`) (#7848).
+- `src/core/behavior-change-notice.ts`: five rows for these changes.
+- Tests, each on PGLite and Postgres (the resolver, routing and dry-run tests use brain directories with no Git checkout): `test/corpus-source-deferred-7868.test.ts`, `test/synthesize-session-source-recheck-7850.test.ts`, `test/atom-retry-session-source-7869.test.ts`, `test/extract-atoms-resume-session-source-7870.test.ts`, `test/synthesize-source-routing-realpath-7871.test.ts`, with `test/e2e/` wrappers; `test/visibility-noncanonical-hold-7848.test.ts` and `test/e2e/visibility-noncanonical-hold-7848-postgres.test.ts` (import of a plain directory with no Git checkout included).
 
 ## [0.60.482.0] - 2026-10-28
 
