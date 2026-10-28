@@ -39,6 +39,8 @@ import { validateIngestionEvent } from '../../ingestion/types.ts';
 import { importFromContent } from '../../import-file.ts';
 import { maintenanceTransaction } from '../../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../../persistence/ownership.ts';
+import { privateRequestRefusal } from '../../persistence/visibility-request.ts';
+import { parseMarkdown } from '../../markdown.ts';
 import { OperationError, type OperationContext } from '../../ops/contract.ts';
 import { submitPageMutation } from '../../persistence/page-mutations.ts';
 
@@ -250,6 +252,8 @@ export function makeIngestCaptureHandler(engine: BrainEngine) {
       remote: untrustedPayload,
       // #5575 A3: webhook and ingestion-daemon captures are external content: stored external_untrusted and gated.
       writeGate: { tier: 'external_untrusted' as const, origin: { channel: `ingest:${event.source_kind}`, source_uri: event.source_uri ?? null, source_kind: event.source_kind }, requestId: null },
+      // #7880: a private request page privacy would not read is held, not stored world-readable (refused below).
+      holdNoncanonicalPrivate: true,
     };
 
     if (managed) {
@@ -327,6 +331,10 @@ export function makeIngestCaptureHandler(engine: BrainEngine) {
       } else {
         throw err;
       }
+    }
+    // #7880: nothing was stored; the job refuses visibility_not_applied without a retry, as the door's put_page refuses it on a managed brain.
+    if (result.refusal?.code === 'visibility_noncanonical') {
+      throw privateRequestRefusal({ slug: result.slug, source_id: sourceFallback ? 'default' : sourceId ?? 'default' }, parseMarkdown(event.content, `${result.slug}.md`).frontmatter);
     }
     if (sourceFallback) {
       console.error(
