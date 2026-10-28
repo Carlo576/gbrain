@@ -96,6 +96,10 @@ test('declaredVisibilities reads the frontmatter block only, any key case, lower
   expect(declaredVisibilities(page('summary: >\n  visibility: private\n'))).toEqual([]);
   expect(declaredVisibilities('A body.\nvisibility: private\n')).toEqual([]);
   expect(declaredVisibilities('---\nvisibility: private\n')).toEqual([]);
+  expect(declaredVisibilities('\uFEFF\n\n---\r\nvisibility: private\r\n---\r\nA body.\r\n')).toEqual(['private']);
+  expect(declaredVisibilities('---\nvisibility: private\n...\nA body.\n')).toEqual(['private']);
+  expect(declaredVisibilities(page('"visibility": private # keep\n'))).toEqual(['private']);
+  expect(declaredVisibilities(page('visibility: private\nvisibility: public\n'))).toEqual(['private', 'public']);
 });
 
 for (const managed of [false, true]) describe(`${managed ? 'managed brain with a Git checkout' : 'repo-less brain'}: put_page visibility: private (#7841)`, () => {
@@ -113,7 +117,8 @@ for (const managed of [false, true]) describe(`${managed ? 'managed brain with a
     });
   }, 120_000);
 
-  for (const [label, extra] of [['visibility: Private', 'visibility: Private\n'], ['Visibility: private', 'Visibility: private\n'], ['VISIBILITY: "PRIVATE"', 'VISIBILITY: "PRIVATE"\n']] as const) {
+  for (const [label, extra] of [['visibility: Private', 'visibility: Private\n'], ['Visibility: private', 'Visibility: private\n'], ['VISIBILITY: "PRIVATE"', 'VISIBILITY: "PRIVATE"\n'],
+    ['visibility with Private on the next line', 'visibility:\n  Private\n'], ['visibility as a block scalar', 'visibility: |\n  private\n'], ['visibility as a flow list', 'visibility: [private]\n']] as const) {
     test(`${label} on an existing world page is refused noncanonical_value, and the page and its revision are unchanged`, async () => {
       await brain(managed, async (ctx, engine) => {
         await put(ctx, 'notes/example', page());
@@ -127,6 +132,27 @@ for (const managed of [false, true]) describe(`${managed ? 'managed brain with a
       });
     }, 120_000);
   }
+
+  test('a quoted key with a trailing comment still publishes private, with CRLF line endings too', async () => {
+    await brain(managed, async (ctx, engine) => {
+      for (const [slug, content] of [['notes/quoted', page('"visibility": private # keep\n')], ['notes/crlf', page('visibility: private\n').replace(/\n/g, '\r\n')]] as const) {
+        expect((await put(ctx, slug, content)).thrown).toBeUndefined();
+        expect(isPrivatePage((await snapshot(engine, ctx, slug))!.page)).toBe(true);
+      }
+    });
+  }, 120_000);
+
+  test('a remote caller is refused the same way, and its plain private request still publishes private', async () => {
+    await brain(managed, async (ctx, engine) => {
+      const remote = { ...ctx, remote: true };
+      await put(ctx, 'notes/example', page());
+      const before = (await snapshot(engine, ctx, 'notes/example'))!;
+      expect(await put(remote, 'notes/example', page('visibility: Private\n'), before.revision)).toMatchObject({ thrown: 'visibility_not_applied' });
+      expect((await snapshot(engine, ctx, 'notes/example'))!.revision).toBe(before.revision);
+      expect((await put(remote, 'notes/remote-example', page('visibility: private\n'))).thrown).toBeUndefined();
+      expect(isPrivatePage((await snapshot(engine, ctx, 'notes/remote-example'))!.page)).toBe(true);
+    });
+  }, 120_000);
 
   test('a new page created with visibility: Private is refused, never stored world-readable', async () => {
     await brain(managed, async (ctx, engine) => {

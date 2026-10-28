@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runPhaseSynthesize } from '../src/core/cycle/synthesize.ts';
@@ -62,23 +62,28 @@ const usage = { input_tokens: 100, output_tokens: 100, cache_read_tokens: 0, cac
 
 interface Fixture { engine: BrainEngine; cycle: { id: string; root: string }; other: { id: string; root: string }; corpus: string }
 
-async function fixture(managed: boolean, run: (f: Fixture) => Promise<void>) {
+async function fixture(managed: boolean, run: (f: Fixture) => Promise<void>, solo = false) {
   for (const engine of engines) {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-synth-source-'));
     const corpus = join(dir, 'corpus');
     const tag = randomUUID().slice(0, 8);
-    const cycle = { id: `source-a-${tag}`, root: join(dir, 'brain-a') };
+    const cycle = { id: solo ? 'default' : `source-a-${tag}`, root: join(dir, 'brain-a') };
     const other = { id: `source-b-${tag}`, root: join(dir, 'brain-b') };
     mkdirSync(corpus);
     try {
       await withEnv({ GBRAIN_HOME: join(dir, 'home'), ANTHROPIC_API_KEY: 'sk-test-synth-source', GBRAIN_SOURCE: undefined }, async () => {
         await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
-        for (const s of [cycle, other]) {
+        const sources = solo ? [cycle] : [cycle, other];
+        for (const s of sources) {
           mkdirSync(s.root);
-          await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [s.id, s.root]);
+          if (solo) {
+            await engine.executeRaw("DELETE FROM sources WHERE id <> 'default'");
+            await engine.executeRaw('UPDATE sources SET local_path=$2 WHERE id=$1', [s.id, s.root]);
+          }
+          else await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [s.id, s.root]);
         }
         await engine.setConfig('sync.write_through', 'true');
-        for (const s of [cycle, other]) await claimWorktree(engine, s.id, s.root);
+        if (!solo) for (const s of sources) await claimWorktree(engine, s.id, s.root);
         for (const [key, value] of Object.entries({
           'dream.synthesize.enabled': 'true', 'dream.synthesize.cooldown_hours': '0',
           'dream.synthesize.min_chars': '100', 'dream.synthesize.link_manifest': 'false',
@@ -182,4 +187,51 @@ for (const managed of [false, true]) describe(`${managed ? 'managed' : 'unmanage
       expect(await synthesizedSources(engine, { cycle, other })).toEqual({ 'sess-extracted.txt': [cycle.id] });
     });
   }, 120_000);
+
+  test('an --input file outside the corpus is kept for the cycle source, in no routing bucket', async () => {
+    await fixture(managed, async ({ engine, cycle, other, corpus }) => {
+      const outside = join(dirname(corpus), 'meeting-notes.txt');
+      writeTranscript(outside, 'the quarterly offsite');
+      const result = await runPhaseSynthesize(engine, { brainDir: cycle.root, sourceId: cycle.id, dryRun: false, inputFile: outside });
+      expect(result.status).toBe('ok');
+      expect(result.details.source_routing).toBeUndefined();
+      expect(await synthesizedSources(engine, { cycle, other })).toEqual({ 'meeting-notes.txt': [cycle.id] });
+    });
+  }, 120_000);
+});
+
+test('a sole-source brain (unmanaged) still synthesizes a legacy top-level file (#7805)', async () => {
+  await fixture(false, async ({ engine, cycle, other, corpus }) => {
+    writeTranscript(join(corpus, 'sess-solo.txt'), 'the office move');
+    const result = await runPhaseSynthesize(engine, { brainDir: cycle.root, sourceId: cycle.id, dryRun: false });
+    expect(result.status).toBe('ok');
+    expect(result.details.source_routing).toBeUndefined();
+    expect(await synthesizedSources(engine, { cycle, other })).toEqual({ 'sess-solo.txt': ['default'] });
+  }, true);
+}, 120_000);
+
+describe('assign-corpus listing includes sessions the sweep already extracted (#7805)', () => {
+  const extracted = (dir: string, name: string) => { writeTranscript(join(dir, name), 'the office move'); writeFileSync(join(dir, name + '.ingested'), '{}\n'); };
+
+  test('only a held extracted session is listed: not a stamped or frozen one, not a sole-source legacy file, not a file outside the corpus', () => {
+    const corpus = mkdtempSync(join(tmpdir(), 'gbrain-assign-corpus-'));
+    try {
+      const spool = ensureCorpusSpoolDir(corpus);
+      extracted(spool, sessionCorpusFileName('sess-held', CORPUS_UNRESOLVED_STAMP));
+      extracted(spool, sessionCorpusFileName('sess-stamped', 'source-a'));
+      extracted(spool, sessionCorpusFileName('sess-frozen', CORPUS_UNRESOLVED_STAMP));
+      expect(freezeSessionSource(corpus, 'sess-frozen', 'source-b', 'operator')?.source_id).toBe('source-b');
+      extracted(corpus, 'sess-legacy.txt');
+      const outside = join(dirname(corpus), `${basename(corpus)}-elsewhere`);
+      mkdirSync(outside);
+      extracted(outside, 'sess-elsewhere.txt');
+
+      expect(listCorpusSourceHolds(corpus, false).sessions).toEqual([]);
+      expect(listCorpusSourceHolds(corpus, false, { includeIngested: true })).toMatchObject({ unresolved: 1, legacy_unstamped: 1, sessions: ['sess-held', 'sess-legacy'] });
+      expect(listCorpusSourceHolds(corpus, true, { includeIngested: true }).sessions).toEqual(['sess-held']);
+      expect(assignCorpusSessions(corpus, ['sess-held', 'sess-frozen'], 'source-a')).toEqual(['sess-held']);
+      expect(freezeSessionSource(corpus, 'sess-frozen', 'source-a', 'operator')?.source_id).toBe('source-b');
+      rmSync(outside, { recursive: true, force: true });
+    } finally { rmSync(corpus, { recursive: true, force: true }); }
+  });
 });

@@ -4,12 +4,13 @@
  * comes back as a no-op, with the page still world-readable.
  *
  * The request is read from the content's leading frontmatter block line by line,
- * independently of the YAML parse, so a request the parse does not keep is still
- * seen: a key or value in another case (`Visibility: private`,
- * `visibility: Private`, which page privacy does not read as private), or a line
- * the parse drops. Only a request for `private` is checked, so the guard can only
- * refuse: it never widens a page and never changes what a remote caller may read
- * or write. A request that is kept passes unchanged.
+ * and from the parse of a visibility line, so a request the stored page would not
+ * keep is still seen: a key or value in another case (`Visibility: private`,
+ * `visibility: Private`, which page privacy does not read as private), a value
+ * the parse reshapes (a block scalar, a list) or a line the parse drops. Only a
+ * request for `private` is checked, so the guard can only refuse: it never widens
+ * a page and never changes what a remote caller may read or write. A request that
+ * is kept passes unchanged.
  */
 import { opError, type OperationError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
@@ -30,11 +31,31 @@ export function declaredVisibilities(content: string): string[] {
   return [];
 }
 
-/** Refuses a write whose content asks for `visibility: private` when `published` (the frontmatter it would store) is not private. */
-export function assertPrivateRequestKept(row: Pick<WriteRequest, 'slug' | 'source_id'>, content: string, published: Record<string, unknown> | null | undefined): void {
-  if (!declaredVisibilities(content).includes('private') || published?.visibility === 'private') return;
-  throw visibilityNotApplied(row, typeof published?.visibility === 'string' && published.visibility.trim().toLowerCase() === 'private'
-    || Object.keys(published ?? {}).some(key => key !== 'visibility' && key.toLowerCase() === 'visibility') ? 'noncanonical_value' : 'not_kept');
+/** Every string the frontmatter's `visibility` key (any case) holds, trimmed and lowercased; a list contributes its string items. */
+function visibilityValues(frontmatter: Record<string, unknown> | null | undefined): string[] {
+  const flatten = (value: unknown): string[] => typeof value === 'string' ? [value.trim().toLowerCase()] : Array.isArray(value) ? value.flatMap(flatten) : [];
+  return Object.entries(frontmatter ?? {}).flatMap(([key, value]) => key.toLowerCase() === 'visibility' ? flatten(value) : []);
+}
+
+/**
+ * The private request `content` carries, with the frontmatter it parses to, or null.
+ * A visibility line asks for private when its own text says so or when the parse
+ * reads it as private (a value on the next line, a block scalar, a flow list), so a
+ * spelling the line scan cannot read is still seen. Parsing waits for a visibility key.
+ */
+export function readPrivateRequest(content: string, parse: () => Record<string, unknown> | null | undefined): { frontmatter: Record<string, unknown> | null | undefined } | null {
+  const declared = declaredVisibilities(content);
+  if (!declared.length) return null;
+  const inline = declared.includes('private');
+  let frontmatter: Record<string, unknown> | null | undefined;
+  try { frontmatter = parse(); } catch (error) { if (inline) throw error; return null; }
+  return inline || visibilityValues(frontmatter).includes('private') ? { frontmatter } : null;
+}
+
+/** Refuses a write that asked for `visibility: private` when `published` (the frontmatter it would store) does not carry exactly that. */
+export function assertPrivateRequestKept(row: Pick<WriteRequest, 'slug' | 'source_id'>, published: Record<string, unknown> | null | undefined): void {
+  if (published?.visibility === 'private') return;
+  throw visibilityNotApplied(row, visibilityValues(published).includes('private') ? 'noncanonical_value' : 'not_kept');
 }
 
 function visibilityNotApplied(row: Pick<WriteRequest, 'slug' | 'source_id'>, reason: 'noncanonical_value' | 'not_kept'): OperationError {
