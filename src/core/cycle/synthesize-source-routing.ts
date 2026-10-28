@@ -13,6 +13,8 @@
  * falls back to the cycle's source. Files outside the session corpus (the meeting
  * transcripts dir, an `--input` file elsewhere) and imported conversation pages
  * (read from the cycle's source) are not session captures and pass unchanged.
+ * extract_atoms routes its session-corpus transcripts through the same two
+ * functions (#7846).
  */
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
@@ -54,22 +56,23 @@ export async function keepSessionSourceTranscripts(engine: BrainEngine, transcri
   return kept;
 }
 
-/** Names every corpus file the phase left out, with the command that synthesizes or releases it. */
-export function withSessionSourceRouting(result: PhaseResult, routing: SessionSourceRouting, sourceId: string): PhaseResult {
+/** Names every corpus file the phase left out, with the command that synthesizes (or extracts) or releases it. */
+export function withSessionSourceRouting(result: PhaseResult, routing: SessionSourceRouting, sourceId: string,
+  phase: 'synthesize' | 'extract_atoms' = 'synthesize'): PhaseResult {
   const others = Object.entries(routing.corpus_source_other).sort(([a], [b]) => a.localeCompare(b));
   const held = Object.entries(routing.held).sort(([a], [b]) => a.localeCompare(b));
   if (!others.length && !held.length) return result;
   const otherCount = others.reduce((n, [, c]) => n + c, 0);
   const heldCount = held.reduce((n, [, c]) => n + c, 0);
   const fix = [
-    ...others.map(([id]) => `gbrain dream --source ${id} --phase synthesize`),
+    ...others.map(([id]) => `gbrain dream --source ${id} --phase ${phase}`),
     ...(heldCount ? ['gbrain sweep --assign-corpus <source>'] : []),
   ];
   const parts = [
-    ...(otherCount ? [`${otherCount} corpus file(s) belong to other sources (${others.map(([id, c]) => `${id}: ${c}`).join(', ')}) and synthesize only under their own source`] : []),
+    ...(otherCount ? [`${otherCount} corpus file(s) belong to other sources (${others.map(([id, c]) => `${id}: ${c}`).join(', ')}) and ${phase === 'synthesize' ? 'synthesize' : 'extract'} only under their own source`] : []),
     ...(heldCount ? [`${heldCount} held with no frozen session source (${held.map(([r, c]) => `${r}: ${c}`).join(', ')})`] : []),
   ];
-  process.stderr.write(`[dream] synthesize for source ${sourceId}: ${parts.join('; ')}. Fix: ${fix.join(' | ')}\n`);
+  process.stderr.write(`[dream] ${phase} for source ${sourceId}: ${parts.join('; ')}. Fix: ${fix.join(' | ')}\n`);
   return { ...result, summary: `${result.summary}; ${parts.join('; ')}`,
     details: { ...result.details, source_routing: { source_id: sourceId, ...routing, fix } } };
 }

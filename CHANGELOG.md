@@ -10,6 +10,43 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.482.0] - 2026-10-28
+
+**Dream's atom extraction now keeps each captured session in its own source, instead of filing it under `default`.**
+
+Atom extraction reads your captured conversations and mines short notes ("atoms") from them. It used to write every atom into the source the run was working for, and only the `default` source read the conversation folder at all. On a brain with more than one source, a session you had captured under a private source could end up as atoms in `default`, where anyone who reads `default` can see them. Now each source's run reads the conversation folder and keeps only the sessions that belong to it. A session that belongs to another source waits for that source's run, and a session whose source was never recorded is held until you map it.
+
+### How to use it
+
+```bash
+gbrain dream --source <id> --phase extract_atoms     # extracts the sessions that belong to that source
+gbrain sweep --assign-corpus <source>                # preview: map held sessions with no recorded source
+gbrain sweep --assign-corpus <source> --apply        # apply the mapping, then run extraction again
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session of source B during a run for source A | its atoms were written into source A | skipped, and extracted when the phase runs for source B |
+| A run for any source other than `default` | read no conversations | reads the conversation folder and keeps its own sessions |
+| A session whose source never resolved, or an older file on a brain with several sources | extracted into the running source | held until `gbrain sweep --assign-corpus <source>` maps it |
+| Meeting transcripts | read by `default` | unchanged, still read only by `default` |
+
+### Things to watch after you upgrade
+
+- Atoms an earlier release already wrote into the wrong source are not moved. Repair is a separate, preview-first step.
+- Skipped and held sessions are counted in the phase summary, in a line on stderr and in `details.source_routing`, with the command that releases each one. Nothing is dropped.
+- On a brain with a single source nothing is held, and older files go to that source.
+
+### Itemized changes
+
+- `src/core/cycle/extract-atoms.ts`: every source discovers session-corpus transcripts and keeps the ones `keepSessionSourceTranscripts` resolves to the run's source; meeting transcripts stay with `default`; the phase result carries `details.source_routing`.
+- `src/core/cycle/synthesize-source-routing.ts`: `withSessionSourceRouting` takes the phase name, so the summary, the stderr line and the fix commands name `extract_atoms` or `synthesize`.
+- `src/commands/sweep.ts`: the `--assign-corpus` help and message text name `extract_atoms` beside synthesis.
+- `src/core/behavior-change-notice.ts`: the `extract_atoms_session_source_7846` row.
+- `test/extract-atoms-session-source-7846.test.ts`, `test/e2e/extract-atoms-session-source-7846.test.ts`: the real discovery path on a brain with `default` and two sources, without a Git checkout, on PGLite and Postgres.
+
 ## [0.60.481.0] - 2026-10-28
 
 **Synthesis stops filing a session into the wrong source, and a write that asks for a private page can no longer quietly publish it.**
