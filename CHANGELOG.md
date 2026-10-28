@@ -10,6 +10,53 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.483.0] - 2026-10-28
+
+**Captured sessions can no longer be pinned to a fallback source, and work queued or retried from before session routing re-checks the source before it writes.**
+
+Four gaps let a captured conversation reach a source it does not belong to. A session whose source was never recorded was filed under the brain's fallback (the configured default, the only other source, or `default`) the first time anything resolved it, and that choice was frozen. A synthesis job, an explicit atom retry and a crashed atom generation all carried the source they were queued with and wrote there without asking again. A conversation folder reached through a symlink was not recognized as the conversation folder at all. Now only a registered source whose folder contains the session's working directory counts as evidence, every queued or retried write checks the session's source first, dry runs record nothing, and symlinked paths are matched by their real path.
+
+### How to use it
+
+```bash
+gbrain sweep --assign-corpus <source>             # preview: map held sessions with no recorded source
+gbrain sweep --assign-corpus <source> --apply     # apply the mapping
+gbrain dream --dry-run --phase synthesize         # preview now records nothing about any session
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session with no recorded source, captured outside every registered source folder, on a brain with several sources | frozen to the fallback source | held as `corpus_source_unresolved` until `--assign-corpus` maps it |
+| The same session on a brain with one source | frozen to that source | uses that source without recording it |
+| A synthesis job whose session now belongs to another source, or whose source was recreated | wrote into the job's source | refused `session_source_changed` before any model call |
+| An explicit atom retry of another source's session | reran the model and wrote into the retry's source | refused `transcript_source_mismatch`, nothing started |
+| A crashed atom generation built from another source's session | its pending members were resubmitted | held, pages left as they are, counted in `details.source_routing.generation_members_held` |
+| A meeting folder or path that links into the conversation folder | read as ordinary transcripts | routed by the session's source; an unreadable real path is held |
+| `gbrain dream --dry-run` | could freeze a session's source | records nothing |
+
+### Things to watch after you upgrade
+
+- Sessions an earlier release already froze, and pages or atoms already written into the wrong source, are not changed or moved. Repair stays a separate, preview-first step.
+- Held sessions and held generation members are counted in the phase summary and `details.source_routing`, with the command that releases them.
+- A synthesis job queued by an earlier release is checked again only on a brain with managed persistence, where the job records its transcript. On other brains, let the waiting dream jobs (`gbrain jobs list --status waiting`) finish before you add, archive or recreate sources.
+
+### Private files in another spelling
+
+**Git sync and `gbrain import` hold a file that asks for `visibility: private` in a spelling privacy does not read, instead of publishing it world-readable (#7848).** Page privacy reads only the exact lowercase `visibility: private`. A file that wrote `Visibility: private`, `visibility: Private`, a block scalar, a list, a flow mapping or a merge key used to sync or import as a page anyone could read. Now classic and managed sync hold it as `visibility_noncanonical` (the rest of the source syncs, and an existing page keeps its last imported version), and `gbrain import`, with or without a Git checkout, refuses it and imports the rest. Write `visibility: private` on its own frontmatter line and commit, or import the file again. `gbrain doctor` (`git_held_files`) counts the held files and the stored pages that already ask for private this way; nothing rewrites them. On a brain without managed persistence, `gbrain put --file` and `gbrain capture --file` of a page over the single-string ceiling now refuse such a request with `visibility_not_applied`, as a smaller write does.
+
+### Itemized changes
+
+- `src/core/context/corpus-source.ts`: the deferred resolution of an unresolved session accepts only tier 4 (`resolveRegisteredLocalPathSource`, new in `src/core/source-resolver.ts`); a single-source brain resolves unfrozen (`sole_source`); `resolveCorpusFileSource(..., { readOnly })` freezes and binds nothing; `listCorpusSourceHolds` stops counting a sole-source brain's sessions that resolve (#7868, #7850).
+- `src/core/cycle/synthesize-source-routing.ts`: real-path corpus matching with an unreadable path held (#7871); `keepSessionSourceTranscripts` pins each kept corpus file and takes `readOnly`; `transcriptSourceHold`, `corpusSourceChanged` and `refuseChangedSessionSource` re-check queued and retained work (#7850, #7869, #7870).
+- `src/core/cycle/synthesize.ts`, `src/core/minions/types.ts`, `src/core/minions/handlers/subagent.ts`: synthesis child jobs carry `corpus_source`, and the child re-resolves it before any model call (#7850).
+- `src/core/persistence/atom-retry.ts`, `src/core/error-registry.ts`: the explicit atom retry refuses a transcript of another source with `transcript_source_mismatch` (#7869).
+- `src/core/persistence/atom-maintenance.ts`, `src/core/cycle/extract-atoms.ts`: resumed generation members of another source's session are held and reported; dry runs resolve read-only (#7870, #7850).
+- `src/core/persistence/visibility-request.ts`, `src/core/import-screen.ts`, `src/core/import-file.ts`, `src/commands/sync/holds.ts`, `src/core/page-body/streamed-import.ts`, `src/core/persistence/sync-prepare.ts`, `src/core/persistence/import-prepare.ts`: classic and managed sync and `gbrain import` hold a file whose private request would not be stored canonically as `visibility_noncanonical`; `src/commands/doctor/checks/git-holds.ts` counts the held files and stored pages (`details.visibility_noncanonical`); `src/cli/commands/append.ts` reports the streamed local `put --file` / `capture --file` refusal as `visibility_not_applied` (#7848).
+- `src/core/behavior-change-notice.ts`: five rows for these changes.
+- Tests, each on PGLite and Postgres (the resolver, routing and dry-run tests use brain directories with no Git checkout): `test/corpus-source-deferred-7868.test.ts`, `test/synthesize-session-source-recheck-7850.test.ts`, `test/atom-retry-session-source-7869.test.ts`, `test/extract-atoms-resume-session-source-7870.test.ts`, `test/synthesize-source-routing-realpath-7871.test.ts`, with `test/e2e/` wrappers; `test/visibility-noncanonical-hold-7848.test.ts` and `test/e2e/visibility-noncanonical-hold-7848-postgres.test.ts` (import of a plain directory with no Git checkout included); `test/visibility-noncanonical-surfaces-7848.test.ts` (streamed import, doctor candidates) and `test/cli-page-writes.test.ts` (an oversized local `put --file` on a brain with no managed persistence).
+
 ## [0.60.482.0] - 2026-10-28
 
 **Dream's atom extraction now keeps each captured session in its own source, instead of filing it under `default`.**
