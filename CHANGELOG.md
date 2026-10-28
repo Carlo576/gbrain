@@ -58,6 +58,138 @@ GBRAIN_MEMORY_TRACE=5 gbrain sync --source <source>          # the same memory t
 - `scripts/bench/sync-pass-memory.ts`: a memory probe for the strict-equivalent pass and the conversion (seed, run, cli, embed-seed).
 - Tests: `test/git-canonical-conversion-g8a.test.ts` (crash, refusal and withhold cases on PGLite and Postgres), `test/git-canonical-conversion-progress.test.ts`, `test/git-gap-census.test.ts`, and a Postgres smoke test for the memory probe.
 
+## [0.60.479.0] - 2026-10-28
+
+**Upgrading an older brain no longer rewrites every page.**
+
+A brain created by `gbrain init` before v0.60.412.0 never recorded the old v0.13.1 migration, so upgrading it ran that migration, and it wrote `validate: false` into the frontmatter of every page. Every page's content hash changed, and on a repo brain the database stopped matching the files in Git (or the stamp was committed into them). The same happened to an existing brain opened from a new `GBRAIN_HOME`. The stamp only opted pages out of validators that never refuse a write and out of `gbrain integrity` scans; those scans now cover such a brain's pages the way they cover a fresh brain's.
+
+v0.13.1 now records itself as complete and changes no page (#7814).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain apply-migrations` (or `gbrain upgrade`) on a brain whose ledger never recorded v0.13.1 | `validate: false` written into every page; every content hash moved | no page changes |
+| A managed repo brain in that state | the stamp committed into every Markdown file | no file or commit |
+| A grandfather write an older gbrain queued and left pending | published after the upgrade | ends `conflict` without writing |
+
+### For operators
+
+Pages an older release already stamped keep the stamp; sync and writes already accept it (#6429). Their frontmatter from before the stamp is in `~/.gbrain/migrations/v0_13_1-rollback.jsonl` on the machine that ran the migration. A page that carries `validate` because someone set it keeps it.
+
+## [0.60.478.0] - 2026-10-28
+
+**A page purge no longer stops conversation-fact extraction from ever finishing (#7778).**
+
+Each conversation page records its extraction outcome as a bookkeeping row with the same text on every page (`EXTRACTION_COMPLETE`, or `EXTRACTION_NOT_APPLICABLE`) and no entity. A page purge tombstoned every fact row of the page, that row included, so the tombstone had subject `*` and matched the outcome row of every other page in the source. Since #7438 the extractor leaves out a row that matches a tombstone, so no page could record its outcome: every run re-extracted and re-paid for the same pages, and doctor's backlog never reached zero.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page purge of a conversation page | tombstoned the outcome marker with subject `*` | tombstones the page's claims only; the marker is also left out of the purge's journal and segment sweeps |
+| A brain that already holds such a tombstone | every page stayed unfinished; each run paid again | the next run records each page's outcome and later runs skip them, with no manual step; the tombstone row stays |
+| An extracted user claim that matches a tombstone (#7438) | left out | still left out, even when its text is `EXTRACTION_COMPLETE` |
+| `gbrain forget <id>` or `forget <id> --purge` naming an outcome row | withdrew or purged the marker for the whole source | not found, nothing changes |
+
+Migration v279 replaces the facts insert guard's function so its purge refusal skips a row whose source is a conversation-facts audit source and whose text is exactly one of the two markers. Any other row under those sources is still refused. It changes no trigger, privilege or row.
+
+## [0.60.477.0] - 2026-10-28
+
+**A trust release confirms only what its preview showed.**
+
+Releasing a held fact that already sits in a page's `## Facts` table confirmed that row's confidence, notability, validity and other cells, though the owner's preview showed only the text (#7656). The database-only release, which every brain without a repository uses, could also release a hold that was re-gated after the owner approved it (#7657).
+
+### What changed
+
+- **The preview names every field the release confirms.** That's the held row's cells as they stand, or the held payload's kind, visibility, validity, source and context. The approval binds them, so a row edited after the approval refuses `preview_changed` and the fact stays held.
+- **The preview can't be made to show a field the row doesn't have.** A held fact's text is printed quoted and escaped, any other value containing a quote, comma or semicolon is quoted the same way, and invisible or bidirectional formatting characters become spaces.
+- **The database-only release re-checks the approval** on the locked hold and refuses `preview_changed` when the hold changed after the owner approved it, the same as the managed path.
+- **New doctor check `trust_release_unpreviewed_fields`** lists facts released from a held row before this fix, so the owner can review them. It's read-only and never lowers a tier.
+
+## [0.60.476.0] - 2026-10-27
+
+**Text someone else wrote can no longer add facts to your brain.**
+
+Gmail threads, calendar events, GitHub issues and chat transcripts are imported as pages, and their text came from other people. Until now that text went into the page as written. If an email held gbrain's facts-table markers and a table, the page treated the table as its own: `extract_facts` saved the sender's rows as facts, with the visibility and confidence the sender chose. The same trick could add takes and links, forge timeline entries, or replace facts gbrain had already saved on that page.
+
+Imports now make that text inert before it reaches the page. Every `gbrain:` marker gets a backslash (`gbrain\:facts:begin`). So do timeline sentinels and headings, dated timeline lines, `[Source: …]` citations and transcript speaker lines. The text still reads the same in the rendered page, but nothing parses it. Before that pass, CR, CRLF, U+2028 and U+2029 line breaks become plain newlines, so an unusual line break can't hide a marker or a timeline line.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An email, calendar description, GitHub comment or chat message contains a facts, takes or links table between gbrain's markers | the rows became the page's facts, takes or links | the text is kept and the markers are escaped, so nothing is indexed |
+| That text contains `<!-- timeline -->`, a `## Timeline` heading or dated timeline lines | the page split there and the lines became timeline entries | kept as plain text |
+| Facts gbrain already saved on a thread page, then a reply carries a facts table | the reply's table replaced them | the saved facts stay |
+
+### For operators
+
+- New doctor check `outside_content_fences` (read-only). It lists imported email, calendar, GitHub and transcript pages that have facts, takes or links indexed from a fence on them, with counts and never a cell value. Rows planted before this release stay until someone removes them. gbrain's own writers also add rows to some of these pages, so the check removes nothing. Review each listed page with the user, and withdraw a fact they say a sender planted with `gbrain forget <fact-id>`.
+- `POST /ingest` is unchanged: its caller is an authenticated writer with the same rights as `put_page`. Files the ingestion daemon picks up are unchanged too, because they're the owner's own.
+- New connectors should pass every outside field through `neutralizeOutsideText` in `src/core/outside-content.ts`.
+
+## [0.60.475.0] - 2026-10-27
+
+**A repository's own commit checks now apply to commits gbrain makes.**
+
+`gbrain git commit-push` and gbrain's own page writes told Git to read every file path literally. Git passes that setting on to the repository's hooks, so a pre-commit check that picks files by pattern (all `*.json` files, say) found no files and let the commit through. A JSON file with merge-conflict markers could be committed and pushed by gbrain while a plain `git commit` of the same file was refused. Hooks that build their own path patterns, such as a post-commit step that runs `git add -- ':(literal)<file>'`, failed for the same reason.
+
+gbrain now marks each of its own paths as literal one at a time and no longer turns the setting on for the whole command. Its hooks, filters and helpers start without it, even when gbrain's own environment sets it. Files whose names contain `*`, `?`, `[` or a leading `:` still commit only themselves.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A pre-commit hook lists staged files with a pattern (`git diff --cached --name-only -- '*.json'`) and refuses a bad one | the hook saw no files; gbrain committed and pushed | the hook refuses; `gbrain git commit-push` exits 1 with `git_unavailable` and the hook's message, leaves the file unstaged and pushes nothing |
+| A post-commit hook runs `git add -- ':(literal)<file>'` | `did not match any files` | works as after a plain `git commit` |
+| A clean filter, push helper or hook started for a gbrain commit | inherited `GIT_LITERAL_PATHSPECS=1` | sees no pathspec setting |
+| `GIT_LITERAL_PATHSPECS`, `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` or `GIT_ICASE_PATHSPECS` set in the environment gbrain runs in | passed to every Git command gbrain ran | dropped from Git commands gbrain runs |
+| A new page file whose name starts with `:` | the ignore check read it as the name without the colon | checked under its real name |
+
+Release 0.60.474.0 also updated the `qs` dependency to 6.16.1 for security advisory GHSA-6pq8-jhm2-2vcw.
+
+## [0.60.474.0] - 2026-10-27
+
+**A database role that can't read the writer state is now refused instead of let through.**
+
+The writer guards on pages, facts, takes, tags, timeline entries, aliases, sources and the segment tables check `persistence_brain` before deciding whether a write needs the coordinator. A non-owner Postgres role without BYPASSRLS, with write policies on those tables but none on the state tables, read no state row, so the guard treated the brain as unmanaged and allowed the write. The Git-canonical fence, the persistence protocol floor, protocol activation and the Git-canonical source count had the same gap. Each of them now refuses with `writer_coordinator_required` ("writer state is unreadable to this database role") when row-level security hides the state it reads. The owner and roles that bypass RLS behave as before. So do roles that can read the state, on managed and unmanaged brains alike, except at protocol activation and the Git-canonical source count, which refuse any role that row-level security filters (a hidden row there can't be told from an absent one). A role that can't see `persistence_brain` is now refused even on an unmanaged brain, since the guard can't tell which kind it is. One case now refuses every caller: a managed brain whose `persistence_brain` or `git_canonical_brain` row is missing, which `gbrain init` never leaves.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A scoped role writes a page on a managed brain without seeing `persistence_brain` | the write passed as if the brain were unmanaged | refused: `writer_coordinator_required`, `relationship: unreadable_state` |
+| The same role writes to a Git-canonical source without seeing `git_canonical_brain` or the source row | the Git-protocol fence was skipped | refused the same way (a writer that declares the Git protocol still passes) |
+| A role deletes a tag or timeline row whose page RLS hides | treated as a cascade and allowed | refused |
+| A role updates a request or effect without seeing the protocol floor | no floor applied | refused |
+| Protocol activation by a role that RLS filters on the persistence tables | pending work could read as quiesced | refused |
+| A Git-canonical flag change by a role that RLS filters on `sources` | the strict-source count could drop to zero | refused |
+
+The migration replaces five function bodies. It changes no privileges and rewrites no data. Function owners and `search_path` settings stay the same.
+
+## [0.60.473.0] - 2026-10-27
+
+**A change you stage while a write is finishing is no longer overwritten.**
+
+After a write on a Git-canonical source commits, gbrain refreshes the Git index so `git status` shows the written pages as clean. That refresh read the index, compared it, and then wrote it without holding Git's index lock. If you staged a change to the same page in that gap (`git add`, `git update-index`), the refresh wrote its own version over yours and the write still reported `committed`.
+
+The refresh now takes Git's own `index.lock`, the same lock `git add` and `git commit` take. It updates a copy of the index and renames the copy into place, so no other Git command can change the index between the check and the write.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| You stage a page while gbrain refreshes the index after its commit | your staged change was silently replaced | Git refuses your `git add` on `index.lock`; run it again and it holds |
+| You stage a page after gbrain's commit and before its refresh | left staged (unchanged) | left staged; the write's failure says the commit landed and names the page |
+| Another Git command holds `index.lock` during the refresh | the refresh could fail with a Git error | the write's failure says the commit landed and the index wasn't updated, and names the pages; the other command keeps its lock |
+| A linked worktree | refreshed its own index | refreshed under that worktree's own lock, never the main checkout's |
+
+In every row the commit itself has landed. Only the index refresh is skipped, and `git status` shows the difference.
+
+A writer that doesn't take the index lock (for example `git commit -- <path>`, which reads the index before locking) is still outside this guarantee.
+
 ## [0.60.472.0] - 2026-10-27
 
 **A `gbrain sources refresh` whose process dies mid-refresh no longer wedges the managed checkout. The next refresh finishes it, and status tells you who holds a refresh and whether it is still running.**
@@ -107,7 +239,7 @@ Before, a write on a source with `canonical: git` committed whatever the file he
 
 | Situation | Before | Now |
 |---|---|---|
-| A page's file is edited on disk while a strict write publishes it | Git committed the edit; the database recorded the write's content | refuses `git_target_changed`: nothing is committed and the edit stays on disk. When the file holds neither the write's bytes nor the version before it, the source's writes pause until `gbrain repair stuck-recovery` resolves it; when it holds the version before the write, the write fails with nothing held |
+| A page's file is edited on disk while a strict write publishes it | Git committed the edit; the database recorded the write's content | refuses `git_target_changed`: nothing is committed, the edit stays on disk, and the source's writes pause until `gbrain repair stuck-recovery` resolves it |
 | The page's file has a staged change when a strict write starts | the write replaced the staged change in the index | refuses `git_index_conflict` with the index untouched; commit or unstage, then retry |
 | The index still holds the version from before an earlier gbrain commit whose index update failed | no notice said the entry was replaced | the next write restores the entry to HEAD and reports a `git_index_restored` notice naming the path |
 | A strict write to a path no ignore rule could match | ran `git check-ignore`, which reads the whole index | skips it; any path a rule might match still goes to Git, which stays the only judge |
@@ -115,7 +247,7 @@ Before, a write on a source with `canonical: git` committed whatever the file he
 
 ### Things to watch after you upgrade
 
-- A write refused with `git_target_changed` while the file holds neither the write's bytes nor the version before it pauses that source's writes on purpose. `gbrain sources writer status --json` shows the state, and `gbrain repair stuck-recovery --source <id> --keep disk|prior` previews and applies the choice of which version wins. When the file holds the version before the write, nothing pauses: the write fails, so read the page before resubmitting it.
+- A write refused with `git_target_changed` pauses that source's writes on purpose. `gbrain sources writer status --json` shows the state, and `gbrain repair stuck-recovery --source <id> --keep disk|prior` previews and applies the choice of which version wins.
 - A staged edit to a page's file now blocks gbrain writes to that page until you commit or unstage it.
 - Git decides alone, with no filter in front, on sparse checkouts, skip-worktree entries, split or sparse indexes, unresolvable ignore includes, and gitlinks or symlinks on the path.
 - Nothing rewrites your data on upgrade.
