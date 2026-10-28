@@ -345,8 +345,8 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   const parsed = { ...scan.parsed, compiled_truth: '', timeline: '' } as ParsedMarkdown;
   const frontmatterHold = classifyImportHold(parsed);
   if (frontmatterHold) return { slug: expectedSlug, status: 'skipped', chunks: 0, error: frontmatterHold.message, refusal: frontmatterHold, skip_reason: 'invalid_frontmatter' };
-  // #7848: a file import holds a private request page privacy would not read; a page write (`content`) refuses it at its own guard.
-  const privateHold = opts.content ? null : noncanonicalPrivateHold('', parsed.frontmatter);
+  // #7848: a private request page privacy would not read is held; only an upload session (`content` plus `coordinated`) refuses it at its own guard.
+  const privateHold = opts.content && opts.coordinated ? null : noncanonicalPrivateHold('', parsed.frontmatter);
   if (privateHold) return { slug: expectedSlug, status: 'skipped', chunks: 0, error: privateHold.message, refusal: privateHold, skip_reason: privateHold.code };
   let slug = expectedSlug;
   if (!expectedSlug || parsed.slug !== expectedSlug) {

@@ -26,7 +26,7 @@
  * (`transcriptSourceHold`, #7869, #7870). Dry runs resolve read-only.
  */
 
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
@@ -66,6 +66,7 @@ function corpusLocation(filePath: string, corpusDir: string): CorpusFileLocation
   if (realRoot === null) return lexical;
   const realSpool = realpathOrMissing(corpusSpoolDir(root));
   const realFile = realpathOrMissing(filePath);
+  if (realFile === null && !lstatSync(filePath, { throwIfNoEntry: false })) return lexical;
   if (realRoot === undefined || realSpool === undefined || !realFile) return 'unresolvable';
   const real = locate(realFile, realRoot, realSpool);
   return lexical === 'spool' || real === 'spool' ? 'spool' : lexical ?? real;
@@ -119,7 +120,8 @@ export async function corpusSourceChanged(engine: BrainEngine, pin: { raw_source
 /**
  * A dream synthesis child's check before any model call: refused (`session_source_changed: <reason>`, no retry) when its
  * pinned file no longer resolves to the job's source or incarnation. A child queued before the pin existed is checked
- * from `dream_output.raw_source` and the configured corpus dir.
+ * from `dream_output.raw_source` and the configured corpus dir, which only a managed brain's children carry; an unmanaged
+ * child queued before the pin has neither and runs unchecked.
  */
 export async function refuseChangedSessionSource(engine: BrainEngine,
   data: { corpus_source?: CorpusSourcePin; dream_output?: { raw_source: string }; source_id?: string }): Promise<void> {

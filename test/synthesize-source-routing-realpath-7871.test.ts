@@ -139,4 +139,15 @@ describe('#7871 corpus files are recognized through symlinks', () => {
       expect(routing.held).toEqual({ corpus_path_unresolvable: 1 });
     });
   }, 60_000);
+
+  test('a path outside the corpus that no longer exists is not a corpus file, so it is not held as a captured session', async () => {
+    await brain(async (engine, dir) => {
+      const corpus = join(dir, 'corpus');
+      mkdirSync(corpus);
+      const gone = join(dir, 'meetings', 'gone.txt');
+      const { kept, routing } = await route(engine, [gone], corpus, 'default');
+      expect(kept).toEqual([gone]);
+      expect(routing.held).toEqual({});
+    });
+  }, 60_000);
 });
