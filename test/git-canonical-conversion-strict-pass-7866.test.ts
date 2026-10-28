@@ -7,10 +7,10 @@
  * drained pass, progress whose total is the planned paths, and refusals that carry the operator contract.
  */
 import { describe, expect, test } from 'bun:test';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { SyncResult } from '../src/commands/sync.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
@@ -90,6 +90,41 @@ for (const backend of testBackends()) describe(`[${backend}] #7866: the conversi
     expect(queued.map(row => Number(row.page_id))).toEqual([Number(unembedded!.id)]);
   }, { databaseUrl, setup }), 300_000);
 
+  // Value: protects=a content no-op still queues an embedding effect for a page with a chunk lacking its embedded_at stamp, or whose text projection is not sealed at its revision; fails_when=chunksEmbeddedAsIs ignores either; why_new=the test above covers only a stale text hash; seam=none; no_claim=a NULL vector (such a page is not re-imported by the round) and provider calls
+  test('a no-op re-import still queues an embedding effect for a page with a chunk lacking its embedded_at stamp, or with its text projection behind its revision', () => managedBrain(async ({ engine }) => {
+    await firstSync(engine);
+    await legacyEmbedded(engine);
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys, '{0,parser}', '"parser-of-an-older-release"'::jsonb) WHERE completed_keys->0 ? 'parser'`);
+    const ids = Object.fromEntries((await engine.executeRaw<{ slug: string; id: number }>("SELECT slug, id FROM pages WHERE slug IN ('notes/n05','notes/n08')")).map(row => [row.slug, Number(row.id)]));
+    await engine.executeRaw('UPDATE content_chunks SET embedded_at=NULL WHERE page_id=$1', [ids['notes/n08']]);
+    await engine.executeRaw('UPDATE pages SET text_projection_revision=NULL WHERE id=$1', [ids['notes/n05']]);
+    const [{ last }] = await engine.executeRaw<{ last: string }>('SELECT COALESCE(max(id), 0)::text AS last FROM persistence_effects') as [{ last: string }];
+    expect(await convert(engine)).toMatchObject({ status: 'converted' });
+    const queued = await engine.executeRaw<{ page_id: number }>("SELECT (data->>'page_id')::int AS page_id FROM persistence_effects WHERE kind='embedding' AND id > $1::bigint", [last]);
+    expect(queued.map(row => Number(row.page_id)).sort((a, b) => a - b)).toEqual([ids['notes/n05']!, ids['notes/n08']!].sort((a, b) => a - b));
+  }, { databaseUrl, setup }), 300_000);
+
+  // Value: protects=the human-mode refusal prints the Next: command from fix and strict-pass stderr progress names the planned paths; fails_when=the Next: line or the strict-pass progress text is dropped; why_new=the drainer test reads --json only; seam=none; no_claim=JSON contract (covered by the drainer test)
+  test('a refused apply in text mode prints the refusal with the fix command as Next, and strict-pass progress on stderr', () => managedBrain(async ({ engine, root }) => {
+    await firstSync(engine);
+    writeFileSync(join(root, 'notes/n05.md'), note(5, 'Edited in Git after the last sync.'));
+    git(root, 'commit', '-qam', 'edit n05');
+    const { preview } = await planGitConversion(engine, 'default');
+    let release!: () => void, acquired!: () => void;
+    const holding = new Promise<void>(resolve => { release = resolve; }), held = new Promise<void>(resolve => { acquired = resolve; });
+    const holder = withDrainLease(engine, 'default', { holder: { kind: 'cli', id: null }, remote: false }, async () => { acquired(); await holding; return { status: 'up_to_date' } as SyncResult; });
+    await held;
+    const out: string[] = [], err: string[] = [];
+    const log = console.log, write = process.stderr.write, priorExitCode = process.exitCode;
+    console.log = (line: unknown) => { out.push(String(line)); };
+    process.stderr.write = ((chunk: string | Uint8Array) => { err.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    try { await runSourcesCanonical(engine, ['default', '--to', 'git', '--apply', '--expect', preview.preview_hash, '--no-extract']); }
+    finally { console.log = log; process.stderr.write = write; _resetCliExitVerdictForTests(); process.exitCode = priorExitCode ?? 0; release(); await holder; }
+    expect(out.at(-1)).toContain('Conversion refused (git_conversion_incomplete)');
+    expect(out.at(-1)).toContain('Next: gbrain sources canonical default --to git --dry-run --json');
+    expect(err.join('')).toContain(`[sources canonical] strict_pass_1: ${N} planned path(s), 0 group(s) committed`);
+  }, { databaseUrl, setup }), 300_000);
+
   test('a strict pass whose own write outlives the single pass\'s receipt wait drains on instead of refusing writer_pending', () => managedBrain(async ({ engine, root }) => {
     await firstSync(engine);
     writeFileSync(join(root, 'notes/n03.md'), note(3, 'Edited in Git after the last sync.'));
@@ -103,6 +138,7 @@ for (const backend of testBackends()) describe(`[${backend}] #7866: the conversi
       if (point === 'sync:after_freeze' && seen.at(-1)?.phase === 'strict_pass_1') armed = true;
       if (point !== 'consumer:claiming' || !armed || stalled) return;
       stalled = true;
+      // gstack-timing-ok: the stall must outlast the 30 s receipt wait; the assertions read the outcome, not the elapsed time
       await Bun.sleep(33_000);
     });
     try {
@@ -145,6 +181,35 @@ for (const backend of testBackends()) describe(`[${backend}] #7866: the conversi
     // The same apply runs once the drainer is gone.
     const { preview: again } = await planGitConversion(engine, 'default');
     expect(await applyGitConversion(engine, 'default', again.preview_hash, { noExtract: true })).toMatchObject({ status: 'converted' });
+  }, { databaseUrl, setup }), 300_000);
+
+  // Value: protects=a strict_pass_2 refusal says the source stays git-canonical and carries the fix, counts and planned total; fails_when=pass 2 refuses without fix or progress, or the flag is not kept; why_new=the drainer test refuses in pass 1 only; seam=none; no_claim=a real concurrent writer (a held drain lease stands in)
+  test('a refusal in strict pass 2 keeps the source git-canonical and carries the operator contract and counts', () => managedBrain(async ({ engine }) => {
+    await firstSync(engine);
+    const { preview } = await planGitConversion(engine, 'default');
+    let release!: () => void;
+    const holding = new Promise<void>(resolve => { release = resolve; });
+    let holder: Promise<unknown> | undefined;
+    installFaultHook(async point => {
+      if (point !== 'conversion:before_flip' || holder) return;
+      let acquired!: () => void;
+      const held = new Promise<void>(resolve => { acquired = resolve; });
+      holder = withDrainLease(engine, 'default', { holder: { kind: 'cli', id: null }, remote: false }, async () => { acquired(); await holding; return { status: 'up_to_date' } as SyncResult; });
+      await held;
+    });
+    const out: string[] = [];
+    const log = console.log, write = process.stderr.write, priorExitCode = process.exitCode;
+    console.log = (line: unknown) => { out.push(String(line)); };
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try { await runSourcesCanonical(engine, ['default', '--to', 'git', '--apply', '--expect', preview.preview_hash, '--no-extract', '--json']); }
+    finally { installFaultHook(undefined); console.log = log; process.stderr.write = write; _resetCliExitVerdictForTests(); process.exitCode = priorExitCode ?? 0; release(); await holder; }
+    const refused = JSON.parse(out.at(-1)!);
+    expect(refused).toMatchObject({ status: 'refused', code: 'git_conversion_incomplete',
+      fix: { next: 'run', argv: ['gbrain', 'sources', 'canonical', 'default', '--to', 'git', '--dry-run', '--json'], verify: { argv: ['gbrain', 'sync', 'status', '--source', 'default', '--json'] } },
+      progress: { phase: 'strict_pass_2', total: N } });
+    expect(refused.message).toContain('strict_pass_2');
+    expect(refused.message).toContain('the source stays git-canonical');
+    expect(await engine.executeRaw("SELECT 1 FROM sources WHERE id='default' AND config->>'canonical'='git'")).toHaveLength(1);
   }, { databaseUrl, setup }), 300_000);
 
   test('a page whose derived stamp is still pending when strict pass 2 reads its level is not re-imported (the progress test\'s 1-in-8 flake)', () => managedBrain(async ({ engine }) => {
@@ -210,5 +275,19 @@ for (const backend of testBackends()) describe(`[${backend}] #7866: the conversi
         } finally { await close(); }
       });
     } finally { rmSync(home, { recursive: true, force: true }); }
+  }, 300_000);
+});
+
+// Value: protects=the opt-in conversion bench stays runnable and still measures a no-change conversion as no write and no embedding effect; fails_when=an API the bench calls moves or the conversion regresses to re-importing; why_new=the bench never runs in CI; seam=none; no_claim=bench timings at scale (40 pages, local Postgres)
+if (testBackends().includes('postgres')) describe('[postgres] #7866: scripts/bench/conversion-strict-pass.ts', () => {
+  test('a no-change conversion of a small legacy source converts with no import request and no embedding effect', () => {
+    const work = mkdtempSync(join(tmpdir(), 'conversion-bench-smoke-'));
+    try {
+      const out = join(work, 'out.json');
+      const run = spawnSync(process.execPath, [join(resolve(import.meta.dir, '..'), 'scripts/bench/conversion-strict-pass.ts'), '--pages', '40', '--legacy', '1',
+        '--timebox-min', '3', '--database-url', requirePostgresTestDatabase(), '--work', work, '--label', 'smoke', '--out', out], { encoding: 'utf8', timeout: 240_000 });
+      expect(run.status, run.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(out, 'utf8'))).toMatchObject({ pages: 40, plan: { discard: 0 }, apply: { status: 'converted', import_requests: 0, embedding_effects: 0 } });
+    } finally { rmSync(work, { recursive: true, force: true }); }
   }, 300_000);
 });

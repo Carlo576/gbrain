@@ -72,9 +72,10 @@ function describeMixed(p: MixedConversionPreview): string {
 }
 
 const roundText = (p: ConversionProgress) => p.round ? ` round ${p.round}${p.batches ? ` batch ${p.batch}/${p.batches}` : ''}${p.candidates !== undefined ? ` (${p.scanned}/${p.candidates} candidate(s) settled)` : ''}` : '';
-const progressText = (p: ConversionProgress) => p.phase.startsWith('strict_pass')
-  ? `[sources canonical] ${p.phase}${roundText(p)}: ${p.total} planned path(s), ${p.groups_committed} group(s) committed`
-  : `[sources canonical] ${p.phase}: ${p.scanned}/${p.total} scanned, ${p.groups_committed} group(s) committed`;
+const progressBody = (p: ConversionProgress) => p.phase.startsWith('strict_pass')
+  ? `${p.phase}${roundText(p)}: ${p.total} planned path(s), ${p.groups_committed} group(s) committed`
+  : `${p.phase}: ${p.scanned}/${p.total} scanned, ${p.groups_committed} group(s) committed`;
+const progressText = (p: ConversionProgress) => `[sources canonical] ${progressBody(p)}`;
 /** #7866: where an apply stood when it was refused, so the refusal carries its counts. */
 const stoppedAt = new WeakMap<object, ConversionProgress>();
 
@@ -110,7 +111,7 @@ async function withConversionReport<T>(engine: BrainEngine, sourceId: string, js
         { docs: DOCS, detail: 'interrupted', fix: conversionIncompleteFix(sourceId) });
       const report = { status: 'interrupted', signal, source_id: sourceId, ...at, canonical };
       process.stdout.write(`${json ? JSON.stringify({ ...report, ...toAgentError(error, { transport: 'cli', command: 'sources canonical', render: cliRenderContext() }) })
-        : `Conversion interrupted (${signal}) during ${at.phase}${at.round ? ` round ${at.round}` : ''}: ${at.scanned}/${at.total} scanned, ${at.groups_committed} group(s) committed; source canonical state: ${canonical}.${at.push?.state === 'pending' ? `\nPush pending (${at.push.code}): ${at.push.notice}` : ''}\nNext: ${error.suggestion}`}\n`);
+        : `Conversion interrupted (${signal}) during ${progressBody(at)}; source canonical state: ${canonical}.${at.push?.state === 'pending' ? `\nPush pending (${at.push.code}): ${at.push.notice}` : ''}\nNext: ${error.suggestion}`}\n`);
       await triggerCleanupAndExit(SIGNAL_EXIT[signal] ?? 1);
     })();
   };
