@@ -634,7 +634,7 @@ async function adoptGroups(engine: BrainEngine, plan: GitConversionPlan, preview
     const group = adopt.slice(start, start + CONVERSION_GROUP_MAX);
     const lock = await acquireWorktree(context.binding, LOCK_WAIT_MS, undefined, engine, { yieldLanes: true });
     if (!lock) throw opError('writer_busy', `The writer lock of source ${context.sourceId}'s checkout stayed busy for ${LOCK_WAIT_MS / 1000}s, so group ${start / CONVERSION_GROUP_MAX + 1} was not committed.`,
-      `Run ${previewCommand} again; the groups already committed read equal, so the new plan holds only what is left.`, { retryable: true });
+      `Run ${previewCommand} again; the groups already committed read equal, so the new plan holds only what is left.`, { retryable: true, fix: conversionIncompleteFix(context.sourceId) });
     try {
       const files: Array<{ path: string; bytes: Buffer }> = [];
       for (const item of group) {
@@ -683,7 +683,7 @@ async function withholdGroups(engine: BrainEngine, plan: GitConversionPlan, prev
     const group = committed.slice(start, start + CONVERSION_GROUP_MAX);
     const lock = await acquireWorktree(context.binding, LOCK_WAIT_MS, undefined, engine, { yieldLanes: true });
     if (!lock) throw opError('writer_busy', `The writer lock of source ${context.sourceId}'s checkout stayed busy for ${LOCK_WAIT_MS / 1000}s, so the removal of private pages' files was not committed.`,
-      `Run ${previewCommand} again; the pages already withheld drop out of the plan, so the new plan holds only what is left.`, { retryable: true });
+      `Run ${previewCommand} again; the pages already withheld drop out of the plan, so the new plan holds only what is left.`, { retryable: true, fix: conversionIncompleteFix(context.sourceId) });
     try {
       for (const item of group) {
         const target = join(root, item.path);

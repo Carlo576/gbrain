@@ -8,7 +8,8 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { SyncResult } from '../src/commands/sync.ts';
@@ -18,7 +19,12 @@ import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { applyGitConversion, planGitConversion, type ConversionProgress } from '../src/core/persistence/git-conversion.ts';
 import { runSourcesCanonical } from '../src/commands/sources-canonical.ts';
 import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
+import { operationsByName } from '../src/core/operations.ts';
+import { acquireWorktree, getWorktreeBinding } from '../src/core/persistence/ownership.ts';
+import { acquireCommitLockAsync } from '../src/core/git/commit-push.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
+import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 
 const N = 30;
@@ -140,4 +146,51 @@ for (const backend of testBackends()) describe(`[${backend}] #7866: the conversi
     const { preview: again } = await planGitConversion(engine, 'default');
     expect(await applyGitConversion(engine, 'default', again.preview_hash, { noExtract: true })).toMatchObject({ status: 'converted' });
   }, { databaseUrl, setup }), 300_000);
+
+  test('the checkout\'s writer locks stay free while a strict pass holds the source\'s drain lease: they are taken per commit', () => managedBrain(async ({ engine, root }) => {
+    await firstSync(engine);
+    writeFileSync(join(root, 'notes/n04.md'), note(4, 'Edited in Git after the last sync.'));
+    git(root, 'commit', '-qam', 'edit n04');
+    const binding = (await getWorktreeBinding(engine, 'default'))!;
+    const seen: ConversionProgress[] = [];
+    const taken: string[] = [];
+    installFaultHook(async point => {
+      if (point !== 'sync:after_freeze' || taken.length || seen.at(-1)?.phase !== 'strict_pass_1') return;
+      // A page write's publication takes the worktree writer lock; `gbrain git commit-push` takes the checkout's commit lock.
+      const worktree = await acquireWorktree(binding, 0, undefined, engine, { yieldLanes: true });
+      taken.push(worktree ? 'worktree' : 'worktree busy');
+      await worktree?.release();
+      const commit = await acquireCommitLockAsync(root, 0).then(lock => lock, () => null);
+      taken.push(commit ? 'commit' : 'commit busy');
+      await commit?.release();
+    });
+    try {
+      expect(await convert(engine, seen)).toMatchObject({ status: 'converted' });
+    } finally { installFaultHook(undefined); }
+    expect(taken).toEqual(['worktree', 'commit']);
+  }, { databaseUrl, setup }), 300_000);
+
+  test('a repo-less brain is unaffected: pages write as before and the conversion refuses with the operator contract, writing nothing', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-repo-less-'));
+    try {
+      await withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+        const { engine, close } = await isolatedSharedSkillsEngine(databaseUrl);
+        try {
+          const ctx = { engine, config: { engine: engine.kind, embedding_disabled: true }, sourceId: 'default', remote: false, dryRun: false,
+            logger: { info() {}, warn() {}, error() {} } } as Parameters<typeof operationsByName.put_page.handler>[0];
+          await operationsByName.put_page.handler(ctx, { slug: 'notes/repo-less', content: note(1) });
+          const out: string[] = [];
+          const log = console.log, write = process.stderr.write, priorExitCode = process.exitCode;
+          console.log = (line: unknown) => { out.push(String(line)); };
+          process.stderr.write = (() => true) as typeof process.stderr.write;
+          try { await runSourcesCanonical(engine, ['default', '--to', 'git', '--apply', '--expect', 'a'.repeat(64), '--no-extract', '--json']); }
+          finally { console.log = log; process.stderr.write = write; _resetCliExitVerdictForTests(); process.exitCode = priorExitCode ?? 0; }
+          expect(JSON.parse(out.at(-1)!)).toMatchObject({ status: 'refused', code: 'strict_requires_managed', fix: { verify: { argv: ['gbrain', 'doctor', '--json'] } } });
+          expect(await engine.executeRaw("SELECT 1 FROM sources WHERE id='default' AND config->>'canonical'='git'")).toHaveLength(0);
+          const [page] = await engine.executeRaw<{ compiled_truth: string }>("SELECT compiled_truth FROM pages WHERE slug='notes/repo-less'");
+          expect(page!.compiled_truth).toContain('Committed body 1.');
+        } finally { await close(); }
+      });
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }, 300_000);
 });
