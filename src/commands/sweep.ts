@@ -51,7 +51,9 @@ files recorded their source (on a brain with more than one source), and
 sessions whose source never resolved, are held. --assign-corpus previews
 which held sessions would be mapped to <source>; --apply records the
 mapping (a session that already names a source is never changed), and the
-next sweep extracts them there. --session limits it to one session.
+next sweep extracts them there. Dream synthesis holds the same files, already
+extracted ones included, until they are mapped (#7805). --session limits it
+to one session.
 
 Failed windows (#6785): a corpus window whose extraction fails after the
 model call (the fence write was refused, the provider errored) is retried
@@ -238,6 +240,6 @@ async function runAssignCorpus(engine: BrainEngine, args: string[]): Promise<voi
     for (const s of sessions) console.log(`  ${s}`);
     if (sessions.length) console.log(`Apply: gbrain sweep --assign-corpus ${sourceId}${onlySession ? ` --session ${onlySession}` : ''} --apply`);
   } else {
-    console.log(`Mapped ${assigned.length} held session(s) to source ${sourceId}; the next sweep extracts them (gbrain sweep --once).`);
+    console.log(`Mapped ${assigned.length} held session(s) to source ${sourceId}; the next sweep extracts them (gbrain sweep --once) and dream synthesis writes them there.`);
   }
 }
