@@ -34,7 +34,7 @@ import type { PageSnapshot } from '../page-state/types.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { bodyStagingGoneError } from '../engine-sql/page-body.ts';
 import { ownerSourceGateInput, writeTrustOfGate } from './attribution.ts';
-import { pageDatabaseOnlyPublication } from './page-prepare.ts';
+import { keepStoredProvenance, pageDatabaseOnlyPublication } from './page-prepare.ts';
 import { pageIdentityError } from './page-identity.ts';
 import { remoteLinkHint } from './page-advisories.ts';
 import { stagedUploadParts, stagedUploadWork, type StagingBodyRef } from './page-upload.ts';
@@ -116,7 +116,10 @@ export async function prepareStreamedUpload(engine: BrainEngine, row: WriteReque
             const gate = pageGateTrust(row, trust, storedTier);
             return gate ? { tier: gate.tier, origin: { channel: gate.origin?.channel ?? row.operation }, requestId: null } : ownerSourceGateInput(engine, row.source_id, frontmatter);
           },
-          stamp: (frontmatter: Record<string, unknown>) => stampPageTrustMarker(row, frontmatter, trust, storedTier),
+          stamp: (frontmatter: Record<string, unknown>) => {
+            keepStoredProvenance(frontmatter, snapshot?.page.frontmatter);
+            stampPageTrustMarker(row, frontmatter, trust, storedTier, snapshot?.page.frontmatter);
+          },
         } } : {}) },
       coordinated: { snapshot, sha256: ref.sha256, slug: row.slug, prepare: async value => { ready = value; return value.result; },
         owner: { kind: 'put', principalKind: row.principal_kind, principalId: row.principal_id, baseRevision: snapshot?.revision ?? null } } }, stat, policy)

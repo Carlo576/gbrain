@@ -126,14 +126,18 @@ function canonical(page: Pick<Page, 'type' | 'title' | 'compiled_truth' | 'timel
     frontmatter: comparableFrontmatter(page.frontmatter), tags: [...new Set(tags)].sort() };
 }
 interface CanonicalProvenance { source_kind: string; ingested_via: string; ingested_at: string; }
-/** Canonical stamps belong to the first write, never to a later preparation attempt. */
+/** Writes whose caller supplies the page text, and so could supply provenance stamps in its frontmatter. */
+const CALLER_CONTENT_OPERATIONS = ['put_page', 'edit_page', 'append_page', 'capture'];
+/**
+ * Canonical stamps belong to the first write, never to a later preparation attempt. #7873: they are server-owned on
+ * every caller-content write a remote caller makes, with or without a repository: the caller's values are dropped and
+ * the stored page's kept. A managed put_page (local too) also stamps the first write's provenance.
+ */
 function putProvenance(row: WriteRequest, snapshot: PageSnapshot | null, parsed: ParsedPage): CanonicalProvenance | undefined {
-  if (row.operation !== 'put_page' || !row.worktree_id) return undefined;
-  const keys = ['source_kind', 'ingested_via', 'ingested_at'] as const;
-  for (const key of keys) {
-    delete parsed.frontmatter[key];
-    if (snapshot?.page.frontmatter[key] !== undefined) parsed.frontmatter[key] = snapshot.page.frontmatter[key];
-  }
+  const managedPut = row.operation === 'put_page' && !!row.worktree_id;
+  if (!managedPut && !(row.authority.remote && CALLER_CONTENT_OPERATIONS.includes(row.operation))) return undefined;
+  keepStoredProvenance(parsed.frontmatter, snapshot?.page.frontmatter);
+  if (!managedPut) return undefined;
   const tags = [...new Set([...(snapshot?.tags ?? []), ...parsed.tags])].sort();
   if (snapshot && !snapshot.page.deleted_at && digest(canonical(snapshot.page, snapshot.tags)) === digest(canonical(parsed, tags))) {
     return undefined;
@@ -150,6 +154,13 @@ function putProvenance(row: WriteRequest, snapshot: PageSnapshot | null, parsed:
   };
   Object.assign(parsed.frontmatter, stamp);
   return stamp;
+}
+/** The provenance stamps of `stored` replace whatever `frontmatter` carries for them (removed when the stored page has none). */
+export function keepStoredProvenance(frontmatter: Record<string, unknown>, stored: Record<string, unknown> | null | undefined): void {
+  for (const key of ['source_kind', 'ingested_via', 'ingested_at'] as const) {
+    delete frontmatter[key];
+    if (stored?.[key] !== undefined) frontmatter[key] = stored[key];
+  }
 }
 export { isNeverFiledDerivedPage };
 /**
@@ -890,7 +901,7 @@ async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: Wri
     prepareFrontmatter: page => {
       provenance = putProvenance(row, snapshot, page);
       suppliedTrustMarker = page.frontmatter.trust_tier;
-      stampPageTrustMarker(row, page.frontmatter, trust, storedTier);
+      stampPageTrustMarker(row, page.frontmatter, trust, storedTier, snapshot?.page.frontmatter);
       if (privateRequest) assertPrivateRequestKept(row, page.frontmatter);
     },
     prepare: async value => { prepared = value; return value.result; },

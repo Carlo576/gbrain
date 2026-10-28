@@ -67,10 +67,14 @@ export async function storedPageTier(engine: BrainEngine, sourceId: string, slug
  * #6550: a stored `unknown` means "not classified yet", not "known unverified", so it does not lower the
  * marker: the marker names the writer's tier and the row keeps min(writer, stored) until the backfill
  * classifies it. An explicit `trust_tier: unknown` already in the frontmatter still caps (stampTrustMarker).
+ * #7873: an unclassified page's own lowering markers (`storedFrontmatter`, the page before the write) still cap the
+ * marker, so a write that removes one (a `ingested_via: webhook` stamp) cannot raise the page when it is re-derived.
  */
-export function stampPageTrustMarker(row: Pick<WriteRequest, 'operation'>, frontmatter: Record<string, unknown>, trust: WriteTrust | undefined, stored: TrustTier | null): void {
+export function stampPageTrustMarker(row: Pick<WriteRequest, 'operation'>, frontmatter: Record<string, unknown>, trust: WriteTrust | undefined, stored: TrustTier | null,
+  storedFrontmatter?: Record<string, unknown> | null): void {
   if (!trust || !CONTENT_OPERATIONS.includes(row.operation)) return;
-  const tier = stored && stored !== 'unknown' ? minTrust(trust.tier, stored) : trust.tier;
+  const prior = stored && stored !== 'unknown' ? [stored] : frontmatterTrustCaps(storedFrontmatter);
+  const tier = minTrust(trust.tier, ...prior);
   const stamped = stampTrustMarker(frontmatter, tier);
   if (stamped !== frontmatter) frontmatter.trust_tier = stamped.trust_tier;
 }
