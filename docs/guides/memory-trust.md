@@ -74,8 +74,8 @@ no entity page, and any fact on an unmanaged brain, is saved to the database
 only.
 The release preview shows every field the release confirms along with the
 text: kind, visibility, validity, source and context, and for a held row
-that is already in a `## Facts` table, that row's confidence, notability and
-typed-claim cells as they stand. The confirmation covers exactly what you saw:
+that is already in a `## Facts` table, that row's confidence, notability,
+typed-claim and attribution cells as they stand. The confirmation covers exactly what you saw:
 if the hold or that row changes before the release lands, it refuses with
 `preview_changed` and the fact stays held, on every brain, with or without a
 repository.
