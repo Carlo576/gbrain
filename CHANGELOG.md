@@ -54,7 +54,7 @@ GBRAIN_MEMORY_TRACE=5 gbrain sync --source <source>          # the same memory t
 - `src/core/export-snapshot.ts`: a batched export read looks each page up by its primary key, so `gbrain export` and the preview stay linear on large sources.
 - `src/commands/sources-canonical.ts`: progress lines, the partial report on signal, the push-pending notice.
 - `src/core/memory-trace.ts`: `GBRAIN_MEMORY_TRACE=<seconds>` (1 to 3600) writes a memory line on stderr during a conversion apply and during `gbrain sync`.
-- `src/commands/sources-git-gap.ts`, `src/core/persistence/git-gap.ts`: the census reads a withheld page's file at its withheld path; one unknown ignore status no longer poisons a whole batch.
+- `src/commands/sources-git-gap.ts`, `src/core/persistence/git-gap.ts`: the census reads a withheld page's file at its withheld path; a path whose ignore status Git cannot read no longer refuses the whole census, and `gbrain sources git-gap` and doctor's `db_ahead_of_git` count it as `ignore_status_unknown` instead.
 - `scripts/bench/sync-pass-memory.ts`: a memory probe for the strict-equivalent pass and the conversion (seed, run, cli, embed-seed).
 - Tests: `test/git-canonical-conversion-g8a.test.ts` (crash, refusal and withhold cases on PGLite and Postgres), `test/git-canonical-conversion-progress.test.ts`, `test/git-gap-census.test.ts`, and a Postgres smoke test for the memory probe.
 
