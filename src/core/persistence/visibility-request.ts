@@ -37,6 +37,10 @@ function visibilityValues(frontmatter: Record<string, unknown> | null | undefine
   return Object.entries(frontmatter ?? {}).flatMap(([key, value]) => key.toLowerCase() === 'visibility' ? flatten(value) : []);
 }
 
+/** The writes whose caller-authored frontmatter is checked: derived writers (add_tag, append_page, maintenance publishes) never carry a request. */
+export const privateRequestGuarded = (operation: string, kind: unknown): boolean =>
+  (operation === 'put_page' || operation === 'edit_page' || operation === 'capture') && kind !== 'managed_maintenance_page';
+
 /**
  * The private request `content` carries, with the frontmatter it parses to, or null.
  * The content asks for private when a visibility line says so or when the parse

@@ -22,7 +22,7 @@ import { importFromContent } from '../src/core/import-file.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
-import { declaredVisibilities } from '../src/core/persistence/visibility-request.ts';
+import { declaredVisibilities, readPrivateRequest } from '../src/core/persistence/visibility-request.ts';
 import { isPrivatePage } from '../src/core/search/private-visibility.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { durableGitRepo } from './helpers/git-publication.ts';
@@ -57,6 +57,8 @@ afterAll(async () => {
 });
 
 const putPage = operations.find(op => op.name === 'put_page')!;
+const editPage = operations.find(op => op.name === 'edit_page')!;
+const capturePage = operations.find(op => op.name === 'capture')!;
 const page = (extra = '') => `---\ntitle: Example\ntype: note\n${extra}---\nA page about acme-example.\n`;
 type Outcome = Record<string, any> & { thrown?: string; message?: string };
 const put = (ctx: OperationContext, slug: string, content: string, expectedRevision?: string): Promise<Outcome> =>
@@ -103,7 +105,31 @@ test('declaredVisibilities reads the frontmatter block only, any key case, lower
   expect(declaredVisibilities(page('visibility: private\nvisibility: public\n'))).toEqual(['private', 'public']);
 });
 
+test('readPrivateRequest rethrows a parse failure when a visibility line asks for private, and passes it otherwise', () => {
+  const failing = () => { throw new Error('bad frontmatter'); };
+  expect(() => readPrivateRequest(page('visibility: private\n'), failing)).toThrow('bad frontmatter');
+  expect(readPrivateRequest(page('visibility: public\n'), failing)).toBeNull();
+  expect(readPrivateRequest(page(), failing)).toBeNull();
+});
+
 for (const managed of [false, true]) describe(`${managed ? 'managed brain with a Git checkout' : 'repo-less brain'}: put_page visibility: private (#7841)`, () => {
+  test('edit_page and capture refuse a private request they would store as Visibility: Private', async () => {
+    await brain(managed, async (ctx, engine) => {
+      await put(ctx, 'notes/example', page());
+      const before = (await snapshot(engine, ctx, 'notes/example'))!;
+      const edited = await (editPage.handler(ctx, { slug: 'notes/example', expected_revision: before.revision, request_id: randomUUID(), wait_ms: 25_000,
+        edits: [{ old_text: 'title: Example', new_text: 'title: Example\nVisibility: Private' }] }) as Promise<Outcome>)
+        .catch((e: { code?: string; message?: string }) => ({ thrown: e.code, message: e.message }));
+      expect(edited.thrown).toBe('visibility_not_applied');
+      const unchanged = (await snapshot(engine, ctx, 'notes/example'))!;
+      expect(unchanged.revision).toBe(before.revision);
+      const captured = await (capturePage.handler(ctx, { slug: 'notes/captured', content: page('Visibility: Private\n'), request_id: randomUUID(), wait_ms: 25_000 }) as Promise<Outcome>)
+        .catch((e: { code?: string; message?: string }) => ({ thrown: e.code, message: e.message }));
+      expect(captured.thrown).toBe('visibility_not_applied');
+      expect(await snapshot(engine, ctx, 'notes/captured')).toBeNull();
+    });
+  }, 120_000);
+
   test('an existing world page turned private with visibility: private publishes private', async () => {
     await brain(managed, async (ctx, engine) => {
       const first = await put(ctx, 'notes/example', page());
@@ -170,6 +196,22 @@ for (const managed of [false, true]) describe(`${managed ? 'managed brain with a
     await brain(managed, async (ctx, engine) => {
       expect(await put(ctx, 'notes/new-example', page('visibility: Private\n'))).toMatchObject({ thrown: 'visibility_not_applied' });
       expect(await snapshot(engine, ctx, 'notes/new-example')).toBeNull();
+    });
+  }, 120_000);
+
+  test('a remote put_page on an always_load page keeps a private request even when the server rewrites the content (core marking carry)', async () => {
+    await brain(managed, async (ctx, engine) => {
+      await put(ctx, 'notes/example', page('always_load: true\n'));
+      const before = (await snapshot(engine, ctx, 'notes/example'))!;
+      expect(before.page.frontmatter.always_load).toBe(true);
+      const remote = { ...ctx, remote: true };
+      for (const extra of ['visibility: private\nfoo: [unclosed\n', 'visibility: private\nvisibility: world\n']) {
+        const result = await put(remote, 'notes/example', page(extra), before.revision);
+        expect(result.thrown).toBe('visibility_not_applied');
+        const after = (await snapshot(engine, ctx, 'notes/example'))!;
+        expect(after.revision).toBe(before.revision);
+        expect(isPrivatePage(after.page)).toBe(false);
+      }
     });
   }, 120_000);
 
