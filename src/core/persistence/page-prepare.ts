@@ -67,6 +67,7 @@ import { DEFAULT_WRITE_GATE_CONFIG, writeGateApplies } from '../write-gate.ts';
 import { materializeTimeline, prepareCanonicalProjections, type TimelineRowsRemoved } from './canonical-projections.ts';
 import { assertTimelineNotOmitted, timelineWritePolicy } from './timeline-omission.ts';
 import { preserveProtectedTakes } from './protected-takes.ts';
+import { assertPrivateRequestKept, declaredVisibilities } from './visibility-request.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { prepareAutomaticLinks } from './links-preparation.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
@@ -832,6 +833,7 @@ async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: Wri
     const { timeline, materialized } = await materializeTimeline(engine,parsed,row.slug,snapshot,writer,timelinePolicy);
     if (materialized) content = serializePageToMarkdown({...snapshot.page,...parsed,timeline,type:parsed.typeExplicit ? parsed.type : snapshot.page.type},parsed.tags);
   }
+  if (typeof content === 'string' && declaredVisibilities(content).includes('private')) assertPrivateRequestKept(row, content, parseMarkdown(content, row.slug, { activePack }).frontmatter);
   const storedTier = snapshot ? await storedPageTier(engine, row.source_id, row.slug) : null;
   // Detect an exact canonical no-op before ingestion can invoke any provider.
   // Revision/identity checks above still apply to stale identical replacements.
@@ -873,6 +875,7 @@ async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: Wri
       provenance = putProvenance(row, snapshot, page);
       suppliedTrustMarker = page.frontmatter.trust_tier;
       stampPageTrustMarker(row, page.frontmatter, trust, storedTier);
+      if (typeof content === 'string') assertPrivateRequestKept(row, content, page.frontmatter);
     },
     prepare: async value => { prepared = value; return value.result; },
   }).catch(error => {
