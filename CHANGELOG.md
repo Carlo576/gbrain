@@ -10,6 +10,57 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Synthesis stops filing a session into the wrong source, and a write that asks for a private page can no longer quietly publish it.**
+
+Two privacy bugs. First, dream synthesis could write a captured conversation into whichever source the cycle happened to run for, even when the conversation belonged to another source. A session you kept in a frozen source could land, as a page, in a source others can read. Second, if you asked for `visibility: private` but spelled it a little differently (`Visibility: Private`, a value on the next line), the write reported success while the page stayed world-readable. Now synthesis writes each session only to the source it recorded, and a write that asks for private but would not get it is refused with a plain message and changes nothing.
+
+### How to use it
+
+```bash
+gbrain dream --source <id> --phase synthesize     # runs the sessions that belong to that source
+gbrain sweep --assign-corpus <source>             # preview: map held sessions with no recorded source
+gbrain sweep --assign-corpus <source> --apply     # apply the mapping, then run synthesis again
+```
+
+To make a page private, write `visibility: private` on its own frontmatter line, lowercase key and value, then submit again with a new `request_id`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session of another source during `dream` for source A | written into source A | left for `gbrain dream --source <id> --phase synthesize` |
+| A session whose source never resolved, or an older file on a brain with several sources | written into the running source | held until `gbrain sweep --assign-corpus <source>` maps it, already-extracted ones included |
+| A write asking for `visibility: private` spelled `Private`, `PRIVATE`, `Visibility`, on the next line, as a block scalar, a list, a flow mapping, or an explicit or merged key | stored, page world-readable, reported as done | refused with `visibility_not_applied`, nothing written |
+
+### Things to watch after you upgrade
+
+- Pages an earlier release already wrote into the wrong source are not moved. Repair is a separate, preview-first step.
+- A held session counts in the phase summary and in `details.source_routing`. Nothing is dropped; it waits for `--assign-corpus`.
+- A page that already stores `Visibility: Private` is still world-readable until you rewrite the key in lowercase.
+- The refusal applies to `put_page`, `edit_page` and `capture`. A file that arrives through git sync or import is not checked yet.
+
+Contributed by @exGeni (#7805) and @TGreen87 (#7841), who reported the two bugs.
+
+## To take advantage of v0.60.481.0
+
+`gbrain upgrade` should do this automatically. If you run synthesis on a brain with more than one source:
+
+1. **Preview held sessions:** `gbrain sweep --assign-corpus <source>`
+2. **Apply the mapping you read:** `gbrain sweep --assign-corpus <source> --apply`
+3. **Verify:** `gbrain dream --source <source> --phase synthesize` and `gbrain doctor`
+4. If a step fails or the numbers look wrong, file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor`.
+
+### Itemized changes
+
+- `src/core/cycle/synthesize-source-routing.ts`: resolves each session file's source from the `.src-<id>` name or its frozen record, passes through files outside the session corpus, and holds the unresolved ones.
+- `src/core/cycle/synthesize.ts`: the synthesize phase uses that routing and reports both counts in `details.source_routing`.
+- `src/core/context/corpus-source.ts`, `src/commands/sweep.ts`: holds list already-extracted sessions, so `--assign-corpus` can release them.
+- `src/core/persistence/visibility-request.ts`, `src/core/persistence/page-prepare.ts`: a write for `put_page`, `edit_page` or `capture` whose frontmatter parses to a private request that the stored page would not keep is refused `visibility_not_applied` (`noncanonical_value` or `not_kept`). The YAML parse decides; a line scan is the fallback.
+- `src/core/error-registry.ts`, `docs/guides/error-codes.md`, `docs/guides/write-refusals.md`, `src/core/behavior-change-notice.ts`: the new code, its fix and the upgrade notices.
+- `test/fixtures/goldens/exports/types.json`: the exported error union lists `visibility_not_applied`, so typed clients see the new code.
+
 ## [0.60.480.0] - 2026-10-28
 
 **Converting a source to Git-canonical now plans quickly on big brains, tells you where it is while it runs, converts sources with private pages instead of refusing, and pushes what it commits.**
