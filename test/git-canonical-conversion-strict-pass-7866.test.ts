@@ -147,6 +147,24 @@ for (const backend of testBackends()) describe(`[${backend}] #7866: the conversi
     expect(await applyGitConversion(engine, 'default', again.preview_hash, { noExtract: true })).toMatchObject({ status: 'converted' });
   }, { databaseUrl, setup }), 300_000);
 
+  test('a page whose derived stamp is still pending when strict pass 2 reads its level is not re-imported (the progress test\'s 1-in-8 flake)', () => managedBrain(async ({ engine }) => {
+    await firstSync(engine);
+    const seen: ConversionProgress[] = [];
+    let atFlip: Awaited<ReturnType<typeof counts>> | undefined;
+    // On a slow host the last page strict pass 1 imported can still lack its contextual-mode stamp when pass 2 reads the
+    // level: committed, equal to its file and record, but not derived-current. Forced here for one page.
+    installFaultHook(async point => {
+      if (point !== 'conversion:before_flip') return;
+      await engine.executeRaw("UPDATE pages SET contextual_retrieval_mode=NULL WHERE slug='notes/n09'");
+      atFlip = await counts(engine);
+    });
+    try {
+      expect(await convert(engine, seen)).toMatchObject({ status: 'converted' });
+    } finally { installFaultHook(undefined); }
+    expect(seen.filter(progress => progress.phase === 'strict_pass_2').every(progress => progress.scanned === 0)).toBe(true);
+    expect((await counts(engine)).imports).toBe(atFlip!.imports);
+  }, { databaseUrl, setup }), 300_000);
+
   test('the checkout\'s writer locks stay free while a strict pass holds the source\'s drain lease: they are taken per commit', () => managedBrain(async ({ engine, root }) => {
     await firstSync(engine);
     writeFileSync(join(root, 'notes/n04.md'), note(4, 'Edited in Git after the last sync.'));
