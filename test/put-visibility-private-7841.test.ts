@@ -205,9 +205,10 @@ for (const managed of [false, true]) describe(`${managed ? 'managed brain with a
       const before = (await snapshot(engine, ctx, 'notes/example'))!;
       expect(before.page.frontmatter.always_load).toBe(true);
       const remote = { ...ctx, remote: true };
-      for (const extra of ['visibility: private\nfoo: [unclosed\n', 'visibility: private\nvisibility: world\n']) {
+      for (const [extra, code] of [['Visibility: Private\n', 'visibility_not_applied'], ['visibility:\n  - private\n', 'visibility_not_applied'],
+        ['visibility: private\nfoo: [unclosed\n', 'invalid_params'], ['visibility: private\nvisibility: world\n', 'invalid_params']] as const) {
         const result = await put(remote, 'notes/example', page(extra), before.revision);
-        expect(result.thrown).toBe('visibility_not_applied');
+        expect(result.thrown).toBe(code);
         const after = (await snapshot(engine, ctx, 'notes/example'))!;
         expect(after.revision).toBe(before.revision);
         expect(isPrivatePage(after.page)).toBe(false);

@@ -12,7 +12,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { Page, PageVersion } from '../types.ts';
 import { importFromContent, verifyPageReadable, type ParsedPage } from '../import-file.ts';
-import { comparableFrontmatter, frontmatterHoldMessageWithoutKeys, parseMarkdown, resolveParsedSubtype, serializePageToMarkdown, resolveSourceLocalFilePath, type ParsedMarkdown, type ParseOpts } from '../markdown.ts';
+import { classifyImportHold, comparableFrontmatter, frontmatterHoldMessageWithoutKeys, parseMarkdown, resolveParsedSubtype, serializePageToMarkdown, resolveSourceLocalFilePath, type ParsedMarkdown, type ParseOpts } from '../markdown.ts';
 import { alignWithStored } from './align-stored.ts';
 import { assertLargePageReplacement } from './large-page-guard.ts';
 import { applyInference } from '../frontmatter-inference.ts';
@@ -26,7 +26,7 @@ import { isOpPageSlug } from '../ops/context.ts';
 import { shellQuote, type Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { pageIdentityError } from './page-identity.ts';
-import { contentRefusalError, PAGE_OVER_LIMIT_SUGGESTION } from '../import-screen.ts';
+import { contentRefusalError, PAGE_OVER_LIMIT_SUGGESTION, type ContentRefusal } from '../import-screen.ts';
 import { ContentSanityBlockError } from '../content-sanity.ts';
 import { assertPageRevision, type PageSnapshot } from '../page-state/types.ts';
 import { GIT_HOLD_OP, gitHoldFingerprint, gitHoldFix, readGitHold } from './sync-holds.ts';
@@ -727,6 +727,21 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
   return prepareInlineOrSegmentedMutation(unbounded, row, _config, preparedIntent, signal, options);
 }
 
+/** A remote caller's refusal names the line, never a key: keys can be private, and the receipt keeps the message. */
+const remoteSafeRefusal = (row: WriteRequest, refusal: ContentRefusal): ContentRefusal =>
+  row.authority.remote && refusal.code === 'invalid_frontmatter' ? { ...refusal, key: undefined, message: frontmatterHoldMessageWithoutKeys(refusal.message) } : refusal;
+
+const frontmatterRefusalError = (refusal: ContentRefusal) => contentRefusalError(refusal,
+  `Correct ${refusal.line !== undefined ? `frontmatter line ${refusal.line}${refusal.key ? ` (key "${refusal.key}")` : ''}` : 'the frontmatter'}: one line per key with its whole value quoted, then submit the corrected content with a new request_id.`,
+  { legacy_error: 'invalid_params' });
+
+/** A private request the importer would hold keeps the importer's typed refusal; any other must be kept as written. */
+function assertPrivateRequestAllowed(row: WriteRequest, content: string, frontmatter: Record<string, unknown> | null | undefined): void {
+  const hold = classifyImportHold(parseMarkdown(content, row.slug, { validate: true }));
+  if (hold) throw frontmatterRefusalError(remoteSafeRefusal(row, hold));
+  assertPrivateRequestKept(row, frontmatter);
+}
+
 async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: WriteRequest, _config: Parameters<typeof preparePageMutation>[2],
   preparedIntent: Parameters<typeof preparePageMutation>[3], signal: AbortSignal | undefined,
   options: NonNullable<Parameters<typeof preparePageMutation>[5]>): Promise<PreparedMutation> {
@@ -774,7 +789,7 @@ async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: Wri
   const edited = row.operation === 'edit_page' ? editLockedPage(row, snapshot) : undefined;
   let content = edited?.content ?? preparedIntent?.content ?? p.content as string;
   const privateRequest = privateRequestGuarded(row.operation, p.kind) && typeof content === 'string' ? readPrivateRequest(content, () => parseMarkdown(content as string, row.slug, { activePack }).frontmatter) : null;
-  if (privateRequest) assertPrivateRequestKept(row, privateRequest.frontmatter);
+  if (privateRequest) assertPrivateRequestAllowed(row, content as string, privateRequest.frontmatter);
   let versionTags: string[] | undefined = preparedIntent?.tags;
   // A replacement/restore publishes a live page. Only a recorded version may
   // explicitly restore a tombstone; legacy versions leave this state unchanged.
@@ -887,13 +902,11 @@ async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: Wri
   signal?.throwIfAborted();
   if (!prepared) {
     // A remote caller's refusal names the line, never a key: keys can be private, and the receipt keeps the message.
-    const refusal = result.refusal && row.authority.remote && result.refusal.code === 'invalid_frontmatter'
-      ? { ...result.refusal, key: undefined, message: frontmatterHoldMessageWithoutKeys(result.refusal.message) } : result.refusal;
+    const refusal = result.refusal && remoteSafeRefusal(row, result.refusal);
     if (refusal?.code === 'file_too_large') throw contentRefusalError(refusal, PAGE_OVER_LIMIT_SUGGESTION, { legacy_error: 'request_too_large' });
     if (refusal?.code === 'invalid_fence') throw contentRefusalError(refusal, `Page ${row.slug} was not written. Fix ${fenceWhere(refusal.fence)} as the message says (fence_issues lists every row and column; use the allowed values), `
       + 'or write facts with remember and takes with takes_add instead of a hand-built table, then submit the corrected content with a new request_id.', { legacy_error: 'invalid_params' });
-    if (refusal) throw contentRefusalError(refusal, `Correct ${refusal.line !== undefined ? `frontmatter line ${refusal.line}${refusal.key ? ` (key "${refusal.key}")` : ''}` : 'the frontmatter'}: one line per key with its whole value quoted, then submit the corrected content with a new request_id.`,
-      { legacy_error: 'invalid_params' });
+    if (refusal) throw frontmatterRefusalError(refusal);
     throw opError('invalid_params', 'The content was rejected before publication.', 'Check the content and frontmatter, then submit the corrected content with a new request_id.');
   }
   const ready = prepared;
