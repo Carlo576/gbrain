@@ -83,7 +83,7 @@ async function fixture(managed: boolean, run: (f: Fixture) => Promise<void>, sol
           else await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [s.id, s.root]);
         }
         await engine.setConfig('sync.write_through', 'true');
-        if (!solo) for (const s of sources) await claimWorktree(engine, s.id, s.root);
+        for (const s of sources) await claimWorktree(engine, s.id, s.root);
         for (const [key, value] of Object.entries({
           'dream.synthesize.enabled': 'true', 'dream.synthesize.cooldown_hours': '0',
           'dream.synthesize.min_chars': '100', 'dream.synthesize.link_manifest': 'false',
