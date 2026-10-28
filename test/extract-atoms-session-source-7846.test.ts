@@ -132,7 +132,7 @@ describe('extract_atoms honors the session\'s frozen source (#7846)', () => {
             fix: [`gbrain dream --source ${b} --phase extract_atoms`, 'gbrain sweep --assign-corpus <source>'],
           });
           expect(first.result.summary).toContain(`2 corpus file(s) belong to other sources (${b}: 2)`);
-          expect(first.result.summary).toContain('3 held with no usable session source');
+          expect(first.result.summary).toContain('3 held with no frozen session source');
 
           const second = await extract(b);
           expect(second.read).toEqual([recorded, stamped].sort());
