@@ -63,6 +63,8 @@ export interface GitGapCensus {
   database_ahead_without_import_record: number;
   /** git_ahead pages whose row also moved since its last import: both sides changed. */
   git_ahead_database_also_moved: number;
+  /** Pages whose path Git could not say is ignored, by reason (IgnoreUnknownReason); they are classified as if not ignored. */
+  ignore_status_unknown: Record<string, number>;
   /** Pages of a source without a checkout that are not declared. Since G7a such a source is declared `database_only_source`, so this stays 0; kept for readers of the JSON. */
   not_compared: number;
   /** Working-tree files of the pages that may have a tracked file, by their raw bytes against HEAD; null without a checkout. */
@@ -110,7 +112,7 @@ const zeros = <K extends string>(keys: readonly K[]) => Object.fromEntries(keys.
 
 function emptyCensus(sourceId: string, root: string | null, head: HeadTree | null): GitGapCensus {
   return { status: 'census', source_id: sourceId, checkout: root, head: head?.commit ?? null, complete: true, pages: 0, states: zeros(PAGE_STATES),
-    declared: zeros(DECLARED_CLASSES), declared_with_head_blob: 0, database_ahead_without_import_record: 0, git_ahead_database_also_moved: 0, not_compared: 0,
+    declared: zeros(DECLARED_CLASSES), declared_with_head_blob: 0, database_ahead_without_import_record: 0, git_ahead_database_also_moved: 0, ignore_status_unknown: {}, not_compared: 0,
     worktree: root ? zeros(WORKTREE_STATES) : null,
     rows_without_git_home: { facts_unfenced: 0, facts_fence_page_missing: 0, facts_on_pages_without_file: { undeclared: 0, declared: 0 },
       links: { total: 0, by_link_source: {} }, timeline_on_pages_without_file: { undeclared: 0, declared: 0 } },
@@ -187,12 +189,16 @@ async function censusBatch(tx: BrainEngine, batch: Key[], census: GitGapCensus, 
     return { key, path, rel: path ? relative(checkout!.root, path).split(sep).join('/') : null };
   });
   if (checkout) {
-    // A path whose ignore status Git cannot read (one beyond a symlink) is classified as if not ignored: the conversion plan
-    // discards it as ignore_status_unknown instead of adopting it.
+    // A path whose ignore status Git cannot read (one beyond a symlink) is classified as if not ignored and counted under
+    // ignore_status_unknown, so the report names it; the conversion plan discards it as ignore_status_unknown instead of adopting it.
     const status = await ignoredPaths(checkout.root, rows.flatMap(row => row.rel === null ? [] : [row.rel]));
     if (!status) throw refuse(`Git could not say which paths the checkout at ${checkout.root} ignores, so the declared classes are unknown.`,
       `Nothing changed. Check that ${checkout.root} is a Git checkout (git -C ${checkout.root} rev-parse HEAD), then rerun gbrain sources git-gap ${batch[0]!.source_id}.`);
     ctx.policy.ignored = status.ignored;
+    for (const { rel } of rows) {
+      const reason = rel === null ? undefined : status.unknown.get(rel);
+      if (reason) census.ignore_status_unknown[reason] = (census.ignore_status_unknown[reason] ?? 0) + 1;
+    }
   }
   const noFile = { undeclared: [] as Key[], declared: [] as Key[] };
   const compare: Array<{ key: Key; path: string; rel: string; blob: TreeBlob; worktree: WorktreeState }> = [];
@@ -331,6 +337,8 @@ export function describeGitGap(census: GitGapCensus): string {
   else if (!census.head) lines.push('The checkout has no commit yet, so no page has a committed file.');
   lines.push(`Pages: ${counts(census.states)}.`, `Declared database-only: ${counts(census.declared)}${census.declared_with_head_blob ? ` (${census.declared_with_head_blob} still committed at HEAD)` : ''}.`);
   if (census.database_ahead_without_import_record) lines.push(`${census.database_ahead_without_import_record} database_ahead page(s) have no import record, so the side that moved is unknown.`);
+  const unknown = Object.values(census.ignore_status_unknown).reduce((sum, n) => sum + n, 0);
+  if (unknown) lines.push(`${unknown} page(s) have a path whose ignore status Git could not read (${counts(census.ignore_status_unknown)}), so whether they are declared database-only is unknown; they are counted above as if not ignored.`);
   if (census.git_ahead_database_also_moved) lines.push(`${census.git_ahead_database_also_moved} git_ahead page(s) also changed in the database since their last import.`);
   if (census.worktree) lines.push(`Working tree against HEAD: ${counts(census.worktree)}.`);
   const rows = census.rows_without_git_home;

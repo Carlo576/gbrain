@@ -235,6 +235,28 @@ for (const backend of testBackends()) describe(`git-gap census (git-canonical G1
     expect(census.sample.find(item => item.slug === 'link/beyond')).toMatchObject({ path: 'link/beyond.md', state: 'undeclared_database_only' });
   });
 
+  /**
+   * Value: protects=a page whose ignore status Git refuses to read is reported as unknown by git-gap and doctor, never as a
+   * plain undeclared or worktree count; fails_when=the census drops ignoredPaths' unknown set (the pre-#7618 census refused
+   * instead); seam=none (a real check-ignore refusal beyond a symlink); no_claim=timeout and outside-repo reasons.
+   */
+  test('#7618: a page whose ignore status Git cannot read is counted and named as unknown by git-gap and doctor', async () => {
+    const root = tempDir('git-gap-census-unknown-');
+    git(root, 'init', '-q');
+    await useCheckout(root);
+    for (const slug of ['notes/equal', 'link/beyond']) await engine.putPage(slug, { type: 'note', title: slug, compiled_truth: `Body of ${slug}.`, timeline: '' });
+    put(root, 'notes/equal.md', await rendered('notes/equal'));
+    commitAll(root, 'init');
+    mkdirSync(join(root, 'real'));
+    symlinkSync('real', join(root, 'link'));
+    const census = await censusGitGap(engine, 'default', { sample: 0 });
+    expect(census).toMatchObject({ pages: 2, ignore_status_unknown: { symlink: 1 } });
+    expect(describeGitGap(census)).toContain('1 page(s) have a path whose ignore status Git could not read (symlink 1)');
+    const [check] = await dbAheadOfGitEntry.run({ engine, progress: { heartbeat: () => {} } } as never) as Array<{ message: string; details: any }>;
+    expect(check!.details.sources.find((s: { source_id: string }) => s.source_id === 'default')).toMatchObject({ ignore_status_unknown: { symlink: 1 } });
+    expect(check!.message).toContain('default: 1 equal, 1 undeclared_database_only (ignore status unknown for 1)');
+  });
+
   test('a repository filter, textconv or fsmonitor never runs: HEAD and the working tree are read without them', async () => {
     const root = tempDir('git-gap-filter-');
     git(root, 'init', '-q');
