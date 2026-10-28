@@ -120,7 +120,7 @@ for (const managed of [false, true]) describe(`${managed ? 'managed brain with a
 
   for (const [label, extra] of [['visibility: Private', 'visibility: Private\n'], ['Visibility: private', 'Visibility: private\n'], ['VISIBILITY: "PRIVATE"', 'VISIBILITY: "PRIVATE"\n'],
     ['visibility with Private on the next line', 'visibility:\n  Private\n'], ['visibility as a block scalar', 'visibility: |\n  private\n'], ['visibility as a flow list', 'visibility: [private]\n'],
-    ['an explicit key', '? visibility\n: Private\n'], ['a merge key', 'base: &base\n  Visibility: Private\n<<: *base\n']] as const) {
+    ['an explicit key', '? visibility\n: Private\n'], ['a merge key', 'base: &base\n  Visibility: Private\n<<: *base\n'], ['an escaped key', '"Visib\\u0069lity": Private\n']] as const) {
     test(`${label} on an existing world page is refused noncanonical_value, and the page and its revision are unchanged`, async () => {
       await brain(managed, async (ctx, engine) => {
         await put(ctx, 'notes/example', page());
