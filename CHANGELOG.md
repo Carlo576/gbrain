@@ -10,6 +10,54 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.480.0] - 2026-10-28
+
+**Converting a source to Git-canonical now plans quickly on big brains, tells you where it is while it runs, converts sources with private pages instead of refusing, and pushes what it commits.**
+
+`gbrain sources canonical <source> --to git` previews a conversion and `--apply --expect <hash>` runs it. On a large source the preview used to read every page one at a time, and the apply ran silently, so if it was stopped you had no idea how far it got. Now the preview reads pages in batches, the apply prints a progress line per phase, and stopping it prints where it stopped. A private page whose committed file differs from it no longer blocks the conversion. The conversion commits the file's removal and the page stays in the database. Where the source pushes its commits, the conversion pushes its own commits too.
+
+### How to use it
+
+```bash
+gbrain sources canonical <source> --to git                          # preview: what would be adopted, withheld, discarded, and why
+gbrain sources canonical <source> --to git --apply --expect <hash>  # apply the preview you read
+GBRAIN_MEMORY_TRACE=5 gbrain sources canonical <source> --to git --apply --expect <hash>  # also sample memory every 5 seconds on stderr
+GBRAIN_MEMORY_TRACE=5 gbrain sync --source <source>          # the same memory trace for a sync
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Previewing a conversion of a large source | one export read per page | export reads in batches, with the same result |
+| A conversion apply running | silent until it finished | a progress line on stderr at each phase and every 10 seconds (a JSON line with `--json`) |
+| Stopping an apply with SIGTERM, SIGINT or SIGHUP | the process just ended | a partial report on stdout (phase, groups committed, items scanned, canonical state), exit 143, 130 or 129. The source is git-canonical once `recordConversion` runs, before strict_pass_2, and the report's canonical state is authoritative, so a stop before that leaves the source mixed and a new preview lists only what is left |
+| A private page whose committed file differs from it | the apply refused `git_conversion_blocked` and counted the page as `git_overwrites_database` | the conversion commits the file's removal and keeps the page in the database (`withhold` in the preview) |
+| A private page whose file was removed by hand | the conversion's strict pass read it as removed by a commit and deleted the page | the conversion withholds it and keeps the page in the database |
+| A private page whose committed file still equals it | kept in Git | unchanged: the file stays in Git, as before the conversion |
+| One path Git cannot check (for example under a symlinked directory) | every adoption candidate was discarded | only that path is discarded, as `ignore_status_unknown` |
+| Discards in the preview | one total | counted by cause |
+| Conversion holds | cleared before the strict recheck | cleared only after the strict recheck passes |
+| A source whose commits are pushed | the conversion's commits stayed local until the next page write | the apply pushes them after its groups and at the end; a push that does not land is named in the receipt with the command that pushes now |
+
+### Things to watch after you upgrade
+
+- A file that changes on disk, or a page that changes in the database, between the preview and the apply makes the apply refuse `preview_changed`; preview again and apply the new hash. Groups already finished stay finished.
+- A withheld file whose directory resolves outside the checkout refuses `git_target_unsafe` before anything is written. Fix the path, then preview again.
+- Content pushed before a page became private stays in Git history; withholding removes the file from the current tree only.
+- Memory that grew during a long conversion against a TLS Postgres came from Bun 1.4.0 to 1.4.2, and the Bun 1.4.4 floor from 0.60.468.0 already covers it. If memory still looks high, `GBRAIN_MEMORY_TRACE` shows the numbers.
+- The 0.60.471.0 notes now say when a `git_target_changed` refusal pauses the source's writes: only when the file holds neither the write's bytes nor the version before it.
+
+### Itemized changes
+
+- `src/core/persistence/git-conversion.ts`: batched export reads in the plan; unplaced holds judged in the plan; discards counted by cause; holds cleared after the strict recheck; private pages whose committed file differs from them, or whose file was removed by hand, are withheld in groups (stamped with a revision check, then the removal committed through the door; a crash in between leaves the page live and the rerun finishes it); confinement checked before the stamp and the file rechecked before its removal; the apply pushes its door commits where durability applies; progress callbacks.
+- `src/core/export-snapshot.ts`: a batched export read looks each page up by its primary key, so `gbrain export` and the preview stay linear on large sources.
+- `src/commands/sources-canonical.ts`: progress lines, the partial report on signal, the push-pending notice.
+- `src/core/memory-trace.ts`: `GBRAIN_MEMORY_TRACE=<seconds>` (1 to 3600) writes a memory line on stderr during a conversion apply and during `gbrain sync`.
+- `src/commands/sources-git-gap.ts`, `src/core/persistence/git-gap.ts`: the census reads a withheld page's file at its withheld path; in the conversion plan a path whose ignore status Git cannot read no longer refuses the whole census, while `gbrain sources git-gap` and doctor's `db_ahead_of_git` still refuse that source and name the path.
+- `scripts/bench/sync-pass-memory.ts`: a memory probe for the strict-equivalent pass and the conversion (seed, run, cli, embed-seed).
+- Tests: `test/git-canonical-conversion-g8a.test.ts` (crash, refusal and withhold cases on PGLite and Postgres), `test/git-canonical-conversion-progress.test.ts`, `test/git-gap-census.test.ts`, and a Postgres smoke test for the memory probe.
+
 ## [0.60.479.0] - 2026-10-28
 
 **Upgrading an older brain no longer rewrites every page.**
