@@ -39,14 +39,14 @@ function visibilityValues(frontmatter: Record<string, unknown> | null | undefine
 
 /**
  * The private request `content` carries, with the frontmatter it parses to, or null.
- * A visibility line asks for private when its own text says so or when the parse
- * reads it as private (a value on the next line, a block scalar, a flow list), so a
- * spelling the line scan cannot read is still seen. Parsing waits for a visibility key.
+ * The content asks for private when a visibility line says so or when the parse
+ * reads a visibility key (any case) as private, so a spelling the line scan cannot
+ * read is still seen: a value on the next line, a block scalar, a list, a flow
+ * mapping, an explicit or merged key. The parse decides; the line scan is only the
+ * fallback when the parse throws.
  */
 export function readPrivateRequest(content: string, parse: () => Record<string, unknown> | null | undefined): { frontmatter: Record<string, unknown> | null | undefined } | null {
-  const declared = declaredVisibilities(content);
-  if (!declared.length) return null;
-  const inline = declared.includes('private');
+  const inline = declaredVisibilities(content).includes('private');
   let frontmatter: Record<string, unknown> | null | undefined;
   try { frontmatter = parse(); } catch (error) { if (inline) throw error; return null; }
   return inline || visibilityValues(frontmatter).includes('private') ? { frontmatter } : null;

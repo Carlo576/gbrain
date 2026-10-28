@@ -833,7 +833,7 @@ async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: Wri
     const { timeline, materialized } = await materializeTimeline(engine,parsed,row.slug,snapshot,writer,timelinePolicy);
     if (materialized) content = serializePageToMarkdown({...snapshot.page,...parsed,timeline,type:parsed.typeExplicit ? parsed.type : snapshot.page.type},parsed.tags);
   }
-  const privateRequest = typeof content === 'string' ? readPrivateRequest(content, () => parseMarkdown(content as string, row.slug, { activePack }).frontmatter) : null;
+  const privateRequest = typeof content === 'string' && (row.operation === 'put_page' || row.operation === 'edit_page' || row.operation === 'capture') && p.kind !== 'managed_maintenance_page' ? readPrivateRequest(content, () => parseMarkdown(content as string, row.slug, { activePack }).frontmatter) : null;
   if (privateRequest) assertPrivateRequestKept(row, privateRequest.frontmatter);
   const storedTier = snapshot ? await storedPageTier(engine, row.source_id, row.slug) : null;
   // Detect an exact canonical no-op before ingestion can invoke any provider.

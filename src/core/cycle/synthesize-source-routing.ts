@@ -14,7 +14,7 @@
  * transcripts dir, an `--input` file elsewhere) and imported conversation pages
  * (read from the cycle's source) are not session captures and pass unchanged.
  */
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
 import { corpusSpoolDir } from '../context/corpus-segments.ts';
@@ -34,7 +34,7 @@ function corpusLocation(filePath: string, corpusDir: string): 'spool' | 'legacy'
   const root = resolve(corpusDir);
   const file = resolve(filePath);
   const rel = relative(root, file);
-  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null;
+  if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return null;
   return dirname(file) === resolve(corpusSpoolDir(root)) ? 'spool' : 'legacy';
 }
 

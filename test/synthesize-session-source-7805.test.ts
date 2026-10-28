@@ -188,6 +188,15 @@ for (const managed of [false, true]) describe(`${managed ? 'managed' : 'unmanage
     });
   }, 120_000);
 
+  test('a top-level corpus file whose name starts with two dots is a corpus file, held like any legacy file', async () => {
+    await fixture(managed, async ({ engine, cycle, other, corpus }) => {
+      writeTranscript(join(corpus, '..stray.txt'), 'the office move');
+      const result = await runPhaseSynthesize(engine, { brainDir: cycle.root, sourceId: cycle.id, dryRun: false });
+      expect(result.details.source_routing).toMatchObject({ held: { corpus_legacy_unstamped: 1 } });
+      expect(await synthesizedSources(engine, { cycle, other })).toEqual({});
+    });
+  }, 120_000);
+
   test('an --input file outside the corpus is kept for the cycle source, in no routing bucket', async () => {
     await fixture(managed, async ({ engine, cycle, other, corpus }) => {
       const outside = join(dirname(corpus), 'meeting-notes.txt');

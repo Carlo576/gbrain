@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { operations } from '../src/core/operations.ts';
+import { importFromContent } from '../src/core/import-file.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
@@ -118,7 +119,8 @@ for (const managed of [false, true]) describe(`${managed ? 'managed brain with a
   }, 120_000);
 
   for (const [label, extra] of [['visibility: Private', 'visibility: Private\n'], ['Visibility: private', 'Visibility: private\n'], ['VISIBILITY: "PRIVATE"', 'VISIBILITY: "PRIVATE"\n'],
-    ['visibility with Private on the next line', 'visibility:\n  Private\n'], ['visibility as a block scalar', 'visibility: |\n  private\n'], ['visibility as a flow list', 'visibility: [private]\n']] as const) {
+    ['visibility with Private on the next line', 'visibility:\n  Private\n'], ['visibility as a block scalar', 'visibility: |\n  private\n'], ['visibility as a flow list', 'visibility: [private]\n'],
+    ['an explicit key', '? visibility\n: Private\n'], ['a merge key', 'base: &base\n  Visibility: Private\n<<: *base\n']] as const) {
     test(`${label} on an existing world page is refused noncanonical_value, and the page and its revision are unchanged`, async () => {
       await brain(managed, async (ctx, engine) => {
         await put(ctx, 'notes/example', page());
@@ -132,6 +134,16 @@ for (const managed of [false, true]) describe(`${managed ? 'managed brain with a
       });
     }, 120_000);
   }
+
+  test('a flow-mapping frontmatter that spells Visibility: Private is refused, and the page is unchanged', async () => {
+    await brain(managed, async (ctx, engine) => {
+      await put(ctx, 'notes/example', page());
+      const before = (await snapshot(engine, ctx, 'notes/example'))!;
+      const result = await put(ctx, 'notes/example', '---\n{title: Example, type: note, Visibility: Private}\n---\nA page about acme-example.\n', before.revision);
+      expect(result.thrown).toBe('visibility_not_applied');
+      expect((await snapshot(engine, ctx, 'notes/example'))!.revision).toBe(before.revision);
+    });
+  }, 120_000);
 
   test('a quoted key with a trailing comment still publishes private, with CRLF line endings too', async () => {
     await brain(managed, async (ctx, engine) => {
@@ -171,3 +183,17 @@ for (const managed of [false, true]) describe(`${managed ? 'managed brain with a
     });
   }, 120_000);
 });
+
+test('a derived write (add_tag) on a page that already stores Visibility: Private is not refused: the guard governs authored content only', async () => {
+  await brain(false, async (ctx, engine) => {
+    const [{ local_path: root }] = await engine.executeRaw<{ local_path: string }>('SELECT local_path FROM sources WHERE id=$1', [ctx.sourceId]);
+    mkdirSync(join(root, 'notes'));
+    writeFileSync(join(root, 'notes/legacy.md'), page('Visibility: Private\n'));
+    await importFromContent(engine, 'notes/legacy', page('Visibility: Private\n'), { sourceId: ctx.sourceId, noEmbed: true });
+    const addTag = operations.find(op => op.name === 'add_tag')!;
+    const result = await (addTag.handler(ctx, { slug: 'notes/legacy', tag: 'alice-example', request_id: randomUUID(), wait_ms: 25_000 }) as Promise<Outcome>)
+      .catch((e: { code?: string }) => ({ thrown: e.code }));
+    expect(result.thrown).toBeUndefined();
+    expect((await engine.getTags('notes/legacy', { sourceId: ctx.sourceId })).includes('alice-example')).toBe(true);
+  });
+}, 120_000);
