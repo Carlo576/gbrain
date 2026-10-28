@@ -22,6 +22,48 @@ Releasing a held fact that already sits in a page's `## Facts` table confirmed t
 - **The database-only release re-checks the approval** on the locked hold and refuses `preview_changed` when the hold changed after the owner approved it, the same as the managed path.
 - **New doctor check `trust_release_unpreviewed_fields`** lists facts released from a held row before this fix, so the owner can review them. It's read-only and never lowers a tier.
 
+## [0.60.476.0] - 2026-10-27
+
+**Text someone else wrote can no longer add facts to your brain.**
+
+Gmail threads, calendar events, GitHub issues and chat transcripts are imported as pages, and their text came from other people. Until now that text went into the page as written. If an email held gbrain's facts-table markers and a table, the page treated the table as its own: `extract_facts` saved the sender's rows as facts, with the visibility and confidence the sender chose. The same trick could add takes and links, forge timeline entries, or replace facts gbrain had already saved on that page.
+
+Imports now make that text inert before it reaches the page. Every `gbrain:` marker gets a backslash (`gbrain\:facts:begin`). So do timeline sentinels and headings, dated timeline lines, `[Source: …]` citations and transcript speaker lines. The text still reads the same in the rendered page, but nothing parses it. Before that pass, CR, CRLF, U+2028 and U+2029 line breaks become plain newlines, so an unusual line break can't hide a marker or a timeline line.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An email, calendar description, GitHub comment or chat message contains a facts, takes or links table between gbrain's markers | the rows became the page's facts, takes or links | the text is kept and the markers are escaped, so nothing is indexed |
+| That text contains `<!-- timeline -->`, a `## Timeline` heading or dated timeline lines | the page split there and the lines became timeline entries | kept as plain text |
+| Facts gbrain already saved on a thread page, then a reply carries a facts table | the reply's table replaced them | the saved facts stay |
+
+### For operators
+
+- New doctor check `outside_content_fences` (read-only). It lists imported email, calendar, GitHub and transcript pages that have facts, takes or links indexed from a fence on them, with counts and never a cell value. Rows planted before this release stay until someone removes them. gbrain's own writers also add rows to some of these pages, so the check removes nothing. Review each listed page with the user, and withdraw a fact they say a sender planted with `gbrain forget <fact-id>`.
+- `POST /ingest` is unchanged: its caller is an authenticated writer with the same rights as `put_page`. Files the ingestion daemon picks up are unchanged too, because they're the owner's own.
+- New connectors should pass every outside field through `neutralizeOutsideText` in `src/core/outside-content.ts`.
+
+## [0.60.475.0] - 2026-10-27
+
+**A repository's own commit checks now apply to commits gbrain makes.**
+
+`gbrain git commit-push` and gbrain's own page writes told Git to read every file path literally. Git passes that setting on to the repository's hooks, so a pre-commit check that picks files by pattern (all `*.json` files, say) found no files and let the commit through. A JSON file with merge-conflict markers could be committed and pushed by gbrain while a plain `git commit` of the same file was refused. Hooks that build their own path patterns, such as a post-commit step that runs `git add -- ':(literal)<file>'`, failed for the same reason.
+
+gbrain now marks each of its own paths as literal one at a time and no longer turns the setting on for the whole command. Its hooks, filters and helpers start without it, even when gbrain's own environment sets it. Files whose names contain `*`, `?`, `[` or a leading `:` still commit only themselves.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A pre-commit hook lists staged files with a pattern (`git diff --cached --name-only -- '*.json'`) and refuses a bad one | the hook saw no files; gbrain committed and pushed | the hook refuses; `gbrain git commit-push` exits 1 with `git_unavailable` and the hook's message, leaves the file unstaged and pushes nothing |
+| A post-commit hook runs `git add -- ':(literal)<file>'` | `did not match any files` | works as after a plain `git commit` |
+| A clean filter, push helper or hook started for a gbrain commit | inherited `GIT_LITERAL_PATHSPECS=1` | sees no pathspec setting |
+| `GIT_LITERAL_PATHSPECS`, `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` or `GIT_ICASE_PATHSPECS` set in the environment gbrain runs in | passed to every Git command gbrain ran | dropped from Git commands gbrain runs |
+| A new page file whose name starts with `:` | the ignore check read it as the name without the colon | checked under its real name |
+
+Release 0.60.474.0 also updated the `qs` dependency to 6.16.1 for security advisory GHSA-6pq8-jhm2-2vcw.
+
 ## [0.60.474.0] - 2026-10-27
 
 **A database role that can't read the writer state is now refused instead of let through.**

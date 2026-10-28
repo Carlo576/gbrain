@@ -1011,6 +1011,10 @@
       },
       {
         "category": "brain",
+        "name": "outside_content_fences"
+      },
+      {
+        "category": "brain",
         "name": "fence_integrity"
       },
       {
