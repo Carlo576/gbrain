@@ -19,6 +19,7 @@ On a source with pages written by an older gbrain, `gbrain sources canonical <id
 - Progress lines name the round, its candidates and the import batch; `total` is the planned path count and no longer changes mid-pass.
 - Every `git_conversion_incomplete` refusal carries a `fix` (preview again, verified by `gbrain sync status --source <id> --json`), and with `--json` a `progress` object with the counts where it stopped.
 - `scripts/bench/conversion-strict-pass.ts` measures a no-change conversion on a synthetic source (opt-in, never run in CI).
+- `@hono/node-server` 2.1.0 → 2.1.3 for GHSA-rmxm-3fg6-px4f.
 
 ## [0.60.483.0] - 2026-10-28
 
