@@ -10,6 +10,19 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A remote agent can no longer rewrite where a page came from, and removing that record no longer makes a page look more trusted (#7873).**
+
+Every page records how it arrived in three frontmatter fields: `source_kind`, `ingested_via` and `ingested_at`. Only `put_page` on a brain with a repository protected them. Through `edit_page`, `append_page`, `capture`, a large upload, or `put_page` on a brain without a repository, a remote MCP client could write any value into them, so the page file and the database disagreed about where the page came from. On a page whose trust tier was not classified yet, removing an external stamp such as `ingested_via: webhook` did more. The edit was screened and stored as if an agent wrote the page, and the next sync or trust backfill rated it as agent-written instead of external. Now those three fields belong to the server on every remote write. The caller's values are dropped and the stored ones kept, an edit that only changes them is a no-op, and the write is screened and stored by the stamps the page keeps. Local commands behave as before, and pages written before this release are not changed (finding them is tracked in #7891).
+
+### Itemized changes
+
+- `src/core/persistence/page-prepare.ts`: `keepStoredProvenance` keeps the stored stamps on every remote `put_page`, `edit_page`, `append_page` and `capture`, with or without a repository. `provenanceWriteTrust` rates the write at the lower of the caller's frontmatter and the frontmatter it publishes, so dropping a stored stamp no longer gets past the write gate.
+- `src/core/persistence/upload-streamed.ts`: the same for an upload too large for one request.
+- `src/core/trust/page-write.ts`: on an unclassified page, the page's own lowering markers from before the write cap its trust marker, so removing one cannot raise the page when it is rated again.
+- Tests, on PGLite and Postgres, with and without a repository: `test/provenance-stamps-7873.test.ts`, `test/large-pages/upload-provenance-7873.test.ts`.
+
 ## [0.60.485.0] - 2026-10-29
 
 **A capture that asks for `visibility: private` in a spelling page privacy does not read is refused on every brain, never stored world-readable (#7880).**
