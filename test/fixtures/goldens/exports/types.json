@@ -5877,6 +5877,13 @@
       },
       {
         "kind": "function",
+        "name": "resolveRecordedSourceFilePath",
+        "signature": [
+          "(localPath: string, rawSourcePath: string | null | undefined, pageSlug?: string | null, slugRootMode?: \"git-root\" | \"source-root\", gitScope?: string[] | null) => string | null"
+        ]
+      },
+      {
+        "kind": "function",
         "name": "resolveSourceLocalFilePath",
         "signature": [
           "(localPath: string, rawSourcePath: string | null | undefined, pageSlug?: string | null, slugRootMode?: \"git-root\" | \"source-root\", gitScope?: string[] | null) => string | null"
@@ -7430,6 +7437,7 @@
           "requested_unit: \"auto\" | \"window\" | \"chunk\" | \"section\" | \"page\"",
           "return_window: number",
           "tail_trim?: TailTrimMeta | undefined",
+          "title_header?: true | undefined",
           "tokenizer: \"cl100k\" | \"heuristic\"",
           "tokens_delivered: number"
         ],
@@ -7496,6 +7504,7 @@
           "rankCut?: PageRankCut | undefined",
           "requestedUnit: \"auto\" | \"window\" | \"chunk\" | \"section\" | \"page\"",
           "tailTrim?: true | undefined",
+          "titleHeader?: true | undefined",
           "unit: \"auto\" | \"window\" | \"section\" | \"page\"",
           "window: number"
         ],
@@ -7608,6 +7617,13 @@
         "name": "PAGE_OVER_INLINE_BYTES",
         "signature": [
           "\"page_over_inline_bytes\""
+        ]
+      },
+      {
+        "kind": "variable",
+        "name": "QUERY_BUDGET_UNIT_CONFIG_KEY",
+        "signature": [
+          "\"search.query_budget_unit\""
         ]
       },
       {
@@ -7835,6 +7851,13 @@
         "name": "parseReturnWindow",
         "signature": [
           "(raw: unknown, op: string) => number | undefined"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "queryBudgetUsesAuto",
+        "signature": [
+          "(engine: Pick<BrainEngine, \"getConfig\">) => Promise<boolean>"
         ]
       },
       {
