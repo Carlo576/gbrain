@@ -324,6 +324,7 @@ describe('ci-reuse remote-gate decision', () => {
       async commit(sha) { if (!commits[sha]) throw new Error(`GitHub API GET git/commits/${sha} -> 404`); return commits[sha]!; },
       async runsForHead(file, sha) { return o.runs.filter(r => r.file === file && r.head_sha === sha); },
       async recentSuccessfulRuns(file) { return o.runs.filter(r => r.file === file && r.conclusion === 'success'); },
+      async recentRuns(file) { return o.runs.filter(r => r.file === file); },
       async jobs(runId, attempt) {
         const r = o.runs.find(x => x.id === runId)!;
         return o.jobs?.[`${runId}/${attempt}`] ?? [{ name: files[r.file].job, status: 'completed', conclusion: 'success' }];
@@ -457,6 +458,10 @@ describe('ci-reuse remote-gate decision', () => {
     expect((await go(deps, C2)).code).toBe(3);
     const busy = gate({ commits, runs: [run('test.yml', { id: 610, status: 'in_progress', conclusion: null }), run('test.yml'), run('e2e.yml')] });
     expect(await decideGate(busy, PROFILES.test, C2, T, REPO)).toMatchObject({ state: 'pending' });
+    // A same-tree commit whose only full run failed is seen too, though it has no passed run to be listed by.
+    const C3 = '9'.repeat(40);
+    const failedElsewhere = gate({ commits: { ...commits, [C3]: { tree: T, parents: [C2] } }, runs: [run('test.yml', { id: 640, head_sha: C2, conclusion: 'failure' }), run('test.yml'), run('e2e.yml')] });
+    expect(await decideGate(failedElsewhere, PROFILES.test, C3, T, REPO)).toMatchObject({ state: 'failed' });
   });
 
   test('a cancelled newest run looks further back; a passed run of the same tree on another head (a merge commit) reuses', async () => {

@@ -151,6 +151,8 @@ function accept(run: FullRun, tree: string, rejected: Rejection[], where: string
 export type GateState = 'reuse' | 'pending' | 'failed' | 'none';
 export interface GateDecision { state: GateState; detail: string; tests?: number; failed?: number; url?: string }
 export interface GateDeps extends ReuseDeps {
+  /** The newest workflow_dispatch and push runs of `file`, whatever their status (a failed run counts against its tree too). */
+  recentRuns(file: string): Promise<FullRun[]>;
   /** Executed (pass, fail) test identities in the run's executed-identities artifact, or why they cannot be read. */
   executed(runId: number): Promise<{ tests: number; failed: number } | { reason: string }>;
 }
@@ -163,7 +165,7 @@ export async function decideGate(deps: GateDeps, p: Profile, head: string, tree:
     const own = await headGate(deps, p, head, tree, repo, rejected);
     if (own) return own;
     const heads = new Map<string, string>();
-    for (const run of (await deps.recentSuccessfulRuns(p.file)).sort((a, b) => b.id - a.id)) {
+    for (const run of (await deps.recentRuns(p.file)).sort((a, b) => b.id - a.id)) {
       if (!isCandidate(run) || run.head_sha === head || run.head_repository?.full_name !== repo || heads.has(run.head_sha)) continue;
       if (heads.size >= MAX_FALLBACK_HEADS) break;
       heads.set(run.head_sha, (await deps.commit(run.head_sha)).tree);
@@ -281,6 +283,10 @@ export function apiDeps(client: GitHubClient): ReuseDeps {
 export function gateDeps(client: GitHubClient): GateDeps {
   return {
     ...apiDeps(client),
+    async recentRuns(file) {
+      const pages = await Promise.all(CANDIDATE_EVENTS.map(event => client.request<{ workflow_runs: FullRun[] }>('GET', `repos/{repo}/actions/workflows/${file}/runs?event=${event}&per_page=100`)));
+      return pages.flatMap(p => p.workflow_runs);
+    },
     async executed(runId) {
       const got = await fetchArtifactJson(client, runId, 'executed-identities', 'executed-identities.json');
       if (got.reason) return { reason: got.reason };
