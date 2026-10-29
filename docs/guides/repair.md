@@ -834,7 +834,11 @@ names the source's root and that root's device and inode. A writer transfer
 accept and `gbrain sources set-path` rebind the receipt of every moved source
 (nested sources by their relative path) in their own transaction, and report it
 as `content_receipts`. A receipt an older release left on the old root makes
-doctor report `content_receipt_stale` with this repair as its fix.
+doctor report `content_receipt_stale` with this repair as its fix. The repair
+also lists an unfinished setup checkpoint that names another root: after a host
+move, the 0.53.0 migration refuses `The canonical root changed after setup
+began` with this repair as its fix (#7900). Follow the class it prints, then
+run `gbrain apply-migrations --force-retry 0.53.0`.
 
 ```bash
 gbrain repair content-receipt-root --source default                       # preview, on the owner host
@@ -848,7 +852,7 @@ Classes in the preview:
 |---|---|---|
 | `rebind` | The owner binding's root is the source's `local_path` and the owner's tree hashes to the worktree manifest the last transfer or rebind verified. | The apply rewrites the receipt's `root` and `root_identity`. |
 | `source_path_mismatch` | The source's `local_path` still names the old root (a transfer was accepted, `set-path` not yet run). | `gbrain sources set-path <source> <owner root>`, which also rebinds the receipt. |
-| `tree_mismatch` | The owner's tree no longer hashes to the recorded manifest (pages were written since), so it is not proven to be the transferred content; the detail prints both digests. | A self-transfer on the owner host (`gbrain sources writer transfer prepare <source> --self-transfer ...`, then the accept it prints) re-verifies the tree and rebinds the receipt. |
+| `tree_mismatch` | The owner's tree no longer hashes to the recorded manifest (pages were written since, or a claim on a new host recorded none), so it is not proven to be the transferred content; the detail prints both digests. | A self-transfer on the owner host (`gbrain sources writer transfer prepare <source> --self-transfer ...`, then the accept it prints) re-verifies the tree and rebinds the receipt. With shared skills on, the fix then repeats `gbrain sources writer activate --confirm-quiesced --shared-skills` for the new owner epoch. |
 | `not_owner_host`, `root_missing` | This host does not own the checkout, or the owner's root cannot be read. | `gbrain sources writer status --source <source> --json`. |
 
 The apply recomputes the preview and refuses `preview_changed` unless it is

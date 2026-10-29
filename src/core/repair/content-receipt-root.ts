@@ -33,18 +33,24 @@ const previewCommand = (scope: RepairScope) => `gbrain repair content-receipt-ro
 const statusFix = (sourceId: string) => readFix(`Shows source ${sourceId}'s owner host, binding root and worktree state, read-only.`,
   { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] });
 
-function selfTransferFix(sourceId: string): Action {
+/** #7900: a self-transfer moves the owner epoch, so where shared skills are on, their activation is repeated for the new epoch. */
+function selfTransferFix(sourceId: string, sharedSkills: boolean): Action {
   const intent = (phase: string) => ['--admin-intent', `writer_transfer_${phase}`, '--expected-state', '<admin_state>'];
   const inputs = [{ name: 'admin_state', how: `admin_state from gbrain sources writer status ${sourceId} --json on the owner host (read it again before the accept)` }];
+  const reactivate: Action = { argv: ['gbrain', 'sources', 'writer', 'activate', '--confirm-quiesced', '--shared-skills', '--admin-intent', 'writer_activate', '--expected-state', '<admin_state>'],
+    inputs: [{ name: 'admin_state', how: 'admin_state from gbrain sources writer status --json, read again after the accept' }], consent: [], actor: 'host_admin', requires_exclusive: false,
+    why: 'Registers shared-skill publication for the owner epoch the self-transfer moved to; until then shared skill writes refuse writer_not_quiesced.' };
   return { argv: ['gbrain', 'sources', 'writer', 'transfer', 'prepare', sourceId, '--self-transfer', ...intent('prepare')], inputs, consent: [], actor: 'host_admin', requires_exclusive: false,
     why: `Records the manifest of source ${sourceId}'s current tree on the owner host; the self-transfer accept then re-verifies the tree and rebinds the content receipt in the same transaction.`,
     then: { argv: ['gbrain', 'sources', 'writer', 'transfer', 'accept', sourceId, '--path', '<owner root>', '--expected-epoch', '<owner_epoch>', '--manifest', '<manifest digest printed by prepare>', '--self-transfer', ...intent('accept')],
       inputs: [...inputs, { name: 'owner root', how: 'the binding root writer status prints' }, { name: 'owner_epoch', how: 'the owner_epoch prepare printed' }],
-      consent: [], actor: 'host_admin', requires_exclusive: false, why: 'Accepts the self-transfer: ownership stays on this host and the content receipt follows the verified root.' } };
+      consent: [], actor: 'host_admin', requires_exclusive: false, why: 'Accepts the self-transfer: ownership stays on this host and the content receipt follows the verified root.',
+      ...(sharedSkills ? { then: reactivate } : {}) } };
 }
 
 async function verdicts(engine: Parameters<RepairHandler['plan']>[0], scope: RepairScope): Promise<Verdict[]> {
   const out: Verdict[] = [];
+  const [brain] = await engine.executeRaw<{ skill_bundles_enabled: boolean }>('SELECT skill_bundles_enabled FROM persistence_brain WHERE singleton=1');
   for (const stale of await staleOwnedContent(engine, scope.source_ids)) {
     const [row] = await engine.executeRaw<{ incarnation: string; brain_id: string; key: string; value: string; owner_host_id: string; manifest: StoredWorktreeManifest | null; worktree_root: string; relative_path: string }>(
       `SELECT s.incarnation::text AS incarnation,p.brain_id,c.key,c.value,w.owner_host_id::text AS owner_host_id,w.manifest,h.local_path AS worktree_root,b.relative_path
@@ -69,7 +75,7 @@ async function verdicts(engine: Parameters<RepairHandler['plan']>[0], scope: Rep
     const recorded = row.manifest?.digest ?? null;
     const actual = worktreeManifest(row.worktree_root, { scope: storedManifestScope(row.manifest) }).digest;
     if (recorded !== actual) {
-      out.push({ ...base, class: 'tree_mismatch', fix: selfTransferFix(stale.sourceId),
+      out.push({ ...base, class: 'tree_mismatch', fix: selfTransferFix(stale.sourceId, brain?.skill_bundles_enabled === true),
         detail: `${was}; the owner's tree at ${row.worktree_root} hashes to ${actual} but the recorded worktree manifest is ${recorded ?? 'missing'}, so it is not proven to be the transferred content` });
       continue;
     }
