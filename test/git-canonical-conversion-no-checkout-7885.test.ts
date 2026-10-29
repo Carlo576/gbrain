@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { operationsByName } from '../src/core/operations.ts';
 import { planGitConversion } from '../src/core/persistence/git-conversion.ts';
@@ -28,6 +28,13 @@ async function cli(engine: Parameters<typeof runSourcesCanonical>[0], args: stri
   return JSON.parse(out.at(-1)!);
 }
 
+const detached = ({ root }: { root: string }) => {
+  plain({ root });
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, '-c', 'commit.gpgsign=false', ...args], { stdio: 'ignore' });
+  git('init', '-q'); git('config', 'user.name', 'Example Writer'); git('config', 'user.email', 'writer@example.invalid');
+  git('add', '-A'); git('commit', '-qm', 'notes'); git('checkout', '-q', '--detach');
+};
+
 for (const backend of testBackends()) describe(`[${backend}] #7885: --to git on a managed source without a Git checkout`, () => {
   const databaseUrl = backend === 'postgres' ? requirePostgresTestDatabase() : undefined;
 
@@ -44,4 +51,20 @@ for (const backend of testBackends()) describe(`[${backend}] #7885: --to git on 
       expect(written.status).toBe('created_or_updated');
     }, { databaseUrl, setup }), 120_000);
   }
+
+  // Value: protects=a root on a detached HEAD is not refused as checkout-less, so the preview still plans; fails_when=assertConversionCheckout rethrows git_detached_head or maps it to a checkout refusal; why_new=the two refusal cases never reach the detached-HEAD early return; seam=none; no_claim=the apply on a detached HEAD (pushes are the durability check's concern)
+  test('a detached HEAD is not a missing checkout: the preview plans instead of refusing', () => managedBrain(async ({ engine }) => {
+    const { preview } = await planGitConversion(engine, 'default');
+    expect(preview.source_id).toBe('default');
+  }, { databaseUrl, setup: detached }), 120_000);
+
+  // Value: protects=a root that is gone (unmounted, moved) is never refused as checkout-less, whose fix would git init an empty repository there; fails_when=assertConversionCheckout maps an unreadable root to git_checkout_required; why_new=the refusal tests all have a readable root; seam=none; no_claim=which refusal the context resolution gives
+  test('a root that is gone is not refused as a missing checkout: the context resolution owns it', () => managedBrain(async ({ engine, root }) => {
+    rmSync(root, { recursive: true, force: true });
+    try {
+      const refused = await planGitConversion(engine, 'default').then(() => null, (error: { code?: string }) => error);
+      expect(refused).not.toBeNull();
+      expect(refused!.code).not.toBe('git_checkout_required');
+    } finally { mkdirSync(root, { recursive: true }); }
+  }, { databaseUrl, setup: plain }), 120_000);
 });

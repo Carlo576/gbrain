@@ -22,6 +22,7 @@ When a managed source's folder was a plain directory, or a `git init` with no co
 
 - The strict-pass receipt-wait test runs in about 6 seconds instead of sleeping past a 30-second wait: the managed sync receipt waits now live in one module with a test seam. It covers both strict passes.
 - A direct test covers the NULL-vector clause of the no-op embedding check.
+
 ## [0.60.493.0] - 2026-10-29
 
 **`search` now finds a saved fact by its words the way the facts keyword index does, and a newer correction comes back ahead of the fact it corrects (`search.saved_facts_supersede`, on by default). In a keyless replay of 816 harness `search` calls, the author's correction ranked above the retracted post in 27 of 27 reads of the corrections case, against 1 of 27 on 0.60.492.0.**

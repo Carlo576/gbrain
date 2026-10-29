@@ -61,6 +61,7 @@ import { DURABILITY_NOT_ENABLED_REASON, gitDurabilityPolicy } from './git-durabi
 import { currentVerifiedLocalWriter, localHostId } from './identity.ts';
 import { acquireWorktree, getWorktreeBinding, readManagedMode } from './ownership.ts';
 import { inspectDurabilityCheckout } from './git-durability-administration.ts';
+import { classifyGitCheckout } from '../git-checkout.ts';
 import { resolveManagedSyncContext, type ManagedSyncContext } from './sync-discovery.ts';
 import { readShadowLevel } from './sync-pass.ts';
 import { isPrivacyClass, type PrivacyClass } from './git-declared.ts';
@@ -197,25 +198,29 @@ export async function assertConversionCaller(engine: BrainEngine, sourceId: stri
 
 /**
  * #7885: a root with no Git checkout, or one whose branch has no commit yet, has nothing to convert into. The plan refuses
- * before it reads anything, and the source keeps working as it is (the database is its record).
+ * before it reads anything, and the source keeps working as it is (the database is its record). A root it cannot read
+ * (gone, unmounted, not a directory) is left to the context resolution, which owns those refusals.
  */
 async function assertConversionCheckout(sourceId: string, root: string): Promise<void> {
-  try { await inspectDurabilityCheckout(root); }
+  if (classifyGitCheckout(root) === 'unknown') return;
+  let code: 'git_checkout_required' | 'git_branch_unborn';
+  try { await inspectDurabilityCheckout(root); return; }
   catch (error) {
-    if (!(error instanceof OperationError) || (error.code !== 'git_checkout_required' && error.code !== 'git_branch_unborn')) {
-      if (error instanceof OperationError && error.code === 'git_detached_head') return;
-      throw error;
-    }
-    const code = error.code === 'git_checkout_required' ? 'git_checkout_required' as const : 'git_branch_unborn' as const;
-    const state = code === 'git_checkout_required' ? 'is not inside a Git checkout' : 'is a Git checkout with no commit yet';
-    const why = 'A git-canonical source commits every page to Git on top of the checkout\'s branch, so its root needs a Git checkout with a first commit.';
-    throw opError(code, `Source ${sourceId}'s root ${root} ${state}, so it has nothing to convert into; nothing was read or written. The source stays usable as it is, with the database as its record.`,
-      'Keep the source as it is, or make its root a Git repository with a first commit on the brain host (git init, git add -A, git commit), then preview again.',
-      { why, docs: DOCS, fix: { argv: ['gbrain', 'sources', 'canonical', sourceId, '--to', 'git', '--dry-run', '--json'], consent: [], actor: 'user', requires_exclusive: false,
-        why: 'Previews the conversion again once the root has a first commit; read-only.',
-        user_message: `Source ${sourceId} has no Git history to convert into. It keeps working as it is. Should its folder become a Git repository with a first commit so it can be converted?` } });
+    if (!(error instanceof OperationError)) throw error;
+    if (error.code === 'git_detached_head') return;
+    if (error.code !== 'git_checkout_required' && error.code !== 'git_branch_unborn') throw error;
+    code = error.code === 'git_checkout_required' ? 'git_checkout_required' : 'git_branch_unborn';
   }
+  const state = code === 'git_checkout_required' ? 'is not inside a Git checkout' : 'is a Git checkout with no commit yet';
+  const why = 'A git-canonical source commits every page to Git on top of the checkout\'s branch, so its root needs a Git checkout with a first commit.';
+  throw opError(code, `Source ${sourceId}'s root ${root} ${state}, so it has nothing to convert into; nothing was read or written. The source stays usable as it is, with the database as its record.`,
+    'Keep the source as it is, or make its root a Git repository with a first commit on the brain host (git init, git add -A, git commit), then preview again.',
+    { why, docs: DOCS, fix: { argv: ['gbrain', 'sources', 'canonical', sourceId, '--to', 'git', '--dry-run', '--json'], consent: [], actor: 'user', requires_exclusive: false,
+      why: 'Previews the conversion again once the root has a first commit; read-only.',
+      user_message: `Source ${sourceId} has no Git history to convert into. It keeps working as it is. Should its folder become a Git repository with a first commit so it can be converted?` } });
 }
+
+
 
 /** The context a strict pass reads, for a source whose row does not say so yet. */
 const strictContext = (context: ManagedSyncContext): ManagedSyncContext => ({ ...context, source: { ...context.source, config: { ...context.source.config, canonical: 'git' } } });
@@ -223,7 +228,7 @@ const strictContext = (context: ManagedSyncContext): ManagedSyncContext => ({ ..
 /** The read-only plan of `--to git`; its preview is what the CLI prints and the apply binds to. */
 export async function planGitConversion(engine: BrainEngine, sourceId: string): Promise<GitConversionPlan> {
   const binding = await getWorktreeBinding(engine, sourceId);
-  if (binding?.local_path) await assertConversionCheckout(sourceId, resolve(binding.local_path, binding.relative_path));
+  if (binding?.local_path && binding.owner_host_id === localHostId() && binding.state === 'active') await assertConversionCheckout(sourceId, resolve(binding.local_path, binding.relative_path));
   const context = await resolveManagedSyncContext(engine, { sourceId, noPull: true, dryRun: true });
   const pages: GitGapPage[] = [];
   const equal = new Map<string, PageRevision>();
@@ -564,7 +569,7 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   const push = final.reason === 'nothing_to_push' ? progress.push! : final;
   report({ push });
   let after = (await planGitConversion(engine, sourceId)).preview, closing = 0;
-  for (; after.remaining > 0 && after.remaining === after.git_wins.count && closing < CLOSING_PASSES; closing++) {
+  for (; after.strict && after.remaining > 0 && after.remaining === after.git_wins.count && closing < CLOSING_PASSES; closing++) {
     passOrThrow(sourceId, 'strict_pass_closing', await pass('strict_pass_closing', after.git_wins.count), progress);
     after = (await planGitConversion(engine, sourceId)).preview;
   }
