@@ -10,6 +10,21 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Three more writers refuse a `visibility: private` request page privacy does not read instead of storing a world-readable page (#7897).**
+
+`gbrain repair url-clone-fences` restored a clone file by importing HEAD's bytes as its page without checking how a private request was spelled, and ignored the import's result. On a brain without managed persistence, a HEAD whose frontmatter said `Visibility: private` (or another spelling sync holds as `visibility_noncanonical`) was stored world-readable and reported `restored`. The preview now lists such a file under the hold's code and leaves it alone, rows and page included, and an approval saved before this release applies as `held`. `gbrain brainstorm` / `gbrain lsd` `--save` on an unmanaged brain had the same gap for content passed to the exported save function; the CLI's own frontmatter never carries a private request, and it now refuses one with put_page's `visibility_not_applied` and exits 1. `gbrain sources reconcile` protected only the lowercase `visibility` key from the file side, so a file adding `Visibility: private` merged in (as an additive field under `--auto-additive`) and published world-readable; it now refuses `visibility_not_applied` at preview and apply. `visibility: private` on its own lowercase line keeps working everywhere, and pages stored before this release are not changed.
+
+### Itemized changes
+
+- `src/core/repair/url-clone-fences.ts`: the preview and the apply screen HEAD's bytes with `holdNoncanonicalPrivate` before any backup or row move; the import opts in too, and a refused import reports `held` with its code instead of `restored`.
+- `src/commands/brainstorm.ts`: the unmanaged save opts in, turns the hold into `visibility_not_applied` (`privateRequestRefusal`) and treats any refused import as not saved.
+- `src/core/persistence/reconcile-prepare.ts`: the merged result imports with `holdNoncanonicalPrivate` and refuses `visibility_not_applied`.
+- `test/import-private-hold-callers-7897.test.ts`: lists every `importFromContent` / `screenImportContent` call that does not opt in, with why it is held another way or derived from a stored page, and fails on a new unlisted call.
+- `src/core/error-registry.ts`, `src/core/behavior-change-notice.ts`, `docs/guides/write-refusals.md`, `docs/guides/repair.md`: name the new refusals.
+- Tests, on PGLite and Postgres: `test/url-clone-fences-private-hold-7897.test.ts`, `test/brainstorm-private-hold-7897.test.ts` (a Git checkout and a source with none), `test/reconcile-private-hold-7897.test.ts` (a Git checkout and a plain directory).
+
 ## [0.60.485.0] - 2026-10-29
 
 **A capture that asks for `visibility: private` in a spelling page privacy does not read is refused on every brain, never stored world-readable (#7880).**
