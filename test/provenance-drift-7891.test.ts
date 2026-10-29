@@ -195,6 +195,49 @@ for (const kind of testBackends()) {
         expect(await tierOf(slug)).toBe('external_untrusted');
       }, 120_000);
 
+      test.skipIf(!repo)('a page file holding an edit the database lacks is listed needs_review and never overwritten', async () => {
+        const slug = 'inbox/unsynced-edit';
+        await seed(slug, STORED);
+        await rewrite(slug, {}, 'oauth_client');
+        const ready = await run(false);
+        expect(ready.affected).toBe(1);
+        const edited = fs.readFileSync(fileOf(slug), 'utf8').replace('Captured body, edited', 'Captured body, edited by hand in the checkout');
+        fs.writeFileSync(fileOf(slug), edited);
+        expect((await refusal(() => run(true, { expect: ready.preview_hash }))).code).toBe('preview_changed');
+        expect(fs.readFileSync(fileOf(slug), 'utf8')).toBe(edited);
+        const dry = await run(false);
+        expect(dry.affected).toBe(0);
+        expect(dry.listing.map((entry: Record<string, string>) => [entry.class, entry.detail])).toEqual([['needs_review', expect.stringContaining('gbrain sync first')]]);
+        expect(fs.readFileSync(fileOf(slug), 'utf8')).toBe(edited);
+        expect(await proposals(slug)).toEqual([]);
+      }, 120_000);
+
+      test.skipIf(!repo)('a page whose checkout cannot be written is listed needs_review, not repaired in the database alone', async () => {
+        const slug = 'inbox/missing-checkout';
+        await seed(slug, STORED);
+        await rewrite(slug, {}, 'oauth_client');
+        await engine.setConfig('sync.repo_path', path.join(tmpRoot, 'gone'));
+        const dry = await run(false);
+        expect(dry.affected).toBe(0);
+        expect(dry.listing.map((entry: Record<string, string>) => entry.class)).toEqual(['needs_review']);
+      }, 120_000);
+
+      test.skipIf(!repo)('a page of a clone gbrain pulls is listed needs_review, not repaired in the database alone', async () => {
+        const slug = 'inbox/owned-clone';
+        await seed(slug, STORED);
+        await rewrite(slug, {}, 'oauth_client');
+        const before = fs.readFileSync(fileOf(slug), 'utf8');
+        await engine.executeRaw(`UPDATE sources SET local_path = $1, config = COALESCE(config, '{}'::jsonb) || '{"managed_clone":true}'::jsonb WHERE id = 'default'`, [brainDir]);
+        try {
+          const dry = await run(false);
+          expect(dry.affected).toBe(0);
+          expect(dry.listing.map((entry: Record<string, string>) => [entry.class, entry.detail])).toEqual([['needs_review', expect.stringContaining('url_clone')]]);
+          expect(fs.readFileSync(fileOf(slug), 'utf8')).toBe(before);
+        } finally {
+          await engine.executeRaw(`UPDATE sources SET local_path = NULL, config = config - 'managed_clone' WHERE id = 'default'`);
+        }
+      }, 120_000);
+
       test('#7918: a classified page whose file would re-read higher gets its stored tier as the marker; the row keeps its tier', async () => {
         const slug = 'inbox/derived-unmarked';
         await seed(slug, {}, 'agent_written');

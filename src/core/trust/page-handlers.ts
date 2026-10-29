@@ -311,12 +311,15 @@ async function publishOwnerPage(engine: BrainEngine, input: PageActionInput, int
   const { importFromContent } = await import('../import-file.ts');
   const attribution = await attributionFor(engine, input.by);
   const trust = ownerTrust(tier, intent.mode, intent.via);
-  // A repair mode on an unmanaged checkout renders the repaired row to the page's file in the same transaction (put_page's
-  // write-through), so a re-read of the checkout does not undo it; the file must still be the bytes read here.
-  const writeThrough = LOCAL_ONLY_MODES.includes(intent.mode) ? await import('../write-through.ts') : null;
-  const target = writeThrough ? await writeThrough.resolvePageWriteTarget(engine, input.slug, input.sourceId) : null;
-  const { existsSync, readFileSync } = await import('node:fs');
-  const fileBytes = target?.ok ? (existsSync(target.filePath) ? readFileSync(target.filePath, 'utf8') : null) : undefined;
+  // A repair mode on an unmanaged checkout renders the repaired row to the page's file in the same transaction, so a
+  // re-read of the checkout does not undo it; a file holding an edit the database lacks refuses the page instead.
+  const file = LOCAL_ONLY_MODES.includes(intent.mode) ? await ownerRepairFile(engine, input.sourceId, input.slug) : null;
+  if (file && !file.ok) {
+    if (file.reason === 'file_database_drift') throw changedSincePreview(pageRef(input.sourceId, input.slug), ACTION_NAMES[intent.mode]);
+    throw opError('unavailable', `The page file of ${pageRef(input.sourceId, input.slug)} cannot be written (${file.reason}); nothing was changed.`,
+      'Fix the checkout (gbrain sources status), then preview the repair again.');
+  }
+  const writeThrough = file?.ok && file.target ? await import('../write-through.ts') : null;
   await engine.transaction(tx => withWriteAttribution(tx, { ...attribution, trust }, () => withTrustPromotion(tx, tier, () =>
     withTrustKeep(tx, FENCE_TABLES, async () => {
       if ((await tx.readPageSnapshot(input.slug, { sourceId: input.sourceId }))?.revision !== input.expectedRevision) {
@@ -326,16 +329,38 @@ async function publishOwnerPage(engine: BrainEngine, input: PageActionInput, int
       const prior = intent.mode === 'restore_provenance' ? await readPageTrustState(tx, input.sourceId, input.slug) : null;
       await importFromContent(tx, input.slug, markdown, { sourceId: input.sourceId, noEmbed: true, preserveGateMarkers: intent.mode !== 'revert', forceRechunk: true, allowEmptyOverwrite: intent.mode === 'revert' });
       if (prior) await recordAgentPageLowering(tx, { operation: TRUST_OWNER_PAGE_OPERATION, source_id: input.sourceId, slug: input.slug }, { tier: prior.tier, revision: prior.revision }, PROVENANCE_PROPOSER);
-      if (writeThrough && target?.ok) {
-        const written = await writeThrough.writePageThrough(tx, input.slug, { sourceId: input.sourceId, expectedFileBytes: fileBytes ?? null });
+      if (writeThrough && file?.ok && file.target) {
+        const written = await writeThrough.writePageThrough(tx, input.slug, { sourceId: input.sourceId, expectedFileBytes: file.target.expectedFileBytes });
         if (written.skipped === 'file_changed') throw changedSincePreview(pageRef(input.sourceId, input.slug), ACTION_NAMES[intent.mode]);
-        if (!written.written && written.skipped !== 'disabled_by_config' && written.skipped !== 'url_clone') {
+        if (!written.written) {
           throw opError('unavailable', `The page file of ${pageRef(input.sourceId, input.slug)} could not be written (${written.skipped ?? written.error}); nothing was changed.`,
             'Fix the checkout (gbrain sources status), then preview the repair again.');
         }
       }
       await closeProposal(tx, intent.proposal, input.by);
     }))));
+}
+
+/** Write-through outcomes that leave a repair database-only on purpose: no checkout, write-through off, an ignored or db_only target. */
+const DATABASE_ONLY_TARGETS = ['no_repo_configured', 'disabled_by_config', 'not_canonical'];
+
+/**
+ * The checkout file an owner repair mode on an unmanaged brain renders the page to: `target: null` when the page has
+ * none on purpose (DATABASE_ONLY_TARGETS), the bytes the write must still find, or why the page cannot be repaired:
+ * `file_database_drift` when the file holds an edit the database lacks (a hand edit sync has not imported), else the
+ * unresolvable target (a missing checkout, a path outside the source root) or `url_clone` (a clone gbrain pulls, whose
+ * next pull would undo a database-only repair). Read-only.
+ */
+export async function ownerRepairFile(engine: BrainEngine, sourceId: string, slug: string):
+  Promise<{ ok: true; target: { expectedFileBytes: string | null } | null } | { ok: false; reason: string }> {
+  const { derivedFileTarget } = await import('../cycle/derived-write-through.ts');
+  const resolved = await derivedFileTarget(engine, slug, sourceId);
+  if (!resolved.ok) return DATABASE_ONLY_TARGETS.includes(resolved.skipped) ? { ok: true, target: null } : { ok: false, reason: resolved.skipped };
+  const { urlCloneReadOnly } = await import('../url-clone.ts');
+  if (await urlCloneReadOnly(engine, sourceId)) return { ok: false, reason: 'url_clone' };
+  const { replaceableFile } = await import('../facts/file-body-guard.ts');
+  const file = await replaceableFile(engine, sourceId, slug, resolved.target.filePath);
+  return file.ok ? { ok: true, target: { expectedFileBytes: file.expectedFileBytes } } : { ok: false, reason: 'file_database_drift' };
 }
 
 /** Admits the journaled owner page mutation and waits for its publication (the decide_proposal precedent). */

@@ -782,8 +782,10 @@ follow it down. The apply writes one owner page write per page, bound to the
 previewed revision and change, so a page that moved since is `preview_changed`
 and nothing is written. On a managed brain the write publishes the file through
 the coordinator (Git stays the parent); on a classic checkout it renders the
-repaired page to its file in the same transaction; on a repo-less brain the
-database is the record. It runs only from the local CLI on the brain host, and
+repaired page to its file in the same transaction, and a page whose file holds
+an edit the database lacks (run `gbrain sync` first) or whose checkout cannot
+be written is listed `needs_review` instead; on a repo-less brain the database
+is the record. It runs only from the local CLI on the brain host, and
 never from `--all`, the remediation plan or an upgrade. A second preview lists
 nothing.
 

@@ -20,7 +20,8 @@
 import type { BrainEngine } from '../engine.ts';
 import { OperationError, opError } from '../ops/contract.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
-import { repairPageMarker, restorePageProvenance } from '../trust/page-handlers.ts';
+import { managedPersistenceEnabled } from '../persistence/ownership.ts';
+import { ownerRepairFile, repairPageMarker, restorePageProvenance } from '../trust/page-handlers.ts';
 import { plannedDigest, readPageDrift, scanProvenanceDrift, type DriftItem } from '../trust/provenance-drift.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairScope } from './core.ts';
 
@@ -67,6 +68,7 @@ async function scan(engine: BrainEngine, scope: RepairScope, selection: Selectio
   const planned: PlannedPage[] = [];
   const listing: RepairListing[] = [];
   const residuals: Record<string, number> = { restore: 0, restamp: 0, ambiguous: 0, needs_review: 0, local: 0 };
+  const managedBrain = await managedPersistenceEnabled(engine);
   for (const sourceId of scope.source_ids) {
     const drift = await scanProvenanceDrift(engine, sourceId, { limit: Number.MAX_SAFE_INTEGER, includeAmbiguous: selection.include_ambiguous, slugs: selection.slugs });
     for (const item of drift.items) {
@@ -82,6 +84,14 @@ async function scan(engine: BrainEngine, scope: RepairScope, selection: Selectio
       if (await segmented(engine, item.page_id)) {
         residuals.needs_review!++;
         listing.push({ item: label, class: 'needs_review', detail: 'the page stores its body in segments, which this repair does not rewrite; edit its frontmatter by hand' });
+        continue;
+      }
+      const file = managedBrain ? null : await ownerRepairFile(engine, item.source_id, item.slug);
+      if (file && !file.ok) {
+        residuals.needs_review!++;
+        listing.push({ item: label, class: 'needs_review', detail: file.reason === 'file_database_drift'
+          ? 'the page file holds an edit the database lacks; run gbrain sync first, then preview again'
+          : `the page file cannot be written (${file.reason}); fix the checkout, then preview again` });
         continue;
       }
       const action = verdict.class === 'restamp' ? 'restamp' : 'restore';
@@ -102,7 +112,8 @@ function item(page: PlannedPage, hash: string, includeAmbiguous: boolean, last: 
 /** The page still needs exactly the previewed change. */
 async function stillPlanned(engine: BrainEngine, page: PlannedPage, includeAmbiguous: boolean): Promise<'planned' | 'done' | 'moved'> {
   const current = await readPageDrift(engine, page.source_id, page.slug, { includeAmbiguous });
-  if (!current || current.page_id !== page.id || !current.verdict.restore) return 'done';
+  if (!current) return 'done';
+  if (current.page_id !== page.id || !current.verdict.restore) return 'moved';
   return current.revision === page.revision && plannedDigest(current) === page.planned ? 'planned' : 'moved';
 }
 
