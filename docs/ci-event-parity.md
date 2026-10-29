@@ -114,8 +114,8 @@ across the head and every recent head with the same tree, so neither an empty
 commit nor an older pass elsewhere skips a newer failure; a failed one refuses
 with no receipt. A run that did not run the full job (a diagnostic dispatch, a
 push that reused) is skipped. A tree that changes `.github/workflows/test.yml`,
-`.github/workflows/e2e.yml`, `scripts/ci-reuse.ts`, `scripts/ci-full-suite-tree.sh`
-or `scripts/ci-executed-counts.ts` relative to `origin/master` never reuses, since its runs would attest to themselves, and the
+`.github/workflows/e2e.yml`, `scripts/ci-reuse.ts`, `scripts/lib/gh-issue.ts`,
+`scripts/ci-full-suite-tree.sh` or `scripts/ci-executed-counts.ts` relative to `origin/master` never reuses, since its runs would attest to themselves, and the
 check runs without the model and database keys, like the gate. Every other case runs the gate: a dirty tree, a commit GitHub
 doesn't have, a missing workflow, an API error, or `GBRAIN_PREGATE_REUSE=0`.
 
