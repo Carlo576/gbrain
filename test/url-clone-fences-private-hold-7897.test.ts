@@ -4,9 +4,10 @@
  * that asks for `visibility: private` in a spelling page privacy does not read (sync holds it `visibility_noncanonical`)
  * was imported world-readable on an unmanaged brain and reported `restored`.
  *
- * Protects: the preview lists such a file under the hold's code and offers nothing to apply; an approval saved before
- * this release (a preview that listed it `fence_rows_only`) applies as `held` with the code, and the file, its fence
- * rows and the page stay as they were. HEAD with `visibility: private` still restores a private page, and a HEAD that
+ * Protects: the preview lists such a file under the hold's code, and apply (from that preview, or from an approval saved
+ * before this release that listed it `fence_rows_only`) reports `held` with the code: the row is kept database-only and
+ * the file is restored from HEAD, so the clone pulls the upstream fix, but HEAD is not imported and the page stays as it
+ * was. HEAD with `visibility: private` still restores a private page, and a HEAD that
  * asks for nothing private still restores. The brain has no repository of its own (no `sync.repo_path`); the repair
  * applies only to a source that is an owned Git clone, so there is no clone-less arm.
  *
@@ -38,11 +39,11 @@ const person = (extra: string) => `---\ntype: person\ntitle: Alice Example\n${ex
 const git = (dir: string, args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
-interface Clone { engine: BrainEngine; root: string; file: () => string; head: () => string; page: () => Promise<{ frontmatter: Record<string, unknown>; compiled_truth: string } | null>;
+interface Clone { engine: BrainEngine; root: string; upstream: string; file: () => string; head: () => string; page: () => Promise<{ frontmatter: Record<string, unknown>; compiled_truth: string } | null>;
   rows: () => Promise<Array<number | null>> }
 
 /**
- * An owned clone whose first sync imported a world page; HEAD then moves to `extra` frontmatter (a local commit) and an
+ * An owned clone whose first sync imported a world page; HEAD then moves to `extra` frontmatter (an upstream commit the clone pulled) and an
  * older gbrain's fence writer appends one row to the working copy, so the file differs from HEAD by fence rows only.
  */
 async function withClone(databaseUrl: string | undefined, extra: string, run: (c: Clone) => Promise<void>): Promise<void> {
@@ -68,13 +69,14 @@ async function withClone(databaseUrl: string | undefined, extra: string, run: (c
         await engine.executeRaw('INSERT INTO sources (id, name, local_path, config) VALUES ($1, $1, $2, $3::text::jsonb)', [SOURCE, root, JSON.stringify(config)]);
         const { performSync } = await import('../src/commands/sync.ts');
         expect((await performSync(engine, { sourceId: SOURCE, repoPath: root, noEmbed: true, noExtract: true })).status).toBe('first_sync');
-        writeFileSync(join(root, FILE), person(extra));
-        git(root, ['commit', '-q', '-am', 'head moves']);
+        writeFileSync(join(upstream, FILE), person(extra));
+        git(upstream, ['commit', '-q', '-am', 'head moves']);
+        git(root, ['pull', '-q', '--ff-only']);
         await engine.executeRaw('UPDATE sources SET config = $1::text::jsonb WHERE id = $2', [JSON.stringify({ remote_url: config.remote_url }), SOURCE]);
         await writeSingleFact(engine, SOURCE, { fact: 'Alice Example leads the platform team at Acme Example.', provenance: 'test:7897', entity: ALICE, visibility: 'world', remote: false });
         await engine.executeRaw('UPDATE sources SET config = $1::text::jsonb WHERE id = $2', [JSON.stringify(config), SOURCE]);
         const c: Clone = {
-          engine, root,
+          engine, root, upstream,
           file: () => readFileSync(join(root, FILE), 'utf8'),
           head: () => git(root, ['show', `HEAD:${FILE}`]),
           page: async () => (await engine.getPage(ALICE, { sourceId: SOURCE })) as never,
@@ -105,22 +107,30 @@ async function savedApproval(c: Clone): Promise<string> {
 
 const arms = testBackends().map(backend => ({ backend, databaseUrl: backend === 'pglite' ? undefined : requirePostgresTestDatabase() }));
 for (const { backend, databaseUrl } of arms) describe(`[${backend}] repair url-clone-fences (#7897)`, () => {
-  test('a HEAD asking for Visibility: private previews as held under visibility_noncanonical, with nothing to apply', async () => {
+  /** The held file is restored and HEAD is not imported: the page is unchanged and world-readable, the row is database-only, and the clone pulls the upstream fix. */
+  const expectHeldRestore = async (c: Clone, page: Awaited<ReturnType<Clone['page']>>, applied: RepairResult) => {
+    expect({ applied: applied.applied, outcomes: applied.outcomes, item: applied.outcome_items?.[0] })
+      .toEqual({ applied: 1, outcomes: { held: 1 }, item: expect.objectContaining({ outcome: 'held', reason: 'visibility_noncanonical' }) });
+    expect({ file: c.file() === c.head(), page: await c.page(), rows: await c.rows() }).toEqual({ file: true, page, rows: [null] });
+    expect(Object.keys((await c.page())!.frontmatter).map(k => k.toLowerCase())).not.toContain('visibility');
+    writeFileSync(join(c.upstream, FILE), person('visibility: private\n'));
+    git(c.upstream, ['commit', '-q', '-am', 'upstream fixes the spelling']);
+    expect(() => git(c.root, ['pull', '-q', '--ff-only'])).not.toThrow();
+  };
+
+  test('a HEAD asking for Visibility: private previews under visibility_noncanonical; apply restores the file without importing HEAD, so the clone pulls again', async () => {
     await withClone(databaseUrl, 'Visibility: private\n', async c => {
+      const page = await c.page();
       const preview = await repair(c.engine, { apply: false });
-      expect({ listing: preview.listing, hash: preview.preview_hash ?? null }).toEqual({ hash: null,
-        listing: [{ item: `${SOURCE}:${FILE}`, class: 'visibility_noncanonical', detail: expect.stringContaining(`gbrain repair url-clone-fences --source ${SOURCE}`) }] });
+      expect(preview.listing).toEqual([{ item: `${SOURCE}:${FILE}`, class: 'visibility_noncanonical', detail: expect.stringContaining('restored from HEAD so the clone can pull again') }]);
+      await expectHeldRestore(c, page, await repair(c.engine, { apply: true, expect: preview.preview_hash }));
     });
   }, 180_000);
 
-  test('an approval saved before the fix applies as held: nothing is imported, the file and its fence rows stay', async () => {
+  test('an approval saved before the fix applies as held: the file is restored and its row kept database-only, HEAD is not imported', async () => {
     await withClone(databaseUrl, 'visibility: Private\n', async c => {
-      const [file, page, rows] = [c.file(), await c.page(), await c.rows()];
-      const applied = await repair(c.engine, { apply: true, expect: await savedApproval(c) });
-      expect({ applied: applied.applied, outcomes: applied.outcomes, item: applied.outcome_items?.[0] })
-        .toEqual({ applied: 0, outcomes: { held: 1 }, item: expect.objectContaining({ outcome: 'held', reason: 'visibility_noncanonical' }) });
-      expect({ file: c.file() === file, page: await c.page(), rows: await c.rows() }).toEqual({ file: true, page, rows });
-      expect(Object.keys((await c.page())!.frontmatter).map(k => k.toLowerCase())).not.toContain('visibility');
+      const page = await c.page();
+      await expectHeldRestore(c, page, await repair(c.engine, { apply: true, expect: await savedApproval(c) }));
     });
   }, 180_000);
 
