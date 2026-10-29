@@ -23,7 +23,7 @@ import { resolveExcludePrivatePages } from './private-visibility.ts';
 import { admitted, collectFactCandidates, FACTS_ARM_COSINE_MIN, queryTerms, scoreFactCandidates, type FactCandidate as PoolCandidate, type FactPoolScope } from './fact-relevance.ts';
 import { pageReadFilter } from './read-policy-sql.ts';
 import { enforceTokenBudget, resultTokens } from './token-budget.ts';
-import { factDateHeader } from './evidence-date.ts';
+import { configFlagOn, factDateHeader } from './evidence-date.ts';
 import type { TrustTier } from '../trust/tier.ts';
 import { conversationSignal } from './evidence-delivery.ts';
 
@@ -320,8 +320,7 @@ export async function applyFactSourcePages(engine: BrainEngine, query: string, r
 /** `search.temporal_fact_reserve` is on ('true' | 'on' | '1' | 'yes'); off by default and on any read error. */
 export async function temporalFactReserveEnabled(engine: { getConfig(key: string): Promise<string | null> }): Promise<boolean> {
   try {
-    const raw = (await engine.getConfig(TEMPORAL_FACT_RESERVE_KEY))?.trim().toLowerCase();
-    return raw === 'true' || raw === 'on' || raw === '1' || raw === 'yes';
+    return configFlagOn(await engine.getConfig(TEMPORAL_FACT_RESERVE_KEY));
   } catch {
     return false;
   }
@@ -340,8 +339,7 @@ export async function queryFactsBlockEnabled(engine: { getConfig(key: string): P
 /** `search.fact_source_pages` is on ('true' | 'on' | '1' | 'yes'); off by default and on any read error. */
 export async function factSourcePagesEnabled(engine: { getConfig(key: string): Promise<string | null> }): Promise<boolean> {
   try {
-    const raw = (await engine.getConfig(FACT_SOURCE_PAGES_KEY))?.trim().toLowerCase();
-    return raw === 'true' || raw === 'on' || raw === '1' || raw === 'yes';
+    return configFlagOn(await engine.getConfig(FACT_SOURCE_PAGES_KEY));
   } catch {
     return false;
   }
