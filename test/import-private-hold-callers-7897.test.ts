@@ -74,6 +74,7 @@ describe('import entry points hold a non-canonical private request (#7897)', () 
   });
 
   test('importFromFile holds before it imports, so its callers need no opt-in', () => {
+    // test-reads-source-ok[structural]: the hold must run before the import inside importFromFile; call order is the contract this audit relies on.
     const source = readFileSync(join('src', 'core', 'import-file.ts'), 'utf8');
     const body = source.slice(source.indexOf('export async function importFromFile('), source.indexOf('\nexport ', source.indexOf('export async function importFromFile(') + 1));
     expect(body.indexOf('noncanonicalPrivateHold(content')).toBeGreaterThan(0);
