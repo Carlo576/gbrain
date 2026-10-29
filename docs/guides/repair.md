@@ -1267,6 +1267,14 @@ database only and are never ghosts. Doctor `undeclared_db_only_pages` is a
 separate audit. A preview lists at most 1,000 ghosts; apply them, then preview
 again for the rest. Sync never removes ghost pages by itself.
 
+A code or image page (a synced `.json`, `.ts` or `.png` file) is checked at
+the file it records, never at `<slug>.md`: while that file is there the page
+is not a ghost. It is a ghost only when its recorded file is gone and no file
+sits at its slug path either, and the preview lists it at the recorded path. A
+page whose recorded path names no file inside the source (an absolute path, a
+path with `..`) is never a ghost and is never removed: doctor, `gbrain pages
+ghosts` and the preview list it apart with code `recorded_path_unresolvable`.
+
 <a id="uncommitted-deletions"></a>
 ### Uncommitted deletions
 
