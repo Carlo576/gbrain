@@ -216,6 +216,27 @@ describe('facts block precedence', () => {
   });
 });
 
+describe('facts block default-on spelling and single run', () => {
+  // Value: protects=the off switch accepts any case and padding of false/off/0/no while empty or unset stays on; fails_when=the trim or toLowerCase in queryFactsBlockEnabled is dropped;
+  // Value (cont): why_new=existing cases use lowercase unpadded values only; seam=none; no_claim=unrecognized junk values (they leave the block on)
+  test('off spellings ignore case and padding; empty or unset stays on', async () => {
+    const read = (v: string | null) => queryFactsBlockEnabled({ getConfig: async () => v });
+    for (const v of ['FALSE', ' Off ', 'No', '0\n']) expect(await read(v)).toBe(false);
+    for (const v of [null, '', 'true', 'ON']) expect(await read(v)).toBe(true);
+  });
+
+  // Value: protects=with the block on by default, the facts arm and temporal reserve do not also run, so no fact row repeats; fails_when=applyFactsStage falls through to the arm or reserve after the block;
+  // Value (cont): why_new=precedence test sets the block explicitly and does not check for repeated rows; seam=none; no_claim=answer quality (PGLite keyword-only fixtures)
+  test('unset block, reserve on, temporal cue: each fact appears once and stays inside the block share', async () => {
+    const budget = 4000;
+    const rows = await withKeys({ 'search.temporal_fact_reserve': 'true' }, () => query('When was the Forge offsite venue booked?', { token_budget: budget, limit: 10 }));
+    const facts = rows.filter(r => r.result_type === 'fact');
+    expect(facts.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(facts.map(f => f.chunk_text)).size).toBe(facts.length);
+    expect(facts.reduce((n, r) => n + resultTokens(r), 0)).toBeLessThanOrEqual(Math.floor(budget * QUERY_FACTS_BLOCK_SHARE));
+  });
+});
+
 describe('fact_source_pages dedupe', () => {
   // Value: protects=a fact's source conversation already among the hits is not injected a second time; fails_when=the present-page guard in applyFactSourcePages is removed;
   // Value (cont): why_new=existing case only covers a source page absent from the hits; seam=none; no_claim=ordering of the injected page (covered by the sibling test)
