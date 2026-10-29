@@ -12,7 +12,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { apiDeps, attemptJobs, checkRecord, decide, PROFILES, writeDecision, type Commit, type JobRow, type FullRun, type ReuseDeps } from '../../scripts/ci-reuse.ts';
+import { apiDeps, attemptJobs, checkRecord, decide, decideGate, PROFILES, runGate, writeDecision, type Commit, type GateDeps, type JobRow, type FullRun, type ReuseDeps } from '../../scripts/ci-reuse.ts';
 import { GET_RETRY_DELAYS_MS, restClient, type GitHubClient } from '../../scripts/lib/gh-issue.ts';
 
 const REPO = 'owner-example/repo-example';
@@ -302,5 +302,98 @@ describe('ci-reuse outputs', () => {
     expect(typeof checkRecord({ ...rec, push_sha: H2 }, 'Test', M)).toBe('string');
     expect(typeof checkRecord({ ...rec, source_run_id: 0 }, 'Test', M)).toBe('string');
     expect(typeof checkRecord(undefined, 'Test', M)).toBe('string');
+  });
+});
+
+// Remote-gate reuse (scripts/pregate-remote-gate.sh): the Ubicloud gate's receipt comes from GitHub's complete
+// full runs of Test and E2E on the identical tree, or the gate runs. A code change after full-ci never reuses.
+describe('ci-reuse remote-gate decision', () => {
+  const A = '5'.repeat(40);
+  const B = '6'.repeat(40);
+  const T2 = 'c'.repeat(40);
+  const files = { 'test.yml': PROFILES.test, 'e2e.yml': PROFILES.e2e } as const;
+  type File = keyof typeof files;
+  const run = (file: File, over: Partial<FullRun> = {}): FullRun & { file: File } => ({ ...prRun({ id: file === 'test.yml' ? 600 : 700, head_sha: A, ...over }), file });
+  const tree = (r: FullRun & { file: File }, over: Record<string, unknown> = {}) => ({ ...treeJson(r, { workflow: files[r.file].workflow }), ...over });
+
+  function gate(o: { commits?: Record<string, Commit>; runs: Array<FullRun & { file: File }>; artifacts?: Record<number, unknown>; jobs?: Record<string, JobRow[]>; executed?: Record<number, { tests: number; failed: number } | { reason: string }> }): GateDeps {
+    const commits = o.commits ?? { [A]: { tree: T, parents: [BASE] } };
+    const art = o.artifacts ?? Object.fromEntries(o.runs.map(r => [r.id, tree(r)]));
+    return {
+      async commit(sha) { if (!commits[sha]) throw new Error(`GitHub API GET git/commits/${sha} -> 404`); return commits[sha]!; },
+      async runsForHead(file, sha) { return o.runs.filter(r => r.file === file && r.head_sha === sha); },
+      async recentSuccessfulRuns(file) { return o.runs.filter(r => r.file === file && r.conclusion === 'success'); },
+      async jobs(runId, attempt) {
+        const r = o.runs.find(x => x.id === runId)!;
+        return o.jobs?.[`${runId}/${attempt}`] ?? [{ name: files[r.file].job, status: 'completed', conclusion: 'success' }];
+      },
+      async artifact(runId, name) {
+        const r = o.runs.find(x => x.id === runId)!;
+        expect(name).toBe(files[r.file].artifact);
+        return art[runId] === undefined ? { reason: `run ${runId} has no '${name}' artifact` } : { value: art[runId] };
+      },
+      async executed(runId) { return o.executed?.[runId] ?? { tests: runId, failed: 0 }; },
+    };
+  }
+  const go = async (deps: GateDeps, head = A, t0 = T, waitMs = 0) => {
+    const lines: string[] = [];
+    let clock = 0;
+    const code = await runGate(deps, { head, tree: t0, repo: REPO, waitMs, pollMs: 60_000, log: l => lines.push(l), sleep: async ms => { clock += ms; }, now: () => clock });
+    return { code, lines, last: lines.at(-1) };
+  };
+
+  test('Test and E2E full runs that passed on this exact tree are the receipt: summed executed tests, no gate', async () => {
+    const r = await go(gate({ runs: [run('test.yml'), run('e2e.yml')] }));
+    expect(r.code).toBe(0);
+    expect(r.last).toBe('GBRAIN_REUSE_RESULT tests=1300 failed=0');
+    expect(r.lines.join('\n')).toContain(`https://github.com/${REPO}/actions/runs/600/attempts/1`);
+  });
+
+  test('a code change after full-ci is refused: the new head has its own tree and no full run of it, so the gate runs', async () => {
+    const deps = gate({ commits: { [A]: { tree: T, parents: [BASE] }, [B]: { tree: T2, parents: [A] } }, runs: [run('test.yml'), run('e2e.yml')] });
+    expect(await decideGate(deps, PROFILES.test, B, T2, REPO)).toMatchObject({ state: 'none' });
+    const r = await go(deps, B, T2);
+    expect(r.code).toBe(4);
+    expect(r.lines.join('\n')).not.toContain('GBRAIN_REUSE_RESULT');
+    // An unpushed code change: GitHub has no such commit, so nothing reuses either.
+    expect((await go(gate({ runs: [run('test.yml'), run('e2e.yml')] }), B, T2)).code).toBe(4);
+  });
+
+  test('a working tree that is not the head commit tree on GitHub never reuses', async () => {
+    expect(await decideGate(gate({ runs: [run('test.yml')] }), PROFILES.test, A, T2, REPO)).toMatchObject({ state: 'none' });
+  });
+
+  test('a failed newest full run on the head refuses (exit 3) even when an older run on it passed', async () => {
+    const deps = gate({ runs: [run('test.yml', { id: 610, conclusion: 'failure' }), run('test.yml'), run('e2e.yml')] });
+    const r = await go(deps);
+    expect(r.code).toBe(3);
+    expect(r.last).toContain('runs/610/attempts/1');
+  });
+
+  test('a full run in progress on the head is waited for, and a timeout falls back to the gate', async () => {
+    let polls = 0;
+    const live = run('test.yml', { status: 'in_progress', conclusion: null });
+    const deps = gate({ runs: [live, run('e2e.yml')] });
+    const slow = { ...deps, async runsForHead(file: string, sha: string) { if (file === 'test.yml' && ++polls >= 3) Object.assign(live, { status: 'completed', conclusion: 'success' }); return deps.runsForHead(file, sha); } };
+    const r = await go(slow, A, T, 10 * 60_000);
+    expect(r.code).toBe(0);
+    expect(r.lines.filter(l => l.includes('waiting for')).length).toBe(2);
+    const stuck = await go(gate({ runs: [run('test.yml', { status: 'queued', conclusion: null }), run('e2e.yml')] }), A, T, 2 * 60_000);
+    expect(stuck.code).toBe(4);
+  });
+
+  test('both workflows are required: a missing E2E full run, a cheap artifact or an unreadable executed list falls back', async () => {
+    expect((await go(gate({ runs: [run('test.yml')] }))).code).toBe(4);
+    const t1 = run('test.yml'), e1 = run('e2e.yml');
+    expect((await go(gate({ runs: [t1, e1], artifacts: { 600: tree(t1), 700: tree(e1, { profile: 'cheap' }) } }))).code).toBe(4);
+    expect((await go(gate({ runs: [t1, e1], executed: { 700: { reason: 'no executed-identities artifact' } } }))).code).toBe(4);
+    expect((await go(gate({ runs: [t1, e1], executed: { 700: { tests: 0, failed: 0 } } }))).code).toBe(4);
+  });
+
+  test('a cancelled newest run looks further back; a passed run of the same tree on another head (a merge commit) reuses', async () => {
+    expect((await go(gate({ runs: [run('test.yml', { id: 620, conclusion: 'cancelled' }), run('test.yml'), run('e2e.yml')] }))).code).toBe(0);
+    const M2 = '7'.repeat(40);
+    const deps = gate({ commits: { [A]: { tree: T, parents: [BASE] }, [M2]: { tree: T, parents: [BASE, A] } }, runs: [run('test.yml'), run('e2e.yml')] });
+    expect(await decideGate(deps, PROFILES.test, M2, T, REPO)).toMatchObject({ state: 'reuse', tests: 600 });
   });
 });

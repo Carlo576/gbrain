@@ -32,6 +32,11 @@
  * to --summary, and the reuse record (REUSE_FILE, read by
  * scripts/release-gate.ts) to --record. Exit 0 whenever a decision was
  * written (a fallback is not an error), 2 on usage.
+ *
+ *   bun scripts/ci-reuse.ts --gate --sha <HEAD> --tree <tree> --repo <owner/name> [--wait-minutes N] [--poll-seconds S]
+ *
+ * Remote-gate reuse (decideGate, runGate): scripts/pregate-remote-gate.sh asks whether Test and E2E already
+ * passed their complete full runs on this exact tree; exit 0 reuse, 3 a full run on the tree failed, 4 no reuse.
  */
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { fetchArtifactJson, inert, restClient, type GitHubClient } from './lib/gh-issue.ts';
@@ -109,19 +114,8 @@ export async function decide(deps: ReuseDeps, p: Profile, sha: string, repo: str
       if (!why) return accept(run, tree, rejected, 'the merged head');
       rejected.push({ run_id: run.id, ...why });
     }
-    const tried = new Set(primary.map(r => r.id));
-    const heads = new Map<string, string>();
-    for (const run of (await deps.recentSuccessfulRuns(p.file)).sort((a, b) => b.id - a.id)) {
-      if (tried.has(run.id) || !isCandidate(run) || run.head_sha === head || run.head_sha === sha || run.head_repository?.full_name !== repo) continue;
-      if (!heads.has(run.head_sha)) {
-        if (heads.size >= MAX_FALLBACK_HEADS) continue;
-        heads.set(run.head_sha, (await deps.commit(run.head_sha)).tree);
-      }
-      if (heads.get(run.head_sha) !== tree) continue;
-      const why = await reject(deps, p, run, repo, tree, tree);
-      if (!why) return accept(run, tree, rejected, `head ${run.head_sha.slice(0, 12)} (same tree as the merged head)`);
-      rejected.push({ run_id: run.id, ...why });
-    }
+    const other = await sameTreeRun(deps, p, repo, tree, new Set(primary.map(r => r.id)), [head, sha], rejected);
+    if (other) return accept(other, tree, rejected, `head ${other.head_sha.slice(0, 12)} (same tree as the merged head)`);
   } catch (e) {
     return { reuse: false, reason: 'api_error', detail: `reading the push commit, runs, jobs or artifacts failed: ${e instanceof Error ? e.message : String(e)}`, tree, rejected };
   }
@@ -129,8 +123,101 @@ export async function decide(deps: ReuseDeps, p: Profile, sha: string, repo: str
   return { reuse: false, reason: rejected[0]!.reason, detail: rejected.map(r => r.detail).join('; '), tree, rejected };
 }
 
+/** The newest passed full run of `p` on another head whose commit tree is `tree` (at most MAX_FALLBACK_HEADS heads read). */
+async function sameTreeRun(deps: ReuseDeps, p: Profile, repo: string, tree: string, tried: Set<number>, skipShas: string[], rejected: Rejection[]): Promise<FullRun | undefined> {
+  const heads = new Map<string, string>();
+  for (const run of (await deps.recentSuccessfulRuns(p.file)).sort((a, b) => b.id - a.id)) {
+    if (tried.has(run.id) || !isCandidate(run) || skipShas.includes(run.head_sha) || run.head_repository?.full_name !== repo) continue;
+    if (!heads.has(run.head_sha)) {
+      if (heads.size >= MAX_FALLBACK_HEADS) continue;
+      heads.set(run.head_sha, (await deps.commit(run.head_sha)).tree);
+    }
+    if (heads.get(run.head_sha) !== tree) continue;
+    const why = await reject(deps, p, run, repo, tree, tree);
+    if (!why) return run;
+    rejected.push({ run_id: run.id, ...why });
+  }
+  return undefined;
+}
+
 function accept(run: FullRun, tree: string, rejected: Rejection[], where: string): Decision {
   return { reuse: true, reason: 'identical_tree_full_run', detail: `run ${run.id} attempt ${run.run_attempt} on ${where} ran the complete full suite on tree ${tree}`, tree, source: { run_id: run.id, run_attempt: run.run_attempt, sha: run.head_sha }, rejected };
+}
+
+/**
+ * Remote-gate reuse (scripts/pregate-remote-gate.sh, docs/ci-event-parity.md#remote-gate-reuse): GitHub's full
+ * profile is the source of truth, so a clean working tree whose commit `head` (or another head with the same tree)
+ * already passed the complete full run of a workflow needs no Ubicloud gate. Same fail-closed checks as a push:
+ * the run's latest attempt and its full-suite job succeeded and its tested-tree artifact records `tree`. Only
+ * the identical tree reuses; a stamp-only difference goes through gstack-pregate's stamp rule, never through here.
+ * The newest run on `head` decides: in progress waits, a failure refuses (no receipt, no VMs), cancelled or
+ * not a full run looks further back; anything else is `none` and the caller runs the VM gate.
+ */
+export type GateState = 'reuse' | 'pending' | 'failed' | 'none';
+export interface GateDecision { state: GateState; detail: string; tests?: number; failed?: number; url?: string }
+export interface GateDeps extends ReuseDeps {
+  /** Executed (pass, fail) test identities in the run's executed-identities artifact, or why they cannot be read. */
+  executed(runId: number): Promise<{ tests: number; failed: number } | { reason: string }>;
+}
+
+export async function decideGate(deps: GateDeps, p: Profile, head: string, tree: string, repo: string): Promise<GateDecision> {
+  const rejected: Rejection[] = [];
+  try {
+    const headTree = (await deps.commit(head)).tree;
+    if (headTree !== tree) return { state: 'none', detail: `${p.workflow}: commit ${head} has tree ${headTree} on GitHub, not the working tree ${tree}` };
+    const primary = (await deps.runsForHead(p.file, head)).filter(r => r.head_sha === head && isCandidate(r)).sort((a, b) => b.id - a.id);
+    for (const run of primary) {
+      const why = await reject(deps, p, run, repo, tree, headTree);
+      if (!why) return gateAccept(deps, p, run, tree, repo);
+      if (why.reason === 'run_in_progress') return { state: 'pending', detail: `${p.workflow} ${why.detail}` };
+      if (why.reason === 'run_failed' || why.reason === 'full_suite_not_success') return { state: 'failed', detail: `${p.workflow} ${why.detail}`, url: runUrl(repo, run) };
+      rejected.push({ run_id: run.id, ...why });
+    }
+    const other = await sameTreeRun(deps, p, repo, tree, new Set(primary.map(r => r.id)), [head], rejected);
+    if (other) return gateAccept(deps, p, other, tree, repo);
+  } catch (e) {
+    return { state: 'none', detail: `${p.workflow}: reading commits, runs, jobs or artifacts failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  return { state: 'none', detail: rejected.length ? `${p.workflow}: ${rejected.map(r => r.detail).join('; ')}` : `${p.workflow}: no workflow_dispatch or push run on ${head} or on another head with tree ${tree}` };
+}
+
+const runUrl = (repo: string, run: FullRun) => `https://github.com/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}`;
+
+async function gateAccept(deps: GateDeps, p: Profile, run: FullRun, tree: string, repo: string): Promise<GateDecision> {
+  const counts = await deps.executed(run.id);
+  if ('reason' in counts) return { state: 'none', detail: `${p.workflow}: ${counts.reason}` };
+  if (counts.tests <= 0) return { state: 'none', detail: `${p.workflow}: run ${run.id}'s executed-identities artifact lists no executed test` };
+  return { state: 'reuse', detail: `${p.workflow} run ${runUrl(repo, run)} passed the complete full suite on tree ${tree}`, url: runUrl(repo, run), ...counts };
+}
+
+/**
+ * The gate's decision over Test and E2E, waiting while a full run on the tree is still in progress. Prints progress
+ * at least every poll (gstack's stall timeout kills a silent gate) and, on reuse, a last line
+ * `GBRAIN_REUSE_RESULT tests=<n> failed=<n>`. Exit codes: 0 reuse, 3 a full run on this tree failed, 4 no reuse.
+ */
+export async function runGate(deps: GateDeps, o: { head: string; tree: string; repo: string; waitMs: number; pollMs: number; log: (line: string) => void; sleep?: (ms: number) => Promise<unknown>; now?: () => number }): Promise<number> {
+  const now = o.now ?? Date.now;
+  const deadline = now() + o.waitMs;
+  for (;;) {
+    const ds = await Promise.all([PROFILES.test, PROFILES.e2e].map(p => decideGate(deps, p, o.head, o.tree, o.repo)));
+    const failed = ds.find(d => d.state === 'failed');
+    if (failed) {
+      o.log(`[ci-reuse] gate: ${failed.detail} (${failed.url}); the full run on this tree failed, so no receipt and no Ubicloud gate`);
+      return 3;
+    }
+    if (ds.every(d => d.state === 'reuse')) {
+      for (const d of ds) o.log(`[ci-reuse] gate: ${d.detail} (${d.tests} tests, ${d.failed} failed)`);
+      o.log(`GBRAIN_REUSE_RESULT tests=${ds.reduce((n, d) => n + d.tests!, 0)} failed=${ds.reduce((n, d) => n + d.failed!, 0)}`);
+      return 0;
+    }
+    const pending = ds.filter(d => d.state === 'pending');
+    if (!pending.length || now() >= deadline) {
+      for (const d of ds.filter(x => x.state !== 'reuse')) o.log(`[ci-reuse] gate: no reuse: ${inert(d.detail, 600)}`);
+      return 4;
+    }
+    o.log(`[ci-reuse] gate: waiting for ${pending.map(d => d.detail).join('; ')} (${Math.ceil((deadline - now()) / 60_000)} min left)`);
+    await (o.sleep ?? Bun.sleep)(o.pollMs);
+  }
 }
 
 /**
@@ -174,6 +261,19 @@ export function apiDeps(client: GitHubClient): ReuseDeps {
   };
 }
 
+export function gateDeps(client: GitHubClient): GateDeps {
+  return {
+    ...apiDeps(client),
+    async executed(runId) {
+      const got = await fetchArtifactJson(client, runId, 'executed-identities', 'executed-identities.json');
+      if (got.reason) return { reason: got.reason };
+      const ids = (got.value as { head?: { identities?: Array<{ status?: string }> } } | null)?.head?.identities;
+      if (!Array.isArray(ids)) return { reason: `run ${runId}'s executed-identities.json has no head.identities list` };
+      return { tests: ids.filter(i => i.status === 'pass' || i.status === 'fail').length, failed: ids.filter(i => i.status === 'fail').length };
+    },
+  };
+}
+
 /** The validated source run of a reuse record, or why the record cannot prove one. */
 export function checkRecord(value: unknown, workflow: string, pushSha: string): { run_id: number; run_attempt: number; sha: string } | string {
   const rec = value as Record<string, unknown> | null | undefined;
@@ -205,7 +305,16 @@ export function writeDecision(d: Decision, p: Profile, opts: { repo: string; sha
   return line;
 }
 
-if (import.meta.main) {
+if (import.meta.main && process.argv.includes('--gate')) {
+  const flag = (name: string) => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : undefined; };
+  const head = flag('--sha') ?? '', tree = flag('--tree') ?? '', repo = flag('--repo') ?? '';
+  const minutes = Number(flag('--wait-minutes') ?? '90'), poll = Number(flag('--poll-seconds') ?? '60');
+  if (!SHA.test(head) || !SHA.test(tree) || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !(minutes >= 0) || !(poll > 0)) {
+    console.log('Usage: bun scripts/ci-reuse.ts --gate --sha <40-hex HEAD> --tree <40-hex tree> --repo <owner/name> [--wait-minutes 90] [--poll-seconds 60]');
+    process.exit(2);
+  }
+  process.exit(await runGate(gateDeps(restClient(repo)), { head, tree, repo, waitMs: minutes * 60_000, pollMs: poll * 1000, log: line => console.log(line) }));
+} else if (import.meta.main) {
   const flag = (name: string) => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : undefined; };
   const key = flag('--workflow') ?? '';
   const sha = flag('--sha') ?? '';
