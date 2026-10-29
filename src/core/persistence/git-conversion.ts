@@ -83,9 +83,9 @@ const SAMPLE = 20;
 const LOCK_WAIT_MS = 30_000;
 const MOVED_BATCH = 10_000;
 
-/** The steps of an apply, in order (`ConversionProgress.phase`). */
-export const CONVERSION_PHASES = ['adopt', 'withhold', 'recheck', 'holds', 'strict_pass_1', 'strict_pass_2'] as const;
-export type ConversionPhase = typeof CONVERSION_PHASES[number];
+/** The steps of every apply, in order (`ConversionProgress.phase`); `strict_pass_closing` follows only when door commits landed (CLOSING_PASSES). */
+export type ConversionPhase = 'adopt' | 'withhold' | 'recheck' | 'holds' | 'strict_pass_1' | 'strict_pass_2' | 'strict_pass_closing';
+export const CONVERSION_PHASES: readonly ConversionPhase[] = ['adopt', 'withhold', 'recheck', 'holds', 'strict_pass_1', 'strict_pass_2'];
 /**
  * Where an apply stands: its phase, the door commits it made (adoption and withholding groups), and the items the phase
  * went through of its total. In a strict pass (#7866), `total` is the paths the strict level holds (the planned page count,
@@ -490,9 +490,19 @@ export interface GitConversionResult {
   parked: { retried: number; reclassified: number };
   /** #7644: the push of the door commits, as it stood when the apply ended. */
   push: ConversionPush;
-  /** The plan after the flag was set and a strict pass ran: nothing left on a completed conversion. */
+  /** The closing strict passes that imported door commits landed after strict_pass_2 read its level (CLOSING_PASSES). */
+  closing_passes: number;
+  /** The plan after the flag was set and the strict passes ran: nothing left on a completed conversion. */
   after: GitConversionPreview;
 }
+
+/**
+ * A live writer's door commits (`gbrain git commit-push`) that land after strict_pass_2 read its level leave the closing
+ * plan with Git ahead of the database at their paths (git_wins) and nothing else. The source is git-canonical by then and
+ * those commits are Git's, so an incremental strict pass imports them and loses nothing: the apply runs up to this many
+ * such passes, planning again after each. Any other open item, or Git still ahead after the last one, ends incomplete.
+ */
+export const CLOSING_PASSES = 3;
 
 const blockedError = (preview: GitConversionPreview): OperationError => {
   const categories = DISCARD_CATEGORIES.filter(category => preview.discard.by[category] > 0);
@@ -541,10 +551,10 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   }
   const processing = { noEmbed: opts.noEmbed, noExtract: opts.noExtract };
   const planned = recheck?.paths.length ?? 0;
-  const pass = (phase: 'strict_pass_1' | 'strict_pass_2') => {
-    report({ phase, scanned: 0, total: planned, ...ROUND_RESET });
-    return strictPass(engine, sourceId, { sourceId, noPull: true, fullRound: true, ...processing, ...(phase === 'strict_pass_1' ? { canonicalOverride: 'git' as const } : {}),
-      onProgress: passProgress(report) });
+  const pass = (phase: 'strict_pass_1' | 'strict_pass_2' | 'strict_pass_closing', total = planned) => {
+    report({ phase, scanned: 0, total, ...ROUND_RESET });
+    return strictPass(engine, sourceId, { sourceId, noPull: true, fullRound: phase !== 'strict_pass_closing', ...processing,
+      ...(phase === 'strict_pass_1' ? { canonicalOverride: 'git' as const } : {}), onProgress: passProgress(report) });
   };
   passOrThrow(sourceId, 'strict_pass_1', await pass('strict_pass_1'), progress);
   await faultPoint('conversion:before_flip', { sourceId });
@@ -553,8 +563,13 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   const final = await pushConversion(engine, plan.context);
   const push = final.reason === 'nothing_to_push' ? progress.push! : final;
   report({ push });
-  const after = (await planGitConversion(engine, sourceId)).preview;
-  return { status: after.remaining === 0 ? 'converted' : 'incomplete', source_id: sourceId, head: after.head, committed, withheld, holds_cleared: holdsCleared, parked, push, after };
+  let after = (await planGitConversion(engine, sourceId)).preview, closing = 0;
+  for (; after.remaining > 0 && after.remaining === after.git_wins.count && closing < CLOSING_PASSES; closing++) {
+    passOrThrow(sourceId, 'strict_pass_closing', await pass('strict_pass_closing', after.git_wins.count), progress);
+    after = (await planGitConversion(engine, sourceId)).preview;
+  }
+  return { status: after.remaining === 0 ? 'converted' : 'incomplete', source_id: sourceId, head: after.head, committed, withheld, holds_cleared: holdsCleared, parked, push,
+    closing_passes: closing, after };
 }
 
 /**
