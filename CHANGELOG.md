@@ -10,6 +10,17 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.489.0] - 2026-10-29
+
+**A page a maintenance job writes from model output keeps its trust tier when the repository is read back (#7905).**
+
+Patterns, concept and claim-source runs publish their pages as maintenance writes (`submit_job`). The database row was capped at the tier the run declared, at most agent-written, but the file committed to git carried no `trust_tier` marker, and a forged higher marker in the model's text passed through as written. Reading that file back (rebuilding a brain from its repository, or a second brain importing it) rated the page at the source default, operator-curated, so model-written text came back trusted as the owner's own notes. These pages now stamp the same lower-only marker an agent's content write stamps, at the declared tier. A page outside the run's output that a patterns run republishes to repair a timeline entry it appended (dropping or normalizing an unverified quote) carries the same declaration, so it gets the marker too, matching the tier the database already gave it. A brain with no repository has no file to read back and was not affected. Nothing rewrites pages already stored. A derived page published before this release gets its marker the next time a run publishes changed content for it, and a page whose content stays the same keeps its unmarked file until then.
+
+### Itemized changes
+
+- `src/core/trust/page-write.ts`: `stampPageTrustMarker` stamps the marker on a write that carries a derivation declaration and is not a fence edit, not only on the content operations.
+- Tests, on PGLite and Postgres, on a repository-backed brain: `test/maintenance-trust-marker-7905.test.ts`.
+
 ## [0.60.488.0] - 2026-10-29
 
 **A brain that moved hosts can now finish the 0.53.0 migration.**
