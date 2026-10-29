@@ -326,10 +326,11 @@ export async function temporalFactReserveEnabled(engine: { getConfig(key: string
   }
 }
 
-/** `search.query_facts_block` is on ('true' | 'on' | '1' | 'yes'); off by default and on any read error. */
+/** `search.query_facts_block` is on by default; 'false' | 'off' | '0' | 'no' turns it off, and so does any read error. */
 export async function queryFactsBlockEnabled(engine: { getConfig(key: string): Promise<string | null> }): Promise<boolean> {
   try {
-    return configFlagOn(await engine.getConfig(QUERY_FACTS_BLOCK_KEY));
+    const raw = (await engine.getConfig(QUERY_FACTS_BLOCK_KEY))?.trim().toLowerCase();
+    return !(raw === 'false' || raw === 'off' || raw === '0' || raw === 'no');
   } catch {
     return false;
   }

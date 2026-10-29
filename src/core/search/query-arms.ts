@@ -5,9 +5,10 @@
  * source pages (`search.fact_source_pages`, default off) and then the facts
  * arm (`search.query_facts_arm`, default on, search/facts-arm.ts), or in its
  * place, for a query with a token budget, the facts block
- * (`search.query_facts_block`, default off) or, with a temporal cue, the
+ * (`search.query_facts_block`, default on) or, with a temporal cue, the
  * temporal fact reserve (`search.temporal_fact_reserve`, default off). With
- * all off the rows pass through unchanged.
+ * all off the rows pass through unchanged; the facts block is checked first, so
+ * turning it off restores the temporal reserve or the facts arm.
  */
 import type { BrainEngine } from '../engine.ts';
 import type { PageReadScope, SearchResult } from '../types.ts';

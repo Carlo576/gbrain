@@ -21,10 +21,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { handleToolCall } from '../src/mcp/server.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
-import { FACT_SOURCE_PAGE_RANK, FACT_SOURCE_PAGES_KEY, MAX_FACT_SOURCE_PAGES, MAX_FACTS_BLOCK_ROWS, QUERY_FACTS_BLOCK_KEY, QUERY_FACTS_BLOCK_SHARE } from '../src/core/search/facts-arm.ts';
+import { FACT_SOURCE_PAGE_RANK, FACT_SOURCE_PAGES_KEY, MAX_FACT_SOURCE_PAGES, MAX_FACTS_BLOCK_ROWS, QUERY_FACTS_BLOCK_KEY, QUERY_FACTS_BLOCK_SHARE, applyFactSourcePages, queryFactsBlockEnabled } from '../src/core/search/facts-arm.ts';
 import { QUERY_BUDGET_UNIT_CONFIG_KEY, deliverEvidence, queryBudgetUsesAuto, resolveEvidencePlan } from '../src/core/search/evidence-delivery.ts';
 import { EVIDENCE_DATE_HEADER_KEY, EVIDENCE_TITLES_KEY, evidenceTitlesEnabled, titledPageHeader } from '../src/core/search/evidence-date.ts';
-import { applyFactSourcePages } from '../src/core/search/facts-arm.ts';
 import { renderPagesBlockDetailed } from '../src/core/think/gather.ts';
 import { resultTokens } from '../src/core/search/token-budget.ts';
 import type { SearchResult } from '../src/core/types.ts';
@@ -63,12 +62,12 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => { await engine?.disconnect(); }, 60_000);
 
-describe('every key unset or off', () => {
-  test('byte-identical to the build without the keys', async () => {
+describe('every key off', () => {
+  test('byte-identical to the build without the keys (the facts block, on by default, turned off)', async () => {
     const calls = async () => [await query(PLAIN, { token_budget: 4000 }), await query(PLAIN), await query(PLAIN, { token_budget: 4000, return_unit: 'auto' })];
-    const unset = await calls();
+    const defaultsOff = await withKeys({ [QUERY_FACTS_BLOCK_KEY]: 'false' }, calls);
     const off = await withKeys({ [QUERY_BUDGET_UNIT_CONFIG_KEY]: 'chunk', [EVIDENCE_TITLES_KEY]: 'false', [QUERY_FACTS_BLOCK_KEY]: 'false', [FACT_SOURCE_PAGES_KEY]: 'false' }, calls);
-    expect(stable(off)).toBe(stable(unset));
+    expect(stable(off)).toBe(stable(defaultsOff));
   });
 });
 
@@ -143,9 +142,29 @@ describe('search.query_facts_block', () => {
   });
 
   test('on without a budget (chunk unit): unchanged', async () => {
-    const base = await query(PLAIN, { return_unit: 'chunk' });
+    const base = await withKeys({ [QUERY_FACTS_BLOCK_KEY]: 'false' }, () => query(PLAIN, { return_unit: 'chunk' }));
     const on = await withKeys({ [QUERY_FACTS_BLOCK_KEY]: 'true' }, () => query(PLAIN, { return_unit: 'chunk' }));
     expect(stable(on)).toBe(stable(base));
+  });
+
+  test('unset: on by default, the same rows as an explicit true', async () => {
+    const unset = await query(PLAIN, { token_budget: 4000, limit: 10 });
+    const on = await withKeys({ [QUERY_FACTS_BLOCK_KEY]: 'true' }, () => query(PLAIN, { token_budget: 4000, limit: 10 }));
+    expect(unset.filter(r => r.result_type === 'fact').length).toBeGreaterThanOrEqual(2);
+    expect(unset[0]!.result_type).toBe('fact');
+    expect(stable(unset)).toBe(stable(on));
+  });
+
+  test('false (or off, 0, no) turns it off: no facts block ahead of the pages', async () => {
+    for (const v of ['false', 'off', '0', 'no']) {
+      const rows = await withKeys({ [QUERY_FACTS_BLOCK_KEY]: v }, () => query(PLAIN, { token_budget: 4000, limit: 10 }));
+      expect(rows[0]!.result_type).not.toBe('fact');
+    }
+  });
+
+  test('a config read error leaves it off (fail-closed)', async () => {
+    expect(await queryFactsBlockEnabled({ getConfig: async () => { throw new Error('config unreadable'); } })).toBe(false);
+    expect(await queryFactsBlockEnabled({ getConfig: async () => null })).toBe(true);
   });
 });
 
@@ -193,6 +212,27 @@ describe('facts block precedence', () => {
     const facts = rows.filter(r => r.result_type === 'fact');
     expect(facts.length).toBeGreaterThanOrEqual(2);
     expect(rows.slice(0, facts.length).every(r => r.result_type === 'fact')).toBe(true);
+    expect(facts.reduce((n, r) => n + resultTokens(r), 0)).toBeLessThanOrEqual(Math.floor(budget * QUERY_FACTS_BLOCK_SHARE));
+  });
+});
+
+describe('facts block default-on spelling and single run', () => {
+  // Value: protects=the off switch accepts any case and padding of false/off/0/no while empty or unset stays on; fails_when=the trim or toLowerCase in queryFactsBlockEnabled is dropped;
+  // Value (cont): why_new=existing cases use lowercase unpadded values only; seam=none; no_claim=unrecognized junk values (they leave the block on)
+  test('off spellings ignore case and padding; empty or unset stays on', async () => {
+    const read = (v: string | null) => queryFactsBlockEnabled({ getConfig: async () => v });
+    for (const v of ['FALSE', ' Off ', 'No', '0\n']) expect(await read(v)).toBe(false);
+    for (const v of [null, '', 'true', 'ON']) expect(await read(v)).toBe(true);
+  });
+
+  // Value: protects=with the block on by default, the facts arm and temporal reserve do not also run, so no fact row repeats; fails_when=applyFactsStage falls through to the arm or reserve after the block;
+  // Value (cont): why_new=precedence test sets the block explicitly and does not check for repeated rows; seam=none; no_claim=answer quality (PGLite keyword-only fixtures)
+  test('unset block, reserve on, temporal cue: each fact appears once and stays inside the block share', async () => {
+    const budget = 4000;
+    const rows = await withKeys({ 'search.temporal_fact_reserve': 'true' }, () => query('When was the Forge offsite venue booked?', { token_budget: budget, limit: 10 }));
+    const facts = rows.filter(r => r.result_type === 'fact');
+    expect(facts.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(facts.map(f => f.chunk_text)).size).toBe(facts.length);
     expect(facts.reduce((n, r) => n + resultTokens(r), 0)).toBeLessThanOrEqual(Math.floor(budget * QUERY_FACTS_BLOCK_SHARE));
   });
 });
