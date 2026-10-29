@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A brain that moved hosts can now finish the 0.53.0 migration.**
+
+After a host move, `gbrain apply-migrations` stopped at v0.53.0 (`content-checkpoints`) with `The canonical root changed after setup began` on every run. The cause was an unfinished shared-skills content setup checkpoint that still named the old host's root. `gbrain repair content-receipt-root` found nothing to fix, so the migration stayed partial and doctor reported MINIONS HALF-INSTALLED. Now the refusal names the repair, and the repair lists the checkpoint along with the step that proves the new root.
+
+### How to use it
+
+```bash
+gbrain repair content-receipt-root --source <source>      # preview, on the owner host: prints the class and its next step
+# for a source claimed on the new host (class tree_mismatch): the self-transfer prepare and accept it prints,
+# then gbrain sources writer activate --confirm-quiesced --shared-skills when shared skills are on
+gbrain apply-migrations --force-retry 0.53.0
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The 0.53.0 migration finds an unfinished checkpoint naming the old host's root | Refused, with advice to resume at the old root | Refuses with `gbrain repair content-receipt-root --source <source>` as its fix |
+| `repair content-receipt-root` and doctor `sync_freshness` | Read complete receipts only, so they found nothing | Also list unfinished checkpoints that name another root |
+
+Nothing is rewritten without the explicit, verified self-transfer or set-path step. Repo-less (database-only) sources have no content root or checkpoint root, so they are unaffected.
+
 ## [0.60.486.0] - 2026-10-29
 
 **A remote agent can no longer rewrite where a page came from, and removing that record no longer makes a page look more trusted (#7873).**
