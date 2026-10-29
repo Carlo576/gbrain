@@ -477,6 +477,7 @@ test/sync-full-untracked-import-5459.test.ts
 test/sync-group-member-order.test.ts
 test/sync-handler-drain-6706.test.ts
 test/sync-holds-only-converge-7327.test.ts
+test/sync-holds-wave-gbra133.test.ts
 test/sync-import-provenance-disk.test.ts
 test/sync-inexact-rename-6729.test.ts
 test/sync-landing-gaps.test.ts

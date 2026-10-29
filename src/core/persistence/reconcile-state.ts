@@ -17,7 +17,7 @@ import { sharedOriginExit } from './sync-origin.ts';
 import { originTwinsPreviewArgv } from './origin-twins.ts';
 export { fileClaimCandidatesQuery } from './file-claims.ts';
 import { localHostId } from './identity.ts';
-import { isDatabaseOnlyPage, slugDerivedOrigin } from './unbound-pages.ts';
+import { isDatabaseOnlyPage, recordsNoFileOrigin, slugDerivedOrigin } from './unbound-pages.ts';
 import { isUnboundSourcePage } from './unbound-source.ts';
 import { getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
 import { digest, gitBlobOid, requireUuid, sha256, stableJson } from './digest.ts';
@@ -238,13 +238,13 @@ export async function readReconcileState(engine: BrainEngine, sourceId: string, 
   const recordedPath = recordedReconcilePath(root, snapshot.page, mode);
   const marked = !recordedPath && isDatabaseOnlyPage({ ...snapshot.page,
     database_only_reason: await isUnboundSourcePage(engine, sourceId, slug) ? 'unbound_source' : null });
-  const adoptable = !recordedPath && !marked && opts.adoptSlugPath === true && !snapshot.page.source_uri
+  const adoptable = !recordedPath && !marked && opts.adoptSlugPath === true && recordsNoFileOrigin(snapshot.page)
     && !publishesDatabaseOnly(root, slug, snapshot) && !await isMirrorOnlyPage(engine, sourceId, slug);
   const derived = marked || adoptable ? slugDerivedOrigin(root, slug, mode) : null;
   const origin = derived ? 'slug_derived' : 'recorded';
   const path = recordedPath ?? derived?.path ?? null;
   if (!path || !isWriteTargetContained(path, root)) throw opError('source_changed', 'The page has no unambiguous confined recorded Markdown origin.',
-    `Page ${slug} in '${sourceId}' records no Markdown file inside the source checkout, so there is nothing to reconcile it against; nothing changed. ${!recordedPath && !marked && !snapshot.page.source_uri && opts.adoptSlugPath !== true
+    `Page ${slug} in '${sourceId}' records no Markdown file inside the source checkout, so there is nothing to reconcile it against; nothing changed. ${!recordedPath && !marked && recordsNoFileOrigin(snapshot.page) && opts.adoptSlugPath !== true
       ? `If the file at its slug path is this page's canonical file, preview again with --adopt-slug-path (gbrain sources reconcile ${sourceId} ${slug} --preview --adopt-slug-path) to adopt it; otherwise check its recorded source path with the command in fix.` : 'Check its recorded source path with the command in fix.'}`,
     { fix: readFix('Shows the page and its recorded source path.', { argv: ['gbrain', 'get', '--source', sourceId, '--', slug] }) });
   let size: number;
@@ -312,7 +312,7 @@ async function reconcilePins(engine: BrainEngine, input: { brain_id: string; sou
 /** #6394: a preview made with --adopt-slug-path recorded a page with no origin; apply and publication adopt the same pinned file. */
 export function reconcilePreviewAdopts(artifact: Pick<ReconcileArtifact, 'preimages'>): boolean {
   const stored = (artifact.preimages as { stored_page?: { source_path?: unknown; source_uri?: unknown } | null } | null)?.stored_page;
-  return stored != null && stored.source_path == null && stored.source_uri == null;
+  return stored != null && stored.source_path == null && recordsNoFileOrigin({ source_uri: typeof stored.source_uri === 'string' ? stored.source_uri : null });
 }
 export function assertReconcilePins(expected: ReconcilePins, actual: ReconcilePins): void {
   for (const key of Object.keys(expected) as Array<keyof ReconcilePins>) if (expected[key] !== actual[key]) staleReconcile(key);
