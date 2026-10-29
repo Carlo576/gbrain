@@ -27,6 +27,49 @@ Maintenance writes that lower a page now tell you (#7917). A dream or patterns p
 - `src/core/trust/page-write.ts`, `src/core/persistence/prepared-maintenance.ts`, `src/core/trust/taint.ts`, `src/core/cycle/patterns.ts`: maintenance lowerings file `lower_page` on managed and repo-less brains; an unreadable derivation declaration rates the write `unknown`.
 - Two `BEHAVIOR_CHANGES` rows; docs: `docs/guides/repair.md#provenance`, `docs/architecture/key-files/security.md`.
 - Tests: `test/provenance-drift-7891.test.ts` and `test/maintenance-lowering-7917-7918.test.ts` (PGLite and Postgres; classic repository, managed repository and repo-less brains).
+## [0.60.494.0] - 2026-10-29
+
+**A conversion to git-canonical now finishes while a live writer commits to the source.**
+
+Door commits (`gbrain git commit-push`) that landed after the apply's second strict pass read its level left Git ahead of the database at those paths, so the closing preview never reached 0 and the apply stopped with `git_conversion_incomplete`, however fast it ran. Nobody can promise a quiet window on a source that scheduled ingest and agents write to. The apply now runs up to three closing strict passes (`strict_pass_closing`) while those commits are all that is left, previewing again after each; the result reports `closing_passes`. No write is held or delayed. If Git is still ahead after the last pass, or anything else is open, the apply stops with `git_conversion_incomplete` and its fix as before, the source stays git-canonical, and a plain `gbrain sync` imports the rest.
+
+**`gbrain sources canonical <id> --to git` on a managed source with no Git checkout now refuses with a typed error and a fix.**
+
+When a managed source's folder was a plain directory, or a `git init` with no commit yet, the preview and the apply failed with `internal_error` and a raw git message. They now refuse with `git_checkout_required` or `git_branch_unborn`, read and write nothing, leave the source usable as it is, and carry a fix that asks the user before the folder becomes a Git repository (then `gbrain sources canonical <id> --to git --dry-run --json` previews again).
+
+- The strict-pass receipt-wait test runs in about 6 seconds instead of sleeping past a 30-second wait: the managed sync receipt waits now live in one module with a test seam. It covers both strict passes.
+- A direct test covers the NULL-vector clause of the no-op embedding check.
+- The admin UI's dev dependency `vite` moves from 6.4.4 to 6.4.5 for GHSA-8g5g-mxqh-grgj (Medium), which the OSV scan reports on every pull request.
+
+## [0.60.493.0] - 2026-10-29
+
+**`search` now finds a saved fact by its words the way the facts keyword index does, and a newer correction comes back ahead of the fact it corrects (`search.saved_facts_supersede`, on by default). In a keyless replay of 816 harness `search` calls, the author's correction ranked above the retracted post in 27 of 27 reads of the corrections case, against 1 of 27 on 0.60.492.0.**
+
+Words in `retrieval.saved_facts` now match whole after stemming with the brain's full-text language, so "renewal" finds "renews" and "count" no longer matches inside "countersigned". Words of a CJK script still match as substrings. A fact still needs three quarters of the query's words, but never more than four. Words that frame a question about a figure (count, number, total, amount) aren't counted. At most five facts ride a reply, as before.
+
+With the new default, a newer fact carrying a correction cue ("correction", "ignore the 52", "disregard", "not what I posted") that shares two matched words with a returned fact comes back too, ahead of it. The older fact is labelled `corrected_by`. A correction only counts when it is about the same thing:
+- it is not saved under another entity;
+- it is not of lower trust;
+- it shares a name the older fact matched;
+- it either adds a figure or withdraws what was said.
+
+So an acknowledgement ("thanks for the correction, noted") corrects nothing. Nothing stored changes. In the same replay no read lost a fact 0.60.492.0 returned, and no label fell outside the corrections cases.
+
+### How to turn it off
+
+```bash
+gbrain config set search.saved_facts_supersede false   # word matching stays; corrections are no longer reordered or labelled
+```
+
+`false`, `off`, `0` or `no` (any case) turns it off.
+
+### Itemized changes
+
+- `src/core/search/saved-facts-match.ts` (new): the stemmed matcher, moved out of `ops/search.ts`. It holds the correction rules, newest-first ordering of corrections under the five-fact cap, and a scan that keeps the facts keyword index unless a query has a CJK word.
+- `src/core/ops/search.ts`: an entity-resolved search keeps the `corrected_by` label on the entity copy of a fact.
+- `src/mcp/dispatch.ts`: saved facts carry their `corrected_by` note in the text reply.
+- The new key, the upgrade notice and the docs are in `src/core/config.ts`, `src/core/behavior-change-notice.ts`, `docs/architecture/RETRIEVAL.md` and the key-files entry.
+- Tests: `test/search-saved-facts-match.test.ts` (stemming, CJK, the off spellings and each correction rule), `test/search/saved-facts-probe.test.ts` (the scan's index use on 20,000 facts), `test/config-search-registry.test.ts`, `test/search-response-meta-concurrency.test.ts`.
 
 ## [0.60.492.0] - 2026-10-29
 

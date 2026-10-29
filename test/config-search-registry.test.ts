@@ -57,6 +57,7 @@ const DIRECTLY_READ_SINGLETONS = [
   'search.query_facts_arm',                  // search/facts-arm.ts (search/query-arms.ts)
   'search.temporal_fact_reserve',            // search/facts-arm.ts (search/query-arms.ts)
   'search.query_facts_block',                // search/facts-arm.ts (search/query-arms.ts, GBRA-205)
+  'search.saved_facts_supersede',            // search/saved-facts-match.ts (GBRA-205)
   'search.fact_source_pages',                // search/facts-arm.ts (search/query-arms.ts, GBRA-205)
   'search.evidence_titles',                  // search/evidence-date.ts (GBRA-205)
   'search.query_budget_unit',                // search/evidence-delivery.ts via ops/search.ts (GBRA-205)
