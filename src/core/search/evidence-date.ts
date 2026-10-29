@@ -174,7 +174,8 @@ export async function blockDateHeaders(engine: Parameters<typeof loadPageDateHea
   };
 }
 
-function configFlagOn(raw: string | null | undefined): boolean {
+/** A config flag value is on: 'true' | 'on' | '1' | 'yes', case-insensitive. */
+export function configFlagOn(raw: string | null | undefined): boolean {
   const v = raw?.trim().toLowerCase();
   return v === 'true' || v === 'on' || v === '1' || v === 'yes';
 }
