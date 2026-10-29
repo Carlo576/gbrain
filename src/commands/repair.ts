@@ -89,6 +89,7 @@ export const REPAIR_HELP = `Usage: gbrain repair [<kind>] [--apply] [--source <i
        gbrain repair url-clone-fences [--source <id>] [--apply --expect <preview-hash> --yes] [--json]
        gbrain repair duplicate-facts [--source <id>] [--include-cross-entity] [--apply --expect <preview-hash> --yes] [--json]
        gbrain repair fact-claim-dates --source <id> [--day YYYY-MM-DD] [--apply --expect <preview-hash> --yes] [--json]
+       gbrain repair provenance [--source <id>] [--slug <slug>]... [--include-ambiguous] [--apply --expect <preview-hash> --yes] [--json]
 ${REPAIR_ORDER_HELP}
        gbrain repair rename-identity --source <id> [--slug <new-slug> [--from <old-slug>] [--close]
                                      [--apply --expect <preview-hash> --yes]] [--json]

@@ -59,6 +59,9 @@ function writerDetail(item: DriftItem): string {
   return change ? `written by a ${change.writer} write${change.request_id ? ` (request ${change.request_id})` : ''}` : '';
 }
 
+const segmented = async (engine: BrainEngine, pageId: number) =>
+  (await engine.executeRaw<{ body_storage: string | null }>('SELECT body_storage FROM pages WHERE id = $1', [pageId]))[0]?.body_storage === 'segmented';
+
 /** Every page of the selection the repair would write or list, in id order. Read-only. */
 async function scan(engine: BrainEngine, scope: RepairScope, selection: Selection) {
   const planned: PlannedPage[] = [];
@@ -74,6 +77,11 @@ async function scan(engine: BrainEngine, scope: RepairScope, selection: Selectio
       if (!verdict.restore) {
         residuals.ambiguous!++;
         listing.push({ item: label, class: 'ambiguous', detail: `no recorded writer; previewed with --include-ambiguous only; ${writerDetail(item)}` });
+        continue;
+      }
+      if (await segmented(engine, item.page_id)) {
+        residuals.needs_review!++;
+        listing.push({ item: label, class: 'needs_review', detail: 'the page stores its body in segments, which this repair does not rewrite; edit its frontmatter by hand' });
         continue;
       }
       const action = verdict.class === 'restamp' ? 'restamp' : 'restore';

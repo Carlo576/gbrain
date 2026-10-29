@@ -40,6 +40,7 @@ import type { Principal, WriteRequest } from '../persistence/model.ts';
 import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import type { PageType } from '../types.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import type { PageVersion } from '../page-state/version-types.ts';
 import { maintenanceAttribution, principalAttribution, withWriteAttribution } from '../persistence/attribution.ts';
 import { withCoordinatedWrite, withTrustKeep, withTrustPromotion } from '../persistence/context.ts';
@@ -262,6 +263,7 @@ async function plannedProvenanceRestore(engine: BrainEngine, state: PageTrustSta
   const restore = item?.verdict.restore;
   if (!item || !restore || item.verdict.class === 'restamp' || plannedDigest(item) !== intent.planned) throw changedSincePreview(pageRef(state.sourceId, state.slug), ACTION_NAMES.restore_provenance);
   const { page } = state.snapshot;
+  assertInlineBody(page, 'gbrain repair provenance');
   return { content: serializeMarkdown(restore.frontmatter, page.compiled_truth ?? '', page.timeline ?? '', {
     type: (page.type as PageType) ?? 'note', title: page.title ?? '', tags: state.snapshot.tags }), tier: minTrust(state.tier, restore.tier) };
 }
