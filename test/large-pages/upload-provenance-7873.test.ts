@@ -3,9 +3,10 @@
  * cannot supply provenance stamps, as a remote put_page cannot.
  *
  * 1. Protects: commit_page_upload of a 25 MiB page whose frontmatter carries source_kind / ingested_via /
- *    ingested_at stores none of the caller's values; a replace keeps the stamps of the page it replaces.
+ *    ingested_at stores none of the caller's values; a replace of an unclassified page keeps the stamps of the page it
+ *    replaces and is tiered by them.
  * 2. Fails when: a caller-written stamp reaches the stored frontmatter through the streamed path, or a replace drops
- *    the stored stamps.
+ *    the stored stamps or is tiered above them.
  * 3. Runs on PGLite, and on Postgres when DATABASE_URL is set (no embedding, no model calls).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -70,6 +71,9 @@ for (const kind of testBackends()) {
       const stored = { source_kind: 'webhook', ingested_via: 'webhook', ingested_at: '2026-01-02T03:04:05.000Z' };
       await engine.putPage(slug, { type: 'note', title: 'Huge restamped', compiled_truth: 'Captured body', timeline: '', frontmatter: stored,
         source_kind: 'webhook', ingested_via: 'webhook' } as never);
+      await engine.executeRaw("UPDATE pages SET trust_tier = 'unknown' WHERE source_id = 'default' AND slug = $1", [slug]);
+      // An external-tier write is scanned whole, which a 25 MiB body is too large for; the tier is what this test reads.
+      await engine.executeRaw("INSERT INTO config (key, value) VALUES ('write_gate.external_mode', 'off') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
       const revision = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!.revision;
       const line = 'We agreed to ship the review checklist first and revisit pricing next week.\n\n';
       const text = `---\ntitle: Huge restamped\nsource_kind: forged-kind\ningested_via: forged-channel\ningested_at: '2020-01-01T00:00:00.000Z'\n---\n\n${line.repeat(Math.ceil(25 * MiB / line.length))}End.`;
@@ -84,11 +88,12 @@ for (const kind of testBackends()) {
         catch (error) { if (!(error instanceof OperationError) || error.code !== 'write_pending' || attempt > 40) throw error; }
       }
       expect(stagedUploadWork.streamed).toBe(streamed + 1);
-      const [row] = await engine.executeRaw<{ body_storage: string; frontmatter: Record<string, unknown> | string }>(
-        'SELECT body_storage, frontmatter FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]);
+      const [row] = await engine.executeRaw<{ body_storage: string; frontmatter: Record<string, unknown> | string; trust_tier: string }>(
+        'SELECT body_storage, frontmatter, trust_tier FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]);
       expect(row!.body_storage).toBe('segmented');
       const frontmatter = typeof row!.frontmatter === 'string' ? JSON.parse(row!.frontmatter) : row!.frontmatter;
       expect({ source_kind: frontmatter.source_kind, ingested_via: frontmatter.ingested_via, ingested_at: frontmatter.ingested_at }).toEqual(stored);
+      expect(row!.trust_tier).toBe('external_untrusted');
     }, 600_000);
   });
 }

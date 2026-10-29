@@ -21,7 +21,7 @@ import { readPageBodyPolicy } from '../page-body/limits.ts';
 import { importStreamedMarkdownFile, type StreamedPreparedImport } from '../page-body/streamed-import.ts';
 import { assertPageRevision } from '../page-state/types.ts';
 import { contentRefusalError, PAGE_OVER_LIMIT_SUGGESTION } from '../import-screen.ts';
-import { pageGateTrust, pageWriteTrust, stampPageTrustMarker, storedPageTier } from '../trust/page-write.ts';
+import { pageGateTrust, stampPageTrustMarker, storedPageTier } from '../trust/page-write.ts';
 import type { WriteTrust } from '../trust/tier.ts';
 import { sizeStateField } from '../page-embedding-budget.ts';
 import { coreMarking } from '../core-memory.ts';
@@ -34,7 +34,7 @@ import type { PageSnapshot } from '../page-state/types.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { bodyStagingGoneError } from '../engine-sql/page-body.ts';
 import { ownerSourceGateInput, writeTrustOfGate } from './attribution.ts';
-import { keepStoredProvenance, pageDatabaseOnlyPublication } from './page-prepare.ts';
+import { keepStoredProvenance, pageDatabaseOnlyPublication, provenanceWriteTrust } from './page-prepare.ts';
 import { pageIdentityError } from './page-identity.ts';
 import { remoteLinkHint } from './page-advisories.ts';
 import { stagedUploadParts, stagedUploadWork, type StagingBodyRef } from './page-upload.ts';
@@ -112,7 +112,7 @@ export async function prepareStreamedUpload(engine: BrainEngine, row: WriteReque
       content: { provenance: { source_kind: text(p.source_kind), source_uri: text(p.source_uri), ingested_via: text(p.ingested_via) },
         ...(remote ? { writer: {
           gate: async (frontmatter: Record<string, unknown>) => {
-            trust = pageWriteTrust(row, frontmatter);
+            trust = provenanceWriteTrust(row, frontmatter, snapshot?.page.frontmatter);
             const gate = pageGateTrust(row, trust, storedTier);
             return gate ? { tier: gate.tier, origin: { channel: gate.origin?.channel ?? row.operation }, requestId: null } : ownerSourceGateInput(engine, row.source_id, frontmatter);
           },

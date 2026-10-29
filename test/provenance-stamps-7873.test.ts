@@ -145,6 +145,14 @@ for (const kind of testBackends()) {
         if (repo) expect(ownerPageTrust({ frontmatter: fileFrontmatter(slug), channel: 'sync' }).tier).toBe('external_untrusted');
       });
 
+      test('a remote edit_page that drops a stored stamp is tiered as the page it publishes, not below the gate', async () => {
+        const slug = 'inbox/edit-drop-tier';
+        await seed(slug, { ingested_via: 'webhook' }, 'unknown');
+        await edit(slug, [['ingested_via: webhook\n', ''], ['Captured body', 'Captured body, edited']]);
+        const [row] = await engine.executeRaw<{ trust_tier: string }>('SELECT trust_tier FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]);
+        expect(row!.trust_tier).toBe('external_untrusted');
+      });
+
       test('a remote edit_page that strips another lowering marker from an unclassified page does not raise it on re-derive', async () => {
         const slug = 'inbox/edit-transcript';
         const before = await seed(slug, { transcript_import: { harness: 'third-party-example' } }, 'unknown');
