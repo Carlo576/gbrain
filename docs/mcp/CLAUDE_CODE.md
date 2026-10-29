@@ -75,7 +75,7 @@ claude-code --instructions-only` writes the block; doctor `harness_wiring` and
 setup hook's read-context block when a serve is running. When setup,
 `gbrain bootstrap` or a workspace install already wires the event in your
 user settings or the project's `.claude` settings, the plugin's hook exits
-without output, so each turn gets it once. `GBRAIN_HOOKS=0` turns it off.
+without output, so each turn gets it once. `GBRAIN_HOOKS=0`, or a recorded `gbrain setup claude-code --no-hooks`, turns it off.
 
 ## Option 1: Local (recommended, zero server needed)
 

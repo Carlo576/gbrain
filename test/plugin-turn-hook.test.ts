@@ -15,7 +15,7 @@ import { join, resolve } from 'node:path';
 import { buildClaudeHookCommand } from '../src/core/bootstrap/hooks.ts';
 import { codexSetupHookGroup } from '../src/core/bootstrap/codex-hooks.ts';
 import { CLAUDE_HOOK_DEFAULT_TIMEOUT_SECS } from '../src/core/bootstrap/host-specs.ts';
-import { otherLaneWiresHook } from '../src/core/bootstrap/plugin-lanes.ts';
+import { pluginHookYields } from '../src/core/bootstrap/plugin-lanes.ts';
 import { runHook } from '../src/commands/hook.ts';
 import { harnessWiringCheck, instructionBlockUpgradeHints } from '../src/commands/doctor/checks/harness-wiring.ts';
 import { renderBrainFirstTurnRule } from '../src/core/setup/brain-first.ts';
@@ -117,8 +117,8 @@ describe('plugin lane: one hook per event, rule only with a block', () => {
     const setupEntry = { type: 'command', command: 'env /opt/g hook user-prompt', timeout: 3, _gbrain: 'setup-v1' };
     claudeSettings(b, { hooks: { UserPromptSubmit: [{ hooks: [setupEntry] }] } });
     await withEnv(b.env, async () => {
-      expect(otherLaneWiresHook('claude-code', 'user-prompt', b.root)).toBe(true);
-      expect(otherLaneWiresHook('claude-code', 'session-start', b.root)).toBe(false);
+      expect(pluginHookYields('claude-code', 'user-prompt', b.root)).toBe(true);
+      expect(pluginHookYields('claude-code', 'session-start', b.root)).toBe(false);
     });
     mkdirSync(join(b.home, '.gbrain'), { recursive: true });
     writeFileSync(join(b.home, '.gbrain', 'agent-instructions.json'), JSON.stringify({ version: 1, entries: [{ harness: 'claude-code', status: 'installed',
@@ -127,10 +127,22 @@ describe('plugin lane: one hook per event, rule only with a block', () => {
 
     const ws = box();
     claudeSettings(ws, { hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo unrelated' }] }] } });
-    await withEnv(ws.env, async () => { expect(otherLaneWiresHook('claude-code', 'user-prompt', ws.root)).toBe(false); });
+    await withEnv(ws.env, async () => { expect(pluginHookYields('claude-code', 'user-prompt', ws.root)).toBe(false); });
     mkdirSync(join(ws.root, '.claude'), { recursive: true });
     writeFileSync(join(ws.root, '.claude', 'settings.local.json'), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'gbrain hook user-prompt', _gbrain: 'bootstrap-v1' }] }] } }));
-    await withEnv(ws.env, async () => { expect(otherLaneWiresHook('claude-code', 'user-prompt', ws.root)).toBe(true); });
+    await withEnv(ws.env, async () => { expect(pluginHookYields('claude-code', 'user-prompt', ws.root)).toBe(true); });
+  });
+
+  test('a recorded `gbrain setup claude-code --no-hooks` turns the plugin hook off too, block or not', async () => {
+    const b = box();
+    claudeSettings(b);
+    const bin = join(b.root, 'gbrain');
+    writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' --no-env-file '${CLI}' "$@"\n`);
+    chmodSync(bin, 0o755);
+    const r = await runCli(['setup', 'claude-code', '--no-hooks', '--gbrain-bin', bin, '--json'], { env: { ...b.env, GBRAIN_HOOK_LANE: undefined }, cwd: b.root });
+    expect(r.stdout + r.stderr).toContain('no hooks');
+    await withEnv(b.env, async () => { expect(pluginHookYields('claude-code', 'user-prompt', b.root)).toBe(true); });
+    expect(await userPrompt(b, 'claude-code')).toBe('');
   });
 
   test('Codex: the plugin hook yields to setup\'s hooks.json group, and runs when hooks.json holds none', async () => {
@@ -143,6 +155,6 @@ describe('plugin lane: one hook per event, rule only with a block', () => {
     writeFileSync(join(b.env.CODEX_HOME!, 'hooks.json'), JSON.stringify({ hooks: { UserPromptSubmit: [codexSetupHookGroup('/opt/g', 'UserPromptSubmit', {})] } }));
     expect(await userPrompt(b, 'codex')).toBe('');
     writeFileSync(join(b.env.CODEX_HOME!, 'hooks.json'), '{ not json');
-    await withEnv(b.env, async () => { expect(otherLaneWiresHook('codex', 'user-prompt', b.root)).toBe(false); });
+    await withEnv(b.env, async () => { expect(pluginHookYields('codex', 'user-prompt', b.root)).toBe(false); });
   });
 });

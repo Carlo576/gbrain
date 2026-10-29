@@ -93,7 +93,7 @@ import {
   type HookHeartbeatEntry,
 } from '../core/context/hook-heartbeat.ts';
 import { CLAUDE_HOOK_OUTPUT_CAP_CHARS } from '../core/bootstrap/host-specs.ts';
-import { otherLaneWiresHook } from '../core/bootstrap/plugin-lanes.ts';
+import { pluginHookYields } from '../core/bootstrap/plugin-lanes.ts';
 import { composeSessionStartOutput } from '../core/context/session-start-output.ts';
 import { claudeCodePressure } from '../core/context/pressure.ts';
 import { readManifest, readReceipt, type InstallReceipt } from '../core/bootstrap/format.ts';
@@ -341,7 +341,7 @@ export async function runHook(args: string[], io: HookIo = {}): Promise<number> 
     }
   }
   // Plugin lane (the Claude Code and Codex plugin manifests): yields to any other gbrain lane wiring this event.
-  if (process.env.GBRAIN_HOOK_LANE === 'plugin' && otherLaneWiresHook(io.harness ?? 'claude-code', event, io.cwd ?? process.cwd())) return 0;
+  if (process.env.GBRAIN_HOOK_LANE === 'plugin' && pluginHookYields(io.harness ?? 'claude-code', event, io.cwd ?? process.cwd())) return 0;
 
   switch (event) {
     case 'session-start':

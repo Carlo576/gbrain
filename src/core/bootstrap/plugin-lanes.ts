@@ -9,6 +9,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { codexHookCensus } from './codex-hooks.ts';
 import { classifyHarnessHook } from './hooks.ts';
+import { claudeSetupPaths } from '../setup/claude-code.ts';
+import { codexSetupPaths } from '../setup/codex.ts';
 import { CLAUDE_HOOK_SUBCOMMAND, claudeUserSettingsPath, codexConfigPath, codexHooksPath, GBRAIN_HOOK_MARKER_KEY } from './host-specs.ts';
 
 // ── Plugin-lane detection (codex/claude plugins provide an MCP server) ─────
@@ -155,15 +157,20 @@ export function claudeAnyRegistrationExists(
 }
 
 /**
- * Plugin-lane defer: does another gbrain install lane (`gbrain setup`,
- * `gbrain bootstrap harness`, a workspace bootstrap) already wire this hook
- * subcommand for the harness? The plugin's own hook (GBRAIN_HOOK_LANE=plugin)
- * then yields, so the event fires once. Claude Code: any gbrain-marked or
+ * Plugin-lane defer: the plugin's own hook (GBRAIN_HOOK_LANE=plugin) yields
+ * when the harness's setup receipt records that the user wants no hooks
+ * (one consent for both lanes), or when another gbrain install lane
+ * (`gbrain setup`, `gbrain bootstrap harness`, a workspace bootstrap) already
+ * wires this hook subcommand for the harness, so the event fires once. Claude Code: any gbrain-marked or
  * harness-lane entry in the user settings or the cwd's .claude settings;
  * Codex: a setup or bootstrap group in CODEX_HOME/hooks.json. Fail-open: an
  * unreadable file counts as not wired.
  */
-export function otherLaneWiresHook(harness: string, subcommand: string, cwd: string): boolean {
+export function pluginHookYields(harness: string, subcommand: string, cwd: string): boolean {
+  const receipt = harness === 'codex' ? codexSetupPaths('gbrain').receiptPath : claudeSetupPaths({ name: 'gbrain', scope: 'user' }).receiptPath;
+  try {
+    if ((JSON.parse(readFileSync(receipt, 'utf8')) as { consent?: { wiring_scope?: { value?: { hooks?: string } } } }).consent?.wiring_scope?.value?.hooks === 'none') return true;
+  } catch { /* no receipt or unreadable: no recorded decline */ }
   const event = Object.entries(CLAUDE_HOOK_SUBCOMMAND).find(([, s]) => s === subcommand)?.[0];
   if (!event) return false;
   if (harness === 'codex') {

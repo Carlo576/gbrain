@@ -20,7 +20,7 @@ The gbrain plugins (gbrain, gbrain-coding, gbrain-daily) now declare the `UserPr
 
 ```bash
 gbrain setup claude-code --instructions-only   # or codex: writes only the brain-first block, which turns the plugin's per-turn rule on
-GBRAIN_HOOKS=0                                 # turns every gbrain hook off, the plugin's included
+GBRAIN_HOOKS=0                                 # turns every gbrain hook off, the plugin's included (so does a recorded `gbrain setup <harness> --no-hooks`)
 ```
 
 ### Itemized changes

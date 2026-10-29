@@ -90,7 +90,7 @@ each turn (`gbrain setup codex --instructions-only` writes the block; doctor
 missing), and it adds the setup hook's read-context block when a serve is
 running. When `gbrain setup codex` or `gbrain bootstrap` already wires the
 event in `$CODEX_HOME/hooks.json`, the plugin's hook exits without output, so
-each turn gets it once. `GBRAIN_HOOKS=0` turns it off.
+each turn gets it once. `GBRAIN_HOOKS=0`, or a recorded `gbrain setup codex --no-hooks`, turns it off.
 
 **Routing under the plugin lane.** The plugin serve is user-global and runs
 with the plugin snapshot as its working directory, so the per-project
