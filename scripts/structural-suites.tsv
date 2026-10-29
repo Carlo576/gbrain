@@ -260,7 +260,7 @@ test/openclaw-assemble-node-loadable.test.ts	(file-level)	4	readFileSync
 test/openclaw-plugin-manifest.test.ts	bundled-skill reference closure (nothing bundled points at a non-bundled skill)	1	readFileSync
 test/openclaw-plugin-manifest.test.ts	plugin membership curation (skills = plugin ∪ exclusions, disjoint)	9	readFileSync
 test/openclaw-plugin-manifest.test.ts	root OpenClaw plugin manifest	2	readFileSync
-test/paid-lanes-switch-5903.test.ts	(file-level)	11	readFileSync
+test/paid-lanes-switch-5903.test.ts	#5903 e2e-status accepts a skipped tier2 only under GBRAIN_PAID_LANES=0	9	readFileSync
 test/persistence-git-subdir-origin.test.ts	(file-level)	6	readFileSync
 test/persistence-request-indexes.test.ts	(file-level)	4	readFileSync
 test/persistence-sync-options.serial.test.ts	(file-level)	1	readFileSync
@@ -318,7 +318,8 @@ test/scripts/e2e-matrix.test.ts	frozen E2E matrix	9	readFileSync
 test/scripts/e2e-provider-key-notice.test.ts	scripts/e2e-provider-key-notice.sh	3	readFileSync
 test/scripts/e2e-runner.test.ts	second	5	readFileSync
 test/scripts/e2e-runner.test.ts	sequential E2E runner (GITHUB_ACTIONS=${githubActions})	9	readFileSync
-test/scripts/e2e-wiring.test.ts	(file-level)	12	readFileSync
+test/scripts/e2e-shard-budget.test.ts	E2E shard-time budget	3	readFileSync
+test/scripts/e2e-wiring.test.ts	(file-level)	14	readFileSync
 test/scripts/fix-wave-gate.test.ts	fix-wave gate workflow	3	readFileSync
 test/scripts/full-ci-workflow.test.ts	full CI on pull requests	4	readFileSync
 test/scripts/full-ci-workflow.test.ts	master-push reuse of a passed full-suite run	2	readFileSync
@@ -337,6 +338,7 @@ test/scripts/postgres-lane-coverage.test.ts	check-postgres-lane-coverage.ts	9	re
 test/scripts/postgres-unit-arms.test.ts	postgres-unit-arms list	13	readFileSync
 test/scripts/promote-stable.test.ts	promote-stable.yml	2	readFileSync
 test/scripts/regen-all.test.ts	regen:all	5	readFileSync
+test/scripts/require-executed-tests.test.ts	require-executed-tests	7	readFileSync
 test/scripts/run-verify-parallel.test.ts	guard registration ⇒ execution coverage	1	readFileSync
 test/scripts/run-verify-parallel.test.ts	run-verify-parallel.sh — no-timeout-binary fallback rc capture (regression)	7	readFileSync
 test/scripts/serial-files.test.ts	scripts/serial-files.tsv (serial lane manifest)	5	readFileSync
