@@ -41,8 +41,10 @@ const DATES = new RegExp(String.raw`\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{
 
 /** The query words a fact writes as the first word of a name ("Orbix" in "Orbix Home Goods", not "Example" in "Alice Example"); term indexes are 1-based. */
 function namedWords(text: string, terms: string[], words: Set<number>): Set<number> {
-  return new Set([...words].filter(i => [...text.matchAll(new RegExp(String.raw`(?<![\p{L}\p{N}])${terms[i - 1]}`, 'giu'))]
-    .some(m => m[0][0] !== m[0][0]!.toLowerCase() && !/\p{Lu}[\p{L}\p{N}'-]*\s+$/u.test(text.slice(0, m.index)))));
+  const heads = [...text.matchAll(/[\p{L}\p{N}][\p{L}\p{N}'-]*/gu)]
+    .filter(m => m[0][0] !== m[0][0]!.toLowerCase() && !/\p{Lu}[\p{L}\p{N}'-]*\s+$/u.test(text.slice(0, m.index)))
+    .map(m => m[0].toLowerCase());
+  return new Set([...words].filter(i => heads.some(h => h.startsWith(terms[i - 1]!))));
 }
 
 /** The figures a fact states: its numbers, with dates ("2026-10-14", "14 Oct", "July 1") and clock times left out. */
