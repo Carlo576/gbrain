@@ -787,7 +787,7 @@ Each finding carries:
   value's hash. It identifies the value without revealing it.
 - **rule ... since**: the gbrain version that added or changed the rule
   (v0.60.31.0 for `url_credentials`, `basic_auth`, `digitalocean` and
-  private keys whose `BEGIN` or `END` line is missing; v0.60.499.0 for
+  private keys whose `BEGIN` or `END` line is missing; v0.60.500.0 for
   `openrouter`, `groq`, `xai`, `perplexity` and `replicate`). A push that worked before an upgrade and fails after it names
   the version here.
 - **allow this finding**: the exact command that appends the fingerprint to

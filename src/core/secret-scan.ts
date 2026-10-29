@@ -177,7 +177,7 @@ const SECURITY_WAVE_SINCE = '0.60.31.0';
  * `since` for the AI-provider key rules added by #7959 (`openrouter`, `groq`,
  * `xai`, `perplexity`, `replicate`).
  */
-const PROVIDER_KEYS_SINCE = '0.60.499.0';
+const PROVIDER_KEYS_SINCE = '0.60.500.0';
 
 /**
  * Placeholder passwords in documentation URLs: `<password>`, `${VAR}`,
