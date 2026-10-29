@@ -155,9 +155,26 @@ describe('pregate-remote-gate.sh', () => {
     it('a full run on the tree that failed refuses: exit 1, no receipt, no gate', () => {
       const r = run(gateMarking, { GBRAIN_PREGATE_REPO: 'owner-example/repo-example', GBRAIN_PREGATE_REUSE_CMD: reuser('exit 3') });
       expect(r.out).not.toContain('PREGATE_REMOTE:');
-      expect(r.err).toContain('failed');
+      expect(r.err).toContain(`pregate-remote-gate: a full run on tree ${git('rev-parse', 'HEAD^{tree}')} failed`);
       expect(r.code).toBe(1);
       expect(ran('gate-ran')).toBe(false);
+    });
+
+    it('a reused run that recorded failed tests prints its receipt with exit 1, and starts no gate', () => {
+      const r = run(gateMarking, { GBRAIN_PREGATE_REPO: 'owner-example/repo-example', GBRAIN_PREGATE_REUSE_CMD: reuser("echo 'GBRAIN_REUSE_RESULT tests=10 failed=2'") });
+      expect(r.out.endsWith(`PREGATE_REMOTE: tree=${git('rev-parse', 'HEAD^{tree}')} tests=10 failed=2\n`)).toBe(true);
+      expect(r.code).toBe(1);
+      expect(ran('gate-ran')).toBe(false);
+    });
+
+    it('a reuse step that exits 0 without a result line, or exits with any other code, runs the gate', () => {
+      for (const body of ["echo '[ci-reuse] gate: something'", 'exit 2']) {
+        rmSync(join(repo, '.git', 'gate-ran'), { force: true });
+        const r = run(gateMarking, { GBRAIN_PREGATE_REPO: 'owner-example/repo-example', GBRAIN_PREGATE_REUSE_CMD: reuser(body) });
+        expect(ran('gate-ran')).toBe(true);
+        expect(r.out.trim().split('\n').at(-1)).toBe(`PREGATE_REMOTE: tree=${contentTree()} tests=4 failed=0`);
+        expect(r.code).toBe(0);
+      }
     });
 
     it('no reuse runs the gate, whose summary is the receipt', () => {

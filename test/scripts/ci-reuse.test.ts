@@ -11,8 +11,9 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { apiDeps, attemptJobs, checkRecord, decide, decideGate, PROFILES, runGate, writeDecision, type Commit, type GateDeps, type JobRow, type FullRun, type ReuseDeps } from '../../scripts/ci-reuse.ts';
+import { join, resolve } from 'node:path';
+import { deflateRawSync } from 'node:zlib';
+import { apiDeps, attemptJobs, checkRecord, decide, decideGate, gateDeps, PROFILES, runGate, writeDecision, type Commit, type GateDeps, type JobRow, type FullRun, type ReuseDeps } from '../../scripts/ci-reuse.ts';
 import { GET_RETRY_DELAYS_MS, restClient, type GitHubClient } from '../../scripts/lib/gh-issue.ts';
 
 const REPO = 'owner-example/repo-example';
@@ -388,6 +389,51 @@ describe('ci-reuse remote-gate decision', () => {
     expect((await go(gate({ runs: [t1, e1], artifacts: { 600: tree(t1), 700: tree(e1, { profile: 'cheap' }) } }))).code).toBe(4);
     expect((await go(gate({ runs: [t1, e1], executed: { 700: { reason: 'no executed-identities artifact' } } }))).code).toBe(4);
     expect((await go(gate({ runs: [t1, e1], executed: { 700: { tests: 0, failed: 0 } } }))).code).toBe(4);
+  });
+
+  test('a full run that concluded success with a failed full-suite job refuses (exit 3)', async () => {
+    const r = await go(gate({ runs: [run('test.yml'), run('e2e.yml')], jobs: { '600/1': [{ name: PROFILES.test.job, status: 'completed', conclusion: 'failure' }] } }));
+    expect(r.code).toBe(3);
+    expect(r.last).toContain('runs/600/attempts/1');
+  });
+
+  test('a failed full run refuses at once even while the other workflow is still running', async () => {
+    const r = await go(gate({ runs: [run('test.yml', { status: 'in_progress', conclusion: null }), run('e2e.yml', { conclusion: 'failure' })] }), A, T, 10 * 60_000);
+    expect(r.code).toBe(3);
+    expect(r.lines.some(l => l.includes('waiting for'))).toBe(false);
+  });
+
+  test('the executed-identities artifact counts pass and fail identities, and an unreadable one says why', async () => {
+    const zipOf = (name: string, content: string): Uint8Array => {
+      const data = Buffer.from(content), body = deflateRawSync(data), file = Buffer.from(name);
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(8, 8); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(file.length, 26);
+      const central = Buffer.alloc(46);
+      central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(8, 10); central.writeUInt32LE(body.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(file.length, 28);
+      const end = Buffer.alloc(22);
+      end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10); end.writeUInt32LE(46 + file.length, 12); end.writeUInt32LE(30 + file.length + body.length, 16);
+      return new Uint8Array(Buffer.concat([local, file, body, central, file, end]));
+    };
+    const client = (doc: unknown, listed = true): GitHubClient => ({
+      async request<T>(_m: string, path: string): Promise<T> {
+        if (path === 'repos/{repo}/actions/runs/600/artifacts?name=executed-identities&per_page=10') return { artifacts: listed ? [{ id: 9, name: 'executed-identities', expired: false }] : [] } as T;
+        throw new Error(`unexpected ${path}`);
+      },
+      async download() { return zipOf('executed-identities.json', JSON.stringify(doc)); },
+    });
+    const ids = [{ status: 'pass' }, { status: 'pass' }, { status: 'fail' }, { status: 'skip' }, {}];
+    expect(await gateDeps(client({ head: { identities: ids } })).executed(600)).toEqual({ tests: 3, failed: 1 });
+    expect(await gateDeps(client({ head: {} })).executed(600)).toEqual({ reason: "run 600's executed-identities.json has no head.identities list" });
+    expect(await gateDeps(client(null, false)).executed(600)).toEqual({ reason: "run 600 has no 'executed-identities' artifact" });
+  });
+
+  test('--gate with a malformed sha, tree or repository is a usage error (exit 2) and reads nothing', () => {
+    const script = resolve(import.meta.dir, '..', '..', 'scripts', 'ci-reuse.ts');
+    for (const args of [['--sha', 'abc', '--tree', T, '--repo', REPO], ['--sha', A, '--tree', T, '--repo', 'no-slash'], ['--sha', A, '--tree', T, '--repo', REPO, '--poll-seconds', '0']]) {
+      const r = Bun.spawnSync(['bun', script, '--gate', ...args], { env: { ...process.env, GH_TOKEN: '', GITHUB_TOKEN: '' } });
+      expect(r.exitCode).toBe(2);
+      expect(r.stdout.toString()).toStartWith('Usage: bun scripts/ci-reuse.ts --gate');
+    }
   });
 
   test('a cancelled newest run looks further back; a passed run of the same tree on another head (a merge commit) reuses', async () => {
