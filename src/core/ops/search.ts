@@ -432,8 +432,16 @@ async function buildRetrievalResponseMeta(
   // A fact the facts arm already returned as a row is not repeated beside the blocks.
   const factRowIds = new Set((results as SearchResult[]).flatMap(r => r.fact_row ? [r.fact_row.id] : []));
   // #7043: a matched fact may copy an entity fact; the merged list collapses again before the response.
-  const savedFacts = (await collapseFactReads(ctx.engine, [...entityFacts, ...matchedFacts.filter(m => !entityFacts.some(e => e.id === m.id))]
-    .filter(f => !factRowIds.has(f.id)))).map(stripCollapseColumns);
+  // An entity fact keeps the corrected_by its matched copy carries, and a label follows its corrector into the collapse.
+  const correctedBy = new Map(matchedFacts.flatMap(m => m.corrected_by ? [[m.id, m.corrected_by] as const] : []));
+  const merged = await collapseFactReads(ctx.engine, [...entityFacts.map(e => ({ ...e, corrected_by: correctedBy.get(e.id) })),
+    ...matchedFacts.filter(m => !entityFacts.some(e => e.id === m.id))].filter(f => !factRowIds.has(f.id)));
+  const shownAs = new Map([...factRowIds].map(id => [id, id]));
+  for (const f of merged) for (const id of f.collapsed_ids ?? [f.id]) shownAs.set(id, f.id);
+  const savedFacts = merged.map(({ corrected_by, ...f }) => {
+    const by = corrected_by === undefined ? undefined : shownAs.get(corrected_by);
+    return stripCollapseColumns(by === undefined || by === f.id ? f : { ...f, corrected_by: by });
+  });
   const heldTotal = [...heldBySource.values()].reduce((sum, n) => sum + n, 0);
   const embedding = embeddingHeld?.total ? embeddingHeld : null;
   const coverage: RetrievalCoverage | undefined = pending || heldTotal || embedding ? {

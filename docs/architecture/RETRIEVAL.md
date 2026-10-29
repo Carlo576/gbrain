@@ -360,9 +360,14 @@ Two cross-cutting seams sit around the pipeline rather than inside it:
   acknowledgement saved after a correction does not crowd it out. An
   acknowledgement corrects nothing: a cue fact that adds no figure (a number
   other than a date such as "14 Oct" or a time) to the older fact, when it restates one of its
-  figures or the older fact is itself a correction. The cue is a fixed word list, so
-  an unmarked correction is not caught and a marked unrelated post can relabel
-  a fact; nothing stored changes.
+  figures or the older fact is itself a correction, or when it states no figure
+  and withdraws nothing ("thanks for the correction"). A cue fact corrects
+  nothing saved under another entity, nothing of higher trust, and nothing whose
+  matched names (the first word of a capitalized name, "Orbix" in "Orbix Home
+  Goods") it shares none of. Corrections rank newest first under the five-fact
+  cap, and a corrected fact whose correction does not fit is left out. The cue
+  is a fixed word list, so an unmarked correction is not caught; nothing stored
+  changes.
 - **Temporal fact reserve (default off).** With `search.temporal_fact_reserve=true`,
   a `query` with a deterministic temporal cue (when, before, after, how long,
   since, until, ordinal-time words, ISO dates, month names) and a token budget

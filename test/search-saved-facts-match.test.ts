@@ -274,7 +274,7 @@ describe('search.saved_facts_supersede: the five-fact cap', () => {
   });
 });
 // Value: protects=a corrector outside the top 200 candidates still corrects; fails_when=200 full matches push a two-word cue row past the cut; why_new=no fixture had more than a handful of matching facts; seam=none; no_claim=query cost on a large facts table
-// Value: protects=a fact naming another entity, or written below agent_written, never demotes a better fact; fails_when=a cue fact with shared words and a new figure demotes any older fact; why_new=every earlier corrector shared the corrected fact's entity and tier; seam=none; no_claim=two writers at one tier disagreeing
+// Value: protects=a fact naming another entity, or of lower trust, never demotes the fact it names; fails_when=a cue fact with shared words and a new figure demotes any older fact; why_new=every earlier corrector shared the corrected fact's entity and tier; seam=none; no_claim=two writers at one tier disagreeing
 describe('search.saved_facts_supersede: which cue facts can correct', () => {
   test('a cue fact past the first 200 full matches still comes back as the correction', async () => {
     await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
@@ -289,7 +289,7 @@ describe('search.saved_facts_supersede: which cue facts can correct', () => {
     }
   }, 120_000);
 
-  test('a cue fact about another entity, or below agent_written and the fact it names, does not correct', async () => {
+  test('a cue fact about another entity, or of lower trust than the fact it names, does not correct', async () => {
     await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
     try {
       const base = await remember('Torvane Logistics renews at 40 seats.', '2026-02-01T09:00:00Z');
@@ -325,6 +325,47 @@ describe('search.saved_facts_supersede: a chain of corrections under the cap', (
       expect(facts.find(f => f.id === c)?.corrected_by).toBe(d);
       expect(facts.find(f => f.id === b)?.corrected_by).toBe(c);
       expect(returned.has(x)).toBe(false);
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+});
+// Value: protects=a correction of one entity's figure never labels another entity's fact, a bare "correction" acknowledgement corrects nothing, and an entity-resolved search keeps the label; fails_when=two shared generic words let a correction cross entities, a figure-free thank-you demotes the figure, or the entity copy replaces the labelled copy; why_new=every earlier fixture named one entity per query and no entity page; seam=none; no_claim=names written in lower case
+describe('search.saved_facts_supersede: what a correction must share', () => {
+  test('a correction naming another entity does not label a fact on the same two words', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      const zeta = await remember('Zentic renews at 52 seats.', '2025-10-30T09:00:00Z');
+      await remember('Ostrel renews at 52 seats.', '2025-11-01T09:00:00Z');
+      await remember('Correction: Ostrel renews at 46 seats, ignore the 52.', '2025-11-02T09:00:00Z');
+      const { facts } = await search('Zentic renewal seats');
+      expect(facts.map(f => f.id)).toContain(zeta);
+      expect(facts.find(f => f.id === zeta)?.corrected_by).toBeUndefined();
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+
+  test('an acknowledgement with no figure does not correct the fact that states one', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      const yonder = await remember('Yondrel renews at 52 seats.', '2025-10-01T09:00:00Z');
+      await remember('Thanks for the correction on the Yondrel renewal seats, noted.', '2025-10-02T09:00:00Z');
+      expect((await search('Yondrel renewal seats')).facts.find(f => f.id === yonder)?.corrected_by).toBeUndefined();
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+
+  test('a search that resolves the entity keeps the label on the entity copy', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      await importFromContent(engine, 'companies/halvard-example', serializeMarkdown({}, 'Halvard Example is a customer account.', '', { type: 'company', title: 'Halvard Example', tags: [] }), { noEmbed: true, forceRechunk: true });
+      const old = await remember('Halvard Example renews at 40 seats.', '2025-09-01T09:00:00Z');
+      const fix = await remember('Correction: Halvard Example is at 35 seats, ignore the 40.', '2025-09-02T09:00:00Z');
+      const { facts } = await search('Halvard Example seats');
+      expect(facts.map(f => f.id)).toEqual(expect.arrayContaining([old, fix]));
+      expect(facts.find(f => f.id === old)?.corrected_by).toBe(fix);
     } finally {
       await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
     }
