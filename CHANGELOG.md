@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.497.0] - 2026-10-29
 
 **The Claude Code and Codex plugins now put gbrain's brain-first rule beside every turn, the same way `gbrain setup` does.**
 
@@ -34,7 +34,7 @@ GBRAIN_HOOKS=0                                 # turns every gbrain hook off, th
 
 **Doctor now finds pages that lost the record of where they came from, and `gbrain repair provenance` puts it back. The repair only ever lowers trust.**
 
-Before v0.60.486.0 (#7892), a remote write could change or drop a page's provenance stamps (`source_kind`, `ingested_via`, `ingested_at`) or its lowering `trust_tier` marker. A page captured from a webhook could then read as your own notes the next time its file was re-read. The new read-only doctor check `provenance_stamp_drift` counts those pages per source from page history and write receipts, split by who made the write, and also counts classified pages whose file would re-read above their stored tier (#7918). `gbrain repair provenance --source <id>` previews each page with its stamps, marker and tier before and after, and writes nothing. After you agree, `--apply --expect <hash> --yes` restores the stamps, stamps the lower marker, lowers the page and files a `lower_page` proposal you can confirm or revert in `gbrain trust review`. Your own edits are never written, and writes with no recorded writer only with `--include-ambiguous`. It runs only when you name it.
+Before v0.60.497.0 (#7892), a remote write could change or drop a page's provenance stamps (`source_kind`, `ingested_via`, `ingested_at`) or its lowering `trust_tier` marker. A page captured from a webhook could then read as your own notes the next time its file was re-read. The new read-only doctor check `provenance_stamp_drift` counts those pages per source from page history and write receipts, split by who made the write, and also counts classified pages whose file would re-read above their stored tier (#7918). `gbrain repair provenance --source <id>` previews each page with its stamps, marker and tier before and after, and writes nothing. After you agree, `--apply --expect <hash> --yes` restores the stamps, stamps the lower marker, lowers the page and files a `lower_page` proposal you can confirm or revert in `gbrain trust review`. Your own edits are never written, and writes with no recorded writer only with `--include-ambiguous`. It runs only when you name it.
 
 Maintenance writes that lower a page now tell you (#7917). A dream or patterns publication over a page you wrote (such as a grounding repair outside the output prefix) still lowers it, and now files a `lower_page` proposal, so it shows up in `gbrain trust review`. A maintenance write whose derivation declaration is present but unreadable now publishes at `unknown`, with an `unknown` marker in the file, instead of taking the write channel's tier (#7918).
 
