@@ -26,7 +26,7 @@ GBRAIN_HOOKS=0                                 # turns every gbrain hook off, th
 ### Itemized changes
 
 - `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json` and the generated persona variants declare the hook. Codex's inline form keeps the hooks.json `hooks` wrapper, since codex-cli ignores a bare event map.
-- `src/core/bootstrap/plugin-lanes.ts` `otherLaneWiresHook`: the plugin hook yields to a gbrain-marked or harness-lane entry in the Claude Code user or project settings, or to a setup or bootstrap group in `CODEX_HOME/hooks.json`. An unreadable file counts as not wired.
+- `src/core/bootstrap/plugin-lanes.ts` `pluginHookYields`: the plugin hook yields to a gbrain-marked or harness-lane entry in the Claude Code user or project settings, or to a setup or bootstrap group in `CODEX_HOME/hooks.json`, and stays off when that harness's setup receipt records `--no-hooks`. An unreadable file counts as not wired.
 - doctor `harness_wiring` checks the default instruction file of each plugin-served harness. `gbrain post-upgrade` prints the `--instructions-only` command for a missing or stale block (`src/core/setup/brain-first-upgrade-notice.ts`).
 - Tests: `test/plugin-turn-hook.test.ts` (new), `test/doctor-harness-wiring-plugin.test.ts`.
 
