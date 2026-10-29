@@ -82,16 +82,41 @@ const TRUST_BLOCK_END = '# --- /gbrain:codex-hooks-trust ---';
  * the declared event list and the writer can never drift apart. */
 const SESSION_END_EVENT: string = CODEX_HOOK_EVENTS[0];
 
-/** Strip the managed trust block (and trailing blank lines) out of a
- * config.toml text — THE one implementation for write and remove, so a
- * marker or CRLF-handling change can never half-propagate. */
-function stripTrustBlock(text: string): { remainder: string[]; crlf: boolean; found: boolean } {
+/** Remove owned tables and markers; keep foreign tables outside the managed span. */
+function stripTrustBlock(text: string, ownedKeys: Set<string>): { remainder: string[]; crlf: boolean; found: boolean } {
   const crlf = text.includes('\r\n');
+  if (crlf && /(?<!\r)\n/.test(text)) throw new Error('mixed line endings');
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const begin = lines.indexOf(TRUST_BLOCK_BEGIN);
   const end = lines.indexOf(TRUST_BLOCK_END);
   const found = begin >= 0 && end > begin;
-  const remainder = found ? [...lines.slice(0, begin), ...lines.slice(end + 1)] : [...lines];
+  if ((begin >= 0 || end >= 0) && (!found || lines.lastIndexOf(TRUST_BLOCK_BEGIN) !== begin || lines.lastIndexOf(TRUST_BLOCK_END) !== end)) {
+    throw new Error('damaged trust block markers');
+  }
+  const kept: string[] = [];
+  if (found) {
+    const span = lines.slice(begin + 1, end);
+    Bun.TOML.parse(span.join('\n'));
+    let owned = false;
+    let table = false;
+    for (const line of span) {
+      if (/^\s*(?:#.*)?$/.test(line)) { kept.push(line); continue; }
+      if (/^\s*\[/.test(line)) {
+        const parsed = Bun.TOML.parse(line) as { hooks?: { state?: Record<string, unknown> } };
+        const keys = Object.keys(parsed.hooks?.state ?? {});
+        const value = parsed.hooks?.state?.[keys[0]!];
+        if (keys.length !== 1 || Object.keys(parsed).length !== 1 || Object.keys(parsed.hooks ?? {}).length !== 1 || typeof value !== 'object' || value === null || Object.keys(value).length !== 0) throw new Error('unsupported trust table');
+        owned = ownedKeys.has(keys[0]!);
+        table = true;
+        if (!owned) kept.push(line);
+      } else {
+        if (!table || !/^\s*[A-Za-z0-9_-]+\s*=/.test(line)) throw new Error('unsupported trust block content');
+        Bun.TOML.parse(line);
+        if (!owned) kept.push(line);
+      }
+    }
+  }
+  const remainder = found ? [...lines.slice(0, begin), ...kept, ...lines.slice(end + 1)] : [...lines];
   while (remainder.length > 0 && remainder[remainder.length - 1]!.trim() === '') remainder.pop();
   return { remainder, crlf, found };
 }
@@ -169,7 +194,7 @@ export interface WriteCodexHooksResult {
   configPath: string;
   trustKey?: string;
   replacedPrior?: boolean;
-  reason?: 'hooks_json_unparseable' | 'foreign_trust_entry' | 'config_toml_unreadable';
+  reason?: 'hooks_json_unparseable' | 'foreign_trust_entry' | 'config_toml_unreadable' | 'trust_block_unparseable';
   notes: string[];
 }
 
@@ -235,7 +260,14 @@ export function writeCodexHooks(opts: {
       return { ok: false, hooksPath, configPath, reason: 'config_toml_unreadable', notes: [`${configPath} exists but is unreadable — fix permissions and re-run.`] };
     }
   }
-  const { remainder, crlf } = stripTrustBlock(configText);
+  const ownedKeys = new Set(sessionEnd.flatMap((group, index) => isOurGroup(group) ? [`${hooksPath}:session_end:${index}:0`] : []));
+  let stripped: ReturnType<typeof stripTrustBlock>;
+  try {
+    stripped = stripTrustBlock(configText, ownedKeys);
+  } catch {
+    return { ok: false, hooksPath, configPath, reason: 'trust_block_unparseable', notes: [`${configPath} has an unsafe gbrain trust block — fix its markers or tables before retrying; no files were written.`] };
+  }
+  const { remainder, crlf } = stripped;
   // Foreign-ownership guard: our table header outside our block would become
   // a duplicate-table hard parse error that bricks codex entirely. TOLERANT
   // match — any [hooks.state.…] header line mentioning our key, in either
@@ -300,6 +332,25 @@ export function removeCodexHooks(opts: { hooksPath?: string; configPath?: string
   const notes: string[] = [];
   let removed = false;
 
+  let ownedKeys = new Set<string>();
+  if (existsSync(hooksPath)) {
+    try {
+      const doc = JSON.parse(readFileSync(hooksPath, 'utf8')) as HooksJson;
+      const groups = doc.hooks?.[SESSION_END_EVENT];
+      if (Array.isArray(groups)) ownedKeys = new Set(groups.flatMap((group, index) => isOurGroup(group) ? [`${hooksPath}:session_end:${index}:0`] : []));
+    } catch {
+      return { hooksPath, configPath, removed, notes: [`${hooksPath} does not parse — left untouched; trust ownership cannot be verified.`] };
+    }
+  }
+  let stripped: ReturnType<typeof stripTrustBlock> | undefined;
+  if (existsSync(configPath)) {
+    try {
+      stripped = stripTrustBlock(readFileSync(configPath, 'utf8'), ownedKeys);
+    } catch {
+      return { hooksPath, configPath, removed, notes: [`${configPath} has an unsafe gbrain trust block — fix its markers or tables before retrying; no files were written.`] };
+    }
+  }
+
   if (existsSync(hooksPath)) {
     try {
       const doc = JSON.parse(readFileSync(hooksPath, 'utf8')) as HooksJson;
@@ -337,8 +388,7 @@ export function removeCodexHooks(opts: { hooksPath?: string; configPath?: string
   }
 
   if (existsSync(configPath)) {
-    const raw = readFileSync(configPath, 'utf8');
-    const { remainder, crlf, found } = stripTrustBlock(raw);
+    const { remainder, crlf, found } = stripped!;
     if (found) {
       removed = true;
       const next = remainder.length ? remainder.join('\n') + '\n' : '';

@@ -35,6 +35,7 @@ afterEach(() => {
 });
 
 const BIN = '/usr/local/bin/gbrain';
+const END_MARKER = '# --- /gbrain:codex-hooks-trust ---';
 
 function readHooks(): { description?: string; hooks?: Record<string, Array<{ hooks: Array<{ command: string; timeout?: number }> }>> } {
   return JSON.parse(readFileSync(hooksPath, 'utf8'));
@@ -148,6 +149,47 @@ describe('removeCodexHooks', () => {
     expect(res.removed).toBe(false);
     expect(readFileSync(hooksPath, 'utf8')).toBe('{broken');
     expect(res.notes.join(' ')).toContain('left untouched');
+  });
+});
+
+describe('managed trust span ownership', () => {
+  for (const eol of ['\n', '\r\n']) {
+    test(`rewrite and uninstall preserve foreign tables with ${eol === '\n' ? 'LF' : 'CRLF'}`, () => {
+      writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath });
+      const foreign = `[hooks.state."other:session_start:0:0"]${eol}trusted_hash = "sha256:foreign" # retain${eol}`;
+      const original = readFileSync(configPath, 'utf8').replace(/\n/g, eol).replace(END_MARKER, foreign + END_MARKER);
+      writeFileSync(configPath, original);
+      expect(writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath }).ok).toBe(true);
+      expect(readFileSync(configPath, 'utf8')).toContain(foreign);
+      expect(removeCodexHooks({ hooksPath, configPath }).removed).toBe(true);
+      const after = readFileSync(configPath, 'utf8');
+      expect(after).toContain(foreign);
+      expect(after).not.toContain(END_MARKER);
+      expect(after).not.toContain(`${hooksPath}:session_end:0:0`);
+    });
+  }
+
+  test('a foreign-only span is retained outside the markers', () => {
+    writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath });
+    const foreign = '[hooks.state."other:session_start:0:0"]\ntrusted_hash = "sha256:foreign"\n';
+    const cfg = readFileSync(configPath, 'utf8').replace(/\[hooks\.state\.[^\n]+\]\ntrusted_hash = [^\n]+\n/, foreign);
+    writeFileSync(configPath, cfg);
+    expect(removeCodexHooks({ hooksPath, configPath }).removed).toBe(true);
+    expect(readFileSync(configPath, 'utf8')).toContain(foreign);
+  });
+
+  test('unsafe span refuses rewrite and uninstall before either file changes', () => {
+    writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath });
+    const cfg = readFileSync(configPath, 'utf8').replace(END_MARKER, 'invalid = [\n' + END_MARKER);
+    writeFileSync(configPath, cfg);
+    const hooks = readFileSync(hooksPath, 'utf8');
+    const result = writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath });
+    expect(result.reason).toBe('trust_block_unparseable');
+    const removal = removeCodexHooks({ hooksPath, configPath });
+    expect(removal.removed).toBe(false);
+    expect(removal.notes.join(' ')).toContain('unsafe');
+    expect(readFileSync(hooksPath, 'utf8')).toBe(hooks);
+    expect(readFileSync(configPath, 'utf8')).toBe(cfg);
   });
 });
 
