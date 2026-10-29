@@ -10,6 +10,38 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.490.0] - 2026-10-29
+
+**Four new search settings for answering inside a tight token budget. All are off by default, so search, query and think output is unchanged until you turn one on.**
+
+Each setting is one step in fitting the right evidence into an 8,000-token answer. They stay off until the held-out evaluation decides, one at a time, whether each one earns a default flip.
+
+### How to use it
+
+```bash
+gbrain config set search.query_budget_unit auto     # query's --token-budget becomes the hard cap on delivered evidence (whole conversations, packed)
+gbrain config set search.evidence_date_header true  # needed for titles on the header line
+gbrain config set search.evidence_titles true       # each page block's header line ends with the page title; think's <page> tag gets a title attribute
+gbrain config set search.query_facts_block true     # a budgeted query puts the question's dated facts first, oldest first, within 22% of the budget
+gbrain config set search.fact_source_pages true     # the conversations the best-matching facts came from join the results
+```
+
+### What changed
+
+| Setting | Off (default) | On |
+|---|---|---|
+| `search.query_budget_unit` | `query --token-budget` trims chunks | `auto`: the budget caps delivered evidence the way `search` does; a budget under 32 tokens is refused with `invalid_params` |
+| `search.evidence_titles` | Header line shows the date only | With the date header on, the line ends with the page title; think's `<page>` tag carries `title`. Angle brackets, double quotes and line breaks in a title are scrubbed |
+| `search.query_facts_block` | Facts arm adds facts in spare rows | Up to 40 question-ranked dated facts lead the results, within 22% of the budget; pages fill the rest |
+| `search.fact_source_pages` | No change | Up to 2 source conversations of the best-matching facts go in after the top 3 rows, read under the caller's own scope, so a remote caller never gets a private page; the row count stays the same |
+
+### Itemized changes
+
+- `src/core/ops/search.ts`, `src/core/search/evidence-packing.ts`: `search.query_budget_unit`.
+- `src/core/search/evidence-date.ts`, `src/core/search/evidence-delivery.ts`, `src/core/think/gather.ts`, `src/core/think/index.ts`: `search.evidence_titles` and its `title_header` delivery field.
+- `src/core/search/facts-arm.ts`, `src/core/search/query-arms.ts`: the facts block (sharing the temporal fact reserve's ranking) and fact source pages.
+- Tests: `test/search-8k-conversion.test.ts`.
+
 ## [0.60.489.0] - 2026-10-29
 
 **A page a maintenance job writes from model output keeps its trust tier when the repository is read back (#7905).**
