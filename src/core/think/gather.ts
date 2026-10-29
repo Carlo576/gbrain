@@ -28,6 +28,7 @@ import { DEFAULT_PAGES_BUDGET, PAGES_BLOCK_EXCERPT_FLOOR_CHARS, type PagesBudget
 import { filterPagesToWindow, type TemporalWindow } from './temporal-window.ts';
 import { pageContentDate } from './temporal-context.ts';
 import { sanitizeQueryForPrompt } from '../search/expansion.ts';
+import { evidenceTitle } from '../search/evidence-date.ts';
 import { ensureWellFormed } from '../text-safe.ts';
 import { CJK_SLUG_CHARS } from '../cjk.ts';
 import type { IntentAsk } from '../search/decide-retrieval.ts';
@@ -667,7 +668,7 @@ export function renderPagesBlockDetailed(
     const flag = (p.injection_suspected ? `${INJECTION_SUSPECTED_LINE}\n` : '')
       + (p.trust_tier && needsDataEnvelope(p.trust_tier) ? `${EXTERNAL_DATA_RULE}\n` : '') + graphEvidenceLine(p);
     const trustAttr = p.trust_tier ? ` ${trustAttributes({ trust_tier: p.trust_tier, origin: p.origin ?? 'legacy' })}` : '';
-    const cleanTitle = opts.titles ? title.replace(/[\r\n<>]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim() : '';
+    const cleanTitle = opts.titles ? evidenceTitle(title) : '';
     const titleAttr = cleanTitle ? ` title="${cleanTitle}"` : '';
     // Evidence delivery: the block was already budgeted and cut around its
     // hits; render it whole (capped only by excerptLen).
