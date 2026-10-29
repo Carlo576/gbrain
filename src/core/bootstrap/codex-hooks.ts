@@ -85,7 +85,6 @@ const SESSION_END_EVENT: string = CODEX_HOOK_EVENTS[0];
 /** Remove owned tables and markers; keep foreign tables outside the managed span. */
 function stripTrustBlock(text: string, ownedKeys: Set<string>): { remainder: string[]; crlf: boolean; found: boolean } {
   const crlf = text.includes('\r\n');
-  if (crlf && /(?<!\r)\n/.test(text)) throw new Error('mixed line endings');
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const begin = lines.indexOf(TRUST_BLOCK_BEGIN);
   const end = lines.indexOf(TRUST_BLOCK_END);
@@ -268,14 +267,14 @@ export function writeCodexHooks(opts: {
     return { ok: false, hooksPath, configPath, reason: 'trust_block_unparseable', notes: [`${configPath} has an unsafe gbrain trust block — fix its markers or tables before retrying; no files were written.`] };
   }
   const { remainder, crlf } = stripped;
-  // Foreign-ownership guard: our table header outside our block would become
-  // a duplicate-table hard parse error that bricks codex entirely. TOLERANT
-  // match — any [hooks.state.…] header line mentioning our key, in either
-  // TOML string spelling and any interior whitespace, not just our exact
-  // JSON.stringify rendering.
   const header = `[hooks.state.${JSON.stringify(trustKey)}]`;
-  const headerRe = /^\s*\[\s*hooks\s*\.\s*state\s*[.\]]/;
-  if (remainder.some((l) => headerRe.test(l) && l.includes(trustKey))) {
+  let parsed: { hooks?: { state?: Record<string, unknown> } };
+  try {
+    parsed = Bun.TOML.parse(remainder.join('\n')) as typeof parsed;
+  } catch {
+    return { ok: false, hooksPath, configPath, reason: 'trust_block_unparseable', notes: [`${configPath} does not parse as TOML — fix it before retrying; no files were written.`] };
+  }
+  if (parsed.hooks?.state && Object.hasOwn(parsed.hooks.state, trustKey)) {
     return {
       ok: false, hooksPath, configPath, reason: 'foreign_trust_entry',
       notes: [`${configPath} already defines a [hooks.state] entry for ${trustKey} outside the gbrain-managed block — refusing to double-define it (a hard TOML parse error). Remove that entry and re-run.`],
@@ -288,6 +287,11 @@ export function writeCodexHooks(opts: {
     TRUST_BLOCK_END,
   ];
   const nextConfig = [...(remainder.length ? [...remainder, ''] : []), ...block, ''].join('\n');
+  try {
+    Bun.TOML.parse(nextConfig);
+  } catch {
+    return { ok: false, hooksPath, configPath, reason: 'trust_block_unparseable', notes: [`${configPath} cannot accept the gbrain trust table — fix conflicting TOML entries before retrying; no files were written.`] };
+  }
 
   // 3. Write both, hooks.json first (a trust entry for a missing file is
   //    inert; a hooks file without trust is silently skipped — either partial

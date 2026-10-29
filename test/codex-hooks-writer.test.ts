@@ -153,6 +153,33 @@ describe('removeCodexHooks', () => {
 });
 
 describe('managed trust span ownership', () => {
+  for (const inside of [true, false]) {
+    test(`refuses a quoted semantic collision ${inside ? 'inside' : 'outside'} the managed span`, () => {
+      const key = `${hooksPath}:session_end:0:0`;
+      const table = `[ "hooks" . "state" . ${JSON.stringify(key)} ]\ntrusted_hash = "sha256:foreign"\n`;
+      const cfg = inside ? `# --- gbrain:codex-hooks-trust (managed block — do not edit; gbrain bootstrap rewrites it) ---\n${table}${END_MARKER}\n` : table;
+      writeFileSync(configPath, cfg);
+      const result = writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath });
+      expect(result.reason).toBe('foreign_trust_entry');
+      expect(readFileSync(configPath, 'utf8')).toBe(cfg);
+      expect(existsSync(hooksPath)).toBe(false);
+    });
+  }
+
+  test('installs and uninstalls with mixed line endings and retains foreign trust', () => {
+    const foreign = '[hooks.state."other:session_start:0:0"]\ntrusted_hash = "sha256:foreign"\r\n';
+    writeFileSync(configPath, `model = "example"\r\n${foreign}`);
+    expect(writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath }).ok).toBe(true);
+    const installed = readFileSync(configPath, 'utf8');
+    expect(Bun.TOML.parse(installed)).toMatchObject({ hooks: { state: { 'other:session_start:0:0': { trusted_hash: 'sha256:foreign' } } } });
+    writeFileSync(configPath, installed.replace('trusted_hash = "sha256:foreign"\r\n', 'trusted_hash = "sha256:foreign"\n'));
+    expect(removeCodexHooks({ hooksPath, configPath }).removed).toBe(true);
+    const after = readFileSync(configPath, 'utf8');
+    expect(Bun.TOML.parse(after)).toMatchObject({ hooks: { state: { 'other:session_start:0:0': { trusted_hash: 'sha256:foreign' } } } });
+    expect(after).not.toContain(END_MARKER);
+    expect(readHooks().hooks?.SessionEnd).toBeUndefined();
+  });
+
   for (const eol of ['\n', '\r\n']) {
     test(`rewrite and uninstall preserve foreign tables with ${eol === '\n' ? 'LF' : 'CRLF'}`, () => {
       writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath });
