@@ -99,6 +99,8 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
          AND ${projectionEligibleSql('facts', 'f', { floor: scope.minTrust })}`;
   const lang = getFtsLanguage();
   const doc = factsFtsDocument('f');
+  // CJK words match as substrings; without one the scan is the any-word tsquery alone, which the facts keyword index serves.
+  const pats = terms.map(t => hasCJK(t) ? `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%` : null);
   try {
     // Most searches have no saved fact to find: the uncorrelated EXISTS is an indexed probe
     // (idx_facts_since) the planner runs once, before the keyword scan, and the scan is skipped
@@ -130,13 +132,13 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
          FROM facts f, k
          WHERE ${active}
            ${eligible}
-           AND (${doc} @@ k.anyq OR lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE ANY(k.pats))
+           AND ${pats.some(Boolean) ? `(${doc} @@ k.anyq OR lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE ANY(k.pats))` : `${doc} @@ k.anyq`}
            AND EXISTS (SELECT 1 FROM facts f WHERE ${active} LIMIT 1)
        ) m
        WHERE cardinality(m.matched) >= CASE WHEN m.cue THEN LEAST(2, m.need) ELSE m.need END) p
        WHERE p.pool_rank <= 200
        ORDER BY cardinality(p.matched) DESC, p.at DESC, p.id DESC`,
-      [sources, [...AUDIT_ROW_SOURCES], terms, terms.map(t => hasCJK(t) ? `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%` : null), CORRECTION_CUE, supersede],
+      [sources, [...AUDIT_ROW_SOURCES], terms, pats, CORRECTION_CUE, supersede],
     );
     const found = rows.map(({ at, matched, need, cue, trust_rank, pool_rank: _p, ...fact }) => ({ fact: { ...fact, id: Number(fact.id) } as SavedFactMatch & CollapseColumns,
       at: new Date(at as string).getTime(), words: new Set(matched.map(Number)), need: Number(need), cue, trust: Number(trust_rank), figures: figures(fact.fact) }))
