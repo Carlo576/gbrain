@@ -13,7 +13,7 @@
  * fresh. Nothing is rewritten without that explicit, verified step.
  */
 import { describe, expect, test } from 'bun:test';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -21,7 +21,7 @@ import type { OperationContext } from '../src/core/ops/contract.ts';
 import { OperationError } from '../src/core/ops/contract.ts';
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
-import { claimWorktree } from '../src/core/persistence/ownership.ts';
+import { claimWorktree, getWorktreeBinding, worktreeManifest } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { activateSharedSkillPersistence } from '../src/core/persistence/skill-activation.ts';
 import { resolveRepairScope, runRepair } from '../src/core/repair/core.ts';
@@ -40,11 +40,11 @@ async function checkpoint(engine: BrainEngine) {
   return JSON.parse((await engine.getConfig(contentSetupKey('default', incarnation)))!) as { root: string; stage: string; status: string };
 }
 
-async function repairPreview(engine: BrainEngine) {
+async function repairPreview(engine: BrainEngine, opts: { apply: boolean; expect?: string } = { apply: false }) {
   const { contentReceiptRootRepair } = await import('../src/core/repair/content-receipt-root.ts');
   const { repairSpec } = await import('../src/core/repair/registry.ts');
   return runRepair(ctxOf(engine) as never, contentReceiptRootRepair, await resolveRepairScope(engine, 'default'),
-    { apply: false, explicit: true, spec: repairSpec('content-receipt-root' as never), sourceFlag: 'default' });
+    { ...opts, explicit: true, spec: repairSpec('content-receipt-root' as never), sourceFlag: 'default' });
 }
 
 async function refusal(run: () => Promise<unknown>): Promise<OperationError> {
@@ -107,6 +107,125 @@ for (const { backend, databaseUrl } of arms) for (const git of [false, true]) {
             expect(await staleOwnedContent(engine, ['default'])).toEqual([]);
             expect((await ownedContentFreshness(engine, ['default'])).map(row => row.sourceId)).toEqual(['default']);
             expect((await repairPreview(engine)).listing).toEqual([]);
+          } finally { await disposePersistenceConsumer(engine); }
+        });
+      } finally { await close(); rmSync(base, { recursive: true, force: true }); }
+    }, 240_000);
+  });
+}
+
+/*
+ * Value: protects=a setup checkpoint naming another root, with no registered source root, keeps the resume-at-old-root refusal; no reactivate step without shared skills;
+ *   fails_when=the existingRoot guard in setupSharedBrainContent is widened or selfTransferFix always appends the activate step;
+ *   why_new=the 7900 test above covers only the claimed-root refusal and the shared-skills-on fix chain; seam=none;
+ *   no_claim=Postgres arm (PGLite only here).
+ */
+describe('#7900 branches the host-move walk-through does not reach (pglite)', () => {
+  test('without a registered root, a checkpoint at another root still refuses with the resume-at-old-root suggestion and no repair fix', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'gbrain-7900-legacy-'));
+    const first = join(base, 'first-root'), second = join(base, 'second-root');
+    const { engine, close } = await withEnv({ GBRAIN_HOME: join(base, 'home'), DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, () => isolatedSharedSkillsEngine(undefined));
+    try {
+      await withEnv({ GBRAIN_HOME: join(base, 'home') }, async () => {
+        await setupSharedBrainContent(ctxOf(engine), { sourceId: 'default', root: first });
+        await engine.executeRaw("UPDATE sources SET local_path=NULL WHERE id='default'");
+        const refused = await refusal(() => setupSharedBrainContent(ctxOf(engine), { sourceId: 'default', root: second }));
+        expect(refused.message).toBe('The canonical root changed after setup began.');
+        expect(refused.suggestion).toContain(`--content-root ${first}`);
+        expect((refused as { fix?: unknown }).fix).toBeUndefined();
+      });
+    } finally { await close(); rmSync(base, { recursive: true, force: true }); }
+  }, 120_000);
+
+  test('the self-transfer fix ends at the accept when shared skills are off', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'gbrain-7900-noskills-'));
+    const oldRoot = join(base, 'old-host', 'content'), newRoot = join(base, 'new-host', 'content');
+    mkdirSync(join(base, 'old-host')); mkdirSync(join(base, 'new-host'));
+    const { engine, close } = await withEnv({ GBRAIN_HOME: join(base, 'old-home'), DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, () => isolatedSharedSkillsEngine(undefined));
+    try {
+      await withEnv({ GBRAIN_HOME: join(base, 'old-home') }, async () => {
+        await setupSharedBrainContent(ctxOf(engine), { sourceId: 'default', root: oldRoot });
+        writeFileSync(join(oldRoot, 'notes.md'), '# notes\n');
+      });
+      cpSync(oldRoot, newRoot, { recursive: true });
+      await withEnv({ GBRAIN_HOME: join(base, 'new-home'), DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+        try {
+          await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [newRoot]);
+          await claimWorktree(engine, 'default', newRoot);
+          await activateSharedSkillPersistence(engine, { confirmQuiesced: true });
+          await engine.executeRaw('UPDATE persistence_brain SET skill_bundles_enabled=false WHERE singleton=1');
+          const preview = await repairPreview(engine);
+          const fix = (preview.details?.refused as Array<{ fix: { argv: string[]; then: { argv: string[]; then?: unknown } } }>)[0].fix;
+          expect(fix.argv.slice(0, 5)).toEqual(['gbrain', 'sources', 'writer', 'transfer', 'prepare']);
+          expect(fix.then.argv.slice(0, 5)).toEqual(['gbrain', 'sources', 'writer', 'transfer', 'accept']);
+          expect(fix.then.then).toBeUndefined();
+        } finally { await disposePersistenceConsumer(engine); }
+      });
+    } finally { await close(); rmSync(base, { recursive: true, force: true }); }
+  }, 120_000);
+});
+
+/*
+ * The repair's verdict classes for an unfinished checkpoint (stage `owner`), which only reaches the repair since
+ * #7900: each refused class is listed and its apply leaves the checkpoint untouched; `rebind` (the owner's tree matches
+ * the recorded worktree manifest) rewrites only root and root_identity, keeps the stage so the migration resumes, and
+ * the migration then completes at the new root.
+ */
+for (const { backend, databaseUrl } of arms) {
+  describe(`#7900 repair verdicts for an unfinished checkpoint after a host move (${backend})`, () => {
+    test('refused classes leave the checkpoint untouched; rebind rewrites only its root and the migration completes', async () => {
+      const base = mkdtempSync(join(tmpdir(), 'gbrain-7900-cells-'));
+      const oldHome = join(base, 'old-host-home'), newHome = join(base, 'new-host-home'), otherHome = join(base, 'other-host-home');
+      const oldRoot = join(base, 'old-host', 'content'), newRoot = join(base, 'new-host', 'content'), elsewhere = join(base, 'elsewhere', 'content');
+      mkdirSync(join(base, 'old-host')); mkdirSync(join(base, 'new-host'));
+      const { engine, close } = await withEnv({ GBRAIN_HOME: oldHome, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, () => isolatedSharedSkillsEngine(databaseUrl));
+      try {
+        await withEnv({ GBRAIN_HOME: oldHome }, async () => {
+          await setupSharedBrainContent(ctxOf(engine), { sourceId: 'default', root: oldRoot });
+          writeFileSync(join(oldRoot, 'notes.md'), '# notes\n');
+        });
+        cpSync(oldRoot, newRoot, { recursive: true });
+        cpSync(oldRoot, elsewhere, { recursive: true });
+        await withEnv({ GBRAIN_HOME: newHome, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+          try {
+            await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [newRoot]);
+            await claimWorktree(engine, 'default', newRoot);
+            await activateSharedSkillPersistence(engine, { confirmQuiesced: true });
+            const topology = (sql: string, params: unknown[]) => engine.transaction(async tx => {
+              await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)"); await tx.executeRaw(sql, params);
+            });
+            const untouched = { root: oldRoot, stage: 'owner' };
+            const refusedCell = async (cls: string) => {
+              const preview = await repairPreview(engine);
+              expect(preview.listing).toEqual([expect.objectContaining({ item: 'default', class: cls })]);
+              const applied = await repairPreview(engine, { apply: true, expect: preview.preview_hash });
+              expect(applied.applied).toBe(0);
+              expect(await checkpoint(engine)).toMatchObject(untouched);
+            };
+
+            await refusedCell('tree_mismatch');
+            await withEnv({ GBRAIN_HOME: otherHome }, () => refusedCell('not_owner_host'));
+            await topology("UPDATE sources SET local_path=$1 WHERE id='default'", [elsewhere]);
+            await refusedCell('source_path_mismatch');
+            await topology("UPDATE sources SET local_path=$1 WHERE id='default'", [newRoot]);
+            renameSync(newRoot, `${newRoot}.away`);
+            try { await refusedCell('root_missing'); } finally { renameSync(`${newRoot}.away`, newRoot); }
+
+            const { worktree_id } = (await getWorktreeBinding(engine, 'default'))!;
+            await topology('UPDATE persistence_worktrees SET manifest=$2::text::jsonb WHERE id=$1::uuid', [worktree_id, JSON.stringify(worktreeManifest(newRoot))]);
+            const preview = await repairPreview(engine);
+            expect(preview.listing).toEqual([expect.objectContaining({ item: 'default', class: 'rebind' })]);
+            expect(await checkpoint(engine)).toMatchObject(untouched);
+            const applied = await repairPreview(engine, { apply: true, expect: preview.preview_hash });
+            expect(applied.applied).toBe(1);
+            const stat = statSync(newRoot);
+            expect(await checkpoint(engine)).toMatchObject({ root: newRoot, stage: 'owner', root_identity: { device: stat.dev, inode: stat.ino } });
+            const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'");
+            expect(JSON.parse(JSON.parse((await engine.getConfig(`${contentSetupKey('default', incarnation)}.backup`))!).previous)).toMatchObject(untouched);
+
+            expect((await runSharedSkillsMigration(ctxOf(engine))).status).not.toBe('conflict');
+            expect(await checkpoint(engine)).toMatchObject({ root: newRoot, stage: 'complete', status: 'ready' });
+            expect(await staleOwnedContent(engine, ['default'])).toEqual([]);
           } finally { await disposePersistenceConsumer(engine); }
         });
       } finally { await close(); rmSync(base, { recursive: true, force: true }); }

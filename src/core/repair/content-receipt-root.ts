@@ -19,6 +19,7 @@ import type { Action } from '../agent-output.ts';
 import { OperationError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { localHostId } from '../persistence/identity.ts';
+import { inspectPersistenceBrain } from '../persistence/managed-mode.ts';
 import { previewChangedError, previewHash } from '../persistence/preview-approval.ts';
 import { storedManifestScope, worktreeManifest, type StoredWorktreeManifest } from '../persistence/worktree-manifest.ts';
 import { staleOwnedContent } from '../shared-skills/content-freshness.ts';
@@ -50,7 +51,6 @@ function selfTransferFix(sourceId: string, sharedSkills: boolean): Action {
 
 async function verdicts(engine: Parameters<RepairHandler['plan']>[0], scope: RepairScope): Promise<Verdict[]> {
   const out: Verdict[] = [];
-  const [brain] = await engine.executeRaw<{ skill_bundles_enabled: boolean }>('SELECT skill_bundles_enabled FROM persistence_brain WHERE singleton=1');
   for (const stale of await staleOwnedContent(engine, scope.source_ids)) {
     const [row] = await engine.executeRaw<{ incarnation: string; brain_id: string; key: string; value: string; owner_host_id: string; manifest: StoredWorktreeManifest | null; worktree_root: string; relative_path: string }>(
       `SELECT s.incarnation::text AS incarnation,p.brain_id,c.key,c.value,w.owner_host_id::text AS owner_host_id,w.manifest,h.local_path AS worktree_root,b.relative_path
@@ -75,7 +75,7 @@ async function verdicts(engine: Parameters<RepairHandler['plan']>[0], scope: Rep
     const recorded = row.manifest?.digest ?? null;
     const actual = worktreeManifest(row.worktree_root, { scope: storedManifestScope(row.manifest) }).digest;
     if (recorded !== actual) {
-      out.push({ ...base, class: 'tree_mismatch', fix: selfTransferFix(stale.sourceId, brain?.skill_bundles_enabled === true),
+      out.push({ ...base, class: 'tree_mismatch', fix: selfTransferFix(stale.sourceId, (await inspectPersistenceBrain(engine)).row?.skill_bundles_enabled === true),
         detail: `${was}; the owner's tree at ${row.worktree_root} hashes to ${actual} but the recorded worktree manifest is ${recorded ?? 'missing'}, so it is not proven to be the transferred content` });
       continue;
     }

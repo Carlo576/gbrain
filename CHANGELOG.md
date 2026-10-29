@@ -33,6 +33,7 @@ gbrain apply-migrations --force-retry 0.53.0
 | `repair content-receipt-root` and doctor `sync_freshness` | Read complete receipts only, so they found nothing | Also list unfinished checkpoints that name another root |
 
 Nothing is rewritten without the explicit, verified self-transfer or set-path step. Repo-less (database-only) sources have no content root or checkpoint root, so they are unaffected.
+
 ## [0.60.487.0] - 2026-10-29
 
 **Three more writers refuse a `visibility: private` request page privacy does not read instead of storing a world-readable page (#7897).**
