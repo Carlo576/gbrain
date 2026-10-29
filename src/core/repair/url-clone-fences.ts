@@ -42,6 +42,7 @@ import { createFrontmatterBackup, makeFrontmatterBackupRunId } from '../brain-wr
 import { parseFactsFence, renderFactsTable, replaceOrInsertFactsFence, type ParsedFact } from '../facts-fence.ts';
 import { extractFactsFromFenceText } from '../facts/extract-from-fence.ts';
 import { importFromContent } from '../import-file.ts';
+import { screenImportContent, type ContentRefusal } from '../import-screen.ts';
 import { assertSourceFilesystemActive, withSourceFilesystemLock } from '../minions/source-filesystem.ts';
 import { OperationError } from '../ops/contract.ts';
 import { withPageLock } from '../page-lock.ts';
@@ -111,6 +112,12 @@ async function identityChange(engine: BrainEngine, file: ClonedFile): Promise<st
   return null;
 }
 
+/** #7897: why HEAD's bytes would not import as the page (`visibility_noncanonical` and the other import holds), or null. */
+const headHold = (head: string, slug: string): ContentRefusal | null => {
+  const screen = screenImportContent({ content: head, path: `${slug}.md`, holdNoncanonicalPrivate: true });
+  return screen.status === 'refused' ? screen.refusal : null;
+};
+
 /** Every changed file of every owned clone in scope, proven or refused. */
 async function survey(engine: BrainEngine, sourceIds: string[]): Promise<{ files: ClonedFile[]; listing: RepairListing[] }> {
   const files: ClonedFile[] = [];
@@ -139,6 +146,11 @@ async function survey(engine: BrainEngine, sourceIds: string[]): Promise<{ files
         continue;
       }
       const { slug, page_id } = await pageOf(engine, source.id, path);
+      const hold = headHold(head!, slug);
+      if (hold) {
+        listing.push({ item, class: hold.code, detail: `HEAD's bytes would not import as ${slug}, so the file is left as it is: ${hold.message} Fix the file upstream, pull, then preview again: ${preview(source.id)}` });
+        continue;
+      }
       files.push({ source_id: source.id, incarnation: source.incarnation, root, path, slug, page_id, head_sha256: sha256(head!), work_sha256: sha256(work!),
         rows: proof.added.map(row => row.rowNum), selection: sourceIds });
       listing.push({ item, class: 'fence_rows_only', detail: `${proof.added.length} fence row(s) gbrain appended to ${slug}: kept database-only, then the file is restored from HEAD` });
@@ -186,9 +198,12 @@ async function restoreFile(engine: BrainEngine, file: ClonedFile, runId: string)
   if (!proof.ok || sha256(head!) !== file.head_sha256 || sha256(work!) !== file.work_sha256) {
     return { applied: false, outcome: 'changed_since_preview', detail: { path: file.path } };
   }
+  const hold = headHold(head!, file.slug);
+  if (hold) return { applied: false, outcome: 'held', reason: hold.code, detail: { path: file.path, message: hold.message } };
   const backup = createFrontmatterBackup(abs, { sourcePath: file.root, backupRoot: gbrainPath('backups', 'url-clone-fences', runId) });
   const { moved, inserted } = await keepRowsDatabaseOnly(engine, file, proof.added);
-  await importFromContent(engine, file.slug, head!, { sourceId: file.source_id, sourcePath: file.path, sourceRoot: file.root, noEmbed: true });
+  const imported = await importFromContent(engine, file.slug, head!, { sourceId: file.source_id, sourcePath: file.path, sourceRoot: file.root, noEmbed: true, holdNoncanonicalPrivate: true });
+  if (imported.refusal) return { applied: false, outcome: 'held', reason: imported.refusal.code, detail: { path: file.path, message: imported.refusal.message, backup, rows_moved: moved, rows_inserted: inserted } };
   assertSourceFilesystemActive();
   atomicWriteFileSync(abs, head!);
   return { applied: true, outcome: 'restored', detail: { path: file.path, slug: file.slug, backup, rows_moved: moved, rows_inserted: inserted } };
