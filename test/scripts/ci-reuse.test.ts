@@ -462,6 +462,16 @@ describe('ci-reuse remote-gate decision', () => {
     const C3 = '9'.repeat(40);
     const failedElsewhere = gate({ commits: { ...commits, [C3]: { tree: T, parents: [C2] } }, runs: [run('test.yml', { id: 640, head_sha: C2, conclusion: 'failure' }), run('test.yml'), run('e2e.yml')] });
     expect(await decideGate(failedElsewhere, PROFILES.test, C3, T, REPO)).toMatchObject({ state: 'failed' });
+    // The newest full run across every head with the tree decides, whichever head has the newest run of any kind:
+    // a diagnostic dispatch on A (full job skipped) does not let A's old pass outrank B's newer failure, and the
+    // requested head's own older pass does not either.
+    const ordered = gate({
+      commits: { ...commits, [C3]: { tree: T, parents: [C2] } },
+      runs: [run('test.yml', { id: 650 }), run('test.yml', { id: 640, head_sha: C2, conclusion: 'failure' }), run('test.yml'), run('e2e.yml')],
+      jobs: { '650/1': [{ name: PROFILES.test.job, status: 'completed', conclusion: 'skipped' }] },
+    });
+    expect(await decideGate(ordered, PROFILES.test, C3, T, REPO)).toMatchObject({ state: 'failed' });
+    expect(await decideGate(ordered, PROFILES.test, A, T, REPO)).toMatchObject({ state: 'failed' });
   });
 
   test('a cancelled newest run looks further back; a passed run of the same tree on another head (a merge commit) reuses', async () => {

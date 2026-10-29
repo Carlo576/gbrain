@@ -141,6 +141,36 @@ describe('pregate-remote-gate.sh', () => {
     };
     const ran = (name: string) => spawnSync('test', ['-e', join(repo, '.git', name)]).status === 0;
     const gateMarking = `touch .git/gate-ran; ${GREEN_GATE}`;
+    beforeEach(() => git('update-ref', 'refs/remotes/origin/master', 'HEAD'));
+
+    it('runs the reuse check without the model and database keys the gate strips', () => {
+      const keys = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'VOYAGE_API_KEY', 'GEMINI_API_KEY', 'JEV_TYPESAFE_API_KEY', 'DATABASE_URL'];
+      const seen = keys.map(k => `echo "${k}=\${${k}:-unset}" >> .git/reuse-env`).join('; ');
+      run(gateMarking, { GBRAIN_PREGATE_REPO: 'owner-example/repo-example', GBRAIN_PREGATE_REUSE_CMD: reuser(`${seen}; exit 4`), ...Object.fromEntries(keys.map(k => [k, 'secret-example'])) });
+      expect(spawnSync('cat', [join(repo, '.git', 'reuse-env')], { encoding: 'utf8' }).stdout.trim().split('\n')).toEqual(keys.map(k => `${k}=unset`));
+    });
+
+    it('a tree that changes the full-ci workflows or ci-reuse.ts relative to origin/master never reuses its own runs', () => {
+      for (const path of ['.github/workflows/test.yml', '.github/workflows/e2e.yml', 'scripts/ci-reuse.ts']) {
+        rmSync(join(repo, '.git', 'reuse-args'), { force: true });
+        rmSync(join(repo, '.git', 'gate-ran'), { force: true });
+        mkdirSync(join(repo, path, '..'), { recursive: true });
+        writeFileSync(join(repo, path), `changed ${path}\n`);
+        git('add', '.');
+        git('commit', '-q', '-m', `change ${path}`);
+        const r = run(gateMarking, { GBRAIN_PREGATE_REPO: 'owner-example/repo-example', GBRAIN_PREGATE_REUSE_CMD: reuser("echo 'GBRAIN_REUSE_RESULT tests=9 failed=0'") });
+        expect(ran('reuse-args')).toBe(false);
+        expect(ran('gate-ran')).toBe(true);
+        expect(r.err).toContain(`pregate-remote-gate: the tree changes ${path} relative to origin/master`);
+        expect(r.out.trim().split('\n').at(-1)).toBe(`PREGATE_REMOTE: tree=${contentTree()} tests=4 failed=0`);
+        git('update-ref', 'refs/remotes/origin/master', 'HEAD');
+      }
+      // Without origin/master to compare against, reuse is not trusted either.
+      git('update-ref', '-d', 'refs/remotes/origin/master');
+      rmSync(join(repo, '.git', 'reuse-args'), { force: true });
+      run(gateMarking, { GBRAIN_PREGATE_REPO: 'owner-example/repo-example', GBRAIN_PREGATE_REUSE_CMD: reuser("echo 'GBRAIN_REUSE_RESULT tests=9 failed=0'") });
+      expect(ran('reuse-args')).toBe(false);
+    });
 
     it('takes the receipt from the full runs, with the gate\'s exact line, and starts no gate', () => {
       const r = run(gateMarking, { GBRAIN_PREGATE_REPO: 'owner-example/repo-example', GBRAIN_PREGATE_REUSE_CMD: reuser("echo '[ci-reuse] gate: Test run passed'; echo 'GBRAIN_REUSE_RESULT tests=58853 failed=0'") });

@@ -18,6 +18,10 @@
 # receipt, no VMs). <tests> and <failed> are then the runs' executed identities.
 # Any other tree, a stamp-only one included, runs the gate below; gstack's
 # stamp rule (`gstack-pregate clear --receipt`) handles a stamp-only head.
+# A tree that changes .github/workflows/test.yml, .github/workflows/e2e.yml or
+# scripts/ci-reuse.ts relative to origin/master (or has no origin/master)
+# never reuses: its runs would attest to themselves. The reuse check runs
+# without the model and database keys, like the gate.
 # GBRAIN_PREGATE_REUSE=0 always runs the gate.
 #
 # Otherwise it runs the development form of the Ubicloud gate, `bun run ci:ubicloud:diff`:
@@ -70,11 +74,28 @@ fi
 log=$(mktemp "${TMPDIR:-/tmp}/pregate-remote-gate-log-XXXXXX") || fail "cannot create a log file"
 trap 'rm -f "$log"' EXIT
 
+strip_keys() { env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u VOYAGE_API_KEY -u GEMINI_API_KEY -u JEV_TYPESAFE_API_KEY -u DATABASE_URL "$@"; }
+
 reused=""
 repo=${GBRAIN_PREGATE_REPO:-$(git remote get-url origin 2>/dev/null | sed -E 's#\.git$##' | sed -nE 's#^.*[/:]([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$#\1#p')}
+reuse_ok=1
 if [ "${GBRAIN_PREGATE_REUSE:-1}" != 0 ] && [ -n "$repo" ] && [ "$before" = "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" ]; then
+  if ! git rev-parse -q --verify 'origin/master^{commit}' >/dev/null; then
+    echo "pregate-remote-gate: no origin/master to compare the full-ci workflows against, so it runs the gate instead of reusing" >&2
+    reuse_ok=0
+  fi
+  for path in .github/workflows/test.yml .github/workflows/e2e.yml scripts/ci-reuse.ts; do
+    [ "$reuse_ok" = 1 ] || break
+    git diff --quiet origin/master HEAD -- "$path" && continue
+    echo "pregate-remote-gate: the tree changes $path relative to origin/master, so it runs the gate instead of reusing its own runs" >&2
+    reuse_ok=0
+  done
+else
+  reuse_ok=0
+fi
+if [ "$reuse_ok" = 1 ]; then
   reuse_cmd=${GBRAIN_PREGATE_REUSE_CMD:-bun scripts/ci-reuse.ts --gate}
-  bash -c "$reuse_cmd \"\$@\"" pregate-remote-gate --sha "$(git rev-parse HEAD)" --tree "$before" --repo "$repo" 2>&1 | tee "$log"
+  strip_keys bash -c "$reuse_cmd \"\$@\"" pregate-remote-gate --sha "$(git rev-parse HEAD)" --tree "$before" --repo "$repo" 2>&1 | tee "$log"
   case ${PIPESTATUS[0]} in
     0) reused=$(sed -nE 's/^GBRAIN_REUSE_RESULT tests=([0-9]+) failed=([0-9]+)$/\1 \2/p' "$log" | tail -1) ;;
     3) fail "a full run on tree $before failed; fix it or rerun it, no receipt" 1 ;;
@@ -88,8 +109,7 @@ if [ -n "$reused" ]; then
 else
   gate_cmd=${GBRAIN_PREGATE_GATE_CMD:-bun run ci:ubicloud:diff}
   # shellcheck disable=SC2086
-  env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u VOYAGE_API_KEY -u GEMINI_API_KEY -u JEV_TYPESAFE_API_KEY -u DATABASE_URL \
-    bash -c "$gate_cmd \"\$@\"" pregate-remote-gate "$@" 2>&1 | tee "$log"
+  strip_keys bash -c "$gate_cmd \"\$@\"" pregate-remote-gate "$@" 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
   totals=$(awk '
     /^=== ci-ubicloud summary ===$/ { seen = 1; next }
