@@ -647,7 +647,7 @@ export function renderPagesBlockDetailed(
   pages: SearchResult[],
   excerptLen = 600,
   query = '',
-  opts: { verbatim?: boolean | ((p: SearchResult) => boolean); verbatimLen?: number; timeZone?: string } = {},
+  opts: { verbatim?: boolean | ((p: SearchResult) => boolean); verbatimLen?: number; timeZone?: string; titles?: boolean } = {},
 ): { text: string; truncated: boolean } {
   let truncated = false;
   const text = pages.map((p, idx) => {
@@ -667,12 +667,14 @@ export function renderPagesBlockDetailed(
     const flag = (p.injection_suspected ? `${INJECTION_SUSPECTED_LINE}\n` : '')
       + (p.trust_tier && needsDataEnvelope(p.trust_tier) ? `${EXTERNAL_DATA_RULE}\n` : '') + graphEvidenceLine(p);
     const trustAttr = p.trust_tier ? ` ${trustAttributes({ trust_tier: p.trust_tier, origin: p.origin ?? 'legacy' })}` : '';
+    const cleanTitle = opts.titles ? title.replace(/[\r\n<>]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim() : '';
+    const titleAttr = cleanTitle ? ` title="${cleanTitle}"` : '';
     // Evidence delivery: the block was already budgeted and cut around its
     // hits; render it whole (capped only by excerptLen).
     if (typeof opts.verbatim === 'function' ? opts.verbatim(p) : opts.verbatim) {
       const cap = opts.verbatimLen ?? excerptLen;
       if (content.length > cap || (p as { delivered?: { truncated?: boolean } }).delivered?.truncated === true) truncated = true;
-      return `<page slug="${slug}" rank="${idx + 1}"${dateAttr}${trustAttr}>\n${flag}${content.slice(0, cap)}\n</page>`;
+      return `<page slug="${slug}" rank="${idx + 1}"${titleAttr}${dateAttr}${trustAttr}>\n${flag}${content.slice(0, cap)}\n</page>`;
     }
     const excerpt = selectRelevantExcerptDetailed(
       content,
@@ -685,7 +687,7 @@ export function renderPagesBlockDetailed(
       (excerpt.truncatedStart ? `${EXCERPT_CUT_START_MARKER}\n` : '') +
       excerpt.text +
       (excerpt.truncatedEnd ? `\n${EXCERPT_CUT_END_MARKER}` : '');
-    return `<page slug="${slug}" rank="${idx + 1}"${dateAttr}${trustAttr}>\n${flag}${body}\n</page>`;
+    return `<page slug="${slug}" rank="${idx + 1}"${titleAttr}${dateAttr}${trustAttr}>\n${flag}${body}\n</page>`;
   }).join('\n\n');
   return { text, truncated };
 }
