@@ -15,6 +15,10 @@
  *    protected frontmatter key) rewrote the whole file through the serializer: keys reordered, lists re-emitted, the body
  *    re-rendered. It now keeps the file's bytes and appends only the protected parts; a result that would need any other
  *    change (here a database-only tag) refuses `file_wins_rewrite` in the preview and writes nothing.
+ * 5. A page a read-only mirror stamped `mirror_read_only` (no recorded file) kept that stamp after its source became
+ *    writable, and its `file_drift` hold had no exit: both previews called it database-only. Once the source is writable it
+ *    reconciles against the file at its slug path (as an unbound-source page does); the apply records that path and clears
+ *    the stamp. While the source is still read-only the page stays database-only.
  *
  * Holds exist only where sync imports a Git checkout, so there is no repo-less arm.
  */
@@ -210,5 +214,26 @@ for (const backend of testBackends()) {
     await performManagedSync(engine, OPTS);
     expect(await holds(engine)).toEqual([]);
     expect(readFileSync(join(root, 'notes/alpha.md'), 'utf8')).toBe(after);
+  }, { databaseUrl, setup }), 180_000);
+
+  test(`GBRA-133 [${backend}]: a stale mirror_read_only page's hold resolves with --prefer database, which records its path and clears the stamp`, () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await coordinated(engine, `INSERT INTO pages(source_id, slug, type, title, compiled_truth, timeline, frontmatter, database_only_reason)
+      VALUES('default', 'notes/mirror-page', 'concept', 'notes/mirror-page', 'The database copy, written while the source was a mirror.', '', '{}'::jsonb, 'mirror_read_only')`);
+    writeFileSync(join(root, 'notes/mirror-page.md'), note('notes/mirror-page', 'The upstream file.')); commitAll(root, 'upstream');
+    await performManagedSync(engine, OPTS);
+    expect(await holds(engine)).toEqual(['notes/mirror-page.md file_drift unknown']);
+    await engine.executeRaw(`UPDATE sources SET config = config || '{"mirror_read_only": true}'::jsonb WHERE id='default'`);
+    expect(listing(await heldPreview(engine, 'database'))).toEqual(['default:notes/mirror-page no_drift']);
+    await engine.executeRaw(`UPDATE sources SET config = config - 'mirror_read_only' WHERE id='default'`);
+    const preview = await heldPreview(engine, 'database');
+    expect(listing(preview)).toEqual(['default:notes/mirror-page prefer_database']);
+    expect((await heldPreview(engine, 'database', preview.preview_hash!)).outcomes).toEqual({ repaired: 1 });
+    expect(readFileSync(join(root, 'notes/mirror-page.md'), 'utf8')).toContain('The database copy, written while the source was a mirror.');
+    expect(await engine.executeRaw("SELECT source_path, database_only_reason FROM pages WHERE source_id='default' AND slug='notes/mirror-page'"))
+      .toEqual([{ source_path: 'notes/mirror-page.md', database_only_reason: null }]);
+    commitAll(root, 'repair');
+    await performManagedSync(engine, OPTS);
+    expect(await holds(engine)).toEqual([]);
   }, { databaseUrl, setup }), 180_000);
 }

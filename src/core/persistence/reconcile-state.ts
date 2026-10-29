@@ -26,7 +26,7 @@ import { reconcileCanonical, strictReconcileKeys, validateReconcileJson, type Re
 import type { ParsedPage } from '../import-file.ts';
 import type { AutoDecision } from './reconcile-additive.ts';
 import { publishesDatabaseOnly, readCanonicalAsImported } from './page-prepare.ts';
-import { isMirrorOnlyPage } from './mirror-read-only.ts';
+import { isMirrorOnlyPage, staleMirrorPage } from './mirror-read-only.ts';
 import { hardenedGitSync } from '../hardened-git.ts';
 
 export interface ReconcilePins {
@@ -236,8 +236,8 @@ export async function readReconcileState(engine: BrainEngine, sourceId: string, 
   const recorded = recordedPathFromFileUri(snapshot.page.source_uri, root);
   const mode = await scannerSlugRootMode(engine, sourceId, root);
   const recordedPath = recordedReconcilePath(root, snapshot.page, mode);
-  const marked = !recordedPath && isDatabaseOnlyPage({ ...snapshot.page,
-    database_only_reason: await isUnboundSourcePage(engine, sourceId, slug) ? 'unbound_source' : null });
+  const marked = !recordedPath && (isDatabaseOnlyPage({ ...snapshot.page,
+    database_only_reason: await isUnboundSourcePage(engine, sourceId, slug) ? 'unbound_source' : null }) || await staleMirrorPage(engine, sourceId, snapshot.page));
   const adoptable = !recordedPath && !marked && opts.adoptSlugPath === true && recordsNoFileOrigin(snapshot.page)
     && !publishesDatabaseOnly(root, slug, snapshot) && !await isMirrorOnlyPage(engine, sourceId, slug);
   const derived = marked || adoptable ? slugDerivedOrigin(root, slug, mode) : null;
