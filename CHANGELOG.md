@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**The Claude Code and Codex plugins now put gbrain's brain-first rule beside every turn, the same way `gbrain setup` does.**
+
+The gbrain plugins (gbrain, gbrain-coding, gbrain-daily) now declare the `UserPromptSubmit` hook `gbrain setup` writes. It runs through the plugin's own launcher with `GBRAIN_HOOK_LANE=plugin`: on Claude Code it's `hook user-prompt` with a 3 s timeout, and on Codex it's `hook user-prompt --harness codex` with 15 s. While a brain-first block is installed, it adds the one-line rule to each turn, plus the read-context block when a serve is running. When setup, `gbrain bootstrap` or a workspace install already wires the event, the plugin's hook exits with no output, so a turn gets it once. Codex skips plugin hooks until you trust them: open `/hooks` and trust it once. A plugin-only install has no block yet. doctor `harness_wiring` and `gbrain post-upgrade` now warn about that and name the one command that adds it.
+
+### How to use it
+
+```bash
+gbrain setup claude-code --instructions-only   # or codex: writes only the brain-first block, which turns the plugin's per-turn rule on
+GBRAIN_HOOKS=0                                 # turns every gbrain hook off, the plugin's included
+```
+
+### Itemized changes
+
+- `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json` and the generated persona variants declare the hook. Codex's inline form keeps the hooks.json `hooks` wrapper, since codex-cli ignores a bare event map.
+- `src/core/bootstrap/plugin-lanes.ts` `otherLaneWiresHook`: the plugin hook yields to a gbrain-marked or harness-lane entry in the Claude Code user or project settings, or to a setup or bootstrap group in `CODEX_HOME/hooks.json`. An unreadable file counts as not wired.
+- doctor `harness_wiring` checks the default instruction file of each plugin-served harness. `gbrain post-upgrade` prints the `--instructions-only` command for a missing or stale block (`src/core/setup/brain-first-upgrade-notice.ts`).
+- Tests: `test/plugin-turn-hook.test.ts` (new), `test/doctor-harness-wiring-plugin.test.ts`.
+
 ## [0.60.496.0] - 2026-10-29
 
 **Doctor now finds pages that lost the record of where they came from, and `gbrain repair provenance` puts it back. The repair only ever lowers trust.**
