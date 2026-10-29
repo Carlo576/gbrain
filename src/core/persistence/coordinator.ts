@@ -67,6 +67,8 @@ interface PreparedMutationBase {
   /** #5470 screening only: the content is unchanged, but publication still runs (and queues effects). */
   contentUnchanged?: boolean;
   deferEmbedding?: boolean;
+  /** #7866: a content no-op whose chunks all hold a vector for their text: publication queues no embedding effect (`embedding_state: current`). */
+  embeddingCurrent?: boolean;
   /** Why a page write bound to a worktree publishes no file (receipt `write_through.skipped`). */
   databaseOnlyReason?: 'db_only' | 'unbound_source' | 'mirror_read_only' | 'sync_excluded' | 'shared_origin' | 'origin_twin' | 'detached';
   /** #6517: the receipt's `write_through.warning` for a database-only publication, set by `validate` under the publication guards. */
@@ -625,7 +627,8 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       decoratePublicationOutcome(row, prepared, outcome, final, files.length, skill);
       await recordPublicationFenceTrend(tx, row, outcome);
       // G2: a strict source's file is committed before its row; its Git effect only pushes.
-      if (door?.door) Object.assign(outcome.persistence as object, { git_state: 'committed', git_commit: await commitThroughDoor(door.door.root, [{ path: door.path, note: prepared.file?.commit }], lock ?? undefined) });
+      if (door?.door) Object.assign(outcome.persistence as object, { git_state: 'committed', git_commit: await commitThroughDoor(door.door.root, [{ path: door.path, planned: door.afterHash, note: prepared.file?.commit }], lock ?? undefined,
+        paths => Object.assign(outcome.persistence as object, { git_index_restored: paths })) });
       await timePublicationStep('effects', row.slug, () => queuePublicationEffects(tx, row, final, outcome, prepared, { pushOnly: !!door?.door }));
       if (prepared.afterEffects) await withCoordinatedWrite(tx, [row.source_id], () => prepared.afterEffects!(tx, outcome), publicationAttribution(row, prepared.trust));
       await hooks.boundary?.('before_commit', row);
