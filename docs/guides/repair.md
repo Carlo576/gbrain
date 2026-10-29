@@ -2450,6 +2450,11 @@ the two `--prefer` values do opposite things in each state.
 | `purged_differs` | Removes the file. | Imports the file as a new page. |
 | `file_gone` | Recreates the file from the page. | Soft-deletes the page (the mass-delete valve applies). |
 
+`--prefer file` keeps the file's bytes: it adds only protected frontmatter keys the
+file lacks and database-only timeline rows, and refuses
+[`file_wins_rewrite`](write-refusals.md#file_wins_rewrite) when the result
+would change anything else.
+
 A held page whose page and file agree now is listed `release_hold` under
 either `--prefer`: its apply writes nothing to the page or the file, and only
 asks the next sync to re-screen the file, which releases the hold. A page with

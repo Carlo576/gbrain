@@ -382,6 +382,13 @@ export function validateReconcileArtifact(value: unknown): ReconcileArtifact {
  * inferring import wrote the row); a row imported without inference (`gbrain reindex` on an unmanaged brain) is
  * compared with the raw bytes. An inferred `type:` is not one the file declared: the caller keeps the stored type.
  */
+/** GBRA-133: a canonical file's text as `readReconcileState` reads it (the reconcile canonical form of the page it imports). */
+export function readCanonicalFileText(state: Pick<ReconcileState, 'importPath' | 'snapshot'>, slug: string, text: string): ParsedPage {
+  const reading = reconcileFileReading(text, state.importPath, state.snapshot.page);
+  const parsed = parseMarkdown(reading.content, `${slug}.md`, { validate: true, expectedSlug: slug });
+  alignWithStored(parsed, state.snapshot.page, reading.inferred);
+  return reconcileCanonical(parsed, parsed.tags);
+}
 export function reconcileFileReading(text: string, sourcePath: string, stored: { frontmatter?: Record<string, unknown> | null }): { content: string; inferred: boolean } {
   const reading = readCanonicalAsImported(text, sourcePath);
   if (!reading.inferred) return reading;

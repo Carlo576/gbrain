@@ -11,12 +11,17 @@
  *    and nothing re-screened one whose page did not move. Such a sync re-screens it now, and the `--held` preview lists an
  *    agreeing hold as `release_hold`, whose apply schedules its re-screen. A hold that still differs stays held.
  *
+ * 4. File wins (`--prefer file`) on a page whose database copy keeps protected parts (a database-only timeline row, a
+ *    protected frontmatter key) rewrote the whole file through the serializer: keys reordered, lists re-emitted, the body
+ *    re-rendered. It now keeps the file's bytes and appends only the protected parts; a result that would need any other
+ *    change (here a database-only tag) refuses `file_wins_rewrite` in the preview and writes nothing.
+ *
  * Holds exist only where sync imports a Git checkout, so there is no repo-less arm.
  */
 import { expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
@@ -65,6 +70,25 @@ async function heldUnknownPage(engine: BrainEngine, root: string): Promise<void>
   writeFileSync(join(root, 'notes/n0.md'), note('notes/n0', 'The edited body of notes/n0.')); commitAll(root, 'edit n0');
   await performManagedSync(engine, OPTS);
   expect(await holds(engine)).toEqual(['notes/n0.md file_drift unknown']);
+}
+
+/** A hand-written file: keys in the author's order, a block list, a rule under a text line, a bare timeline heading. */
+const HAND_WRITTEN = '---\ntitle: Alpha Example\ntype: concept\naliases:\n  - alpha-one\n  - alpha-two\nstatus: active\n---\n\n'
+  + 'Intro paragraph.\n\nSection text above a rule\n---\n\nAfter the rule.\n\n## Timeline\n\n- 2026-01-01: First event.\n';
+
+/** notes/alpha as an older gbrain left it, with a database-only timeline row and protected key, then a commit edits its file: held unknown. */
+async function heldProtectedPage(engine: BrainEngine, root: string): Promise<void> {
+  writeFileSync(join(root, 'notes/alpha.md'), HAND_WRITTEN); commitAll(root, 'alpha');
+  expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+  await coordinated(engine, `DELETE FROM op_checkpoints WHERE op='sync-import-provenance'
+    AND completed_keys->0->>'page_id' IN (SELECT id::text FROM pages WHERE source_id='default' AND slug='notes/alpha')`);
+  await coordinated(engine, `UPDATE pages SET frontmatter = frontmatter || '{"embed_skip": true}'::jsonb, knowledge_revision=$1::uuid, revision_write_request_id=NULL
+    WHERE source_id='default' AND slug='notes/alpha'`, [randomUUID()]);
+  await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.addTimelineEntry('notes/alpha',
+    { date: '2026-02-01', summary: 'A database-only event.', source: 'example', detail: '' }, { sourceId: 'default' }), TEST_WRITE_ATTRIBUTION));
+  writeFileSync(join(root, 'notes/alpha.md'), HAND_WRITTEN.replace('Intro paragraph.', 'Intro paragraph, edited.')); commitAll(root, 'edit alpha');
+  await performManagedSync(engine, OPTS);
+  expect(await holds(engine)).toEqual(['notes/alpha.md file_drift unknown']);
 }
 
 for (const backend of testBackends()) {
@@ -137,5 +161,31 @@ for (const backend of testBackends()) {
     await performManagedSync(engine, OPTS);
     expect(await holds(engine)).toEqual([]);
     expect((await origin(engine, 'notes/n0'))?.source_path).toBe('notes/n0.md');
+  }, { databaseUrl, setup }), 180_000);
+
+  test(`GBRA-133 [${backend}]: file wins keeps the file's bytes and appends only the protected key and the database-only timeline row`, () => managedBrain(async ({ engine, root }) => {
+    await heldProtectedPage(engine, root);
+    const before = readFileSync(join(root, 'notes/alpha.md'), 'utf8');
+    const preview = await heldPreview(engine, 'file');
+    expect(listing(preview)).toEqual(['default:notes/alpha prefer_file']);
+    expect((await heldPreview(engine, 'file', preview.preview_hash!)).outcomes).toEqual({ repaired: 1 });
+    const after = readFileSync(join(root, 'notes/alpha.md'), 'utf8');
+    const [head, body] = [before.slice(0, before.indexOf('\n---\n', 3) + 1), before.slice(before.indexOf('\n---\n', 3) + 1)];
+    const timelineAt = body.indexOf('## Timeline');
+    expect(after.startsWith(`${head}embed_skip: true\n${body.slice(0, timelineAt)}<!-- timeline -->\n\n${body.slice(timelineAt)}`)).toBe(true);
+    expect(after.slice(before.length + 'embed_skip: true\n<!-- timeline -->\n\n'.length)).toMatch(/^<!-- gbrain:materialized v1 [0-9a-f]+ -->\n- \*\*2026-02-01\*\* \| example — A database-only event\.\n$/);
+    await performManagedSync(engine, OPTS);
+    expect(await holds(engine)).toEqual([]);
+  }, { databaseUrl, setup }), 180_000);
+
+  test(`GBRA-133 [${backend}]: file wins refuses file_wins_rewrite in the preview when keeping the file would need a re-render, and writes nothing`, () => managedBrain(async ({ engine, root }) => {
+    await heldProtectedPage(engine, root);
+    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.addTag('notes/alpha', 'database-only-tag', { sourceId: 'default' }), TEST_WRITE_ATTRIBUTION));
+    const before = readFileSync(join(root, 'notes/alpha.md'), 'utf8');
+    const preview = await heldPreview(engine, 'file');
+    expect((preview as { listing?: Array<{ class: string; detail: string }> }).listing?.map(row => `${row.class} ${row.detail.split(':')[0]}`)).toEqual(['refused file_wins_rewrite']);
+    expect(preview.details?.pages ?? []).toEqual([]);
+    expect(readFileSync(join(root, 'notes/alpha.md'), 'utf8')).toBe(before);
+    expect(await holds(engine)).toEqual(['notes/alpha.md file_drift unknown']);
   }, { databaseUrl, setup }), 180_000);
 }

@@ -22,7 +22,8 @@ import { preserveProtectedTakes } from './protected-takes.ts';
 import { digest, sha256 } from './digest.ts';
 import { mergeReconcile, reconcileCanonical, type ReconcileDecision } from './reconcile-merge.ts';
 import { stabilizeSafetyAssessments } from './reconcile-safety.ts';
-import { ABSENT_FILE_HASH, assertReconcilePins, readReconcileState, reconcileFileReading, reconcileReadOptions, staleReconcile, validateReconcileArtifact, type ReconcileState } from './reconcile-state.ts';
+import { fileWinsContent } from './file-wins-content.ts';
+import { ABSENT_FILE_HASH, assertReconcilePins, readCanonicalFileText, readReconcileState, reconcileFileReading, reconcileReadOptions, staleReconcile, validateReconcileArtifact, type ReconcileState } from './reconcile-state.ts';
 import { verifyReconcileBackup } from './reconcile-backup.ts';
 import { assertAutoDecisions } from './reconcile-additive.ts';
 import { admissionAllows, readSyncAdmission } from './sync-admission.ts';
@@ -155,12 +156,13 @@ export async function prepareReconcileMutation(engine: BrainEngine, row: WriteRe
   assertAutoDecisions(artifact.auto_decisions ?? [], state.file, reconcileCanonical(state.snapshot.page, state.snapshot.tags), artifact.decisions);
   const prepared = await prepareReconcileResult(engine, state, artifact.decisions);
   if (!prepared.ready || digest(prepared.result) !== artifact.result_digest) staleReconcile('canonical policy result changed');
-  // #6643: a request that asks to keep the file's bytes (repair file-drift --prefer file) leaves a file that already parses to the
-  // reviewed result as it is; any other difference (a protected key, a tag union, a kept private row) renders the result.
+  // #6643 / GBRA-133: a request that asks to keep the file's bytes (repair file-drift --prefer file) leaves the file as it is plus
+  // the protected parts reconcile kept (appended keys and timeline rows), and refuses any result that would re-render the file.
   // #6712 wave: a preview that observed the file absent recreates it from the page and expects no bytes there.
   const absent = state.pins.raw_file_hash === ABSENT_FILE_HASH;
-  const keep = !absent && row.intent.keep_file_bytes === true && digest(reconcileCanonical(state.file, state.file.tags)) === artifact.result_digest;
-  const content = keep ? state.raw.toString('utf8') : serializePageToMarkdown({ ...state.snapshot.page, ...prepared.result }, prepared.result.tags);
+  const content = !absent && row.intent.keep_file_bytes === true
+    ? fileWinsContent(state.raw.toString('utf8'), state.file, prepared.result, text => readCanonicalFileText(state, row.slug, text), { sourceId: row.source_id, slug: row.slug })
+    : serializePageToMarkdown({ ...state.snapshot.page, ...prepared.result }, prepared.result.tags);
   const ready = prepared.ready;
   return {
     observedRevision: state.snapshot.revision, trust: await ownerImportTrust(engine, row, prepared.result.frontmatter, state.path),
