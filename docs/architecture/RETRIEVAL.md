@@ -337,6 +337,37 @@ Two cross-cutting seams sit around the pipeline rather than inside it:
   with correction-dated writes it lifted forget-then-remember from 92% to 100%
   correct. `search.query_facts_arm=false` turns it off. Verdict and gates:
   `docs/eval/decisions/query-facts-arm/`.
+- **Saved facts beside `search` and `query` results.** Both ops return, in
+  `retrieval.saved_facts` and a text block after the rows, up to five active
+  saved facts: first those about the entity page the query names, then facts
+  that share the query's words (`matchingSavedFacts` in
+  `src/core/search/saved-facts-match.ts`). Words match whole after stemming with the brain's
+  full-text language, the facts keyword index's expression, so "renewal" finds
+  "renews" and "count" does not match inside "countersigned"; words of a CJK
+  script match as substrings. A fact needs three quarters of the query's words
+  (both of a two-word query, and never more than four, so a question asked in
+  full finds the short fact that answers it), not counting words that frame a question about a
+  figure (count, number, total, amount); the most matched words come first, then the
+  newest. This is the only place `search` returns saved facts: the
+  facts arm, the facts block and the temporal reserve run in `query` alone.
+  With `search.saved_facts_supersede` (default on; `false` turns it off), a newer fact with a
+  correction cue ("correction", "ignore the ...", "not what I posted"; a reply
+  that says "corrected" or "correcting" reports a correction and makes none) that
+  shares at least two matched words with a returned fact is returned too, even
+  below the threshold, every fact it corrects moves below the facts nothing
+  corrects, and those carry `corrected_by` (the correcting fact's id, the
+  newest when several correct it). Every correction comes back, so an
+  acknowledgement saved after a correction does not crowd it out. An
+  acknowledgement corrects nothing: a cue fact that adds no figure (a number
+  other than a date such as "14 Oct" or a time) to the older fact, when it restates one of its
+  figures or the older fact is itself a correction, or when it states no figure
+  and withdraws nothing ("thanks for the correction"). A cue fact corrects
+  nothing saved under another entity, nothing of higher trust, and nothing whose
+  matched names (the first word of a capitalized name, "Orbix" in "Orbix Home
+  Goods") it shares none of. Corrections rank newest first under the five-fact
+  cap, and a corrected fact whose correction does not fit is left out. The cue
+  is a fixed word list, so an unmarked correction is not caught; nothing stored
+  changes.
 - **Temporal fact reserve (default off).** With `search.temporal_fact_reserve=true`,
   a `query` with a deterministic temporal cue (when, before, after, how long,
   since, until, ordinal-time words, ISO dates, month names) and a token budget

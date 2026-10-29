@@ -10,6 +10,36 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.493.0] - 2026-10-29
+
+**`search` now finds a saved fact by its words the way the facts keyword index does, and a newer correction comes back ahead of the fact it corrects (`search.saved_facts_supersede`, on by default). In a keyless replay of 816 harness `search` calls, the author's correction ranked above the retracted post in 27 of 27 reads of the corrections case, against 1 of 27 on 0.60.492.0.**
+
+Words in `retrieval.saved_facts` now match whole after stemming with the brain's full-text language, so "renewal" finds "renews" and "count" no longer matches inside "countersigned". Words of a CJK script still match as substrings. A fact still needs three quarters of the query's words, but never more than four. Words that frame a question about a figure (count, number, total, amount) aren't counted. At most five facts ride a reply, as before.
+
+With the new default, a newer fact carrying a correction cue ("correction", "ignore the 52", "disregard", "not what I posted") that shares two matched words with a returned fact comes back too, ahead of it. The older fact is labelled `corrected_by`. A correction only counts when it is about the same thing:
+- it is not saved under another entity;
+- it is not of lower trust;
+- it shares a name the older fact matched;
+- it either adds a figure or withdraws what was said.
+
+So an acknowledgement ("thanks for the correction, noted") corrects nothing. Nothing stored changes. In the same replay no read lost a fact 0.60.492.0 returned, and no label fell outside the corrections cases.
+
+### How to turn it off
+
+```bash
+gbrain config set search.saved_facts_supersede false   # word matching stays; corrections are no longer reordered or labelled
+```
+
+`false`, `off`, `0` or `no` (any case) turns it off.
+
+### Itemized changes
+
+- `src/core/search/saved-facts-match.ts` (new): the stemmed matcher, moved out of `ops/search.ts`. It holds the correction rules, newest-first ordering of corrections under the five-fact cap, and a scan that keeps the facts keyword index unless a query has a CJK word.
+- `src/core/ops/search.ts`: an entity-resolved search keeps the `corrected_by` label on the entity copy of a fact.
+- `src/mcp/dispatch.ts`: saved facts carry their `corrected_by` note in the text reply.
+- The new key, the upgrade notice and the docs are in `src/core/config.ts`, `src/core/behavior-change-notice.ts`, `docs/architecture/RETRIEVAL.md` and the key-files entry.
+- Tests: `test/search-saved-facts-match.test.ts` (stemming, CJK, the off spellings and each correction rule), `test/search/saved-facts-probe.test.ts` (the scan's index use on 20,000 facts), `test/config-search-registry.test.ts`, `test/search-response-meta-concurrency.test.ts`.
+
 ## [0.60.492.0] - 2026-10-29
 
 **The remote gate takes its receipt from GitHub's full-ci when the exact tree already passed there, so a merge slot no longer pays for a second full test pass on Ubicloud.**
