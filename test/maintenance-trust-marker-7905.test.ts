@@ -21,6 +21,7 @@ import { importFromFile } from '../src/core/import-file.ts';
 import { parseMarkdown } from '../src/core/markdown.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { maintenancePreflight, publishMaintenancePages } from '../src/core/persistence/prepared-maintenance.ts';
+import { stampPageTrustMarker } from '../src/core/trust/page-write.ts';
 import { declareDerivation } from '../src/core/trust/taint.ts';
 import type { TrustTier } from '../src/core/trust/tier.ts';
 import { managedBrain, settleManagedGitEffects } from './helpers/managed-brain.ts';
@@ -85,3 +86,28 @@ for (const backend of testBackends()) {
     }, { databaseUrl }), 120_000);
   });
 }
+
+// Value: protects=the marker rule's exclusions and lower-only cap on the derivation branch; fails_when=the fence-edit or declaration guard is dropped, or the stored tier no longer caps; why_new=the managed cases above cover declared submit_job pages only; seam=none; no_claim=none beyond protects
+describe('#7905 stampPageTrustMarker: which writes stamp, and at what tier', () => {
+  const derivation = declareDerivation({ tier: 'agent_written', origin: { channel: 'derive:patterns' } }, []);
+  const trust = { tier: 'agent_written' as const, origin: { channel: 'derive:patterns' } };
+  const stamp = (row: Record<string, unknown>, stored: TrustTier | null = null) => {
+    const fm: Record<string, unknown> = {};
+    stampPageTrustMarker(row as never, fm, trust, stored);
+    return fm.trust_tier;
+  };
+
+  test('a declared maintenance page stamps the declared tier', () => {
+    expect(stamp({ operation: 'submit_job', intent: { kind: 'managed_maintenance_page', derivation } })).toBe('agent_written');
+  });
+  test('a maintenance write with no derivation declaration stamps nothing', () => {
+    expect(stamp({ operation: 'submit_job', intent: { kind: 'managed_maintenance_page' } })).toBeUndefined();
+  });
+  test('a fence edit keeps the page tier even when it carries a derivation declaration', () => {
+    expect(stamp({ operation: 'submit_job', intent: { kind: 'managed_facts_entity', derivation } })).toBeUndefined();
+    expect(stamp({ operation: 'takes_add', intent: { derivation } })).toBeUndefined();
+  });
+  test('a declared republication onto a lower stored tier keeps the lower tier', () => {
+    expect(stamp({ operation: 'submit_job', intent: { kind: 'managed_maintenance_page', derivation } }, 'external_untrusted')).toBe('external_untrusted');
+  });
+});
