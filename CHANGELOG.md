@@ -10,6 +10,116 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.490.0] - 2026-10-29
+
+**Four new search settings for answering inside a tight token budget. All are off by default, so search, query and think output is unchanged until you turn one on.**
+
+Each setting is one step in fitting the right evidence into an 8,000-token answer. They stay off until the held-out evaluation decides, one at a time, whether each one earns a default flip.
+
+### How to use it
+
+```bash
+gbrain config set search.query_budget_unit auto     # query's --token-budget becomes the hard cap on delivered evidence (whole conversations, packed)
+gbrain config set search.evidence_date_header true  # needed for titles on the header line
+gbrain config set search.evidence_titles true       # each page block's header line ends with the page title; think's <page> tag gets a title attribute
+gbrain config set search.query_facts_block true     # a budgeted query puts the question's dated facts first, oldest first, within 22% of the budget
+gbrain config set search.fact_source_pages true     # the conversations the best-matching facts came from join the results
+```
+
+### What changed
+
+| Setting | Off (default) | On |
+|---|---|---|
+| `search.query_budget_unit` | `query --token-budget` trims chunks | `auto`: the budget caps delivered evidence the way `search` does; a budget under 32 tokens is refused with `invalid_params` |
+| `search.evidence_titles` | Header line shows the date only | With the date header on, the line ends with the page title; think's `<page>` tag carries `title`. Angle brackets, double quotes and line breaks in a title are scrubbed |
+| `search.query_facts_block` | Facts arm adds facts in spare rows | Up to 40 question-ranked dated facts lead the results, within 22% of the budget; pages fill the rest |
+| `search.fact_source_pages` | No change | Up to 2 source conversations of the best-matching facts go in after the top 3 rows, read under the caller's own scope, so a remote caller never gets a private page; the row count stays the same |
+
+### Itemized changes
+
+- `src/core/ops/search.ts`, `src/core/search/evidence-packing.ts`: `search.query_budget_unit`.
+- `src/core/search/evidence-date.ts`, `src/core/search/evidence-delivery.ts`, `src/core/think/gather.ts`, `src/core/think/index.ts`: `search.evidence_titles` and its `title_header` delivery field.
+- `src/core/search/facts-arm.ts`, `src/core/search/query-arms.ts`: the facts block (sharing the temporal fact reserve's ranking) and fact source pages.
+- Tests: `test/search-8k-conversion.test.ts`.
+
+## [0.60.489.0] - 2026-10-29
+
+**A page a maintenance job writes from model output keeps its trust tier when the repository is read back (#7905).**
+
+Patterns, concept and claim-source runs publish their pages as maintenance writes (`submit_job`). The database row was capped at the tier the run declared, at most agent-written, but the file committed to git carried no `trust_tier` marker, and a forged higher marker in the model's text passed through as written. Reading that file back (rebuilding a brain from its repository, or a second brain importing it) rated the page at the source default, operator-curated, so model-written text came back trusted as the owner's own notes. These pages now stamp the same lower-only marker an agent's content write stamps, at the declared tier. A page outside the run's output that a patterns run republishes to repair a timeline entry it appended (dropping or normalizing an unverified quote) carries the same declaration, so it gets the marker too, matching the tier the database already gave it. A brain with no repository has no file to read back and was not affected. Nothing rewrites pages already stored. A derived page published before this release gets its marker the next time a run publishes changed content for it, and a page whose content stays the same keeps its unmarked file until then.
+
+### Itemized changes
+
+- `src/core/trust/page-write.ts`: `stampPageTrustMarker` stamps the marker on a write that carries a derivation declaration and is not a fence edit, not only on the content operations.
+- Tests, on PGLite and Postgres, on a repository-backed brain: `test/maintenance-trust-marker-7905.test.ts`.
+
+## [0.60.488.0] - 2026-10-29
+
+**A brain that moved hosts can now finish the 0.53.0 migration.**
+
+After a host move, `gbrain apply-migrations` stopped at v0.53.0 (`content-checkpoints`) with `The canonical root changed after setup began` on every run. The cause was an unfinished shared-skills content setup checkpoint that still named the old host's root. `gbrain repair content-receipt-root` found nothing to fix, so the migration stayed partial and doctor reported MINIONS HALF-INSTALLED. Now the refusal names the repair, and the repair lists the checkpoint along with the step that proves the new root.
+
+### How to use it
+
+```bash
+gbrain repair content-receipt-root --source <source>      # preview, on the owner host: prints the class and its next step
+# for a source claimed on the new host (class tree_mismatch): the self-transfer prepare and accept it prints,
+# then gbrain sources writer activate --confirm-quiesced --shared-skills when shared skills are on
+gbrain apply-migrations --force-retry 0.53.0
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The 0.53.0 migration finds an unfinished checkpoint naming the old host's root | Refused, with advice to resume at the old root | Refuses with `gbrain repair content-receipt-root --source <source>` as its fix |
+| `repair content-receipt-root` and doctor `sync_freshness` | Read complete receipts only, so they found nothing | Also list unfinished checkpoints that name another root |
+
+Nothing is rewritten without the explicit, verified self-transfer or set-path step. Repo-less (database-only) sources have no content root or checkpoint root, so they are unaffected.
+
+## [0.60.487.0] - 2026-10-29
+
+**Three more writers refuse a `visibility: private` request page privacy does not read instead of storing a world-readable page (#7897).**
+
+`gbrain repair url-clone-fences` restored a clone file by importing HEAD's bytes as its page without checking how a private request was spelled, and ignored the import's result. On a brain without managed persistence, a HEAD whose frontmatter said `Visibility: private` (or another spelling sync holds as `visibility_noncanonical`) was stored world-readable and reported `restored`. The preview now lists such a file under the hold's code. Apply still keeps its fence rows database-only and restores the file from HEAD, so the clone can pull the upstream fix, but it does not import HEAD as the page and reports `held` (an approval saved before this release applies the same way). `gbrain brainstorm` / `gbrain lsd` `--save` on an unmanaged brain had the same gap for content passed to the exported save function; the CLI's own frontmatter never carries a private request, and it now refuses one with put_page's `visibility_not_applied` and exits 1. `gbrain sources reconcile` protected only the lowercase `visibility` key from the file side, so a file adding `Visibility: private` merged in (as an additive field under `--auto-additive`) and published world-readable; it now refuses `visibility_not_applied` at preview and apply. `visibility: private` on its own lowercase line keeps working everywhere, and pages stored before this release are not changed.
+
+### Itemized changes
+
+- `src/core/repair/url-clone-fences.ts`: the preview and the apply screen HEAD's bytes with `holdNoncanonicalPrivate`, and the import opts in too; a held HEAD still gets its rows kept database-only and its file restored (so the clone's pull is unblocked), skips the import and reports `held` with its code instead of `restored`.
+- `src/commands/brainstorm.ts`: the unmanaged save opts in, turns the hold into `visibility_not_applied` (`privateRequestRefusal`) and treats any refused import as not saved.
+- `src/core/persistence/reconcile-prepare.ts`: the merged result imports with `holdNoncanonicalPrivate` and refuses `visibility_not_applied`.
+- `test/import-private-hold-callers-7897.test.ts`: lists every `importFromContent` / `screenImportContent` call that does not opt in, with why it is held another way or derived from a stored page, and fails on a new unlisted call.
+- `src/core/error-registry.ts`, `src/core/behavior-change-notice.ts`, `docs/guides/write-refusals.md`, `docs/guides/repair.md`: name the new refusals.
+- Tests, on PGLite and Postgres: `test/url-clone-fences-private-hold-7897.test.ts`, `test/brainstorm-private-hold-7897.test.ts` (a Git checkout and a source with none), `test/reconcile-private-hold-7897.test.ts` (a Git checkout and a plain directory).
+
+## [0.60.486.0] - 2026-10-29
+
+**A remote agent can no longer rewrite where a page came from, and removing that record no longer makes a page look more trusted (#7873).**
+
+Every page records how it arrived in three frontmatter fields: `source_kind`, `ingested_via` and `ingested_at`. Only `put_page` on a brain with a repository protected them. Through `edit_page`, `append_page`, `capture`, a large upload, or `put_page` on a brain without a repository, a remote MCP client could write any value into them, so the page file and the database disagreed about where the page came from. On a page whose trust tier was not classified yet, removing an external stamp such as `ingested_via: webhook` did more. The edit was screened and stored as if an agent wrote the page, and the next sync or trust backfill rated it as agent-written instead of external. Now those three fields belong to the server on every remote write. The caller's values are dropped and the stored ones kept, an edit that only changes them is a no-op, and the write is screened and stored by the stamps the page keeps. Local commands behave as before, and pages written before this release are not changed (finding them is tracked in #7891).
+
+### Itemized changes
+
+- `src/core/persistence/page-prepare.ts`: `keepStoredProvenance` keeps the stored stamps on every remote `put_page`, `edit_page`, `append_page` and `capture`, with or without a repository. `provenanceWriteTrust` rates the write at the lower of the caller's frontmatter and the frontmatter it publishes, so dropping a stored stamp no longer gets past the write gate.
+- `src/core/persistence/upload-streamed.ts`: the same for an upload too large for one request.
+- `src/core/trust/page-write.ts`: on an unclassified page, the page's own lowering markers from before the write cap its trust marker, so removing one cannot raise the page when it is rated again.
+- Tests, on PGLite and Postgres, with and without a repository: `test/provenance-stamps-7873.test.ts`, `test/large-pages/upload-provenance-7873.test.ts`.
+
+## [0.60.485.0] - 2026-10-29
+
+**A capture that asks for `visibility: private` in a spelling page privacy does not read is refused on every brain, never stored world-readable (#7880).**
+
+On a brain without managed persistence, the `ingest_capture` job behind the webhook `POST /ingest` route and the ingestion daemon wrote its content straight to the database. Its content screen did not check how a private request was spelled, so an event whose frontmatter said `Visibility: private`, `visibility: Private`, a block scalar, a list, a flow mapping or a merge key was stored as a world-readable page. A managed brain already refused the same event through `put_page`. Now both refuse it with `visibility_not_applied` and the same message, store nothing, and the worker dead-letters the job on its first attempt with the refusal on its result. A legacy (unmanaged) company-brain connect or sync had the same gap for an approved repository file: it is held as `visibility_noncanonical` instead. The GitHub and Google connectors now hold such a file on a database-only source as they already did with a checkout. `visibility: private` on its own lowercase line keeps working everywhere, and pages stored before this release are not changed.
+
+### Itemized changes
+
+- `src/core/import-file.ts`: `importFromContent` takes `holdNoncanonicalPrivate`, passed to `screenImportContent`, so a caller that imports external content refuses `visibility_noncanonical` before anything is stored.
+- `src/core/minions/handlers/ingest-capture.ts`, `src/core/persistence/visibility-request.ts`: the unmanaged capture opts in and turns the hold into put_page's `visibility_not_applied` refusal (`privateRequestRefusal`), which the worker treats as terminal.
+- `src/core/company-brain/profile.ts`, `src/core/github-source.ts`, `src/core/google/sweep-shared.ts`: the same opt-in for company-brain imports and the connectors' database-only imports.
+- `src/core/error-registry.ts`, `src/core/behavior-change-notice.ts`, `docs/guides/write-refusals.md`: name `ingest_capture` and the new holds.
+- `test/sync-blobs-pinned-order.test.ts`: its counting `git` shim runs the real `git` under the PATH it was created with. On a machine whose `git` is a wrapper that finds the next `git` on PATH (a shared-tree git guard), the shim and the wrapper ran each other until the 60 s test deadline. A second case runs the same reads through such a wrapper.
+- Tests, on PGLite and Postgres with a source folder that has no Git checkout: `test/ingest-capture-private-hold-7880.test.ts`, `test/company-brain-private-hold-7880.test.ts`; on PGLite, `test/google-connector-private-hold-7880.test.ts` drives the Google connector's database-only import.
+
 ## [0.60.484.0] - 2026-10-28
 
 **Converting a large source to git-canonical no longer re-embeds unchanged pages or stops on its own writes.**
