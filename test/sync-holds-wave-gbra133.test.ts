@@ -76,17 +76,23 @@ async function heldUnknownPage(engine: BrainEngine, root: string): Promise<void>
 const HAND_WRITTEN = '---\ntitle: Alpha Example\ntype: concept\naliases:\n  - alpha-one\n  - alpha-two\nstatus: active\n---\n\n'
   + 'Intro paragraph.\n\nSection text above a rule\n---\n\nAfter the rule.\n\n## Timeline\n\n- 2026-01-01: First event.\n';
 
+/** Quoted values, an unsorted inline tag list, stacked rules with the last one the timeline separator, the timeline at the end. */
+const STACKED_RULES = '---\ntitle: "Beta Example"\ntype: concept\ncreated: 2026-01-01\ntags: [zeta-tag, alpha-tag, mid-tag]\nsource_label: \'quoted value\'\n---\n\n'
+  + 'Intro paragraph.\n\n---\n\n---\n\n---\n\n## Timeline\n\n- 2026-01-01: First event.\n';
+
 /** notes/alpha as an older gbrain left it, with a database-only timeline row and protected key, then a commit edits its file: held unknown. */
-async function heldProtectedPage(engine: BrainEngine, root: string): Promise<void> {
-  writeFileSync(join(root, 'notes/alpha.md'), HAND_WRITTEN); commitAll(root, 'alpha');
+async function heldProtectedPage(engine: BrainEngine, root: string, file = HAND_WRITTEN, dbKeys: Record<string, unknown> = { embed_skip: true },
+  events = ['A database-only event.'], dbTruthEdit = false): Promise<void> {
+  writeFileSync(join(root, 'notes/alpha.md'), file); commitAll(root, 'alpha');
   expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
   await coordinated(engine, `DELETE FROM op_checkpoints WHERE op='sync-import-provenance'
     AND completed_keys->0->>'page_id' IN (SELECT id::text FROM pages WHERE source_id='default' AND slug='notes/alpha')`);
-  await coordinated(engine, `UPDATE pages SET frontmatter = frontmatter || '{"embed_skip": true}'::jsonb, knowledge_revision=$1::uuid, revision_write_request_id=NULL
-    WHERE source_id='default' AND slug='notes/alpha'`, [randomUUID()]);
-  await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.addTimelineEntry('notes/alpha',
-    { date: '2026-02-01', summary: 'A database-only event.', source: 'example', detail: '' }, { sourceId: 'default' }), TEST_WRITE_ATTRIBUTION));
-  writeFileSync(join(root, 'notes/alpha.md'), HAND_WRITTEN.replace('Intro paragraph.', 'Intro paragraph, edited.')); commitAll(root, 'edit alpha');
+  await coordinated(engine, `UPDATE pages SET frontmatter = frontmatter || $2::text::jsonb, knowledge_revision=$1::uuid, revision_write_request_id=NULL
+    WHERE source_id='default' AND slug='notes/alpha'`, [randomUUID(), JSON.stringify(dbKeys)]);
+  if (dbTruthEdit) await coordinated(engine, "UPDATE pages SET compiled_truth = 'An older database body.' WHERE source_id='default' AND slug='notes/alpha'");
+  for (const [i, summary] of events.entries()) await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.addTimelineEntry('notes/alpha',
+    { date: `2026-02-0${i + 1}`, summary, source: 'example', detail: '' }, { sourceId: 'default' }), TEST_WRITE_ATTRIBUTION));
+  writeFileSync(join(root, 'notes/alpha.md'), file.replace('Intro paragraph.', 'Intro paragraph, edited.')); commitAll(root, 'edit alpha');
   await performManagedSync(engine, OPTS);
   expect(await holds(engine)).toEqual(['notes/alpha.md file_drift unknown']);
 }
@@ -187,5 +193,22 @@ for (const backend of testBackends()) {
     expect(preview.details?.pages ?? []).toEqual([]);
     expect(readFileSync(join(root, 'notes/alpha.md'), 'utf8')).toBe(before);
     expect(await holds(engine)).toEqual(['notes/alpha.md file_drift unknown']);
+  }, { databaseUrl, setup }), 180_000);
+
+  test(`GBRA-133 [${backend}]: file wins on a file with quoted values, an unsorted inline tag list, stacked rules and a grandfather stamp only in the database appends only the two database-only timeline rows`, () => managedBrain(async ({ engine, root }) => {
+    await heldProtectedPage(engine, root, STACKED_RULES, { validate: false }, ['A database-only event.', 'A second database-only event.'], true);
+    const before = readFileSync(join(root, 'notes/alpha.md'), 'utf8');
+    const preview = await heldPreview(engine, 'file');
+    expect(listing(preview)).toEqual(['default:notes/alpha prefer_file']);
+    expect(preview.warnings?.some(warning => warning.startsWith('Commit the appended files right after the apply') && warning.includes('notes/alpha.md'))).toBe(true);
+    expect((await heldPreview(engine, 'file', preview.preview_hash!)).outcomes).toEqual({ repaired: 1 });
+    const after = readFileSync(join(root, 'notes/alpha.md'), 'utf8');
+    expect(after.slice(0, before.length)).toBe(before);
+    expect(after.slice(before.length)).toMatch(/^<!-- gbrain:materialized v1 [0-9a-f]+ -->\n- \*\*2026-02-01\*\* \| example — A database-only event\.\n(<!-- gbrain:materialized v1 [0-9a-f]+ -->\n)?- \*\*2026-02-02\*\* \| example — A second database-only event\.\n$/);
+    // Git durability is off in this checkout, so the preview says to commit the appended file; committed, the next sync imports it as is.
+    commitAll(root, 'repair');
+    await performManagedSync(engine, OPTS);
+    expect(await holds(engine)).toEqual([]);
+    expect(readFileSync(join(root, 'notes/alpha.md'), 'utf8')).toBe(after);
   }, { databaseUrl, setup }), 180_000);
 }

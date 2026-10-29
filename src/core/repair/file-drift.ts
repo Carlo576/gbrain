@@ -102,7 +102,9 @@ interface DriftItem extends RepairItem { page: ApprovedPage; hash: string; last:
 /** One page's prepared resolution: the ready reconcile preview its apply submits, and where it departs from the preferred side. */
 export interface ArtifactPage { slug: string; prefer: DriftSide; class?: DriftClass; adopt_slug_path: boolean; exceptions: DriftException[]; result: ParsedPage; preview: ReconcileArtifact;
   /** #6712 wave: the canonical file is gone from the last commit and the apply recreates it from the page. */
-  file_gone?: true }
+  file_gone?: true;
+  /** GBRA-133: file wins appends protected keys or timeline rows to the canonical file (`fileWinsContent`). */
+  file_appended?: true }
 /** #6712 wave: a page whose canonical file is gone from the last commit, resolved `--prefer file`: soft-delete exactly that page. */
 export interface SoftDeletePage { slug: string; prefer: 'file'; exceptions: DriftException[]; soft_delete: { ghost: GhostPage; owner: GhostOwner } }
 /**
@@ -499,13 +501,14 @@ export async function prepareDriftPage(engine: BrainEngine, sourceId: string, sl
   if (prepared.conflicts.length || !prepared.ready) throw opError('invalid_params', 'Some paths still need a decision.',
     `Preview ${slug} with gbrain sources reconcile ${sourceId} ${slug} --brain host --preview --out <file> and resolve it there.`);
   // GBRA-133: file wins keeps the file's bytes and only appends protected parts; a result that needs a re-render refuses here.
-  if (prefer === 'file' && !opts.fileGone) fileWinsContent(state.raw.toString('utf8'), state.file, prepared.result, text => readCanonicalFileText(state, slug, text), { sourceId, slug });
+  const raw = state.raw.toString('utf8');
+  const appends = prefer === 'file' && !opts.fileGone && fileWinsContent(raw, state.file, prepared.result, text => readCanonicalFileText(state, slug, text), { sourceId, slug }) !== raw;
   const preview: ReconcileArtifact = { format_version: 1, preview_id: randomUUID(), preconditions: state.pins,
     preimages: JSON.parse(stableJson({ file_base64: state.raw.toString('base64'), database: state.snapshot, stored_page: state.storedPage })),
     decisions, conflicts: [], result: prepared.result, result_digest: digest(prepared.result), status: 'ready' };
   await assertReconcileSize(engine, preview);
   return { slug, prefer, adopt_slug_path: adopt, exceptions: driftExceptions(prepared.result, prefer === 'file' ? file : database), result: prepared.result, preview,
-    ...(opts.fileGone ? { file_gone: true as const } : {}) };
+    ...(opts.fileGone ? { file_gone: true as const } : {}), ...(appends ? { file_appended: true as const } : {}) };
 }
 
 /**
@@ -818,6 +821,7 @@ export const fileDriftRepair: RepairHandler = {
         : [page.slug, page.preview.preconditions.revision, page.preview.preconditions.raw_file_hash, page.preview.result_digest]) });
     // #6712 wave: a recreated file stays only once committed; without Git durability the next sync imports the committed deletion again.
     const recreated = pages.flatMap(page => 'preview' in page && page.file_gone ? [page.preview.preconditions.relative_path] : []);
+    const appended = pages.flatMap(page => 'preview' in page && page.file_appended ? [page.preview.preconditions.relative_path] : []);
     // #6712 PR 4b: a removed file is gone only once its deletion is committed; without Git durability the next sync finds the committed file held again.
     const removed = pages.flatMap(page => 'remove_file' in page ? [page.remove_file.path] : []);
     let warnings: string[] = nextCommand ? [`This preview covered ${previewed} of the ${held!.targets.length} selected held pages${opts.cursor ? ' after its cursor' : ''} (one window stops at ${HELD_WINDOW_PAGES} pages or ${HELD_WINDOW_BUDGET_MS / 1000} s); its hash and apply command cover only these. `
@@ -825,13 +829,14 @@ export const fileDriftRepair: RepairHandler = {
     const releases = pages.filter(page => 'release_hold' in page).length;
     if (releases) warnings.push(`The apply only schedules a re-screen of ${releases} held file(s) whose page and file agree; the next sync (gbrain sync --source ${sourceId}) releases each that still agrees.`);
     let undoneBySync: { recreated: number; removed: number } | null = null;
-    if (recreated.length || removed.length) {
+    if (recreated.length || removed.length || appended.length) {
       const binding = await getWorktreeBinding(engine, sourceId);
       const root = join(binding!.local_path!, binding!.relative_path);
       if (!(await gitDurabilityPolicy(binding, root).catch(() => ({ durable: false }))).durable) {
         if (removed.length) warnings.unshift(`The next sync undoes this repair unless the removals are committed: Git durability is off for ${sourceId}, so the apply leaves each removed file's deletion uncommitted (${removed.length} file(s)) and the next sync holds the committed file again. Commit them right after the apply: ${commitPushCommand(root, removed, [`gbrain: repair file drift in ${sourceId}`])}`);
+        if (appended.length) warnings.unshift(`Commit the appended files right after the apply: Git durability is off for ${sourceId}, so the apply leaves the protected parts it appends to each file uncommitted (${appended.length} file(s)), and the next sync holds an uncommitted file it cannot import as is. ${commitPushCommand(root, appended, [`gbrain: repair file drift in ${sourceId}`])}`);
         if (recreated.length) warnings.unshift(`The next sync undoes this repair unless the recreated files are committed: Git durability is off for ${sourceId}, so the apply leaves each recreated file uncommitted (${recreated.length} file(s)) and the next sync imports their committed deletion again. Commit them right after the apply: ${commitPushCommand(root, recreated, [`gbrain: repair file drift in ${sourceId}`])}`);
-        undoneBySync = { recreated: recreated.length, removed: removed.length };
+        if (recreated.length || removed.length) undoneBySync = { recreated: recreated.length, removed: removed.length };
       }
     }
     const provenanceOf = new Map((held?.targets ?? []).flatMap(target => target.provenance && target.hold.slug ? [[target.hold.slug, target.provenance] as const] : []));
