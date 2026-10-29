@@ -2312,7 +2312,7 @@ HEAD so the clone can pull the upstream fix, but does not import HEAD, reports
 holds the file until upstream fixes it (#7897). Each restored file is first backed up under
 `~/.gbrain/backups/url-clone-fences/`. Its rows stay active and recallable as
 database-only facts, HEAD's bytes are imported as the page (as sync would
-import them), and only then is the file restored; each step is idempotent, so
+import them, except for a held file above), and only then is the file restored; each step is idempotent, so
 a stopped run previews the same file again. A file that changed since the preview
 reports `changed_since_preview` and is kept. The hash is bound to the `--source`
 selection, each source's incarnation and clone root, and each file's page: an
