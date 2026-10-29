@@ -10,6 +10,21 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.485.0] - 2026-10-29
+
+**A capture that asks for `visibility: private` in a spelling page privacy does not read is refused on every brain, never stored world-readable (#7880).**
+
+On a brain without managed persistence, the `ingest_capture` job behind the webhook `POST /ingest` route and the ingestion daemon wrote its content straight to the database. Its content screen did not check how a private request was spelled, so an event whose frontmatter said `Visibility: private`, `visibility: Private`, a block scalar, a list, a flow mapping or a merge key was stored as a world-readable page. A managed brain already refused the same event through `put_page`. Now both refuse it with `visibility_not_applied` and the same message, store nothing, and the worker dead-letters the job on its first attempt with the refusal on its result. A legacy (unmanaged) company-brain connect or sync had the same gap for an approved repository file: it is held as `visibility_noncanonical` instead. The GitHub and Google connectors now hold such a file on a database-only source as they already did with a checkout. `visibility: private` on its own lowercase line keeps working everywhere, and pages stored before this release are not changed.
+
+### Itemized changes
+
+- `src/core/import-file.ts`: `importFromContent` takes `holdNoncanonicalPrivate`, passed to `screenImportContent`, so a caller that imports external content refuses `visibility_noncanonical` before anything is stored.
+- `src/core/minions/handlers/ingest-capture.ts`, `src/core/persistence/visibility-request.ts`: the unmanaged capture opts in and turns the hold into put_page's `visibility_not_applied` refusal (`privateRequestRefusal`), which the worker treats as terminal.
+- `src/core/company-brain/profile.ts`, `src/core/github-source.ts`, `src/core/google/sweep-shared.ts`: the same opt-in for company-brain imports and the connectors' database-only imports.
+- `src/core/error-registry.ts`, `src/core/behavior-change-notice.ts`, `docs/guides/write-refusals.md`: name `ingest_capture` and the new holds.
+- `test/sync-blobs-pinned-order.test.ts`: its counting `git` shim runs the real `git` under the PATH it was created with. On a machine whose `git` is a wrapper that finds the next `git` on PATH (a shared-tree git guard), the shim and the wrapper ran each other until the 60 s test deadline. A second case runs the same reads through such a wrapper.
+- Tests, on PGLite and Postgres with a source folder that has no Git checkout: `test/ingest-capture-private-hold-7880.test.ts`, `test/company-brain-private-hold-7880.test.ts`; on PGLite, `test/google-connector-private-hold-7880.test.ts` drives the Google connector's database-only import.
+
 ## [0.60.484.0] - 2026-10-28
 
 **Converting a large source to git-canonical no longer re-embeds unchanged pages or stops on its own writes.**
