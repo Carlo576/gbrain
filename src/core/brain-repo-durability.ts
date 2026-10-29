@@ -320,6 +320,10 @@ exit 4
 /** Top-level folders that hold gbrain plumbing rather than filed content. */
 const NON_CONTENT_DIRS = new Set(['skills', 'scripts', 'node_modules']);
 
+/** Folder names rendered into the durability block: no dot-folders, markup, newlines or code-span breakers. */
+const SAFE_FOLDER_NAME = /^[A-Za-z0-9_][A-Za-z0-9_ .-]*$/;
+const MAX_DERIVED_FOLDERS = 50;
+
 /**
  * Resolve the filing-rules taxonomy for `repoPath`: prefer the repo's own
  * `skills/_brain-filing-rules.json`, then `_brain-filing-rules.json` at the
@@ -327,7 +331,8 @@ const NON_CONTENT_DIRS = new Set(['skills', 'scripts', 'node_modules']);
  * top-level folders gets those folders, each bundled rule that lives under one
  * keeping its kind; a repo with no content folder yet gets the bundled default,
  * the convention a new brain starts from. Fails open — a missing or malformed
- * repo file must never break `sources harden`.
+ * repo file must never break `sources harden`. Only plain folder names are
+ * listed (at most 50), so repo content cannot add text to the block.
  */
 function resolveFilingRules(repoPath: string): { rules: FilingRulesDoc; from: string } {
   for (const dir of [join(repoPath, 'skills'), repoPath]) {
@@ -340,9 +345,10 @@ function resolveFilingRules(repoPath: string): { rules: FilingRulesDoc; from: st
   let folders: string[] = [];
   try {
     folders = readdirSync(repoPath, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && !d.name.startsWith('.') && !NON_CONTENT_DIRS.has(d.name))
+      .filter((d) => d.isDirectory() && SAFE_FOLDER_NAME.test(d.name) && !NON_CONTENT_DIRS.has(d.name))
       .map((d) => d.name)
-      .sort();
+      .sort()
+      .slice(0, MAX_DERIVED_FOLDERS);
   } catch { /* unreadable — use the bundled default */ }
   if (folders.length === 0) return { rules: bundled, from: "gbrain's default taxonomy" };
   const rules = folders.flatMap((folder) => {

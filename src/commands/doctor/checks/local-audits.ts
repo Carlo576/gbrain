@@ -10,7 +10,7 @@
 import { applyExtractAtomsNoPricing, readExtractAtomsNoPricing } from '../../../core/cycle/extract-atoms-cost-gate.ts';
 import { applyFactsReconcileBacklog, readFactsReconcileBacklog } from '../../../core/facts/reconcile-watermark.ts';
 import { managedPersistenceEnabled } from '../../../core/persistence/ownership.ts';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { gbrainPath } from '../../../core/config.ts';
 import { multiSourceDriftCheck, multiSourceDriftNotVerified } from '../schema-pack-checks.ts';
 import { computeConversationFormatCoverageCheck } from './conversation-coverage.ts';
@@ -410,8 +410,9 @@ async function runHomeDirInWorktree(ctx: DoctorContext): Promise<Check[]> {
     const { homedir } = await import('node:os');
     const bunGlobalRoot = join(process.env.BUN_INSTALL || join(homedir(), '.bun'), 'install', 'global');
     const globalPackages = [join(bunGlobalRoot, 'node_modules', 'gbrain')];
+    let npmRoot: string | undefined;
     try {
-      const npmRoot = execFileSync('npm', ['root', '-g'], {
+      npmRoot = execFileSync('npm', ['root', '-g'], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: 5000,
@@ -435,7 +436,10 @@ async function runHomeDirInWorktree(ctx: DoctorContext): Promise<Check[]> {
       // entirely on this platform) — nothing to check.
     }
     const { assessGbrainBinaries } = await import('../../../core/npm-squat-check.ts');
-    const assessment = assessGbrainBinaries(candidates, { globalPackages, bunGlobalRoot });
+    const { fileURLToPath } = await import('node:url');
+    const assessment = assessGbrainBinaries(candidates, {
+      globalPackages, bunGlobalRoot, npmRoot, selfDir: dirname(fileURLToPath(import.meta.url)),
+    });
     if (assessment.status !== 'skip') {
       checks.push({
         name: 'npm_squat',

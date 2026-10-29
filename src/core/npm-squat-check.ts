@@ -44,6 +44,10 @@ export interface AssessGbrainBinariesOptions {
   globalPackages?: string[];
   /** Bun's global install root (`$BUN_INSTALL/install/global`), to remove a package found there with Bun. */
   bunGlobalRoot?: string;
+  /** `npm root -g`: only a package under it is removed with npm, which uninstalls from its own prefix alone. */
+  npmRoot?: string;
+  /** Directory of the running gbrain's code; when it is this project, a real gbrain exists even if PATH shows none. */
+  selfDir?: string;
 }
 
 export interface ClassifyGbrainBinaryOptions {
@@ -221,11 +225,20 @@ export function classifyGlobalGbrainPackage(dir: string): ClassifiedGbrainBinary
   };
 }
 
-function squatFix(foreign: ClassifiedGbrainBinary, realOnPath: boolean, bunGlobalRoot?: string): Action {
+function squatFix(foreign: ClassifiedGbrainBinary, realElsewhere: boolean, opts: AssessGbrainBinariesOptions): Action {
   const dir = foreign.packageDir ?? foreign.path;
-  const bunRoot = bunGlobalRoot ? canonicalDir(bunGlobalRoot) + sep : undefined;
-  const viaBun = (bunRoot !== undefined && dir.startsWith(bunRoot)) || /[\\/]\.bun[\\/]install[\\/]global[\\/]/.test(dir);
+  const under = (root?: string) => root !== undefined && dir.startsWith(canonicalDir(root) + sep);
+  const viaBun = under(opts.bunGlobalRoot) || /[\\/]\.bun[\\/]install[\\/]global[\\/]/.test(dir);
+  const remove = viaBun ? ['bun', 'remove', '-g', 'gbrain'] : under(opts.npmRoot) ? ['npm', 'uninstall', '-g', 'gbrain'] : undefined;
   const verify = { argv: ['gbrain', 'doctor', '--only', 'npm_squat', '--json'] };
+  const effect = realElsewhere ? 'can take over the gbrain command' : foreign.global ? 'is installed globally' : 'is what runs as gbrain';
+  const why = `The npm registry name "gbrain" belongs to an unrelated package (${dir}); this project is not distributed on npm, and that package ${effect}.`;
+  if (!remove) {
+    return {
+      consent: ['persistent_install'], actor: 'user', requires_exclusive: false, verify, docs: 'README.md#install', why,
+      user_message: `An unrelated npm package named "gbrain" is installed at ${dir}. It is not GBrain. Remove it with the package manager that installed it (pnpm, yarn, volta or another npm prefix); npm and bun only remove packages from their own global directories.`,
+    };
+  }
   const reinstall: Action = {
     argv: INSTALL_ARGV, consent: ['persistent_install'], actor: 'agent', requires_exclusive: false, verify,
     why: 'No real gbrain is left on PATH. This installs it from the latest-stable release ref, the only supported source.',
@@ -236,11 +249,10 @@ function squatFix(foreign: ClassifiedGbrainBinary, realOnPath: boolean, bunGloba
     },
   };
   return {
-    argv: viaBun ? ['bun', 'remove', '-g', 'gbrain'] : ['npm', 'uninstall', '-g', 'gbrain'],
-    consent: ['persistent_install'], actor: 'agent', ask_user: true, requires_exclusive: false, verify, docs: 'README.md#install',
-    why: `The npm registry name "gbrain" belongs to an unrelated package (${dir}); this project is not distributed on npm, and that package ${realOnPath ? 'can take over the gbrain command' : 'is what runs as gbrain'}.`,
-    user_message: `An unrelated npm package named "gbrain" is installed at ${dir}. It is not GBrain${realOnPath ? ' and can take over the gbrain command' : ''}. Should I uninstall it${realOnPath ? '' : ' and install GBrain from its GitHub release'}?`,
-    ...(realOnPath ? {} : { then: reinstall }),
+    argv: remove,
+    consent: ['persistent_install'], actor: 'agent', ask_user: true, requires_exclusive: false, verify, docs: 'README.md#install', why,
+    user_message: `An unrelated npm package named "gbrain" is installed at ${dir}. It is not GBrain${realElsewhere ? ' and can take over the gbrain command' : ''}. Should I uninstall it${realElsewhere ? '' : ' and install GBrain from its GitHub release'}?`,
+    ...(realElsewhere ? {} : { then: reinstall }),
   };
 }
 
@@ -287,14 +299,18 @@ export function assessGbrainBinaries(candidates: string[], opts: AssessGbrainBin
   }
   if (foreignIdx !== -1 && (realIdx === -1 || foreignIdx < realIdx)) {
     const foreign = binaries[foreignIdx]!;
+    const self = opts.selfDir ? nearestPackageJson(opts.selfDir) : null;
+    const realElsewhere = realIdx !== -1
+      || binaries.slice(0, foreignIdx).some((b) => b.kind === 'unknown')
+      || (self !== null && self.pkg.name === 'gbrain' && isRealGbrainPackage(self.pkg));
     const where = foreign.global
-      ? `An unrelated npm package named "gbrain" is installed globally at ${foreign.packageDir}, and no real gbrain is on PATH. `
+      ? `An unrelated npm package named "gbrain" is installed globally at ${foreign.packageDir}${realElsewhere ? '' : ', and no real gbrain is on PATH'}. `
       : `\`gbrain\` on PATH resolves to an unrelated npm package, not this project (${foreign.path} — ${foreign.detail}). `;
     return {
       status: 'warn',
       message: `${where}gbrain is NOT distributed on npm. ${NPM_SQUAT_REMEDIATION}`,
       binaries,
-      fix: squatFix(foreign, realIdx !== -1, opts.bunGlobalRoot),
+      fix: squatFix(foreign, realElsewhere, opts),
     };
   }
   if (foreignIdx !== -1) {
