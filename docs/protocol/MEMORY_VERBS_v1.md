@@ -82,11 +82,8 @@ opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve 
 host, then `gbrain connect https://host/mcp --token gbrain_xxx --install` on
 each client.
 
-**Listing:** `--advertise verbs` (what gbrain's own registrations write)
-shows the seven verbs plus `request_tools` in tools/list while everything
-`--surface` allows stays callable; `request_tools` lists the rest and returns
-full schemas, and a tool it describes joins the session's list. An explicit
-`--surface` without `--advertise` lists that whole surface.
+**Listing:** `--advertise verbs` (gbrain's registrations) lists the verbs
+plus `request_tools`, which describes the rest; all of `--surface` stays callable.
 
 **Surface modes:** `--surface verbs` exposes EXACTLY the seven verbs —
 advertised list AND dispatch are filtered fail-closed (a hidden op returns
