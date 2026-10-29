@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.500.0] - 2026-10-29
+
+**`gbrain repair file-drift` can now resolve the `file_drift` holds that no command could clear before, and `--prefer file` keeps the file exactly as written.**
+
+Four hold shapes used to stay stuck: a page with no file origin (a URL or capture-label source URI) whose file appeared at its slug path; a page whose file uses another spelling of its slug, such as `README.md` for slug `readme`; a hold whose page and file already agree; and a page a read-only mirror stored database-only after its source became writable again (part 1 of #7931). File wins now adopts the slug-path file and records its path. An agreeing hold previews as `release_hold`; applying it writes nothing and schedules a re-screen, so the next sync releases it. A sync with no new commit now also re-screens holds whose page moved. `--prefer file` used to re-render the whole file whenever it kept a protected frontmatter key or a database-only timeline row, which reordered keys, re-emitted lists and rewrote the body. It now keeps the file's bytes and only inserts the missing protected keys before the closing `---` and appends the database-only timeline rows. Any other difference refuses with the new code `file_wins_rewrite`, in both the preview and the apply, and writes nothing. When Git durability is off, the preview reminds you to commit the files it appended to.
+
+### How to use it
+
+```bash
+gbrain repair file-drift --source <id> --held --prefer file          # preview: release_hold rows and the file-wins plan
+gbrain repair file-drift --source <id> --held --prefer file --apply --expect <hash>
+gbrain sync --source <id> --no-pull                                  # releases the agreeing holds
+```
+
+### Itemized changes
+
+- `src/core/persistence/unbound-pages.ts`: `recordsNoFileOrigin` treats only a `file:` source URI as a file origin; `slugPathFile` finds the one file discovery imports as the slug (several candidates still refuse `slug_path_ambiguous`).
+- `src/core/persistence/sync-pass-run.ts`: the pass-kind gate counts `movedDriftHolds`.
+- `src/core/repair/file-drift.ts`: `release_hold` rows re-check the pinned revision and file hash and call `requestGitHoldRetry`; `file_appended` warns when Git durability is off.
+- `src/core/persistence/file-wins-content.ts` (new): byte-preserving file wins, read back against the reviewed result; `file_wins_rewrite` refusal in `prepareDriftPage` and `reconcile-prepare`.
+- `src/core/persistence/mirror-read-only.ts`: `staleMirrorPage` reconciles a stale `mirror_read_only` page on a writable source against its slug-path file; the page upsert and reconcile clear the stamp once a source path is recorded.
+- Docs: `docs/guides/repair.md`, `docs/guides/write-refusals.md`, `docs/error-codes.md`, key-files `canonical-reconciliation.md`.
+- Tests: `test/sync-holds-wave-gbra133.test.ts` (new, PGLite and Postgres).
+
 ## [0.60.499.0] - 2026-10-29
 
 **The install docs now lead with hosted GBrain at gbrain.io, the fastest way to use GBrain with any harness, and `gbrain doctor` catches the unrelated npm `gbrain` package even when it is not on your PATH.**
