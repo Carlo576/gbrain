@@ -332,15 +332,16 @@ export function makeIngestCaptureHandler(engine: BrainEngine) {
         throw err;
       }
     }
-    // #7880: nothing was stored; the job refuses visibility_not_applied without a retry, as the door's put_page refuses it on a managed brain.
-    if (result.refusal?.code === 'visibility_noncanonical') {
-      throw privateRequestRefusal({ slug: result.slug, source_id: sourceFallback ? 'default' : sourceId ?? 'default' }, parseMarkdown(event.content, `${result.slug}.md`).frontmatter);
-    }
+    const refused = result.refusal?.code === 'visibility_noncanonical';
     if (sourceFallback) {
       console.error(
         `[WARN] ingest_capture: requested source '${sourceFallback.requested}' unavailable ` +
-        `(${sourceFallback.reason}); wrote under default`,
+        `(${sourceFallback.reason}); ${refused ? 'refused' : 'wrote'} under default`,
       );
+    }
+    // #7880: nothing was stored; the job refuses visibility_not_applied without a retry, as the door's put_page refuses it on a managed brain.
+    if (refused) {
+      throw privateRequestRefusal({ slug: result.slug, source_id: sourceFallback ? 'default' : sourceId ?? 'default' }, parseMarkdown(event.content, `${result.slug}.md`).frontmatter);
     }
 
     return {
