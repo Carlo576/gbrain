@@ -436,6 +436,29 @@ describe('ci-reuse remote-gate decision', () => {
     }
   });
 
+  test('a newer run on the head that did not run the full job (a diagnostic dispatch, a reusing push) is skipped, never a failed full run', async () => {
+    const skipped = (id: number) => ({ [`${id}/1`]: [{ name: PROFILES.test.job, status: 'completed', conclusion: 'skipped' }, { name: 'reused-full-suite', status: 'completed', conclusion: 'success' }] });
+    // A diagnostic dispatch that passed, a push that reused (full-suite skipped), and a diagnostic dispatch that failed.
+    for (const over of [{ id: 630 }, { id: 630, event: 'push' }, { id: 630, conclusion: 'failure' }]) {
+      const deps = gate({ runs: [run('test.yml', over), run('test.yml'), run('e2e.yml')], jobs: skipped(630) });
+      expect(await decideGate(deps, PROFILES.test, A, T, REPO)).toMatchObject({ state: 'reuse' });
+      expect((await go(deps)).code).toBe(0);
+    }
+    // One still in progress whose full job is already skipped does not hold the gate.
+    const live = gate({ runs: [run('test.yml', { id: 630, status: 'in_progress', conclusion: null }), run('test.yml'), run('e2e.yml')], jobs: skipped(630) });
+    expect(await decideGate(live, PROFILES.test, A, T, REPO)).toMatchObject({ state: 'reuse' });
+  });
+
+  test('another commit with the same tree inherits that head\'s newest full run: a newer failure there still refuses', async () => {
+    const C2 = '8'.repeat(40);
+    const commits = { [A]: { tree: T, parents: [BASE] }, [C2]: { tree: T, parents: [A] } };
+    const deps = gate({ commits, runs: [run('test.yml', { id: 610, conclusion: 'failure' }), run('test.yml'), run('e2e.yml')] });
+    expect(await decideGate(deps, PROFILES.test, C2, T, REPO)).toMatchObject({ state: 'failed' });
+    expect((await go(deps, C2)).code).toBe(3);
+    const busy = gate({ commits, runs: [run('test.yml', { id: 610, status: 'in_progress', conclusion: null }), run('test.yml'), run('e2e.yml')] });
+    expect(await decideGate(busy, PROFILES.test, C2, T, REPO)).toMatchObject({ state: 'pending' });
+  });
+
   test('a cancelled newest run looks further back; a passed run of the same tree on another head (a merge commit) reuses', async () => {
     expect((await go(gate({ runs: [run('test.yml', { id: 620, conclusion: 'cancelled' }), run('test.yml'), run('e2e.yml')] }))).code).toBe(0);
     const M2 = '7'.repeat(40);

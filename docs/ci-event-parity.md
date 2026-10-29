@@ -109,8 +109,11 @@ complete full runs of both Test and E2E under the master-push rules above. If
 both did, the receipt comes from them: the same `PREGATE_REMOTE: tree= tests=
 failed=` line, with the runs' executed test identities as the counts, and no VM
 starts. A full run on the tree still in progress is waited for (90 minutes at
-most, a progress line every minute). A failed newest run on the head refuses
-with no receipt. Every other case runs the gate: a dirty tree, a commit GitHub
+most, a progress line every minute). A failed newest full run refuses with no
+receipt. The newest full run on the head decides, then the newest full run on
+each other head with the same tree, so an empty commit cannot skip a newer
+failure; a run that did not run the full job (a diagnostic dispatch, a push that
+reused) is skipped. Every other case runs the gate: a dirty tree, a commit GitHub
 doesn't have, a missing workflow, an API error, or `GBRAIN_PREGATE_REUSE=0`.
 
 Only the identical tree reuses. A head that /ship changed after full-ci has a

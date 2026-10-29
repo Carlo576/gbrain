@@ -114,30 +114,24 @@ export async function decide(deps: ReuseDeps, p: Profile, sha: string, repo: str
       if (!why) return accept(run, tree, rejected, 'the merged head');
       rejected.push({ run_id: run.id, ...why });
     }
-    const other = await sameTreeRun(deps, p, repo, tree, new Set(primary.map(r => r.id)), [head, sha], rejected);
-    if (other) return accept(other, tree, rejected, `head ${other.head_sha.slice(0, 12)} (same tree as the merged head)`);
+    const tried = new Set(primary.map(r => r.id));
+    const heads = new Map<string, string>();
+    for (const run of (await deps.recentSuccessfulRuns(p.file)).sort((a, b) => b.id - a.id)) {
+      if (tried.has(run.id) || !isCandidate(run) || run.head_sha === head || run.head_sha === sha || run.head_repository?.full_name !== repo) continue;
+      if (!heads.has(run.head_sha)) {
+        if (heads.size >= MAX_FALLBACK_HEADS) continue;
+        heads.set(run.head_sha, (await deps.commit(run.head_sha)).tree);
+      }
+      if (heads.get(run.head_sha) !== tree) continue;
+      const why = await reject(deps, p, run, repo, tree, tree);
+      if (!why) return accept(run, tree, rejected, `head ${run.head_sha.slice(0, 12)} (same tree as the merged head)`);
+      rejected.push({ run_id: run.id, ...why });
+    }
   } catch (e) {
     return { reuse: false, reason: 'api_error', detail: `reading the push commit, runs, jobs or artifacts failed: ${e instanceof Error ? e.message : String(e)}`, tree, rejected };
   }
   if (!rejected.length) return { reuse: false, reason: 'no_candidate', detail: `no ${p.workflow} workflow_dispatch or push run exists on the merged head or on another head with tree ${tree}`, tree, rejected };
   return { reuse: false, reason: rejected[0]!.reason, detail: rejected.map(r => r.detail).join('; '), tree, rejected };
-}
-
-/** The newest passed full run of `p` on another head whose commit tree is `tree` (at most MAX_FALLBACK_HEADS heads read). */
-async function sameTreeRun(deps: ReuseDeps, p: Profile, repo: string, tree: string, tried: Set<number>, skipShas: string[], rejected: Rejection[]): Promise<FullRun | undefined> {
-  const heads = new Map<string, string>();
-  for (const run of (await deps.recentSuccessfulRuns(p.file)).sort((a, b) => b.id - a.id)) {
-    if (tried.has(run.id) || !isCandidate(run) || skipShas.includes(run.head_sha) || run.head_repository?.full_name !== repo) continue;
-    if (!heads.has(run.head_sha)) {
-      if (heads.size >= MAX_FALLBACK_HEADS) continue;
-      heads.set(run.head_sha, (await deps.commit(run.head_sha)).tree);
-    }
-    if (heads.get(run.head_sha) !== tree) continue;
-    const why = await reject(deps, p, run, repo, tree, tree);
-    if (!why) return run;
-    rejected.push({ run_id: run.id, ...why });
-  }
-  return undefined;
 }
 
 function accept(run: FullRun, tree: string, rejected: Rejection[], where: string): Decision {
@@ -150,8 +144,9 @@ function accept(run: FullRun, tree: string, rejected: Rejection[], where: string
  * already passed the complete full run of a workflow needs no Ubicloud gate. Same fail-closed checks as a push:
  * the run's latest attempt and its full-suite job succeeded and its tested-tree artifact records `tree`. Only
  * the identical tree reuses; a stamp-only difference goes through gstack-pregate's stamp rule, never through here.
- * The newest run on `head` decides: in progress waits, a failure refuses (no receipt, no VMs), cancelled or
- * not a full run looks further back; anything else is `none` and the caller runs the VM gate.
+ * The newest full run on `head` decides, then the same for each other head with the same tree (newest first): in
+ * progress waits, a failure refuses (no receipt, no VMs), cancelled or not a full run looks further back; anything else
+ * is `none` and the caller runs the VM gate.
  */
 export type GateState = 'reuse' | 'pending' | 'failed' | 'none';
 export interface GateDecision { state: GateState; detail: string; tests?: number; failed?: number; url?: string }
@@ -165,20 +160,42 @@ export async function decideGate(deps: GateDeps, p: Profile, head: string, tree:
   try {
     const headTree = (await deps.commit(head)).tree;
     if (headTree !== tree) return { state: 'none', detail: `${p.workflow}: commit ${head} has tree ${headTree} on GitHub, not the working tree ${tree}` };
-    const primary = (await deps.runsForHead(p.file, head)).filter(r => r.head_sha === head && isCandidate(r)).sort((a, b) => b.id - a.id);
-    for (const run of primary) {
-      const why = await reject(deps, p, run, repo, tree, headTree);
-      if (!why) return gateAccept(deps, p, run, tree, repo);
-      if (why.reason === 'run_in_progress') return { state: 'pending', detail: `${p.workflow} ${why.detail}` };
-      if (why.reason === 'run_failed' || why.reason === 'full_suite_not_success') return { state: 'failed', detail: `${p.workflow} ${why.detail}`, url: runUrl(repo, run) };
-      rejected.push({ run_id: run.id, ...why });
+    const own = await headGate(deps, p, head, tree, repo, rejected);
+    if (own) return own;
+    const heads = new Map<string, string>();
+    for (const run of (await deps.recentSuccessfulRuns(p.file)).sort((a, b) => b.id - a.id)) {
+      if (!isCandidate(run) || run.head_sha === head || run.head_repository?.full_name !== repo || heads.has(run.head_sha)) continue;
+      if (heads.size >= MAX_FALLBACK_HEADS) break;
+      heads.set(run.head_sha, (await deps.commit(run.head_sha)).tree);
+      if (heads.get(run.head_sha) !== tree) continue;
+      const other = await headGate(deps, p, run.head_sha, tree, repo, rejected);
+      if (other) return other;
     }
-    const other = await sameTreeRun(deps, p, repo, tree, new Set(primary.map(r => r.id)), [head], rejected);
-    if (other) return gateAccept(deps, p, other, tree, repo);
   } catch (e) {
     return { state: 'none', detail: `${p.workflow}: reading commits, runs, jobs or artifacts failed: ${e instanceof Error ? e.message : String(e)}` };
   }
   return { state: 'none', detail: rejected.length ? `${p.workflow}: ${rejected.map(r => r.detail).join('; ')}` : `${p.workflow}: no workflow_dispatch or push run on ${head} or on another head with tree ${tree}` };
+}
+
+/**
+ * The newest full run of `p` on commit `sha` (whose tree is `tree`) decides; a run that did not run the full job
+ * (a diagnostic dispatch, a push that reused) is skipped. Undefined when `sha` has no deciding run.
+ */
+async function headGate(deps: GateDeps, p: Profile, sha: string, tree: string, repo: string, rejected: Rejection[]): Promise<GateDecision | undefined> {
+  const runs = (await deps.runsForHead(p.file, sha)).filter(r => r.head_sha === sha && isCandidate(r)).sort((a, b) => b.id - a.id);
+  for (const run of runs) {
+    const full = (await deps.jobs(run.id, run.run_attempt)).filter(j => j.name === p.job);
+    if (full.some(j => j.conclusion === 'skipped') || (run.status === 'completed' && full.length === 0)) {
+      rejected.push({ run_id: run.id, reason: 'full_suite_missing', detail: `run ${run.id} attempt ${run.run_attempt} did not run ${p.job} (not a full-profile run)` });
+      continue;
+    }
+    const why = await reject(deps, p, run, repo, tree, tree);
+    if (!why) return gateAccept(deps, p, run, tree, repo);
+    if (why.reason === 'run_in_progress') return { state: 'pending', detail: `${p.workflow} ${why.detail}` };
+    if (why.reason === 'run_failed' || why.reason === 'full_suite_not_success') return { state: 'failed', detail: `${p.workflow} ${why.detail}`, url: runUrl(repo, run) };
+    rejected.push({ run_id: run.id, ...why });
+  }
+  return undefined;
 }
 
 const runUrl = (repo: string, run: FullRun) => `https://github.com/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}`;
