@@ -31,6 +31,543 @@ Upgrade. If you previewed `gbrain repair ghost-pages` on an older version, previ
 
 Reported by @Kkkkkuro (#7736).
 
+## [0.60.495.0] - 2026-10-29
+
+**Every harness install now tells the agent to check gbrain first, and the rule rides each turn, not just the system prompt.**
+
+`gbrain setup <harness>`, `gbrain connect --install`, `gbrain bootstrap harness` and the thin-client GBRAIN-INSTRUCTIONS.md now write a short marked brain-first block into the harness's own instruction file (Claude Code `~/.claude/CLAUDE.md`, Codex `AGENTS.md` or a non-empty `AGENTS.override.md`, opencode `AGENTS.md`, the OpenClaw workspace `AGENTS.md`, an existing Hermes `SOUL.md`, a Cursor project rule). Text outside the markers is never touched, and a re-run upgrades the block in place. While the block is installed, each harness's per-turn hook puts a one-line rule beside every turn: the Claude Code and Codex `UserPromptSubmit` hook, a hook-only OpenClaw plugin (`gbrain-turn-rule`, `before_prompt_build`), and a self-contained Hermes `pre_llm_call` hook. In harness-evals, the block alone was followed in 0 of 80 OpenClaw and 0 of 80 Hermes trials; with the per-turn rule, the installed agent used gbrain in 80 of 80 on each.
+
+New stdio registrations gbrain writes now pin `--surface starter`, the daily-driver tool list (reach and accuracy unchanged, 17-23% fewer input tokens in gbrain-evals#191). Existing registrations keep their surface and are never rewritten, and the Codex and Claude Code plugins and a bare `gbrain serve` stay on `full`.
+
+### How to turn it off
+
+```bash
+gbrain setup <harness> --instructions-only --no-instructions   # removes the block and the per-turn rule, and is remembered
+GBRAIN_AGENT_INSTRUCTIONS=0                                    # same, from the environment
+```
+
+### Itemized changes
+
+- `src/core/setup/brain-first.ts` (new): the block, its per-harness target files, the ledger at `~/.gbrain/agent-instructions.json` and the per-turn rule; `gbrain setup <harness> --instructions-only` manages only the block.
+- `src/core/setup/openclaw-turn-plugin.ts` and `src/core/setup/hermes-turn-hook.ts` (new): the OpenClaw plugin, installed with the openclaw CLI (or printed when openclaw isn't on PATH), and the Hermes hook plus its shell-hooks allowlist approval.
+- `src/commands/hook.ts`: `user-prompt` leads each turn with the rule while a block is installed, with or without a context block.
+- doctor `harness_wiring` warns when a registered harness's block is missing, stale or damaged, with a fix that rewrites only the block, and notes a `--surface full` registration as information only.
+- Tests: `test/setup-brain-first.test.ts`, `test/brain-first-turn-rule.test.ts`, plus updated setup, readiness and registration suites.
+
+## [0.60.494.0] - 2026-10-29
+
+**A conversion to git-canonical now finishes while a live writer commits to the source.**
+
+Door commits (`gbrain git commit-push`) that landed after the apply's second strict pass read its level left Git ahead of the database at those paths, so the closing preview never reached 0 and the apply stopped with `git_conversion_incomplete`, however fast it ran. Nobody can promise a quiet window on a source that scheduled ingest and agents write to. The apply now runs up to three closing strict passes (`strict_pass_closing`) while those commits are all that is left, previewing again after each; the result reports `closing_passes`. No write is held or delayed. If Git is still ahead after the last pass, or anything else is open, the apply stops with `git_conversion_incomplete` and its fix as before, the source stays git-canonical, and a plain `gbrain sync` imports the rest.
+
+**`gbrain sources canonical <id> --to git` on a managed source with no Git checkout now refuses with a typed error and a fix.**
+
+When a managed source's folder was a plain directory, or a `git init` with no commit yet, the preview and the apply failed with `internal_error` and a raw git message. They now refuse with `git_checkout_required` or `git_branch_unborn`, read and write nothing, leave the source usable as it is, and carry a fix that asks the user before the folder becomes a Git repository (then `gbrain sources canonical <id> --to git --dry-run --json` previews again).
+
+- The strict-pass receipt-wait test runs in about 6 seconds instead of sleeping past a 30-second wait: the managed sync receipt waits now live in one module with a test seam. It covers both strict passes.
+- A direct test covers the NULL-vector clause of the no-op embedding check.
+- The admin UI's dev dependency `vite` moves from 6.4.4 to 6.4.5 for GHSA-8g5g-mxqh-grgj (Medium), which the OSV scan reports on every pull request.
+
+## [0.60.493.0] - 2026-10-29
+
+**`search` now finds a saved fact by its words the way the facts keyword index does, and a newer correction comes back ahead of the fact it corrects (`search.saved_facts_supersede`, on by default). In a keyless replay of 816 harness `search` calls, the author's correction ranked above the retracted post in 27 of 27 reads of the corrections case, against 1 of 27 on 0.60.492.0.**
+
+Words in `retrieval.saved_facts` now match whole after stemming with the brain's full-text language, so "renewal" finds "renews" and "count" no longer matches inside "countersigned". Words of a CJK script still match as substrings. A fact still needs three quarters of the query's words, but never more than four. Words that frame a question about a figure (count, number, total, amount) aren't counted. At most five facts ride a reply, as before.
+
+With the new default, a newer fact carrying a correction cue ("correction", "ignore the 52", "disregard", "not what I posted") that shares two matched words with a returned fact comes back too, ahead of it. The older fact is labelled `corrected_by`. A correction only counts when it is about the same thing:
+- it is not saved under another entity;
+- it is not of lower trust;
+- it shares a name the older fact matched;
+- it either adds a figure or withdraws what was said.
+
+So an acknowledgement ("thanks for the correction, noted") corrects nothing. Nothing stored changes. In the same replay no read lost a fact 0.60.492.0 returned, and no label fell outside the corrections cases.
+
+### How to turn it off
+
+```bash
+gbrain config set search.saved_facts_supersede false   # word matching stays; corrections are no longer reordered or labelled
+```
+
+`false`, `off`, `0` or `no` (any case) turns it off.
+
+### Itemized changes
+
+- `src/core/search/saved-facts-match.ts` (new): the stemmed matcher, moved out of `ops/search.ts`. It holds the correction rules, newest-first ordering of corrections under the five-fact cap, and a scan that keeps the facts keyword index unless a query has a CJK word.
+- `src/core/ops/search.ts`: an entity-resolved search keeps the `corrected_by` label on the entity copy of a fact.
+- `src/mcp/dispatch.ts`: saved facts carry their `corrected_by` note in the text reply.
+- The new key, the upgrade notice and the docs are in `src/core/config.ts`, `src/core/behavior-change-notice.ts`, `docs/architecture/RETRIEVAL.md` and the key-files entry.
+- Tests: `test/search-saved-facts-match.test.ts` (stemming, CJK, the off spellings and each correction rule), `test/search/saved-facts-probe.test.ts` (the scan's index use on 20,000 facts), `test/config-search-registry.test.ts`, `test/search-response-meta-concurrency.test.ts`.
+
+## [0.60.492.0] - 2026-10-29
+
+**The remote gate takes its receipt from GitHub's full-ci when the exact tree already passed there, so a merge slot no longer pays for a second full test pass on Ubicloud.**
+
+`scripts/pregate-remote-gate.sh` prints the `PREGATE_REMOTE:` line that clears /ship's remote-gate obligation, and it used to start Ubicloud VMs every time, even when GitHub had just run the same tests on the same tree. Now, when the working tree is clean and both the Test and E2E full runs passed on GitHub for that exact tree (`full-suite` and `e2e-full-suite` green in the latest attempt, their tree artifacts naming the tree), it prints the same line from those runs and starts no VM. A full run still in progress on the tree is waited for, up to 90 minutes. A full run on the tree that failed refuses with the run's URL instead of spending on VMs. The newest full run on the tree decides, across every recent commit with that tree, so an older pass cannot outrank a newer failure. Any other tree runs the VM gate as before, including a tree that differs only in release stamps (gstack's stamp rule covers that case), a tree that changes `.github/workflows/test.yml`, `.github/workflows/e2e.yml`, `scripts/ci-reuse.ts`, `scripts/lib/gh-issue.ts`, `scripts/ci-full-suite-tree.sh` or `scripts/ci-executed-counts.ts` relative to master (its runs would attest to themselves), a dirty working tree, or `GBRAIN_PREGATE_REUSE=0`. On reuse, `tests=` counts the executed test identities of both runs.
+
+### Itemized changes
+
+- `scripts/ci-reuse.ts`: `--gate` mode (`decideGate`, `runGate`) uses the same run, job and tree-artifact checks as a master push's reuse; exit 0 reuse, 3 a failed full run on the tree, 4 no reuse.
+- `scripts/pregate-remote-gate.sh`: the reuse path on a clean tree, `GBRAIN_PREGATE_REUSE=0` to turn it off, and the `GBRAIN_PREGATE_REUSE_CMD` and `GBRAIN_PREGATE_REPO` test seams.
+- Docs: `docs/ci-event-parity.md` ("Remote-gate reuse") and `docs/TESTING.md`.
+- Tests: `test/scripts/ci-reuse.test.ts` and `test/scripts/pregate-remote-gate.test.ts`.
+
+## [0.60.491.0] - 2026-10-29
+
+**A budgeted `query` now leads with the question's dated saved facts (the facts block is on by default). On a sealed held-out set of 200 questions it answered 183, against 151 without it.**
+
+`query` with a token budget puts up to 40 question-ranked dated facts first, oldest first, within 22% of the budget, in place of the facts arm (and of the temporal fact reserve when that is on). It adds about 70 tokens to a median budgeted result (p95 about 700) and makes no model call. Queries without a budget, `search` and `think` are unchanged, and a remote caller sees only facts whose source pages it could read.
+
+### How to turn it off
+
+```bash
+gbrain config set search.query_facts_block false   # back to the facts arm (or the temporal fact reserve when it is on)
+```
+
+`false`, `off`, `0` or `no` (any case) turns it off, and a config read error leaves it off.
+
+### Itemized changes
+
+- `src/core/search/facts-arm.ts`: `queryFactsBlockEnabled` is on unless the key says off.
+- `src/core/config.ts`, `src/core/search/query-arms.ts`, docs: the default is described as on.
+- `src/core/behavior-change-notice.ts`: the upgrade notice row for the new default.
+- Tests: `test/search-8k-conversion.test.ts` covers the unset default, the off spellings, the fail-closed read and the single run beside the temporal reserve; the C5 identity golden and the facts-arm and temporal-reserve suites pin the block off.
+
+## [0.60.490.0] - 2026-10-29
+
+**Four new search settings for answering inside a tight token budget. All are off by default, so search, query and think output is unchanged until you turn one on.**
+
+Each setting is one step in fitting the right evidence into an 8,000-token answer. They stay off until the held-out evaluation decides, one at a time, whether each one earns a default flip.
+
+### How to use it
+
+```bash
+gbrain config set search.query_budget_unit auto     # query's --token-budget becomes the hard cap on delivered evidence (whole conversations, packed)
+gbrain config set search.evidence_date_header true  # needed for titles on the header line
+gbrain config set search.evidence_titles true       # each page block's header line ends with the page title; think's <page> tag gets a title attribute
+gbrain config set search.query_facts_block true     # a budgeted query puts the question's dated facts first, oldest first, within 22% of the budget
+gbrain config set search.fact_source_pages true     # the conversations the best-matching facts came from join the results
+```
+
+### What changed
+
+| Setting | Off (default) | On |
+|---|---|---|
+| `search.query_budget_unit` | `query --token-budget` trims chunks | `auto`: the budget caps delivered evidence the way `search` does; a budget under 32 tokens is refused with `invalid_params` |
+| `search.evidence_titles` | Header line shows the date only | With the date header on, the line ends with the page title; think's `<page>` tag carries `title`. Angle brackets, double quotes and line breaks in a title are scrubbed |
+| `search.query_facts_block` | Facts arm adds facts in spare rows | Up to 40 question-ranked dated facts lead the results, within 22% of the budget; pages fill the rest |
+| `search.fact_source_pages` | No change | Up to 2 source conversations of the best-matching facts go in after the top 3 rows, read under the caller's own scope, so a remote caller never gets a private page; the row count stays the same |
+
+### Itemized changes
+
+- `src/core/ops/search.ts`, `src/core/search/evidence-packing.ts`: `search.query_budget_unit`.
+- `src/core/search/evidence-date.ts`, `src/core/search/evidence-delivery.ts`, `src/core/think/gather.ts`, `src/core/think/index.ts`: `search.evidence_titles` and its `title_header` delivery field.
+- `src/core/search/facts-arm.ts`, `src/core/search/query-arms.ts`: the facts block (sharing the temporal fact reserve's ranking) and fact source pages.
+- Tests: `test/search-8k-conversion.test.ts`.
+
+## [0.60.489.0] - 2026-10-29
+
+**A page a maintenance job writes from model output keeps its trust tier when the repository is read back (#7905).**
+
+Patterns, concept and claim-source runs publish their pages as maintenance writes (`submit_job`). The database row was capped at the tier the run declared, at most agent-written, but the file committed to git carried no `trust_tier` marker, and a forged higher marker in the model's text passed through as written. Reading that file back (rebuilding a brain from its repository, or a second brain importing it) rated the page at the source default, operator-curated, so model-written text came back trusted as the owner's own notes. These pages now stamp the same lower-only marker an agent's content write stamps, at the declared tier. A page outside the run's output that a patterns run republishes to repair a timeline entry it appended (dropping or normalizing an unverified quote) carries the same declaration, so it gets the marker too, matching the tier the database already gave it. A brain with no repository has no file to read back and was not affected. Nothing rewrites pages already stored. A derived page published before this release gets its marker the next time a run publishes changed content for it, and a page whose content stays the same keeps its unmarked file until then.
+
+### Itemized changes
+
+- `src/core/trust/page-write.ts`: `stampPageTrustMarker` stamps the marker on a write that carries a derivation declaration and is not a fence edit, not only on the content operations.
+- Tests, on PGLite and Postgres, on a repository-backed brain: `test/maintenance-trust-marker-7905.test.ts`.
+
+## [0.60.488.0] - 2026-10-29
+
+**A brain that moved hosts can now finish the 0.53.0 migration.**
+
+After a host move, `gbrain apply-migrations` stopped at v0.53.0 (`content-checkpoints`) with `The canonical root changed after setup began` on every run. The cause was an unfinished shared-skills content setup checkpoint that still named the old host's root. `gbrain repair content-receipt-root` found nothing to fix, so the migration stayed partial and doctor reported MINIONS HALF-INSTALLED. Now the refusal names the repair, and the repair lists the checkpoint along with the step that proves the new root.
+
+### How to use it
+
+```bash
+gbrain repair content-receipt-root --source <source>      # preview, on the owner host: prints the class and its next step
+# for a source claimed on the new host (class tree_mismatch): the self-transfer prepare and accept it prints,
+# then gbrain sources writer activate --confirm-quiesced --shared-skills when shared skills are on
+gbrain apply-migrations --force-retry 0.53.0
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The 0.53.0 migration finds an unfinished checkpoint naming the old host's root | Refused, with advice to resume at the old root | Refuses with `gbrain repair content-receipt-root --source <source>` as its fix |
+| `repair content-receipt-root` and doctor `sync_freshness` | Read complete receipts only, so they found nothing | Also list unfinished checkpoints that name another root |
+
+Nothing is rewritten without the explicit, verified self-transfer or set-path step. Repo-less (database-only) sources have no content root or checkpoint root, so they are unaffected.
+
+## [0.60.487.0] - 2026-10-29
+
+**Three more writers refuse a `visibility: private` request page privacy does not read instead of storing a world-readable page (#7897).**
+
+`gbrain repair url-clone-fences` restored a clone file by importing HEAD's bytes as its page without checking how a private request was spelled, and ignored the import's result. On a brain without managed persistence, a HEAD whose frontmatter said `Visibility: private` (or another spelling sync holds as `visibility_noncanonical`) was stored world-readable and reported `restored`. The preview now lists such a file under the hold's code. Apply still keeps its fence rows database-only and restores the file from HEAD, so the clone can pull the upstream fix, but it does not import HEAD as the page and reports `held` (an approval saved before this release applies the same way). `gbrain brainstorm` / `gbrain lsd` `--save` on an unmanaged brain had the same gap for content passed to the exported save function; the CLI's own frontmatter never carries a private request, and it now refuses one with put_page's `visibility_not_applied` and exits 1. `gbrain sources reconcile` protected only the lowercase `visibility` key from the file side, so a file adding `Visibility: private` merged in (as an additive field under `--auto-additive`) and published world-readable; it now refuses `visibility_not_applied` at preview and apply. `visibility: private` on its own lowercase line keeps working everywhere, and pages stored before this release are not changed.
+
+### Itemized changes
+
+- `src/core/repair/url-clone-fences.ts`: the preview and the apply screen HEAD's bytes with `holdNoncanonicalPrivate`, and the import opts in too; a held HEAD still gets its rows kept database-only and its file restored (so the clone's pull is unblocked), skips the import and reports `held` with its code instead of `restored`.
+- `src/commands/brainstorm.ts`: the unmanaged save opts in, turns the hold into `visibility_not_applied` (`privateRequestRefusal`) and treats any refused import as not saved.
+- `src/core/persistence/reconcile-prepare.ts`: the merged result imports with `holdNoncanonicalPrivate` and refuses `visibility_not_applied`.
+- `test/import-private-hold-callers-7897.test.ts`: lists every `importFromContent` / `screenImportContent` call that does not opt in, with why it is held another way or derived from a stored page, and fails on a new unlisted call.
+- `src/core/error-registry.ts`, `src/core/behavior-change-notice.ts`, `docs/guides/write-refusals.md`, `docs/guides/repair.md`: name the new refusals.
+- Tests, on PGLite and Postgres: `test/url-clone-fences-private-hold-7897.test.ts`, `test/brainstorm-private-hold-7897.test.ts` (a Git checkout and a source with none), `test/reconcile-private-hold-7897.test.ts` (a Git checkout and a plain directory).
+
+## [0.60.486.0] - 2026-10-29
+
+**A remote agent can no longer rewrite where a page came from, and removing that record no longer makes a page look more trusted (#7873).**
+
+Every page records how it arrived in three frontmatter fields: `source_kind`, `ingested_via` and `ingested_at`. Only `put_page` on a brain with a repository protected them. Through `edit_page`, `append_page`, `capture`, a large upload, or `put_page` on a brain without a repository, a remote MCP client could write any value into them, so the page file and the database disagreed about where the page came from. On a page whose trust tier was not classified yet, removing an external stamp such as `ingested_via: webhook` did more. The edit was screened and stored as if an agent wrote the page, and the next sync or trust backfill rated it as agent-written instead of external. Now those three fields belong to the server on every remote write. The caller's values are dropped and the stored ones kept, an edit that only changes them is a no-op, and the write is screened and stored by the stamps the page keeps. Local commands behave as before, and pages written before this release are not changed (finding them is tracked in #7891).
+
+### Itemized changes
+
+- `src/core/persistence/page-prepare.ts`: `keepStoredProvenance` keeps the stored stamps on every remote `put_page`, `edit_page`, `append_page` and `capture`, with or without a repository. `provenanceWriteTrust` rates the write at the lower of the caller's frontmatter and the frontmatter it publishes, so dropping a stored stamp no longer gets past the write gate.
+- `src/core/persistence/upload-streamed.ts`: the same for an upload too large for one request.
+- `src/core/trust/page-write.ts`: on an unclassified page, the page's own lowering markers from before the write cap its trust marker, so removing one cannot raise the page when it is rated again.
+- Tests, on PGLite and Postgres, with and without a repository: `test/provenance-stamps-7873.test.ts`, `test/large-pages/upload-provenance-7873.test.ts`.
+
+## [0.60.485.0] - 2026-10-29
+
+**A capture that asks for `visibility: private` in a spelling page privacy does not read is refused on every brain, never stored world-readable (#7880).**
+
+On a brain without managed persistence, the `ingest_capture` job behind the webhook `POST /ingest` route and the ingestion daemon wrote its content straight to the database. Its content screen did not check how a private request was spelled, so an event whose frontmatter said `Visibility: private`, `visibility: Private`, a block scalar, a list, a flow mapping or a merge key was stored as a world-readable page. A managed brain already refused the same event through `put_page`. Now both refuse it with `visibility_not_applied` and the same message, store nothing, and the worker dead-letters the job on its first attempt with the refusal on its result. A legacy (unmanaged) company-brain connect or sync had the same gap for an approved repository file: it is held as `visibility_noncanonical` instead. The GitHub and Google connectors now hold such a file on a database-only source as they already did with a checkout. `visibility: private` on its own lowercase line keeps working everywhere, and pages stored before this release are not changed.
+
+### Itemized changes
+
+- `src/core/import-file.ts`: `importFromContent` takes `holdNoncanonicalPrivate`, passed to `screenImportContent`, so a caller that imports external content refuses `visibility_noncanonical` before anything is stored.
+- `src/core/minions/handlers/ingest-capture.ts`, `src/core/persistence/visibility-request.ts`: the unmanaged capture opts in and turns the hold into put_page's `visibility_not_applied` refusal (`privateRequestRefusal`), which the worker treats as terminal.
+- `src/core/company-brain/profile.ts`, `src/core/github-source.ts`, `src/core/google/sweep-shared.ts`: the same opt-in for company-brain imports and the connectors' database-only imports.
+- `src/core/error-registry.ts`, `src/core/behavior-change-notice.ts`, `docs/guides/write-refusals.md`: name `ingest_capture` and the new holds.
+- `test/sync-blobs-pinned-order.test.ts`: its counting `git` shim runs the real `git` under the PATH it was created with. On a machine whose `git` is a wrapper that finds the next `git` on PATH (a shared-tree git guard), the shim and the wrapper ran each other until the 60 s test deadline. A second case runs the same reads through such a wrapper.
+- Tests, on PGLite and Postgres with a source folder that has no Git checkout: `test/ingest-capture-private-hold-7880.test.ts`, `test/company-brain-private-hold-7880.test.ts`; on PGLite, `test/google-connector-private-hold-7880.test.ts` drives the Google connector's database-only import.
+
+## [0.60.484.0] - 2026-10-28
+
+**Converting a large source to git-canonical no longer re-embeds unchanged pages or stops on its own writes.**
+
+On a source with pages written by an older gbrain, `gbrain sources canonical <id> --to git --apply` re-imported every page twice, once per strict pass, and queued an embedding job for each even though nothing had changed. It then stopped with `git_conversion_incomplete` (`writer_pending`) whenever one of its own writes took longer than its wait, so a long run could end having converted nothing. Now the strict passes only import what Git actually changed, a re-import that changes nothing queues no embedding job when the page's vectors already match its text, and each pass keeps going until it finishes, as `gbrain sync` does. A write from someone else that never settles still stops the conversion before the source is flipped, and nothing is lost.
+
+- Progress lines name the round, its candidates and the import batch; `total` is the planned path count and no longer changes mid-pass.
+- Every `git_conversion_incomplete` refusal carries a `fix` (preview again, verified by `gbrain sync status --source <id> --json`), and with `--json` a `progress` object with the counts where it stopped.
+- `scripts/bench/conversion-strict-pass.ts` measures a no-change conversion on a synthetic source (opt-in, never run in CI).
+- `@hono/node-server` 2.1.0 → 2.1.3 for GHSA-rmxm-3fg6-px4f.
+
+## [0.60.483.0] - 2026-10-28
+
+**Captured sessions can no longer be pinned to a fallback source, and work queued or retried from before session routing re-checks the source before it writes.**
+
+Four gaps let a captured conversation reach a source it does not belong to. A session whose source was never recorded was filed under the brain's fallback (the configured default, the only other source, or `default`) the first time anything resolved it, and that choice was frozen. A synthesis job, an explicit atom retry and a crashed atom generation all carried the source they were queued with and wrote there without asking again. A conversation folder reached through a symlink was not recognized as the conversation folder at all. Now only a registered source whose folder contains the session's working directory counts as evidence, every queued or retried write checks the session's source first, dry runs record nothing, and symlinked paths are matched by their real path.
+
+### How to use it
+
+```bash
+gbrain sweep --assign-corpus <source>             # preview: map held sessions with no recorded source
+gbrain sweep --assign-corpus <source> --apply     # apply the mapping
+gbrain dream --dry-run --phase synthesize         # preview now records nothing about any session
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session with no recorded source, captured outside every registered source folder, on a brain with several sources | frozen to the fallback source | held as `corpus_source_unresolved` until `--assign-corpus` maps it |
+| The same session on a brain with one source | frozen to that source | uses that source without recording it |
+| A synthesis job whose session now belongs to another source, or whose source was recreated | wrote into the job's source | refused `session_source_changed` before any model call |
+| An explicit atom retry of another source's session | reran the model and wrote into the retry's source | refused `transcript_source_mismatch`, nothing started |
+| A crashed atom generation built from another source's session | its pending members were resubmitted | held, pages left as they are, counted in `details.source_routing.generation_members_held` |
+| A meeting folder or path that links into the conversation folder | read as ordinary transcripts | routed by the session's source; an unreadable real path is held |
+| `gbrain dream --dry-run` | could freeze a session's source | records nothing |
+
+### Things to watch after you upgrade
+
+- Sessions an earlier release already froze, and pages or atoms already written into the wrong source, are not changed or moved. Repair stays a separate, preview-first step.
+- Held sessions and held generation members are counted in the phase summary and `details.source_routing`, with the command that releases them.
+- A synthesis job queued by an earlier release is checked again only on a brain with managed persistence, where the job records its transcript. On other brains, let the waiting dream jobs (`gbrain jobs list --status waiting`) finish before you add, archive or recreate sources.
+
+### Private files in another spelling
+
+**Git sync and `gbrain import` hold a file that asks for `visibility: private` in a spelling privacy does not read, instead of publishing it world-readable (#7848).** Page privacy reads only the exact lowercase `visibility: private`. A file that wrote `Visibility: private`, `visibility: Private`, a block scalar, a list, a flow mapping or a merge key used to sync or import as a page anyone could read. Now classic and managed sync hold it as `visibility_noncanonical` (the rest of the source syncs, and an existing page keeps its last imported version), and `gbrain import`, with or without a Git checkout, refuses it and imports the rest. Write `visibility: private` on its own frontmatter line and commit, or import the file again. `gbrain doctor` (`git_held_files`) counts the held files and the stored pages that already ask for private this way; nothing rewrites them. On a brain without managed persistence, `gbrain put --file` and `gbrain capture --file` of a page over the single-string ceiling now refuse such a request with `visibility_not_applied`, as a smaller write does.
+
+### Itemized changes
+
+- `src/core/context/corpus-source.ts`: the deferred resolution of an unresolved session accepts only tier 4 (`resolveRegisteredLocalPathSource`, new in `src/core/source-resolver.ts`); a single-source brain resolves unfrozen (`sole_source`); `resolveCorpusFileSource(..., { readOnly })` freezes and binds nothing; `listCorpusSourceHolds` stops counting a sole-source brain's sessions that resolve (#7868, #7850).
+- `src/core/cycle/synthesize-source-routing.ts`: real-path corpus matching with an unreadable path held (#7871); `keepSessionSourceTranscripts` pins each kept corpus file and takes `readOnly`; `transcriptSourceHold`, `corpusSourceChanged` and `refuseChangedSessionSource` re-check queued and retained work (#7850, #7869, #7870).
+- `src/core/cycle/synthesize.ts`, `src/core/minions/types.ts`, `src/core/minions/handlers/subagent.ts`: synthesis child jobs carry `corpus_source`, and the child re-resolves it before any model call (#7850).
+- `src/core/persistence/atom-retry.ts`, `src/core/error-registry.ts`: the explicit atom retry refuses a transcript of another source with `transcript_source_mismatch` (#7869).
+- `src/core/persistence/atom-maintenance.ts`, `src/core/cycle/extract-atoms.ts`: resumed generation members of another source's session are held and reported; dry runs resolve read-only (#7870, #7850).
+- `src/core/persistence/visibility-request.ts`, `src/core/import-screen.ts`, `src/core/import-file.ts`, `src/commands/sync/holds.ts`, `src/core/page-body/streamed-import.ts`, `src/core/persistence/sync-prepare.ts`, `src/core/persistence/import-prepare.ts`: classic and managed sync and `gbrain import` hold a file whose private request would not be stored canonically as `visibility_noncanonical`; `src/commands/doctor/checks/git-holds.ts` counts the held files and stored pages (`details.visibility_noncanonical`); `src/cli/commands/append.ts` reports the streamed local `put --file` / `capture --file` refusal as `visibility_not_applied` (#7848).
+- `src/core/behavior-change-notice.ts`: five rows for these changes.
+- Tests, each on PGLite and Postgres (the resolver, routing and dry-run tests use brain directories with no Git checkout): `test/corpus-source-deferred-7868.test.ts`, `test/synthesize-session-source-recheck-7850.test.ts`, `test/atom-retry-session-source-7869.test.ts`, `test/extract-atoms-resume-session-source-7870.test.ts`, `test/synthesize-source-routing-realpath-7871.test.ts`, with `test/e2e/` wrappers; `test/visibility-noncanonical-hold-7848.test.ts` and `test/e2e/visibility-noncanonical-hold-7848-postgres.test.ts` (import of a plain directory with no Git checkout included); `test/visibility-noncanonical-surfaces-7848.test.ts` (streamed import, doctor candidates) and `test/cli-page-writes.test.ts` (an oversized local `put --file` on a brain with no managed persistence).
+
+## [0.60.482.0] - 2026-10-28
+
+**Dream's atom extraction now keeps each captured session in its own source, instead of filing it under `default`.**
+
+Atom extraction reads your captured conversations and mines short notes ("atoms") from them. It used to write every atom into the source the run was working for, and only the `default` source read the conversation folder at all. On a brain with more than one source, a session you had captured under a private source could end up as atoms in `default`, where anyone who reads `default` can see them. Now each source's run reads the conversation folder and keeps only the sessions that belong to it. A session that belongs to another source waits for that source's run, and a session whose source was never recorded is held until you map it.
+
+### How to use it
+
+```bash
+gbrain dream --source <id> --phase extract_atoms     # extracts the sessions that belong to that source
+gbrain sweep --assign-corpus <source>                # preview: map held sessions with no recorded source
+gbrain sweep --assign-corpus <source> --apply        # apply the mapping, then run extraction again
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session of source B during a run for source A | its atoms were written into source A | skipped, and extracted when the phase runs for source B |
+| A run for any source other than `default` | read no conversations | reads the conversation folder and keeps its own sessions |
+| A session whose source never resolved, or an older file on a brain with several sources | extracted into the running source | held until `gbrain sweep --assign-corpus <source>` maps it |
+| Meeting transcripts | read by `default` | unchanged, still read only by `default` |
+
+### Things to watch after you upgrade
+
+- Atoms an earlier release already wrote into the wrong source are not moved. Repair is a separate, preview-first step.
+- Skipped and held sessions are counted in the phase summary, in a line on stderr and in `details.source_routing`, with the command that releases each one. Nothing is dropped.
+- On a brain with a single source nothing is held, and older files go to that source.
+
+### Itemized changes
+
+- `src/core/cycle/extract-atoms.ts`: every source discovers session-corpus transcripts and keeps the ones `keepSessionSourceTranscripts` resolves to the run's source; meeting transcripts stay with `default`; the phase result carries `details.source_routing`.
+- `src/core/cycle/synthesize-source-routing.ts`: `withSessionSourceRouting` takes the phase name, so the summary, the stderr line and the fix commands name `extract_atoms` or `synthesize`.
+- `src/commands/sweep.ts`: the `--assign-corpus` help and message text name `extract_atoms` beside synthesis.
+- `src/core/behavior-change-notice.ts`: the `extract_atoms_session_source_7846` row.
+- `test/extract-atoms-session-source-7846.test.ts`, `test/e2e/extract-atoms-session-source-7846.test.ts`: the real discovery path on a brain with `default` and two sources, without a Git checkout, on PGLite and Postgres.
+
+## [0.60.481.0] - 2026-10-28
+
+**Synthesis stops filing a session into the wrong source, and a write that asks for a private page can no longer quietly publish it.**
+
+Two privacy bugs. First, dream synthesis could write a captured conversation into whichever source the cycle happened to run for, even when the conversation belonged to another source. A session you kept in a frozen source could land, as a page, in a source others can read. Second, if you asked for `visibility: private` but spelled it a little differently (`Visibility: Private`, a value on the next line), the write reported success while the page stayed world-readable. Now synthesis writes each session only to the source it recorded, and a write that asks for private but would not get it is refused with a plain message and changes nothing.
+
+### How to use it
+
+```bash
+gbrain dream --source <id> --phase synthesize     # runs the sessions that belong to that source
+gbrain sweep --assign-corpus <source>             # preview: map held sessions with no recorded source
+gbrain sweep --assign-corpus <source> --apply     # apply the mapping, then run synthesis again
+```
+
+To make a page private, write `visibility: private` on its own frontmatter line, lowercase key and value, then submit again with a new `request_id`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session of another source during `dream` for source A | written into source A | left for `gbrain dream --source <id> --phase synthesize` |
+| A session whose source never resolved, or an older file on a brain with several sources | written into the running source | held until `gbrain sweep --assign-corpus <source>` maps it, already-extracted ones included |
+| A write asking for `visibility: private` spelled `Private`, `PRIVATE`, `Visibility`, on the next line, as a block scalar, a list, a flow mapping, or an explicit or merged key | stored, page world-readable, reported as done | refused with `visibility_not_applied` (`invalid_frontmatter` when the frontmatter is unreadable or ambiguous), nothing written |
+
+### Things to watch after you upgrade
+
+- Pages an earlier release already wrote into the wrong source are not moved. Repair is a separate, preview-first step.
+- A held session counts in the phase summary and in `details.source_routing`. Nothing is dropped; it waits for `--assign-corpus`.
+- A page that already stores `Visibility: Private` is still world-readable until you rewrite the key in lowercase.
+- The refusal applies to `put_page`, `edit_page` and `capture`. A file that arrives through git sync or import is not checked yet.
+
+Contributed by @exGeni (#7805) and @TGreen87 (#7841), who reported the two bugs.
+
+## To take advantage of v0.60.481.0
+
+`gbrain upgrade` should do this automatically. If you run synthesis on a brain with more than one source:
+
+1. **Preview held sessions:** `gbrain sweep --assign-corpus <source>`
+2. **Apply the mapping you read:** `gbrain sweep --assign-corpus <source> --apply`
+3. **Verify:** `gbrain dream --source <source> --phase synthesize` and `gbrain doctor`
+4. If a step fails or the numbers look wrong, file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor`.
+
+### Itemized changes
+
+- `src/core/cycle/synthesize-source-routing.ts`: resolves each session file's source from the `.src-<id>` name or its frozen record, passes through files outside the session corpus, and holds the unresolved ones.
+- `src/core/cycle/synthesize.ts`: the synthesize phase uses that routing and reports both counts in `details.source_routing`.
+- `src/core/context/corpus-source.ts`, `src/commands/sweep.ts`: holds list already-extracted sessions, so `--assign-corpus` can release them.
+- `src/core/persistence/visibility-request.ts`, `src/core/persistence/page-prepare.ts`, `src/core/persistence/upload-streamed.ts`: a write for `put_page`, `edit_page` or `capture` whose frontmatter parses to a private request that the stored page would not keep is refused `visibility_not_applied` (`noncanonical_value` or `not_kept`). The guard reads the caller's content before the server rewrites it (core marking carry, protected takes, timeline materialize), and content the importer would hold is refused with the importer's typed `invalid_frontmatter` instead. A streamed upload over 24 MiB runs the same check on its prepared frontmatter. The YAML parse decides; a line scan is the fallback.
+- `src/core/error-registry.ts`, `docs/guides/error-codes.md`, `docs/guides/write-refusals.md`, `src/core/behavior-change-notice.ts`: the new code, its fix and the upgrade notices.
+- `test/fixtures/goldens/exports/types.json`: the exported error union lists `visibility_not_applied`, so typed clients see the new code.
+
+## [0.60.480.0] - 2026-10-28
+
+**Converting a source to Git-canonical now plans quickly on big brains, tells you where it is while it runs, converts sources with private pages instead of refusing, and pushes what it commits.**
+
+`gbrain sources canonical <source> --to git` previews a conversion and `--apply --expect <hash>` runs it. On a large source the preview used to read every page one at a time, and the apply ran silently, so if it was stopped you had no idea how far it got. Now the preview reads pages in batches, the apply prints a progress line per phase, and stopping it prints where it stopped. A private page whose committed file differs from it no longer blocks the conversion. The conversion commits the file's removal and the page stays in the database. Where the source pushes its commits, the conversion pushes its own commits too.
+
+### How to use it
+
+```bash
+gbrain sources canonical <source> --to git                          # preview: what would be adopted, withheld, discarded, and why
+gbrain sources canonical <source> --to git --apply --expect <hash>  # apply the preview you read
+GBRAIN_MEMORY_TRACE=5 gbrain sources canonical <source> --to git --apply --expect <hash>  # also sample memory every 5 seconds on stderr
+GBRAIN_MEMORY_TRACE=5 gbrain sync --source <source>          # the same memory trace for a sync
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Previewing a conversion of a large source | one export read per page | export reads in batches, with the same result |
+| A conversion apply running | silent until it finished | a progress line on stderr at each phase and every 10 seconds (a JSON line with `--json`) |
+| Stopping an apply with SIGTERM, SIGINT or SIGHUP | the process just ended | a partial report on stdout (phase, groups committed, items scanned, canonical state), exit 143, 130 or 129. The source is git-canonical once `recordConversion` runs, before strict_pass_2, and the report's canonical state is authoritative, so a stop before that leaves the source mixed and a new preview lists only what is left |
+| A private page whose committed file differs from it | the apply refused `git_conversion_blocked` and counted the page as `git_overwrites_database` | the conversion commits the file's removal and keeps the page in the database (`withhold` in the preview) |
+| A private page whose file was removed by hand | the conversion's strict pass read it as removed by a commit and deleted the page | the conversion withholds it and keeps the page in the database |
+| A private page whose committed file still equals it | kept in Git | unchanged: the file stays in Git, as before the conversion |
+| One path Git cannot check (for example under a symlinked directory) | every adoption candidate was discarded | only that path is discarded, as `ignore_status_unknown` |
+| Discards in the preview | one total | counted by cause |
+| Conversion holds | cleared before the strict recheck | cleared only after the strict recheck passes |
+| A source whose commits are pushed | the conversion's commits stayed local until the next page write | the apply pushes them after its groups and at the end; a push that does not land is named in the receipt with the command that pushes now |
+
+### Things to watch after you upgrade
+
+- A file that changes on disk, or a page that changes in the database, between the preview and the apply makes the apply refuse `preview_changed`; preview again and apply the new hash. Groups already finished stay finished.
+- A withheld file whose directory resolves outside the checkout refuses `git_target_unsafe` before anything is written. Fix the path, then preview again.
+- Content pushed before a page became private stays in Git history; withholding removes the file from the current tree only.
+- Memory that grew during a long conversion against a TLS Postgres came from Bun 1.4.0 to 1.4.2, and the Bun 1.4.4 floor from 0.60.468.0 already covers it. If memory still looks high, `GBRAIN_MEMORY_TRACE` shows the numbers.
+- The 0.60.471.0 notes now say when a `git_target_changed` refusal pauses the source's writes: only when the file holds neither the write's bytes nor the version before it.
+
+### Itemized changes
+
+- `src/core/persistence/git-conversion.ts`: batched export reads in the plan; unplaced holds judged in the plan; discards counted by cause; holds cleared after the strict recheck; private pages whose committed file differs from them, or whose file was removed by hand, are withheld in groups (stamped with a revision check, then the removal committed through the door; a crash in between leaves the page live and the rerun finishes it); confinement checked before the stamp and the file rechecked before its removal; the apply pushes its door commits where durability applies; progress callbacks.
+- `src/core/export-snapshot.ts`: a batched export read looks each page up by its primary key, so `gbrain export` and the preview stay linear on large sources.
+- `src/commands/sources-canonical.ts`: progress lines, the partial report on signal, the push-pending notice.
+- `src/core/memory-trace.ts`: `GBRAIN_MEMORY_TRACE=<seconds>` (1 to 3600) writes a memory line on stderr during a conversion apply and during `gbrain sync`.
+- `src/commands/sources-git-gap.ts`, `src/core/persistence/git-gap.ts`: the census reads a withheld page's file at its withheld path; in the conversion plan a path whose ignore status Git cannot read no longer refuses the whole census, while `gbrain sources git-gap` and doctor's `db_ahead_of_git` still refuse that source and name the path.
+- `scripts/bench/sync-pass-memory.ts`: a memory probe for the strict-equivalent pass and the conversion (seed, run, cli, embed-seed).
+- Tests: `test/git-canonical-conversion-g8a.test.ts` (crash, refusal and withhold cases on PGLite and Postgres), `test/git-canonical-conversion-progress.test.ts`, `test/git-gap-census.test.ts`, and a Postgres smoke test for the memory probe.
+
+## [0.60.479.0] - 2026-10-28
+
+**Upgrading an older brain no longer rewrites every page.**
+
+A brain created by `gbrain init` before v0.60.412.0 never recorded the old v0.13.1 migration, so upgrading it ran that migration, and it wrote `validate: false` into the frontmatter of every page. Every page's content hash changed, and on a repo brain the database stopped matching the files in Git (or the stamp was committed into them). The same happened to an existing brain opened from a new `GBRAIN_HOME`. The stamp only opted pages out of validators that never refuse a write and out of `gbrain integrity` scans; those scans now cover such a brain's pages the way they cover a fresh brain's.
+
+v0.13.1 now records itself as complete and changes no page (#7814).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain apply-migrations` (or `gbrain upgrade`) on a brain whose ledger never recorded v0.13.1 | `validate: false` written into every page; every content hash moved | no page changes |
+| A managed repo brain in that state | the stamp committed into every Markdown file | no file or commit |
+| A grandfather write an older gbrain queued and left pending | published after the upgrade | ends `conflict` without writing |
+
+### For operators
+
+Pages an older release already stamped keep the stamp; sync and writes already accept it (#6429). Their frontmatter from before the stamp is in `~/.gbrain/migrations/v0_13_1-rollback.jsonl` on the machine that ran the migration. A page that carries `validate` because someone set it keeps it.
+
+## [0.60.478.0] - 2026-10-28
+
+**A page purge no longer stops conversation-fact extraction from ever finishing (#7778).**
+
+Each conversation page records its extraction outcome as a bookkeeping row with the same text on every page (`EXTRACTION_COMPLETE`, or `EXTRACTION_NOT_APPLICABLE`) and no entity. A page purge tombstoned every fact row of the page, that row included, so the tombstone had subject `*` and matched the outcome row of every other page in the source. Since #7438 the extractor leaves out a row that matches a tombstone, so no page could record its outcome: every run re-extracted and re-paid for the same pages, and doctor's backlog never reached zero.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page purge of a conversation page | tombstoned the outcome marker with subject `*` | tombstones the page's claims only; the marker is also left out of the purge's journal and segment sweeps |
+| A brain that already holds such a tombstone | every page stayed unfinished; each run paid again | the next run records each page's outcome and later runs skip them, with no manual step; the tombstone row stays |
+| An extracted user claim that matches a tombstone (#7438) | left out | still left out, even when its text is `EXTRACTION_COMPLETE` |
+| `gbrain forget <id>` or `forget <id> --purge` naming an outcome row | withdrew or purged the marker for the whole source | not found, nothing changes |
+
+Migration v279 replaces the facts insert guard's function so its purge refusal skips a row whose source is a conversation-facts audit source and whose text is exactly one of the two markers. Any other row under those sources is still refused. It changes no trigger, privilege or row.
+
+## [0.60.477.0] - 2026-10-28
+
+**A trust release confirms only what its preview showed.**
+
+Releasing a held fact that already sits in a page's `## Facts` table confirmed that row's confidence, notability, validity and other cells, though the owner's preview showed only the text (#7656). The database-only release, which every brain without a repository uses, could also release a hold that was re-gated after the owner approved it (#7657).
+
+### What changed
+
+- **The preview names every field the release confirms.** That's the held row's cells as they stand, or the held payload's kind, visibility, validity, source and context. The approval binds them, so a row edited after the approval refuses `preview_changed` and the fact stays held.
+- **The preview can't be made to show a field the row doesn't have.** A held fact's text is printed quoted and escaped, any other value containing a quote, comma or semicolon is quoted the same way, and invisible or bidirectional formatting characters become spaces.
+- **The database-only release re-checks the approval** on the locked hold and refuses `preview_changed` when the hold changed after the owner approved it, the same as the managed path.
+- **New doctor check `trust_release_unpreviewed_fields`** lists facts released from a held row before this fix, so the owner can review them. It's read-only and never lowers a tier.
+
+## [0.60.476.0] - 2026-10-27
+
+**Text someone else wrote can no longer add facts to your brain.**
+
+Gmail threads, calendar events, GitHub issues and chat transcripts are imported as pages, and their text came from other people. Until now that text went into the page as written. If an email held gbrain's facts-table markers and a table, the page treated the table as its own: `extract_facts` saved the sender's rows as facts, with the visibility and confidence the sender chose. The same trick could add takes and links, forge timeline entries, or replace facts gbrain had already saved on that page.
+
+Imports now make that text inert before it reaches the page. Every `gbrain:` marker gets a backslash (`gbrain\:facts:begin`). So do timeline sentinels and headings, dated timeline lines, `[Source: …]` citations and transcript speaker lines. The text still reads the same in the rendered page, but nothing parses it. Before that pass, CR, CRLF, U+2028 and U+2029 line breaks become plain newlines, so an unusual line break can't hide a marker or a timeline line.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An email, calendar description, GitHub comment or chat message contains a facts, takes or links table between gbrain's markers | the rows became the page's facts, takes or links | the text is kept and the markers are escaped, so nothing is indexed |
+| That text contains `<!-- timeline -->`, a `## Timeline` heading or dated timeline lines | the page split there and the lines became timeline entries | kept as plain text |
+| Facts gbrain already saved on a thread page, then a reply carries a facts table | the reply's table replaced them | the saved facts stay |
+
+### For operators
+
+- New doctor check `outside_content_fences` (read-only). It lists imported email, calendar, GitHub and transcript pages that have facts, takes or links indexed from a fence on them, with counts and never a cell value. Rows planted before this release stay until someone removes them. gbrain's own writers also add rows to some of these pages, so the check removes nothing. Review each listed page with the user, and withdraw a fact they say a sender planted with `gbrain forget <fact-id>`.
+- `POST /ingest` is unchanged: its caller is an authenticated writer with the same rights as `put_page`. Files the ingestion daemon picks up are unchanged too, because they're the owner's own.
+- New connectors should pass every outside field through `neutralizeOutsideText` in `src/core/outside-content.ts`.
+
+## [0.60.475.0] - 2026-10-27
+
+**A repository's own commit checks now apply to commits gbrain makes.**
+
+`gbrain git commit-push` and gbrain's own page writes told Git to read every file path literally. Git passes that setting on to the repository's hooks, so a pre-commit check that picks files by pattern (all `*.json` files, say) found no files and let the commit through. A JSON file with merge-conflict markers could be committed and pushed by gbrain while a plain `git commit` of the same file was refused. Hooks that build their own path patterns, such as a post-commit step that runs `git add -- ':(literal)<file>'`, failed for the same reason.
+
+gbrain now marks each of its own paths as literal one at a time and no longer turns the setting on for the whole command. Its hooks, filters and helpers start without it, even when gbrain's own environment sets it. Files whose names contain `*`, `?`, `[` or a leading `:` still commit only themselves.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A pre-commit hook lists staged files with a pattern (`git diff --cached --name-only -- '*.json'`) and refuses a bad one | the hook saw no files; gbrain committed and pushed | the hook refuses; `gbrain git commit-push` exits 1 with `git_unavailable` and the hook's message, leaves the file unstaged and pushes nothing |
+| A post-commit hook runs `git add -- ':(literal)<file>'` | `did not match any files` | works as after a plain `git commit` |
+| A clean filter, push helper or hook started for a gbrain commit | inherited `GIT_LITERAL_PATHSPECS=1` | sees no pathspec setting |
+| `GIT_LITERAL_PATHSPECS`, `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` or `GIT_ICASE_PATHSPECS` set in the environment gbrain runs in | passed to every Git command gbrain ran | dropped from Git commands gbrain runs |
+| A new page file whose name starts with `:` | the ignore check read it as the name without the colon | checked under its real name |
+
+Release 0.60.474.0 also updated the `qs` dependency to 6.16.1 for security advisory GHSA-6pq8-jhm2-2vcw.
+
+## [0.60.474.0] - 2026-10-27
+
+**A database role that can't read the writer state is now refused instead of let through.**
+
+The writer guards on pages, facts, takes, tags, timeline entries, aliases, sources and the segment tables check `persistence_brain` before deciding whether a write needs the coordinator. A non-owner Postgres role without BYPASSRLS, with write policies on those tables but none on the state tables, read no state row, so the guard treated the brain as unmanaged and allowed the write. The Git-canonical fence, the persistence protocol floor, protocol activation and the Git-canonical source count had the same gap. Each of them now refuses with `writer_coordinator_required` ("writer state is unreadable to this database role") when row-level security hides the state it reads. The owner and roles that bypass RLS behave as before. So do roles that can read the state, on managed and unmanaged brains alike, except at protocol activation and the Git-canonical source count, which refuse any role that row-level security filters (a hidden row there can't be told from an absent one). A role that can't see `persistence_brain` is now refused even on an unmanaged brain, since the guard can't tell which kind it is. One case now refuses every caller: a managed brain whose `persistence_brain` or `git_canonical_brain` row is missing, which `gbrain init` never leaves.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A scoped role writes a page on a managed brain without seeing `persistence_brain` | the write passed as if the brain were unmanaged | refused: `writer_coordinator_required`, `relationship: unreadable_state` |
+| The same role writes to a Git-canonical source without seeing `git_canonical_brain` or the source row | the Git-protocol fence was skipped | refused the same way (a writer that declares the Git protocol still passes) |
+| A role deletes a tag or timeline row whose page RLS hides | treated as a cascade and allowed | refused |
+| A role updates a request or effect without seeing the protocol floor | no floor applied | refused |
+| Protocol activation by a role that RLS filters on the persistence tables | pending work could read as quiesced | refused |
+| A Git-canonical flag change by a role that RLS filters on `sources` | the strict-source count could drop to zero | refused |
+
+The migration replaces five function bodies. It changes no privileges and rewrites no data. Function owners and `search_path` settings stay the same.
+
+## [0.60.473.0] - 2026-10-27
+
+**A change you stage while a write is finishing is no longer overwritten.**
+
+After a write on a Git-canonical source commits, gbrain refreshes the Git index so `git status` shows the written pages as clean. That refresh read the index, compared it, and then wrote it without holding Git's index lock. If you staged a change to the same page in that gap (`git add`, `git update-index`), the refresh wrote its own version over yours and the write still reported `committed`.
+
+The refresh now takes Git's own `index.lock`, the same lock `git add` and `git commit` take. It updates a copy of the index and renames the copy into place, so no other Git command can change the index between the check and the write.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| You stage a page while gbrain refreshes the index after its commit | your staged change was silently replaced | Git refuses your `git add` on `index.lock`; run it again and it holds |
+| You stage a page after gbrain's commit and before its refresh | left staged (unchanged) | left staged; the write's failure says the commit landed and names the page |
+| Another Git command holds `index.lock` during the refresh | the refresh could fail with a Git error | the write's failure says the commit landed and the index wasn't updated, and names the pages; the other command keeps its lock |
+| A linked worktree | refreshed its own index | refreshed under that worktree's own lock, never the main checkout's |
+
+In every row the commit itself has landed. Only the index refresh is skipped, and `git status` shows the difference.
+
+A writer that doesn't take the index lock (for example `git commit -- <path>`, which reads the index before locking) is still outside this guarantee.
+
 ## [0.60.472.0] - 2026-10-27
 
 **A `gbrain sources refresh` whose process dies mid-refresh no longer wedges the managed checkout. The next refresh finishes it, and status tells you who holds a refresh and whether it is still running.**
