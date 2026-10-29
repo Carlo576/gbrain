@@ -150,8 +150,8 @@ describe('pregate-remote-gate.sh', () => {
       expect(spawnSync('cat', [join(repo, '.git', 'reuse-env')], { encoding: 'utf8' }).stdout.trim().split('\n')).toEqual(keys.map(k => `${k}=unset`));
     });
 
-    it('a tree that changes the full-ci workflows or ci-reuse.ts relative to origin/master never reuses its own runs', () => {
-      for (const path of ['.github/workflows/test.yml', '.github/workflows/e2e.yml', 'scripts/ci-reuse.ts']) {
+    it('a tree that changes the full-ci workflows or the scripts that attest its runs relative to origin/master never reuses its own runs', () => {
+      for (const path of ['.github/workflows/test.yml', '.github/workflows/e2e.yml', 'scripts/ci-reuse.ts', 'scripts/ci-full-suite-tree.sh', 'scripts/ci-executed-counts.ts']) {
         rmSync(join(repo, '.git', 'reuse-args'), { force: true });
         rmSync(join(repo, '.git', 'gate-ran'), { force: true });
         mkdirSync(join(repo, path, '..'), { recursive: true });

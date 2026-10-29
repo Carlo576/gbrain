@@ -84,7 +84,7 @@ if [ "${GBRAIN_PREGATE_REUSE:-1}" != 0 ] && [ -n "$repo" ] && [ "$before" = "$(g
     echo "pregate-remote-gate: no origin/master to compare the full-ci workflows against, so it runs the gate instead of reusing" >&2
     reuse_ok=0
   fi
-  for path in .github/workflows/test.yml .github/workflows/e2e.yml scripts/ci-reuse.ts; do
+  for path in .github/workflows/test.yml .github/workflows/e2e.yml scripts/ci-reuse.ts scripts/ci-full-suite-tree.sh scripts/ci-executed-counts.ts; do
     [ "$reuse_ok" = 1 ] || break
     git diff --quiet origin/master HEAD -- "$path" && continue
     echo "pregate-remote-gate: the tree changes $path relative to origin/master, so it runs the gate instead of reusing its own runs" >&2
