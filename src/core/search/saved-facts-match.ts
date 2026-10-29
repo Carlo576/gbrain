@@ -7,7 +7,7 @@
  * test/search/saved-facts-probe.test.ts.
  */
 import type { OperationContext } from '../ops/contract.ts';
-import type { TrustTier } from '../trust/tier.ts';
+import { TRUST_TIER_RANK, trustRankSql, type TrustTier } from '../trust/tier.ts';
 import { AUDIT_ROW_SOURCES } from '../facts/audit-sources.ts';
 import { collapseFactReads } from '../facts/capture-dedup.ts';
 import { projectionEligibleSql } from '../eligibility/sql.ts';
@@ -69,7 +69,9 @@ async function savedFactsSupersedeEnabled(engine: { getConfig(key: string): Prom
  * corrects, labelled `corrected_by`. An acknowledgement corrects nothing: a cue
  * fact that adds no figure (a number other than a date or time) to the older
  * fact, when it restates one of its figures or the older fact is itself a
- * correction.
+ * correction. Nor does a cue fact about another entity, or one below
+ * agent_written trust correcting a fact of higher trust. A corrected fact whose
+ * corrector the five-fact cap leaves out is dropped.
  */
 export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceId?: string; sourceIds?: string[]; minTrust?: TrustTier }, queryText: string, otherNames: string[] = []): Promise<Array<SavedFactMatch & CollapseColumns>> {
   // A query naming one of two declared names also matches facts saved under the other.
@@ -97,7 +99,8 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
     // A word the language drops as a stopword counts toward neither side of the threshold.
     // The threshold is applied before the cut: a fact matching every word is never crowded
     // out by newer facts that match fewer.
-    const rows = await ctx.engine.executeRaw<SavedFactMatch & CollapseColumns & { at: unknown; matched: unknown[]; need: unknown; cue: boolean }>(
+    // Cue rows below the threshold rank in a pool of their own, so full matches never push a correction past the cut.
+    const rows = await ctx.engine.executeRaw<SavedFactMatch & CollapseColumns & { at: unknown; matched: unknown[]; need: unknown; cue: boolean; trust_rank: unknown; pool_rank: unknown }>(
       `WITH w AS (
          SELECT t.i, t.pat, plainto_tsquery('${lang}'::regconfig, t.term) AS tq
          FROM unnest($3::text[], $4::text[]) WITH ORDINALITY AS t(term, pat, i)
@@ -108,36 +111,39 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
            COALESCE(array_agg(pat) FILTER (WHERE pat IS NOT NULL), '{}') AS pats
          FROM w
        )
-       SELECT * FROM (
+       SELECT * FROM (SELECT m.*, row_number() OVER (PARTITION BY m.cue AND cardinality(m.matched) < m.need ORDER BY cardinality(m.matched) DESC, m.at DESC, m.id DESC) AS pool_rank FROM (
          SELECT f.id, f.fact, f.entity_slug, f.kind, f.valid_from::text AS valid_from, f.source, f.valid_from AS at, ${SAVED_FACT_COLLAPSE_COLUMNS},
-           ARRAY(SELECT w.i FROM w WHERE CASE WHEN w.pat IS NOT NULL THEN lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE w.pat
-             ELSE ${doc} @@ w.tq END ORDER BY w.i) AS matched,
+           ARRAY(SELECT w.i FROM w, (SELECT ${doc} AS d OFFSET 0) x WHERE CASE WHEN w.pat IS NOT NULL THEN lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE w.pat
+             ELSE x.d @@ w.tq END ORDER BY w.i) AS matched,
            LEAST(4, GREATEST(LEAST(2, k.n), ceil(k.n * 0.75)::int)) AS need,
-           ($6::boolean AND f.fact ~* $5) AS cue
+           ($6::boolean AND f.fact ~* $5) AS cue, ${trustRankSql('f.trust_tier')} AS trust_rank
          FROM facts f, k
          WHERE ${active}
            ${eligible}
            AND (${doc} @@ k.anyq OR lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE ANY(k.pats))
            AND EXISTS (SELECT 1 FROM facts f WHERE ${active} LIMIT 1)
        ) m
-       WHERE cardinality(m.matched) >= CASE WHEN m.cue THEN LEAST(2, m.need) ELSE m.need END
-       ORDER BY cardinality(m.matched) DESC, m.at DESC, m.id DESC
-       LIMIT 200`,
+       WHERE cardinality(m.matched) >= CASE WHEN m.cue THEN LEAST(2, m.need) ELSE m.need END) p
+       WHERE p.pool_rank <= 200
+       ORDER BY cardinality(p.matched) DESC, p.at DESC, p.id DESC`,
       [sources, [...AUDIT_ROW_SOURCES], terms, terms.map(t => hasCJK(t) ? `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%` : null), CORRECTION_CUE, supersede],
     );
-    const found = rows.map(({ at, matched, need, cue, ...fact }) => ({ fact: { ...fact, id: Number(fact.id) } as SavedFactMatch & CollapseColumns,
-      at: new Date(at as string).getTime(), words: new Set(matched.map(Number)), need: Number(need), cue, figures: cue ? figures(fact.fact) : new Set<string>() }));
+    const found = rows.map(({ at, matched, need, cue, trust_rank, pool_rank: _p, ...fact }) => ({ fact: { ...fact, id: Number(fact.id) } as SavedFactMatch & CollapseColumns,
+      at: new Date(at as string).getTime(), words: new Set(matched.map(Number)), need: Number(need), cue, trust: Number(trust_rank), figures: figures(fact.fact) }));
     const admitted = found.filter(r => r.words.size >= r.need);
+    const correcting = new Set<number>();
     if (supersede) {
-      const correcting = new Set<number>();
+      const cues = found.filter(n => n.cue);
       for (const older of admitted) {
         // Posts saved in one flush share a time; the later id is the later post.
         // An acknowledgement is not a correction: a cue fact that adds no figure to the older fact
         // corrects it only when it restates no figure and the older fact is not a correction itself.
-        const olderFigures = figures(older.fact.fact);
-        const corrections = found.filter(n => n.cue && (n.at > older.at || (n.at === older.at && n.fact.id > older.fact.id))
+        // A cue fact about another entity corrects nothing, and one below agent_written corrects only facts at or below its tier.
+        const corrections = cues.filter(n => (n.at > older.at || (n.at === older.at && n.fact.id > older.fact.id))
+          && (!n.fact.entity_slug || !older.fact.entity_slug || n.fact.entity_slug === older.fact.entity_slug)
+          && (n.trust >= TRUST_TIER_RANK.agent_written || n.trust >= older.trust)
           && [...n.words].filter(w => older.words.has(w)).length >= Math.min(2, n.need)
-          && !([...n.figures].every(x => olderFigures.has(x)) && (n.figures.size > 0 || older.cue))).sort((a, b) => b.at - a.at || b.fact.id - a.fact.id);
+          && !([...n.figures].every(x => older.figures.has(x)) && (n.figures.size > 0 || older.cue))).sort((a, b) => b.at - a.at || b.fact.id - a.fact.id);
         if (corrections.length) older.fact.corrected_by = corrections[0].fact.id;
         for (const c of corrections) correcting.add(c.fact.id);
       }
@@ -145,8 +151,20 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
       // saved after the correction must not crowd out the post that made it.
       admitted.push(...found.filter(r => correcting.has(r.fact.id) && r.words.size < r.need));
     }
-    const ordered = supersede ? [...admitted.filter(r => !r.fact.corrected_by), ...admitted.filter(r => r.fact.corrected_by)] : admitted;
-    return (await collapseFactReads(ctx.engine, ordered.map(r => r.fact))).slice(0, 5);
+    // A corrected fact that corrects another stays ahead of the fact it corrects, so the cap cuts the stalest first.
+    const ordered = supersede ? [...admitted.filter(r => !r.fact.corrected_by), ...admitted.filter(r => r.fact.corrected_by && correcting.has(r.fact.id)),
+      ...admitted.filter(r => r.fact.corrected_by && !correcting.has(r.fact.id))] : admitted;
+    const kept = (await collapseFactReads(ctx.engine, ordered.map(r => r.fact))).slice(0, 5);
+    if (!supersede) return kept;
+    // A label names the returned fact that stands for its corrector. A corrected fact whose corrector the cap or
+    // the collapse left out is dropped rather than shown as current.
+    const correctedBy = new Map(ordered.map(r => [r.fact.id, r.fact.corrected_by]));
+    const shownAs = new Map(kept.flatMap(r => (r.collapsed_ids ?? [r.id]).map(id => [id, r.id] as const)));
+    return kept.flatMap(({ corrected_by, ...r }) => {
+      const by = (r.collapsed_ids ?? [r.id]).map(id => shownAs.get(correctedBy.get(id) ?? -1)).find(c => c !== undefined && c !== r.id);
+      if (by !== undefined) return [{ ...r, corrected_by: by }];
+      return corrected_by === undefined ? [r] : [];
+    });
   } catch {
     return [];
   }

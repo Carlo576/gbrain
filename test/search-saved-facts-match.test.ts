@@ -224,3 +224,87 @@ describe('search.saved_facts_supersede on', () => {
     }
   });
 });
+
+// Value: protects=search.saved_facts_supersede turns off for off/0/no/false spellings and CJK words match as substrings; fails_when=the off parse or CJK branch is dropped; why_new=existing tests only set 'false' and use Latin words; seam=none; no_claim=none beyond protects
+describe('saved facts: config spellings and CJK words', () => {
+  test('every off spelling of search.saved_facts_supersede returns no correction and no label', async () => {
+    try {
+      for (const raw of ['off', 'OFF', '0', 'no', ' False ']) {
+        await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, raw);
+        const { facts, text } = await search('Orbix seats renewal');
+        expect(facts.map(f => f.id), raw).toContain(ids.first);
+        expect(facts.map(f => f.id), raw).not.toContain(ids.correction);
+        expect(facts.some(f => f.corrected_by !== undefined), raw).toBe(false);
+        expect(text, raw).not.toContain('corrected by a newer saved fact');
+      }
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+
+  test('a CJK query word matches inside a fact that has no word breaks', async () => {
+    const id = await remember('合同续约期 pending zorbex', '2026-09-05T09:00:00Z');
+    const { facts } = await search('续约期 zorbex');
+    expect(facts.map(f => f.id)).toContain(id);
+    const miss = await search('续费期 zorbex');
+    expect(miss.facts.map(f => f.id)).not.toContain(id);
+  });
+});
+// Value: protects=a corrected_by label always names a fact the reply returns; fails_when=the five-fact cap keeps a corrected fact and cuts its corrector; why_new=existing supersede tests return fewer than five facts; seam=none; no_claim=collapsed duplicates (no near-duplicate fixture here)
+describe('search.saved_facts_supersede: the five-fact cap', () => {
+  test('a corrector that is itself corrected outranks the fact it corrects, so no label names a fact the cap cut', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      const stale = await remember('Vorlane renews at 52 seats under the plan (the draft said 48).', '2026-04-01T09:00:00Z');
+      for (const [i, fact] of ['Vorlane renewal seats: 52 draft, 46 signed, 48 final.', 'The Vorlane renewal lists seats as 52, then 46, then 48.', 'Vorlane seats at renewal went 52 to 46 to 48.'].entries()) {
+        await remember(fact, `2026-04-0${i + 2}T09:00:00Z`);
+      }
+      const corrector = await remember('Correction: Vorlane renewal seats are 46, ignore the 52.', '2026-04-06T09:00:00Z');
+      const newest = await remember('Correction: Vorlane seats are 48.', '2026-04-07T09:00:00Z');
+      const { facts } = await search('Vorlane seats renewal plan');
+      const returned = new Set(facts.map(f => f.id));
+      expect(returned.has(newest)).toBe(true);
+      expect(returned.has(corrector)).toBe(true);
+      expect(facts.find(f => f.id === corrector)?.corrected_by).toBe(newest);
+      expect(returned.has(stale)).toBe(false);
+      for (const f of facts) if (f.corrected_by !== undefined) expect(returned.has(f.corrected_by), String(f.id)).toBe(true);
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+});
+// Value: protects=a corrector outside the top 200 candidates still corrects; fails_when=200 full matches push a two-word cue row past the cut; why_new=no fixture had more than a handful of matching facts; seam=none; no_claim=query cost on a large facts table
+// Value: protects=a fact naming another entity, or written below agent_written, never demotes a better fact; fails_when=a cue fact with shared words and a new figure demotes any older fact; why_new=every earlier corrector shared the corrected fact's entity and tier; seam=none; no_claim=two writers at one tier disagreeing
+describe('search.saved_facts_supersede: which cue facts can correct', () => {
+  test('a cue fact past the first 200 full matches still comes back as the correction', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      const letters = 'abcdefghijklmnopqrst';
+      for (const a of letters) for (const b of 'abcdefghijk') await remember(`Pelloran renewal seats reviewed by desk ${a}${b}.`, '2026-03-02T09:00:00Z');
+      const fix = await remember('Correction: Pelloran seats are 24, ignore the 30.', '2026-03-03T09:00:00Z');
+      const { facts } = await search('Pelloran renewal seats');
+      expect(facts.map(f => f.id)).toContain(fix);
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  }, 120_000);
+
+  test('a cue fact about another entity, or below agent_written and the fact it names, does not correct', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      const base = await remember('Torvane Logistics renews at 40 seats.', '2026-02-01T09:00:00Z');
+      const other = await remember('Correction: Torvane Logistics seats are 35, ignore the 40.', '2026-02-02T09:00:00Z');
+      await engine.executeRaw('UPDATE facts SET entity_slug = $2 WHERE id = $1', [base, 'companies/torvane-example']);
+      await engine.executeRaw('UPDATE facts SET entity_slug = $2 WHERE id = $1', [other, 'companies/acme-example']);
+      expect((await search('Torvane Logistics seats')).facts.find(f => f.id === base)?.corrected_by).toBeUndefined();
+      await engine.executeRaw("UPDATE facts SET entity_slug = 'companies/torvane-example', trust_tier = 'external_untrusted' WHERE id = $1", [other]);
+      const lower = await search('Torvane Logistics seats');
+      expect(lower.facts.map(f => f.id)).toContain(other);
+      expect(lower.facts.find(f => f.id === base)?.corrected_by).toBeUndefined();
+      await engine.executeRaw("UPDATE facts SET trust_tier = 'external_untrusted' WHERE id = $1", [base]);
+      expect((await search('Torvane Logistics seats')).facts.find(f => f.id === base)?.corrected_by).toBe(other);
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+});
