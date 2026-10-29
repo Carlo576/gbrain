@@ -23,6 +23,59 @@ identifiers and attribution are available in the pre-removal Git revision
 - Docs: `docs/ci-event-parity.md` ("Remote-gate reuse") and `docs/TESTING.md`.
 - Tests: `test/scripts/ci-reuse.test.ts` and `test/scripts/pregate-remote-gate.test.ts`.
 
+## [0.60.491.0] - 2026-10-29
+
+**A budgeted `query` now leads with the question's dated saved facts (the facts block is on by default). On a sealed held-out set of 200 questions it answered 183, against 151 without it.**
+
+`query` with a token budget puts up to 40 question-ranked dated facts first, oldest first, within 22% of the budget, in place of the facts arm (and of the temporal fact reserve when that is on). It adds about 70 tokens to a median budgeted result (p95 about 700) and makes no model call. Queries without a budget, `search` and `think` are unchanged, and a remote caller sees only facts whose source pages it could read.
+
+### How to turn it off
+
+```bash
+gbrain config set search.query_facts_block false   # back to the facts arm (or the temporal fact reserve when it is on)
+```
+
+`false`, `off`, `0` or `no` (any case) turns it off, and a config read error leaves it off.
+
+### Itemized changes
+
+- `src/core/search/facts-arm.ts`: `queryFactsBlockEnabled` is on unless the key says off.
+- `src/core/config.ts`, `src/core/search/query-arms.ts`, docs: the default is described as on.
+- `src/core/behavior-change-notice.ts`: the upgrade notice row for the new default.
+- Tests: `test/search-8k-conversion.test.ts` covers the unset default, the off spellings, the fail-closed read and the single run beside the temporal reserve; the C5 identity golden and the facts-arm and temporal-reserve suites pin the block off.
+
+## [0.60.490.0] - 2026-10-29
+
+**Four new search settings for answering inside a tight token budget. All are off by default, so search, query and think output is unchanged until you turn one on.**
+
+Each setting is one step in fitting the right evidence into an 8,000-token answer. They stay off until the held-out evaluation decides, one at a time, whether each one earns a default flip.
+
+### How to use it
+
+```bash
+gbrain config set search.query_budget_unit auto     # query's --token-budget becomes the hard cap on delivered evidence (whole conversations, packed)
+gbrain config set search.evidence_date_header true  # needed for titles on the header line
+gbrain config set search.evidence_titles true       # each page block's header line ends with the page title; think's <page> tag gets a title attribute
+gbrain config set search.query_facts_block true     # a budgeted query puts the question's dated facts first, oldest first, within 22% of the budget
+gbrain config set search.fact_source_pages true     # the conversations the best-matching facts came from join the results
+```
+
+### What changed
+
+| Setting | Off (default) | On |
+|---|---|---|
+| `search.query_budget_unit` | `query --token-budget` trims chunks | `auto`: the budget caps delivered evidence the way `search` does; a budget under 32 tokens is refused with `invalid_params` |
+| `search.evidence_titles` | Header line shows the date only | With the date header on, the line ends with the page title; think's `<page>` tag carries `title`. Angle brackets, double quotes and line breaks in a title are scrubbed |
+| `search.query_facts_block` | Facts arm adds facts in spare rows | Up to 40 question-ranked dated facts lead the results, within 22% of the budget; pages fill the rest |
+| `search.fact_source_pages` | No change | Up to 2 source conversations of the best-matching facts go in after the top 3 rows, read under the caller's own scope, so a remote caller never gets a private page; the row count stays the same |
+
+### Itemized changes
+
+- `src/core/ops/search.ts`, `src/core/search/evidence-packing.ts`: `search.query_budget_unit`.
+- `src/core/search/evidence-date.ts`, `src/core/search/evidence-delivery.ts`, `src/core/think/gather.ts`, `src/core/think/index.ts`: `search.evidence_titles` and its `title_header` delivery field.
+- `src/core/search/facts-arm.ts`, `src/core/search/query-arms.ts`: the facts block (sharing the temporal fact reserve's ranking) and fact source pages.
+- Tests: `test/search-8k-conversion.test.ts`.
+
 ## [0.60.489.0] - 2026-10-29
 
 **A page a maintenance job writes from model output keeps its trust tier when the repository is read back (#7905).**
