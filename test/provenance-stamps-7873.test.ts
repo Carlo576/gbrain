@@ -170,6 +170,27 @@ for (const kind of testBackends()) {
         if (repo) expect(stampsOf(fileFrontmatter(slug))).toEqual(STORED);
       });
 
+      // Value: protects=remote append_page on an unclassified captured page keeps stored stamps and the lowering marker; fails_when=append re-derives the page higher or drops stamps; why_new=prior rows cover edit_page/put_page/capture only; seam=none; no_claim=segmented splice path (inline page only)
+      test('a remote append_page keeps the stored stamps and does not raise an unclassified page', async () => {
+        const slug = 'inbox/append-stamps';
+        await seed(slug, STORED, 'unknown');
+        await call('append_page', { slug, text: 'Appended line', request_id: crypto.randomUUID(), expected_revision: (await read(slug)).revision });
+        const after = await page(slug);
+        expect(after.page.compiled_truth).toContain('Appended line');
+        expect(stampsOf(after.page.frontmatter)).toEqual(STORED);
+        expect(lowest(after.page.frontmatter)).toBe('external_untrusted');
+        if (repo) expect(stampsOf(fileFrontmatter(slug))).toEqual(STORED);
+      });
+
+      // Value: protects=a local (remote=false) edit_page can still change provenance stamps as before #7873; fails_when=the server-owned stamp rule is applied to local callers; why_new=every other row is remote=true; seam=none; no_claim=managed local put_page (put-page-provenance covers it)
+      test.skipIf(repo)('a local edit_page keeps its old behaviour and can change stamps on a repo-less brain', async () => {
+        const slug = 'inbox/local-edit';
+        await seed(slug, STORED, 'external_untrusted');
+        const current = await read(slug);
+        await call('edit_page', { slug, expected_revision: current.revision, edits: forgeAll().map(([old_text, new_text]) => ({ old_text, new_text })) }, ctx(false));
+        expect(stampsOf((await page(slug)).page.frontmatter)).toEqual(FORGED);
+      });
+
       test('a remote put_page and capture of a new page cannot supply stamps', async () => {
         const content = `---\ntitle: New page\nsource_kind: forged-kind\ningested_via: forged-channel\ningested_at: '${FORGED.ingested_at}'\n---\n\nFresh body`;
         await call('put_page', { slug: 'inbox/put-new', content });

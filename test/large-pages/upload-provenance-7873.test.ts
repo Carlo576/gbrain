@@ -3,8 +3,9 @@
  * cannot supply provenance stamps, as a remote put_page cannot.
  *
  * 1. Protects: commit_page_upload of a 25 MiB page whose frontmatter carries source_kind / ingested_via /
- *    ingested_at stores none of the caller's values.
- * 2. Fails when: a caller-written stamp reaches the stored frontmatter through the streamed path.
+ *    ingested_at stores none of the caller's values; a replace keeps the stamps of the page it replaces.
+ * 2. Fails when: a caller-written stamp reaches the stored frontmatter through the streamed path, or a replace drops
+ *    the stored stamps.
  * 3. Runs on PGLite, and on Postgres when DATABASE_URL is set (no embedding, no model calls).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -62,6 +63,32 @@ for (const kind of testBackends()) {
       const frontmatter = typeof row!.frontmatter === 'string' ? JSON.parse(row!.frontmatter) : row!.frontmatter;
       expect({ source_kind: frontmatter.source_kind, ingested_via: frontmatter.ingested_via, ingested_at: frontmatter.ingested_at })
         .toEqual({ source_kind: undefined, ingested_via: undefined, ingested_at: undefined });
+    }, 600_000);
+
+    test('a 25 MiB remote replace keeps the stored stamps of the page it replaces', async () => {
+      const slug = 'notes/huge-restamped';
+      const stored = { source_kind: 'webhook', ingested_via: 'webhook', ingested_at: '2026-01-02T03:04:05.000Z' };
+      await engine.putPage(slug, { type: 'note', title: 'Huge restamped', compiled_truth: 'Captured body', timeline: '', frontmatter: stored,
+        source_kind: 'webhook', ingested_via: 'webhook' } as never);
+      const revision = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!.revision;
+      const line = 'We agreed to ship the review checklist first and revisit pricing next week.\n\n';
+      const text = `---\ntitle: Huge restamped\nsource_kind: forged-kind\ningested_via: forged-channel\ningested_at: '2020-01-01T00:00:00.000Z'\n---\n\n${line.repeat(Math.ceil(25 * MiB / line.length))}End.`;
+      const session = await call('begin_page_upload', { slug, mode: 'replace', expected_revision: revision, total_bytes: Buffer.byteLength(text), sha256: hex(text), request_id: randomUUID() });
+      for (let part = 0, at = 0; at < text.length; part++, at += PART_CHARS) {
+        const piece = text.slice(at, at + PART_CHARS);
+        await call('upload_page_part', { upload_id: session.upload_id, part, text: piece, part_sha256: hex(piece) });
+      }
+      const streamed = stagedUploadWork.streamed;
+      for (let attempt = 0; ; attempt++) {
+        try { expect((await call('commit_page_upload', { upload_id: session.upload_id, wait_ms: 30_000 })).state).toBe('committed'); break; }
+        catch (error) { if (!(error instanceof OperationError) || error.code !== 'write_pending' || attempt > 40) throw error; }
+      }
+      expect(stagedUploadWork.streamed).toBe(streamed + 1);
+      const [row] = await engine.executeRaw<{ body_storage: string; frontmatter: Record<string, unknown> | string }>(
+        'SELECT body_storage, frontmatter FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]);
+      expect(row!.body_storage).toBe('segmented');
+      const frontmatter = typeof row!.frontmatter === 'string' ? JSON.parse(row!.frontmatter) : row!.frontmatter;
+      expect({ source_kind: frontmatter.source_kind, ingested_via: frontmatter.ingested_via, ingested_at: frontmatter.ingested_at }).toEqual(stored);
     }, 600_000);
   });
 }
