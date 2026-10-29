@@ -105,7 +105,7 @@ This is the difference between a search engine and a brain. Search finds the pag
 
 ### Here's how to self-host it
 
-GBrain is MIT-licensed and free to self-host. It needs **Bun 1.4.0 or newer**; existing worker installs read the [authorization and queue upgrade guide](docs/guides/authorization-upgrade.md) before restarting on this version.
+GBrain is MIT-licensed and free to self-host. It needs **Bun 1.4.4 or newer**; existing worker installs read the [authorization and queue upgrade guide](docs/guides/authorization-upgrade.md) before restarting on this version.
 
 > [!WARNING]
 > **GBrain is NOT distributed on npm.** The npm `gbrain` package is unrelated and
@@ -121,7 +121,7 @@ gbrain setup claude-code              # or: gbrain setup codex
 gbrain init --pglite --no-embedding   # any other harness, or no agent
 ```
 
-`gbrain setup` shows what it will write first (`--dry-run` previews, `--remove` undoes), creates a keyless brain only if none exists, wires MCP and hooks, and smoke-tests them ([setup guide](docs/guides/setup.md)). For any other coding agent, paste:
+`gbrain setup` shows what it will write first (`--dry-run` previews, `--remove` undoes), creates a keyless brain only if none exists, wires MCP, hooks and a brain-first block in the agent's instruction file (`--no-instructions` skips it), and smoke-tests them ([setup guide](docs/guides/setup.md)). For any other coding agent, paste:
 
 ```text
 Add GBrain memory to this existing agent. Read and follow:
@@ -158,7 +158,7 @@ The repo is not a complete backup; see the [bootstrap guide](docs/guides/bootstr
 
 ### Connect GBrain to your AI client (MCP)
 
-- **Local stdio client:** `claude mcp add gbrain -- "$(command -v gbrain)" serve --surface full`; Codex, Cursor, Windsurf and other stdio clients take the same command.
+- **Local stdio client:** `claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter` (`--surface full` lists every tool); Codex, Cursor, Windsurf and other stdio clients take the same command. Then run `gbrain setup <harness> --instructions-only`: agents seldom call a brain nobody told them about.
 - **Plugins with curated skills:** Codex `codex plugin marketplace add garrytan/gbrain@codex-plugin` + `codex plugin add gbrain@gbrain`; Claude Code `/plugin marketplace add garrytan/gbrain` + `/plugin install gbrain@gbrain`.
 - **This brain from anywhere:** `gbrain mcp expose` publishes it on your Tailscale tailnet as a user service (`--funnel` for cloud agents such as Grok Bot, Muse and ChatGPT). [Guide](docs/guides/remote-mcp.md).
 - **A brain on another host:** `gbrain connect https://your-host/mcp --token gbrain_xxx --install` (add `--agent codex` for Codex). Hosted brains use [native OAuth or a private handoff](docs/guides/hosted-harness-access.md); dashboard, clients and permissions live in [MCP administration](docs/mcp/ADMIN.md).
