@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.500.0] - 2026-10-29
+## [0.60.501.0] - 2026-10-29
 
 **`gbrain repair file-drift` can now resolve the `file_drift` holds that no command could clear before, and `--prefer file` keeps the file exactly as written.**
 
