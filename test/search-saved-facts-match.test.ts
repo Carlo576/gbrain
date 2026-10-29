@@ -308,3 +308,25 @@ describe('search.saved_facts_supersede: which cue facts can correct', () => {
     }
   });
 });
+// Value: protects=a label never names a fact the reply leaves out when corrections chain; fails_when=an older corrector ranks ahead of the newer one correcting it and the cap cuts the newer; why_new=the cap test above has one corrected corrector; seam=none; no_claim=chains that cross collapsed copies
+describe('search.saved_facts_supersede: a chain of corrections under the cap', () => {
+  test('the newest corrections stay ahead, so every label names a returned fact', async () => {
+    await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'true');
+    try {
+      await remember('Brenlow berth quota lease at 60.', '2026-01-01T09:00:00Z');
+      const x = await remember('Correction: Brenlow berth quota lease is 58, ignore the 60, 56 and 55.', '2026-01-02T09:00:00Z');
+      const b = await remember('Correction: Brenlow berth quota lease is 55, ignore the 57.', '2026-01-03T09:00:00Z');
+      const c = await remember('Correction: Brenlow berth quota is 60, ignore the 56.', '2026-01-04T09:00:00Z');
+      const d = await remember('Correction: Brenlow berth is 55.', '2026-01-05T09:00:00Z');
+      for (const desk of ['a', 'b']) await remember(`Brenlow berth quota lease reviewed by desk ${desk}.`, '2026-01-06T09:00:00Z');
+      const { facts } = await search('Brenlow berth quota lease');
+      const returned = new Set(facts.map(f => f.id));
+      for (const f of facts) if (f.corrected_by !== undefined) expect(returned.has(f.corrected_by), String(f.id)).toBe(true);
+      expect(facts.find(f => f.id === c)?.corrected_by).toBe(d);
+      expect(facts.find(f => f.id === b)?.corrected_by).toBe(c);
+      expect(returned.has(x)).toBe(false);
+    } finally {
+      await engine.setConfig(SAVED_FACTS_SUPERSEDE_KEY, 'false');
+    }
+  });
+});

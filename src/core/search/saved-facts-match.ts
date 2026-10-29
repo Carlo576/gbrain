@@ -151,8 +151,9 @@ export async function matchingSavedFacts(ctx: OperationContext, scope: { sourceI
       // saved after the correction must not crowd out the post that made it.
       admitted.push(...found.filter(r => correcting.has(r.fact.id) && r.words.size < r.need));
     }
-    // A corrected fact that corrects another stays ahead of the fact it corrects, so the cap cuts the stalest first.
-    const ordered = supersede ? [...admitted.filter(r => !r.fact.corrected_by), ...admitted.filter(r => r.fact.corrected_by && correcting.has(r.fact.id)),
+    // Corrected facts that correct others go newest first, each behind its newer corrector, so the cap cuts the stalest first.
+    const ordered = supersede ? [...admitted.filter(r => !r.fact.corrected_by),
+      ...admitted.filter(r => r.fact.corrected_by && correcting.has(r.fact.id)).sort((a, b) => b.at - a.at || b.fact.id - a.fact.id),
       ...admitted.filter(r => r.fact.corrected_by && !correcting.has(r.fact.id))] : admitted;
     const kept = (await collapseFactReads(ctx.engine, ordered.map(r => r.fact))).slice(0, 5);
     if (!supersede) return kept;
