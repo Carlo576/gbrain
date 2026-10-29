@@ -40,7 +40,7 @@
  * remaining categories are reported. `--to mixed` removes the flag and changes nothing else.
  */
 import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts, SyncResult } from '../../commands/sync.ts';
 import type { Action } from '../agent-output.ts';
@@ -59,7 +59,8 @@ import { commitThroughDoor } from './git-door.ts';
 import { gitRootAhead, pushGitRoot } from './effect-git.ts';
 import { DURABILITY_NOT_ENABLED_REASON, gitDurabilityPolicy } from './git-durability-policy.ts';
 import { currentVerifiedLocalWriter, localHostId } from './identity.ts';
-import { acquireWorktree, readManagedMode } from './ownership.ts';
+import { acquireWorktree, getWorktreeBinding, readManagedMode } from './ownership.ts';
+import { inspectDurabilityCheckout } from './git-durability-administration.ts';
 import { resolveManagedSyncContext, type ManagedSyncContext } from './sync-discovery.ts';
 import { readShadowLevel } from './sync-pass.ts';
 import { isPrivacyClass, type PrivacyClass } from './git-declared.ts';
@@ -94,6 +95,7 @@ export type ConversionPhase = typeof CONVERSION_PHASES[number];
  */
 export interface ConversionProgress { phase: ConversionPhase; groups_committed: number; scanned: number; total: number; round?: number; candidates?: number;
   batch?: number; batches?: number; push?: ConversionPush }
+const ROUND_RESET = { round: undefined, candidates: undefined, batch: undefined, batches: undefined } as const;
 /**
  * Where the push of the apply's door commits stands: `pushed`; `pending` (the commits are local and the next page write's
  * push-only effect pushes them; `code` and `notice` say why it did not land); `skipped` (`reason`: durability is off,
@@ -193,11 +195,35 @@ export async function assertConversionCaller(engine: BrainEngine, sourceId: stri
       user_message: `Source ${sourceId} can only become git-canonical on a brain with managed writes, and this brain is not managed. Should it move to managed writes first?` } });
 }
 
+/**
+ * #7885: a root with no Git checkout, or one whose branch has no commit yet, has nothing to convert into. The plan refuses
+ * before it reads anything, and the source keeps working as it is (the database is its record).
+ */
+async function assertConversionCheckout(sourceId: string, root: string): Promise<void> {
+  try { await inspectDurabilityCheckout(root); }
+  catch (error) {
+    if (!(error instanceof OperationError) || (error.code !== 'git_checkout_required' && error.code !== 'git_branch_unborn')) {
+      if (error instanceof OperationError && error.code === 'git_detached_head') return;
+      throw error;
+    }
+    const code = error.code === 'git_checkout_required' ? 'git_checkout_required' as const : 'git_branch_unborn' as const;
+    const state = code === 'git_checkout_required' ? 'is not inside a Git checkout' : 'is a Git checkout with no commit yet';
+    const why = 'A git-canonical source commits every page to Git on top of the checkout\'s branch, so its root needs a Git checkout with a first commit.';
+    throw opError(code, `Source ${sourceId}'s root ${root} ${state}, so it has nothing to convert into; nothing was read or written. The source stays usable as it is, with the database as its record.`,
+      'Keep the source as it is, or make its root a Git repository with a first commit on the brain host (git init, git add -A, git commit), then preview again.',
+      { why, docs: DOCS, fix: { argv: ['gbrain', 'sources', 'canonical', sourceId, '--to', 'git', '--dry-run', '--json'], consent: [], actor: 'user', requires_exclusive: false,
+        why: 'Previews the conversion again once the root has a first commit; read-only.',
+        user_message: `Source ${sourceId} has no Git history to convert into. It keeps working as it is. Should its folder become a Git repository with a first commit so it can be converted?` } });
+  }
+}
+
 /** The context a strict pass reads, for a source whose row does not say so yet. */
 const strictContext = (context: ManagedSyncContext): ManagedSyncContext => ({ ...context, source: { ...context.source, config: { ...context.source.config, canonical: 'git' } } });
 
 /** The read-only plan of `--to git`; its preview is what the CLI prints and the apply binds to. */
 export async function planGitConversion(engine: BrainEngine, sourceId: string): Promise<GitConversionPlan> {
+  const binding = await getWorktreeBinding(engine, sourceId);
+  if (binding?.local_path) await assertConversionCheckout(sourceId, resolve(binding.local_path, binding.relative_path));
   const context = await resolveManagedSyncContext(engine, { sourceId, noPull: true, dryRun: true });
   const pages: GitGapPage[] = [];
   const equal = new Map<string, PageRevision>();
@@ -516,7 +542,7 @@ export async function applyGitConversion(engine: BrainEngine, sourceId: string, 
   const processing = { noEmbed: opts.noEmbed, noExtract: opts.noExtract };
   const planned = recheck?.paths.length ?? 0;
   const pass = (phase: 'strict_pass_1' | 'strict_pass_2') => {
-    report({ phase, scanned: 0, total: planned, round: undefined, candidates: undefined, batch: undefined, batches: undefined });
+    report({ phase, scanned: 0, total: planned, ...ROUND_RESET });
     return strictPass(engine, sourceId, { sourceId, noPull: true, fullRound: true, ...processing, ...(phase === 'strict_pass_1' ? { canonicalOverride: 'git' as const } : {}),
       onProgress: passProgress(report) });
   };
@@ -583,7 +609,7 @@ function passProgress(report: ConversionReporter): NonNullable<SyncOpts['onProgr
   let base = 0;
   return event => {
     const round = event.round;
-    if (round && event.phase === 'managed_sync.round_level') { base = 0; report({ round: round.round, scanned: 0, candidates: undefined, batch: undefined, batches: undefined }); }
+    if (round && event.phase === 'managed_sync.round_level') { base = 0; report({ ...ROUND_RESET, round: round.round, scanned: 0 }); }
     else if (round && event.phase === 'managed_sync.round_admit') report({ round: round.round, scanned: 0, candidates: (round.imports ?? 0) + (round.deletes ?? 0) });
     else if (round && event.phase === 'managed_sync.round_batch') { base = round.base ?? 0; report({ round: round.round, scanned: base, batch: round.batch, batches: round.batches }); }
     else if (event.bankedFiles !== undefined && event.phase !== 'managed_sync.level_progress' && event.phase !== 'managed_sync.legacy_swept') report({ scanned: base + event.bankedFiles });
