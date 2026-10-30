@@ -736,8 +736,8 @@ replace an allowlisted value.
 ### Shapes this scanner catches
 
 Vendor key prefixes (OpenAI, Anthropic, Voyage, GitHub, GitLab, Slack, AWS, Google,
-Stripe, SendGrid, Twilio, Supabase, npm, Hugging Face, DigitalOcean, gbrain
-tokens), JWTs, `Bearer` tokens, private keys, database URLs carrying a
+Stripe, SendGrid, Twilio, Supabase, npm, Hugging Face, DigitalOcean, OpenRouter,
+Groq, xAI, Perplexity, Replicate, gbrain tokens), JWTs, `Bearer` tokens, private keys, database URLs carrying a
 password, `http(s)` URLs carrying a password (`url_credentials`) and
 `Authorization: Basic` credentials (`basic_auth`). A private key is caught
 even when a snippet or chunk cut off its `BEGIN` or `END` line: the key body
@@ -788,7 +788,8 @@ Each finding carries:
   value's hash. It identifies the value without revealing it.
 - **rule ... since**: the gbrain version that added or changed the rule
   (v0.60.31.0 for `url_credentials`, `basic_auth`, `digitalocean` and
-  private keys whose `BEGIN` or `END` line is missing). A push that worked before an upgrade and fails after it names
+  private keys whose `BEGIN` or `END` line is missing; v0.60.502.0 for
+  `openrouter`, `groq`, `xai`, `perplexity` and `replicate`). A push that worked before an upgrade and fails after it names
   the version here.
 - **allow this finding**: the exact command that appends the fingerprint to
   the `.gbrain-scan-allow` file at the repository root. The path is absolute
