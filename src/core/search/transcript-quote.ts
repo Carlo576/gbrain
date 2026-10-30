@@ -33,8 +33,9 @@
  * unchanged; only a quoted row's chunk_text, `quoted` and its delivered
  * match_spans (remapped to the returned text) and tokens differ. Recall and
  * think's prompt run both steps too; facts read as items (`quoteFact`) and
- * page bodies a remote reader gets (`quotePageBody`, get_page and fetch) are
- * fenced only, so the text inside stays byte-exact.
+ * page bodies a remote reader gets (get_page and fetch,
+ * ops/get-page-projection.ts and get-page-body.ts) are fenced only, so the
+ * text inside stays byte-exact.
  */
 import { BUILTIN_PATTERNS } from '../conversation-parser/builtins.ts';
 import { ALLOWED_TYPE_ALIASES } from '../facts/conversation-types.ts';
@@ -380,17 +381,7 @@ export function quoteFact<T extends { id: number; fact: string; source?: string 
 }
 
 /**
- * A page body as a remote reader gets it when its type is quoted: compiled_truth and timeline each fenced
- * (no tool-call summary, so edit_page old_text copied from inside still matches the stored body).
- */
-export function quotePageBody<T extends { slug: string; type: string; compiled_truth: string; timeline: string }>(page: T): T {
-  if (!isQuotedPageType(page.type)) return page;
-  const fence = (text: string) => (text ? fenceTranscriptText(text, page.slug) : text);
-  return { ...page, compiled_truth: fence(page.compiled_truth), timeline: fence(page.timeline) };
-}
-
-/**
- * The text with every fence quotePageBody (or a fenced get_page window) put around `slug`'s body removed,
+ * The text with every fence a remote get_page put around `slug`'s body (get-page-projection.ts, get-page-body.ts) removed,
  * so a remote get → edit → put_page round trip writes the body, never the fence. Only a marker line naming
  * this slug followed by its own fence is removed; anything else is kept.
  */

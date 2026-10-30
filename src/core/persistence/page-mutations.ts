@@ -43,6 +43,7 @@ import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { liveSearchable } from './searchable.ts';
 import { cachedPreadmitBrain, dropPreadmitCache, preadmitReads, preadmitRecheckFailed } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
+import { unquoteTranscriptText } from '../search/transcript-quote.ts';
 import { isMirrorOnlyPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 
 export async function requestPrincipalForContext(ctx: OperationContext): Promise<Principal> {
@@ -261,6 +262,9 @@ export async function preparePageAdmission(ctx: OperationContext,
     /** #6712 `repair overwritten-edits`: publish to the database only, so the restore never rewrites the committed file. */
     databaseOnly?: 'overwrite_restore' | 'detached'; stagedBody?: true }
 ): Promise<{ prior: WriteRequest; admission?: undefined; typeWarning?: undefined; slugAdvisory?: undefined } | { prior?: undefined; admission: WriteAdmission; typeWarning: PageTypeWarning | null; slugAdvisory: string | null }> {
+  // #8042: a remote put_page (put_pages too) of get_page content writes the page body, not the quote fences get_page added.
+  const { content: putContent, slug: putSlug } = input.params;
+  if (input.operation === 'put_page' && ctx.remote !== false && typeof putContent === 'string' && typeof putSlug === 'string') input = { ...input, params: { ...input.params, content: unquoteTranscriptText(putContent, putSlug) } };
   if (input.operation === 'put_page' && ['kind', 'preview', 'backup_reference'].some(key => Object.hasOwn(input.params, key))) {
     if (ctx.remote !== false || input.managedFileImport !== true || !OWNER_FILE_INTENTS.has(String(input.params.kind)) ||
       ['preview', 'backup_reference'].some(key => Object.hasOwn(input.params, key))) {

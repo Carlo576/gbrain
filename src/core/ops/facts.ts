@@ -218,6 +218,12 @@ function packingArm<T>(candidates: T[], kept: T[], cost: (item: T) => number) {
  * A result row's cost in recall's packing. A delivered block costs what delivery counted (its text and title in
  * delivery's tokenizer), so recall never re-cuts a set delivery already fit using a different estimator.
  */
+/** #8042: third-party text reaches a remote recall reader quoted, before packing so the budget prices the fence. */
+function quoteRecallForRemote<F extends { id: number; fact: string; source?: string | null }>(facts: F[], results: SearchResult[], delivery: DeliveryMeta | undefined) {
+  const recount = delivery ? { count: (text: string) => countEvidenceTokens(text, delivery.tokenizer), delivery } : undefined;
+  return { facts: facts.map(quoteFact), results: fenceTranscriptRows(neutralizeTranscriptRows(results, delivery?.date_header === true), recount) };
+}
+
 function recallResultCost(delivery: DeliveryMeta | undefined): (r: SearchResult) => number {
   if (!delivery) return resultTokens;
   return r => r.delivered ? r.delivered.tokens + countEvidenceTokens(r.title ?? '', delivery.tokenizer) : resultTokens(r);
@@ -548,12 +554,7 @@ const recall: Operation = {
     // Pack what is delivered: results redacted for all; facts for remote only (localVerbatim).
     const view = redactRetrievalOutput([{ facts: rows.map(r => ({ fact: r.fact, context: r.context, source: r.source })), results: searchResults }], {}).results[0];
     searchResults = view.results;
-    if (ctx.remote !== false) {
-      rows = rows.map((r, i) => quoteFact({ ...r, ...view.facts[i] }));
-      // #8042: third-party text reaches a remote reader quoted, before packing so the budget prices the fence.
-      const header = delivery?.date_header === true;
-      searchResults = fenceTranscriptRows(neutralizeTranscriptRows(searchResults, header), delivery ? { count: text => countEvidenceTokens(text, delivery!.tokenizer), delivery } : undefined);
-    }
+    if (ctx.remote !== false) ({ facts: rows, results: searchResults } = quoteRecallForRemote(rows.map((r, i) => ({ ...r, ...view.facts[i] })), searchResults, delivery));
 
     let packedFacts = rows;
     let packedResults = searchResults;
@@ -640,8 +641,7 @@ const recall: Operation = {
               provenance: r.slug,
               // #4830: a row without a source takes the scope's single source; a federated read leaves it absent.
               ...((r.source_id ?? scalarSource) ? { source_id: r.source_id ?? scalarSource } : {}),
-              ...(r.delivered ? { delivered: r.delivered } : {}),
-              ...(r.quoted ? { quoted: r.quoted } : {}),
+              ...(r.delivered ? { delivered: r.delivered } : {}), ...(r.quoted ? { quoted: r.quoted } : {}),
               ...(r.relational ? { relational: r.relational } : {}),
               ...(r.trust_tier ? { trust_tier: r.trust_tier, origin: r.origin, ...(r.unconfirmed ? { unconfirmed: true } : {}) } : {}),
             })),
@@ -1243,6 +1243,7 @@ const delta: Operation = {
         fact_id: String(f.id),
         provenance: f.provenance,
         ...(f.trust_tier ? { trust_tier: f.trust_tier, origin: f.origin } : {}),
+        ...(f.quoted ? { quoted: f.quoted } : {}),
       })),
       threads,
       text,

@@ -51,6 +51,7 @@ import { pageActivationVerdicts, pageKey, suppressionSummary, type SuppressionSu
 import { renderTrustedInline, trustFields, type TrustFields } from '../eligibility/labels.ts';
 import { TURN_CONTEXT_ENVELOPE } from './turn-context-envelope.ts';
 import { neutralizeForPrompt } from '../think/sanitize.ts';
+import { quoteFact } from '../search/transcript-quote.ts';
 
 /**
  * v0.45.7 ambient recall (issue #1). The per-turn assembler is extended into the
@@ -98,6 +99,8 @@ export interface TurnContextFact {
   /** #5575 A6: the fact's trust tier and short write origin (rendered as a compact label; absent from older serves). */
   trust_tier?: TrustTier;
   origin?: string;
+  /** #8042: a fact saved from a chat page, returned fenced as quoted source material (search/transcript-quote.ts). */
+  quoted?: 'transcript';
 }
 
 /**
@@ -800,7 +803,8 @@ async function assembleDelta(
           status: 'ok',
           raw: kept.map((r) => ({ id: r.id, at: iso(r), repId: members.get(r.id) ?? r.id })),
           overflowRow: probe ? { id: probe.id, at: iso(probe) } : null,
-          facts: collapsed.map((r) => ({
+          // #8042: a remote reader gets a fact saved from a chat page quoted.
+          facts: collapsed.map((r): typeof r & { quoted?: 'transcript' } => (remote ? quoteFact(r) : r)).map((r) => ({
             id: r.id,
             fact: r.fact,
             kind: r.kind,
@@ -814,6 +818,7 @@ async function assembleDelta(
             confidence: r.confidence,
             ...(r.attributed_to ? { attributed_to: r.attributed_to } : {}),
             ...trustFields(r.trust_tier, r.write_origin),
+            ...(r.quoted ? { quoted: r.quoted } : {}),
           })),
         };
       } catch {

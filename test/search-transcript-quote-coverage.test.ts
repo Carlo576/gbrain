@@ -4,8 +4,8 @@
  * every fact the conversation-facts extractor saved from them, on every read
  * path that hands them to a model: search, query (page and fact rows,
  * saved_facts), assemble_evidence, recall (results and facts), get_page
- * (reading shape, content and windows), fetch, think's prompt and the MCP
- * hot memory. A note and a remembered fact holding the same text are
+ * (reading shape, content and windows), fetch, think's prompt, delta and the
+ * MCP hot memory. A note and a remembered fact holding the same text are
  * returned unchanged. Remote callers go through MCP dispatch; a trusted
  * local get_page stays raw, and a remote get_page → put_page round trip
  * stores the original body.
@@ -244,6 +244,11 @@ for (const backend of testBackends()) {
         expect(blocks.get(NOTE.slug)).not.toContain('[quoted conversation excerpt');
       }, 120_000);
     }
+
+    test('remote MCP delta: the conversation-derived fact is quoted, the remembered one is not', async () => {
+      const out = remoteJson<{ facts: Fact[] }>(await dispatchToolCall(engine, 'delta', { since: '2000-01-01T00:00:00Z' }, remote));
+      expectQuotedFacts(out.facts, chatFactId, ownFactId);
+    }, 120_000);
 
     test('MCP hot memory: the conversation-derived fact is quoted, the remembered one is not', async () => {
       const meta = await getBrainHotMemoryMeta('search', remoteCtx()) as { brain_hot_memory: { facts: Fact[] } };
