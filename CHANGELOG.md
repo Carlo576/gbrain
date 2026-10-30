@@ -10,6 +10,19 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**The unit lane now runs 28 shards instead of 22, on shard weights refreshed from the Oct 30 nightly. With the fresh weights, every one of 22 shards would be planned at 624.4 s against the 600 s per-shard budget; at 28 shards the largest is 490.6 s.**
+
+`UNIT_SHARDS` is 28. `test.yml`'s unit matrix and `e2e.yml`'s `coverage-full-unit` matrix follow it, and `test/scripts/unit-shard-budget.test.ts` pins both, still two shards per runner. The unit, serial and E2E weight maps and their metadata come from the Oct 30 nightly mining run, and weight coverage is clean: 4366 unit, 446 serial and 832 E2E files, with no dead entries.
+
+### Itemized changes
+
+- `scripts/sharding.ts`: `UNIT_SHARDS = 28`.
+- `.github/workflows/test.yml`, `.github/workflows/e2e.yml`: the unit and coverage-full-unit matrices and their `--manifest-expect` lists.
+- `scripts/test-weights.json`, `scripts/serial-weights.json`, `scripts/e2e-weights.json` and their `.metadata.json`: the Oct 30 refresh.
+- `docs/TESTING.md`: the shard counts.
+
 ## [0.60.518.0] - 2026-10-30
 
 **`gbrain repair secret-spans --source <id> --slug <slug>...` replaces the credentials the secret scanner finds in the database copies of the pages you name with `<REDACTED:rule>` markers and changes nothing else, held pages included (GST-327).**
