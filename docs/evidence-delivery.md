@@ -428,7 +428,7 @@ explicit `snippet_chars` caps the text inside the fence, so the row can run
 longer than the cap by the marker and fence lines. Under `auto` an explicit
 budget pays for the fence, except that a rank-one row is kept when the fence
 alone exceeds a very small budget; budgets under other units do not count it.
-With `date_header`, the header is the first line inside the fence.
+With `date_header`, the header stays the first line of the row, ahead of the marker and the fence.
 
 One result is returned per expanded page, at the page's best rank. `chunk_id`,
 `chunk_index`, `score` and the other ranking fields stay those of the page's

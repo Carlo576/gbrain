@@ -1475,7 +1475,7 @@ export function capEvidenceToBudget<T extends SearchResult & { delivered?: Deliv
   let lost = 0;
   const out: T[] = [];
   for (const r of results) {
-    const asDelivered = (text: string) => (quote ? deliveredQuoteText(r, text) : text);
+    const asDelivered = (text: string) => (quote ? deliveredQuoteText(r, text, delivery.date_header === true) : text);
     const titleTok = count(r.title);
     const textTok = count(asDelivered(r.chunk_text));
     if (titleTok + textTok <= remaining) {
