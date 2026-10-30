@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.511.0] - 2026-10-30
+## [0.60.512.0] - 2026-10-30
 
 **After an automatic self-upgrade, the autopilot now restarts the serve your installed service runs when it is still on the old build, so one auto-upgrade no longer leaves two builds running until someone runs `gbrain upgrade --restart-only` by hand.**
 
@@ -25,6 +25,35 @@ The systemd pid read also stopped passing a value flag to `systemctl show` and p
 - `src/core/cli-flag-registry.generated.ts`: regenerated; the never-accepted value flag is gone from the `upgrade`, `post-upgrade` and `autopilot` rows.
 - Docs: the Restart section of `docs/guides/upgrades-auto-update.md` and the `upgrade-restart.ts` key-files entry.
 - Tests: `test/autopilot-serve-restart-7475.test.ts`.
+
+## [0.60.511.0] - 2026-10-30
+
+**Sync no longer deletes pages it cannot prove are deletions while gbrain.yml's storage section is invalid, and one-line `db_only: [dir/]` lists now take effect.**
+
+A managed sync keeps a live page whose file is gone when the page sits under a declared `storage.db_only` directory, because the database copy is canonical. When gbrain.yml's storage section did not load (a directory in both `db_tracked` and `db_only`), or declared `db_only` in a shape the parser resolved to nothing, that check answered "not database-only". Those pages were then soft-deleted, and the retention purge removed them for good (#8007). Sync now treats the answer as unknown: it keeps each such page and holds its path as `file_drift` with reason `storage_invalid`. The same applies when a deprecated `supabase_only` list sits next to canonical keys, which makes gbrain ignore it. `gbrain repair file-drift --prefer file` and `sync.apply_held_deletions` skip these pages too. Once gbrain.yml is fixed and synced, the holds clear and each page is decided under the fixed config.
+
+### How to use it
+
+- If `gbrain sync` reports pages "kept, not deleted" or `gbrain sources status` shows `storage_invalid` holds, run `gbrain storage status`. It names the problem. Fix gbrain.yml, commit it, then run `gbrain sync --source <id> --no-pull`.
+- Storage tiers can be written as a one-line flow list: `db_only: [media/x/, 'archive/']`.
+
+### What changes after you upgrade
+
+| Situation | Before | After |
+|---|---|---|
+| gbrain.yml tiers overlap and a file disappears | the page was deleted, then purged | the page is kept and held `storage_invalid` |
+| `db_only` written as a flow list split over lines | resolved nothing: missing-file pages deleted | resolves nothing: missing-file pages held, and `gbrain storage status` warns |
+| `db_only: [dir/]` on one line | ignored | declared: gitignored, published database-only, kept when its file is gone |
+| `db_tracked: [...]` or `keep_db: [...]` on one line | ignored | take effect |
+| `db_only: []` | made the sync baseline commit refuse | declares no directory |
+
+### Itemized changes
+
+- `src/core/storage-config.ts`: quote-aware one-line flow lists; an explicit `[]` is no unresolved declaration; an ignored deprecated `supabase_only` list is flagged.
+- `src/core/persistence/source-storage.ts`, `sync-discovery.ts`, `sync-pass.ts`, `sync-classify.ts`, `sync-pass-apply.ts`, `sync-holds.ts`: the three-valued db_only verdict, the `storage_invalid` hold, its remediation, rescreen and release.
+- `src/core/persistence/sync-held-deletions.ts`, `src/core/repair/file-drift.ts`: skip pages whose db_only verdict is not a definite no.
+- `src/commands/storage.ts`, `src/commands/sync-diagnostics.ts`: the unresolved-declaration warning and the kept-pages summary line.
+- Tests: `test/sync-storage-invalid-8007.test.ts` (PGLite and Postgres), `test/sync-classify-storage-invalid-8007.test.ts`, and new cases in `test/storage-config.test.ts` and `test/storage-pglite.test.ts`.
 
 ## [0.60.510.0] - 2026-10-30
 
