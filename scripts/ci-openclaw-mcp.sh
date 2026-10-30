@@ -9,6 +9,10 @@
 # gbrain tools. `openclaw mcp set` writes the file OpenClaw reads, and
 # `openclaw mcp show` reads it back.
 #
+# gbrain serves its starter surface (31 tools): OpenClaw's default agent model
+# is openai/gpt-5.4, OpenAI refuses a request with more than 128 tools, and
+# OpenClaw adds about 31 of its own to gbrain's 158 on the full surface.
+#
 # The server runs behind scripts/ci-mcp-tap.sh, which logs every request to
 # $GBRAIN_TEST_TIER2_MCP_TAP_LOG for test/e2e/skills.test.ts.
 #
@@ -23,7 +27,7 @@ server=$(GBRAIN_REPO="$PWD" bun -e '
   const e = process.env;
   console.log(JSON.stringify({
     command: "bash",
-    args: ["scripts/ci-mcp-tap.sh", e.GBRAIN_TEST_TIER2_MCP_TAP_LOG, "--", "bun", "run", "src/cli.ts", "serve"],
+    args: ["scripts/ci-mcp-tap.sh", e.GBRAIN_TEST_TIER2_MCP_TAP_LOG, "--", "bun", "run", "src/cli.ts", "serve", "--surface", "starter"],
     cwd: e.GBRAIN_REPO,
     env: { DATABASE_URL: e.DATABASE_URL },
   }));

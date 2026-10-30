@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { load } from 'js-yaml';
 import { tapToolCalls } from '../../scripts/mcp-tap-calls.ts';
+import { STARTER_OPS } from '../../src/mcp/surface.ts';
 
 const REPO = join(import.meta.dir, '../..');
 type Step = { name?: string; run?: string; env?: Record<string, string> };
@@ -62,7 +63,7 @@ describe('Tier 2 OpenClaw MCP wiring (#8002)', () => {
       expect(r.status, r.stdout + r.stderr).toBe(0);
       expect(JSON.parse(readFileSync(join(dir, 'saved.json'), 'utf8'))).toEqual({
         command: 'bash',
-        args: ['scripts/ci-mcp-tap.sh', tap, '--', 'bun', 'run', 'src/cli.ts', 'serve'],
+        args: ['scripts/ci-mcp-tap.sh', tap, '--', 'bun', 'run', 'src/cli.ts', 'serve', '--surface', 'starter'],
         cwd: REPO,
         env: { DATABASE_URL: 'postgresql://u@localhost:5432/db' },
       });
@@ -80,6 +81,16 @@ describe('Tier 2 OpenClaw MCP wiring (#8002)', () => {
       expect(configure({ ...base, DATABASE_URL: undefined }).status).not.toBe(0);
       expect(configure({ ...base, GBRAIN_TEST_TIER2_MCP_TAP_LOG: undefined }).status).not.toBe(0);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('the server stays under the model API tool cap: it serves the starter surface', () => {
+    // OpenClaw's default agent model is openai/gpt-5.4, and OpenAI refuses a
+    // request with more than 128 tools. OpenClaw adds about 31 of its own;
+    // gbrain's full surface is 158 tools, the starter surface 31.
+    const script = readFileSync(join(REPO, 'scripts/ci-openclaw-mcp.sh'), 'utf8');
+    expect(script).toContain('"serve", "--surface", "starter"');
+    expect(STARTER_OPS.size).toBeLessThanOrEqual(64);
+    for (const op of ['put_page', 'search', 'query', 'whoami', 'list_pages']) expect(STARTER_OPS.has(op)).toBe(true);
   });
 
   test('the tap passes the stream through unchanged and logs what the client sent', () => {

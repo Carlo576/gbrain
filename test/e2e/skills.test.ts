@@ -200,7 +200,7 @@ describeT2('E2E Tier 2: Health Skill', () => {
 
   test('health skill reports brain status', async () => {
     const { result: { text, exitCode, durationMs }, calls } = gbrainToolCalls(() => runOpenClaw(
-      'Use the gbrain MCP get_health tool to check the brain\'s health and tell me the results.',
+      'Use the gbrain MCP tools to report the brain\'s status: call whoami and list_pages, then tell me what you found.',
       180_000,
     ));
 
