@@ -27,7 +27,7 @@ import { dirname, join } from 'node:path';
 import { removeHermesTurnHook, syncHermesTurnHook } from '../core/setup/hermes-turn-hook.ts';
 import { removeOpenclawTurnPlugin, syncOpenclawTurnPlugin } from '../core/setup/openclaw-turn-plugin.ts';
 import { isTurnRuleHarness, removeTurnRuleHook, syncTurnRuleHook, type TurnHookOutcome, type TurnRuleHarness } from '../core/setup/turn-hook.ts';
-import { inspectTurnHook, turnHookFix, verifyTurnHook, type TurnHookVerdict } from '../core/setup/turn-hook-check.ts';
+import { inspectTurnHook, TURN_HOOK_NATIVE_INSPECT, turnHookFix, verifyTurnHook, type TurnHookVerdict } from '../core/setup/turn-hook-check.ts';
 import { opError, OperationError } from '../core/ops/contract.ts';
 import { cliRenderContext, renderCliError, renderNotice, type Action, type Notice } from '../core/agent-output.ts';
 import { writeCliNotices } from '../core/interop-notices.ts';
@@ -792,7 +792,7 @@ function turnRuleHookFor(harness: TurnRuleHarness, off: boolean, flags: SetupFla
 
 function turnHookNotLoaded(harness: string, check: TurnHookVerdict, rerun: string[]): OperationError {
   const fix = turnHookFix(harness, rerun);
-  return opError('turn_hook_not_loaded', `The per-turn gbrain hook for ${harness} is not active: ${check.message}.`, fix.why, { reason: check.reason, docs: 'docs/guides/repair.md#turn-hook-not-loaded', fix });
+  return opError('turn_hook_not_loaded', `The per-turn gbrain hook for ${harness} is not active: ${check.message}.${TURN_HOOK_NATIVE_INSPECT[harness] ? ` The harness's own check: ${TURN_HOOK_NATIVE_INSPECT[harness]}.` : ''}`, fix.why, { reason: check.reason, docs: 'docs/guides/repair.md#turn-hook-not-loaded', fix });
 }
 
 async function finish(out: Out, doc: {

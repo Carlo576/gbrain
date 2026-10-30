@@ -137,7 +137,7 @@ export function verifyTurnHook(harness: string, opts: { projectDir?: string; run
   if (state.via === 'plugin') return { ok: true, state, reason: 'plugin_lane', message: `${state.detail}; check it with ${state.native_inspect}` };
   if ((harness === 'claude-code' || harness === 'codex') && state.command) {
     const r = run(['sh', '-c', state.command], JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: '', session_id: 'gbrain-install-check' }));
-    if (!r.ok) return fail('hook_failed', `the UserPromptSubmit hook exited non-zero (${r.output.trim().split('\n').at(-1) ?? 'no output'})`);
+    if (!r.ok) return fail('hook_failed', `the UserPromptSubmit hook exited non-zero (${r.output.trim().split('\n').at(-1) || 'no output'})`);
     if (!r.output.includes('GBrain: before answering')) return fail('no_rule', 'the UserPromptSubmit hook ran but did not add the brain-first rule (is the brain-first block installed for this harness?)');
     return { ok: true, state, reason: 'ran', message: `${state.detail}; it ran and added the rule` };
   }
@@ -192,6 +192,7 @@ export function installerTurnHook(opts: { harness: string; accepted: boolean; gb
   const outcome = carried && carried.state !== 'missing' && carried.via !== 'turn-rule'
     ? { harness, action: 'skip' as const, path: '', detail: `per-turn rule already carried: ${carried.detail}` }
     : syncTurnRuleHook({ harness, gbrainBin: opts.gbrainBin, gbrainHome: opts.gbrainHome, paths: opts.paths, rerun: opts.rerun });
-  if (outcome.action === 'print') return { outcome, verdict: { ok: false, state: { harness, state: 'missing', detail: outcome.detail }, reason: 'missing', message: outcome.detail } };
+  // Nothing was installed and the outcome names the step that does it: reported, never a failed install.
+  if (outcome.action === 'print') return { outcome, verdict: null };
   return { outcome, verdict: opts.verify === false || opts.paths ? null : verifyTurnHook(harness) };
 }

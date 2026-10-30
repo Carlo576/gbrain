@@ -486,6 +486,18 @@ describe('full apply', () => {
     expect(readFileSync(join(dirname(g.codexConfig), 'hooks.json'), 'utf8')).toContain('hook session-end --harness codex');
   });
 
+  test('codex lane wires the per-turn rule hook, trusted, beside the brain-first block; the consent block names it', async () => {
+    const f = makeFake();
+    expect(await applyHarness(flags(['--harness', 'codex']), f.deps)).toBe(0);
+    expect(f.out.join('\n')).toContain('The per-turn brain-first rule hook (UserPromptSubmit');
+    const hooks = readFileSync(join(dirname(f.codexConfig), 'hooks.json'), 'utf8');
+    expect(hooks).toContain('GBRAIN_HOOK_LANE=turn-rule');
+    expect(hooks).toContain('hook user-prompt');
+    expect(readFileSync(f.codexConfig, 'utf8')).toContain('user_prompt_submit');
+    expect(await removeHarness(flags(['--remove', '--harness', 'codex']), f.deps)).toBe(0);
+    expect(existsSync(join(dirname(f.codexConfig), 'hooks.json')) ? readFileSync(join(dirname(f.codexConfig), 'hooks.json'), 'utf8') : '').not.toContain('GBRAIN_HOOK_LANE=turn-rule');
+  });
+
   test('--project must exist [F4]', async () => {
     const f = makeFake();
     const code = await applyHarness(flags(['--project', '/definitely/not/a/dir']), f.deps);

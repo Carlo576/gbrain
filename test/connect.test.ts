@@ -538,6 +538,16 @@ describe('runConnect --install', () => {
     expect(all).toContain(REDACTED);
   });
 
+  test('a per-turn hook that does not load fails the install loudly (turn_hook_not_loaded)', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'gbrain_tok', '--install', '--yes'],
+      installDeps({ writeTurnHook: () => ({ lines: ['error turn_hook_not_loaded (hook_failed): the per-turn gbrain hook is not active'], ok: false }) }),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.err.join('\n')).toContain('turn_hook_not_loaded');
+    expect(r.err.join('\n')).toMatch(/Verified/);
+  });
+
   test('missing claude binary fails fast', async () => {
     const r = await runWithExitCapture(
       ['https://brain.example.com/mcp', '--token', 'tok', '--install', '--yes'],
