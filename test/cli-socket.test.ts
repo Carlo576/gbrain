@@ -38,7 +38,7 @@ import { cliSocketRefusalsEntry } from '../src/commands/doctor/checks/cli-socket
 import { loadOperation } from '../src/core/operation-load.ts';
 import { isResultFrame, reviveOperationError, serializeOperationError, type CliSocketRequest, type ResultFrame } from '../src/core/cli-socket/protocol.ts';
 import { queueFirstFallbackHop, takeChatFallbackHopNotices, __resetChatFallbackHopNoticeForTests } from '../src/core/ai/fallback-hop-queue.ts';
-import { installOutputCapture, OutputCapture, withOutputCapture } from '../src/core/cli-socket/output-capture.ts';
+import { _uninstallOutputCaptureForTests, installOutputCapture, OutputCapture, withOutputCapture } from '../src/core/cli-socket/output-capture.ts';
 import { opError, OperationError } from '../src/core/ops/contract.ts';
 import { loadConfigWithEngine, type GBrainConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -56,7 +56,7 @@ function runDir(): string {
 let root: string;
 
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'gbrain-cli-sock-')); });
-afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { rmSync(root, { recursive: true, force: true }); _uninstallOutputCaptureForTests(); });
 
 function homeWithConfig(name: string, body = '{"engine":"postgres"}'): { dir: string; file: string } {
   const dir = join(root, name, '.gbrain');
@@ -86,8 +86,8 @@ const NOT_READ_BEHAVIOR_PREFIXES = [
   'GBRAIN_PROGRESSIVE_BATCH_', 'GBRAIN_QUEUE_', 'GBRAIN_SETUP_', 'GBRAIN_STOP_PUSH', 'GBRAIN_SUPERVIS', 'GBRAIN_SWEEP', 'GBRAIN_SYNC', 'GBRAIN_WORKER_',
 ];
 const NOT_READ_BEHAVIOR = new Set([
-  'GBRAIN_HOME', 'GBRAIN_SERVE_LOG_MAX_BYTES', 'GBRAIN_SERVE_LOG_MAX_FILES', 'GBRAIN_SERVE_LOG_DEDUPE_SECONDS', 'GBRAIN_BRAIN_ID', 'GBRAIN_MOUNTS_PATH', 'GBRAIN_CWD_ENV_QUARANTINED',
-  'GBRAIN_FAIL_ON_EMPTY', 'GBRAIN_CLI_SOCKET', 'GBRAIN_DEBUG', 'GBRAIN_SQL_TRACE', 'GBRAIN_SQL_TRACE_LABEL', 'GBRAIN_LME_DEBUG', 'GBRAIN_SOURCE',
+  'GBRAIN_AGENT_INSTRUCTIONS', 'GBRAIN_PLUGIN', 'GBRAIN_HOME', 'GBRAIN_SERVE_LOG_MAX_BYTES', 'GBRAIN_SERVE_LOG_MAX_FILES', 'GBRAIN_SERVE_LOG_DEDUPE_SECONDS', 'GBRAIN_BRAIN_ID', 'GBRAIN_MOUNTS_PATH', 'GBRAIN_CWD_ENV_QUARANTINED',
+  'GBRAIN_FAIL_ON_EMPTY', 'GBRAIN_CLI_SOCKET', 'GBRAIN_DEBUG', 'GBRAIN_SQL_TRACE', 'GBRAIN_SQL_TRACE_LABEL', 'GBRAIN_MEMORY_TRACE', 'GBRAIN_LME_DEBUG', 'GBRAIN_SOURCE',
   'GBRAIN_DATABASE_URL', 'GBRAIN_DIRECT_DATABASE_URL', 'GBRAIN_DIRECT_POOL_SIZE', 'GBRAIN_DIRECT_POOL_BY_COMMAND', 'GBRAIN_DISABLE_DIRECT_POOL', 'GBRAIN_PREPARE',
   'GBRAIN_IDLE_TX_TIMEOUT', 'GBRAIN_MAX_CONNECTIONS', 'GBRAIN_NO_RETRY_CONNECT', 'GBRAIN_DB_ACCESS',
   'GBRAIN_ACCEPT_PENDING', 'GBRAIN_ACCEPT_SILENT_WIDEN', 'GBRAIN_WRITE_WAIT_MS', 'GBRAIN_ONESHOT_HOUSEKEEPING_INTERVAL_MS', 'GBRAIN_PREADMIT_CACHE', 'GBRAIN_PREPARATION_DEADLINES',
@@ -347,6 +347,17 @@ describe('serve listener', () => {
     if (binding) bindings.push(binding);
     return { binding, lines, path: cliSocketPath(home) };
   }
+
+  test('closing a serve drops its exit listener and the test undo puts console and stderr back', async () => {
+    const before = { exits: process.listenerCount('exit'), log: console.log, error: console.error, write: process.stderr.write };
+    const { binding } = await start();
+    expect(process.listenerCount('exit')).toBe(before.exits + 1);
+    expect(console.log).not.toBe(before.log);
+    binding!.close();
+    expect(process.listenerCount('exit')).toBe(before.exits);
+    _uninstallOutputCaptureForTests();
+    expect([console.log, console.error, process.stderr.write]).toEqual([before.log, before.error, before.write]);
+  });
 
   test('this platform reads peer credentials (otherwise the serve would refuse to start)', () => {
     if (process.platform === 'linux' || process.platform === 'darwin') expect(peerCredSupport().ok).toBe(true);

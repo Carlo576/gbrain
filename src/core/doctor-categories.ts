@@ -70,6 +70,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'connector_held_items',
   'git_held_files',
   'fence_integrity',
+  // GBRA-221: live fence rows on imported pages whose body is outside-authored text (doctor/checks/outside-content-fences.ts).
+  'outside_content_fences',
   // GBRA-161: derived items live generations retired in the restore window, and results held instead of published (doctor/checks/generations.ts).
   'generation_held',
   'generation_pending',
@@ -78,6 +80,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'trust_tiers',
   'trust_scan',
   'trust_sources_unclaimed',
+  // #7656: index-existing trust releases confirmed before their preview showed the fence row's fields (doctor/checks/trust-release-unpreviewed.ts).
+  'trust_release_unpreviewed_fields',
   'credential_projection_pending',
   'derived_visibility',
   'extractor_facts_expired',
@@ -136,6 +140,10 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'extract_health',
   // Large pages A7: page extractions that read only part of their input.
   'extraction_input_truncated',
+  // PR 4 (Wave B incremental derivation, transcripts): conversation pages held because no format is detected over them.
+  'conversation_detection_ambiguous',
+  // PR 4 (Wave B incremental derivation, transcripts): segmented derivations held back by a model without a price.
+  'derivation_unpriced_model',
   'facts_embedding_width_consistency',
   'facts_extraction_health',
   'facts_health',
@@ -169,6 +177,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'parked_effects',
   // #6741: managed purges parked after repeated failures (doctor/checks/purge-parks.ts).
   'purge_parked_pages',
+  // Wave B PR 4: fact purge sweeps of stored derivation results still pending or stalled (doctor/checks/derivation-purge-sweeps.ts).
+  'derivation_purge_sweeps',
   'partial_embedding',
   'pglite_scratch_probe',
   'quarantined_pages',
@@ -208,6 +218,10 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'unlinked_facts',
   // #7160: title-prefixed person pages that likely duplicate an unprefixed page (preview only).
   'person_title_duplicates',
+  // Git-canonical G1: the database compared with the commit at HEAD per source, informational (doctor/checks/db-ahead-of-git.ts).
+  'db_ahead_of_git',
+  // Git-canonical G3: how far each strict source's index trails HEAD (doctor/checks/git-index-lag.ts).
+  'git_index_lag',
   'edge_validity',
   'text_projection_readiness',
   'timeline_coverage',
@@ -236,6 +250,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'sync_landing_gaps',
   // #6712: live pages whose database-only edit an incremental sync overwrote without a hold (doctor/checks/overwritten-edits.ts).
   'sync_overwritten_db_edits',
+  // #7891: provenance stamps and trust markers a write removed before #7892 (doctor/checks/provenance-stamp-drift.ts).
+  'provenance_stamp_drift',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',
@@ -307,6 +323,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'google_api_access',
   'google_oauth',
   'home_dir_in_worktree',
+  // GBRA-108: cron commands that run gbrain without GBRAIN_HOME (doctor/checks/cron-gbrain-home.ts).
+  'cron_gbrain_home',
   'index_audit',
   'npm_squat',
   'oauth_client_scope_health',
@@ -386,6 +404,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'grant_new_ops_available',
   'reranker_health',
   'rls',
+  // #7632: every gbrain function that pins a search_path ends it with pg_temp.
+  'function_search_path',
   'rls_event_trigger',
   'search_mode',
   'decide_health',
