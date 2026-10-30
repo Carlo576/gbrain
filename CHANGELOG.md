@@ -10,6 +10,20 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.508.0] - 2026-10-30
+
+**The E2E full run is shorter and Tier 2 no longer reports green on a run where it executed nothing: Selected E2E uses up to 14 workers, Tier 1's graduation files run in 2 shards of their own, and Tier 2 runs keyed on the nightly schedule with a check that fails when any of its tests skipped.**
+
+Selected E2E shards set the E2E critical path in most full-ci runs, and Tier 1 ran its 15 graduation files one after another for about 15 minutes. Tier 2 installed OpenClaw on every run, then skipped all 3 tests because the test preload strips the model keys, and still counted green. Now Selected E2E can run up to 14 workers (`MAX_E2E_WORKERS`), and the graduation files run in a `tier1-graduation` job split into 2 weighted shards, against direct Postgres and PgBouncer as before and on the same `tier1` receipt lane; `e2e-status` requires that job. Tier 2 runs keyed only on the nightly E2E schedule and on a `full_corpus` dispatch. On other events `e2e-status` accepts its skip with a `Tier 2 (LLM Skills) not run: keys withheld` notice, and on the nightly `scripts/require-executed-tests.ts` fails the job when any Tier 2 test skipped or none ran. `GBRAIN_PAID_LANES=0` still turns it off. A new test fails when a Selected E2E or graduation shard of the full corpus, scaled by the measured actual-to-predicted factor plus setup time and a minute of margin, would pass its job timeout.
+
+### Itemized changes
+
+- `.github/workflows/e2e.yml`: 14 Selected E2E workers, the `tier1-graduation` shards, keyed Tier 2 on the nightly and `full_corpus`, and the keys-withheld notice in `e2e-status`.
+- `scripts/require-executed-tests.ts`: fails a lane whose tests skipped or never ran.
+- `scripts/e2e-matrix.ts`, `scripts/e2e-provider-key-notice.sh`, `scripts/structural-suites.tsv` and `.gstack/pregate.json` follow the new jobs.
+- Docs: `docs/ci-event-parity.md`, `docs/ci-red-runbook.md`, `docs/TESTING.md` and the key-files entry.
+- Tests: `test/scripts/e2e-shard-budget.test.ts`, `test/scripts/require-executed-tests.test.ts`, and the wiring, matrix, routing and paid-lane tests.
+
 ## [0.60.507.0] - 2026-10-30
 
 **`search`, `query` and `assemble_evidence` now return a conversation page's text as a quoted excerpt, with tool calls in it (JSON or XML-style) replaced by a one-line summary, so an agent reading the result can't mistake an old tool call for a live one.**
