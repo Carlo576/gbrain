@@ -37,6 +37,7 @@ import { readBlobContents, readTreeBlobs, SYNC_READ_BOUND } from './sync-blobs.t
 import { gitChildEnv } from '../git-env.ts';
 import { readOriginEvidence } from './sync-origin-evidence.ts';
 import { sourceDbOnlyVerdict } from './source-storage.ts';
+import { dbOnlyVerdict, storageConfigFromYaml, unresolvedDbOnlyIn } from '../storage-config.ts';
 import { movedDriftHolds, prescreenSyncEntries, type SyncDriftSide } from './sync-prescreen.ts';
 import { sliceEntries, type SyncSliceCursor, type SyncSliceState } from './sync-slices.ts';
 
@@ -375,14 +376,29 @@ async function dropUncommittedDeletes(gitRoot: string, tips: Array<string | null
   return kept;
 }
 
+/** #8014: a company source's db_only verdict, read from gbrain.yml at its approved commit, never the working tree. */
+function committedDbOnlyVerdict(gitRoot: string, commit: string, root: string): (slug: string) => boolean | 'unknown' {
+  const rel = relative(gitRoot, root).split(sep).join('/');
+  const path = rel ? `${rel}/gbrain.yml` : 'gbrain.yml';
+  try {
+    if (!syncGit(gitRoot, ['ls-tree', '--name-only', commit, '--', path]).trim()) return () => false;
+    const content = syncGit(gitRoot, ['show', `${commit}:${path}`]);
+    const config = storageConfigFromYaml(content, path);
+    if (unresolvedDbOnlyIn(content, config)) return () => 'unknown';
+    return slug => dbOnlyVerdict(slug, config);
+  } catch {
+    return () => 'unknown';
+  }
+}
+
 /**
  * #7324: a delete under a declared storage.db_only dir is retired (its database row is canonical). #8007: while gbrain.yml's
  * storage section is invalid, whether a path is database-only is unknown, so its delete is retired too and named.
  */
-function retireDbOnlyDeletes(root: string, entries: readonly SyncEntry[], retired: Set<SyncEntry>): { storageInvalidKept?: string[] } {
+function retireDbOnlyDeletes(entries: readonly SyncEntry[], retired: Set<SyncEntry>, verdict: (slug: string) => boolean | 'unknown'): { storageInvalidKept?: string[] } {
   const storageInvalidKept: string[] = [];
   for (const entry of entries) {
-    const dbOnly = entry.action === 'delete' && entry.slug ? sourceDbOnlyVerdict(root, entry.slug) : false;
+    const dbOnly = entry.action === 'delete' && entry.slug ? verdict(entry.slug) : false;
     if (dbOnly) retired.add(entry);
     if (dbOnly === 'unknown') storageInvalidKept.push(entry.path);
   }
@@ -675,7 +691,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       else winner.renameHeld = held;
     }
   }
-  Object.assign(discovered, retireDbOnlyDeletes(root, selected, retired));
+  Object.assign(discovered, retireDbOnlyDeletes(selected, retired, company ? committedDbOnlyVerdict(gitRoot, target, root) : slug => sourceDbOnlyVerdict(root, slug)));
   if (retired.size) discovered.entries = selected.filter(entry => !retired.has(entry));
   if (collisions.length) discovered.slugCollisions = collisions;
   // Identities and origin collisions were resolved over the whole target above; only the frozen manifest is cut.

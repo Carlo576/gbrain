@@ -94,10 +94,11 @@ export const LABELED_CREDENTIAL_PATTERNS: readonly LabeledPattern[] = [
 /**
  * #7997: an importer redaction marker (`<REDACTED:kind>`) with its colon swapped, the same length, so the label
  * patterns read it as one word. Its colon used to split it into a claimed `user:pass` pair, while a credential written
- * beside a marker (`login <REDACTED:user-pattern> / s3cret!`) still matches.
+ * beside a marker (`login <REDACTED:user-pattern> / s3cret!`) still matches. A marker glued to more text
+ * (`<REDACTED:x>s3cret!`) is left alone, so that text is still claimed as it was before.
  */
 export function neutralizeRedactionMarkers(line: string): string {
-  return line.includes('<REDACTED:') ? line.replace(/<REDACTED:(?=[A-Za-z0-9_-]{1,64}>)/g, '<REDACTED_') : line;
+  return line.includes('<REDACTED:') ? line.replace(/<REDACTED:(?=[A-Za-z0-9_-]{1,64}>[*_]{0,2}(?:[\s/:"'`.,;!?)\]}]|$))/g, '<REDACTED_') : line;
 }
 
 /** Cheap gate before the label regexes run on a line. */

@@ -27,6 +27,7 @@ const MARKERS: Array<[string, string]> = [
   ['a marker after a password label', 'password: <REDACTED:labeled_credential>'],
   ['a marker pair joined by a colon', 'login <REDACTED:user-pattern>:<REDACTED:user-pattern>'],
   ['a marker pair joined by a slash', 'login <REDACTED:user-pattern> / <REDACTED:labeled_credential>'],
+  ['a marker ending a sentence', 'login: <REDACTED:labeled_credential>.'],
 ];
 
 const BESIDE: Array<[string, string]> = [
@@ -35,6 +36,13 @@ const BESIDE: Array<[string, string]> = [
   ['a password right after a marker user and colon', `login <REDACTED:user-pattern>:${PW}`],
   ['a password label after a marker on the same line', `<REDACTED:user-pattern> password: ${PW}`],
   ['a login pair before a marker on the same line', `login alice-example / ${PW} <REDACTED:secret>`],
+];
+
+/** A marker glued to more text is no single word: as before the fix, that text is claimed (taking part of the marker with it). */
+const GLUED: Array<[string, string]> = [
+  ['a password glued onto a marker user', `login <REDACTED:user-pattern>${PW}`],
+  ['a password glued onto a bold marker', `login: **<REDACTED:secret>**${PW}`],
+  ['a password glued onto a marker after a user name', `creds alice<REDACTED:x>${PW}`],
 ];
 
 describe('#7997: importer redaction markers and labeled_credential', () => {
@@ -48,6 +56,11 @@ describe('#7997: importer redaction markers and labeled_credential', () => {
     const out = redactFindings(line, LANE).text;
     expect(out).not.toContain(PW);
     for (const marker of line.match(/<REDACTED:[a-z_-]+>/g) ?? []) expect(out).toContain(marker);
+  });
+
+  for (const [name, line] of GLUED) test(`${name} is still claimed`, () => {
+    expect(scanText(line, LANE).map(f => f.pattern)).toEqual(['labeled_credential']);
+    expect(redactFindings(line, LANE).text).not.toContain(PW);
   });
 
   test('re-redacting an imported transcript that already holds markers changes nothing', () => {

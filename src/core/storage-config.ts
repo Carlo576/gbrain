@@ -63,6 +63,18 @@ type RawStorage = {
   supabase_only?: string[];
 };
 
+/**
+ * The values of a one-line flow list (`[]`, `[dir/, 'other/']`), or null when `text` is not one the parser resolves: not a
+ * flow list, a nested list, or an unquoted value holding whitespace (a missing comma: `[a/ b/]`, #8015).
+ */
+function parseFlowList(text: string): string[] | null {
+  const flow = /^\[(.*)\]$/.exec(text);
+  if (!flow || /[[\]]/.test(flow[1]!)) return null;
+  const tokens = [...flow[1]!.matchAll(/\s*("[^"]*"|'[^']*'|[^,]*)\s*(?:,|$)/g)].map((m) => m[1]!.trim());
+  if (tokens.some((token) => !/^["']/.test(token) && /\s/.test(token))) return null;
+  return tokens.map((token) => token.replace(/^["']|["']$/g, '')).filter(Boolean);
+}
+
 function parseStorageYaml(content: string, unknown: string[] = []): RawStorage | null {
   const lines = content.split('\n').map((line) => line.replace(/\r$/, ''));
 
@@ -111,13 +123,8 @@ function parseStorageYaml(content: string, unknown: string[] = []): RawStorage |
     const key = indented.slice(0, colon).trim();
     if (STORAGE_KEYS.has(key)) {
       currentList = key as keyof RawStorage;
-      // Inline flow list on one line: `db_only: []` or `db_only: [dir/, 'other/']`.
-      const flow = /^\[(.*)\]$/.exec(indented.slice(colon + 1).trim());
-      // A nested list, or an unquoted value holding whitespace (a missing comma: `[a/ b/]`), resolves nothing (#8015).
-      const tokens = flow && !/[[\]]/.test(flow[1]!) ? [...flow[1]!.matchAll(/\s*("[^"]*"|'[^']*'|[^,]*)\s*(?:,|$)/g)].map((m) => m[1]!.trim()) : null;
-      if (tokens && !tokens.some((token) => !/^["']/.test(token) && /\s/.test(token))) {
-        raw[currentList] = [...(raw[currentList] ?? []), ...tokens.map((token) => token.replace(/^["']|["']$/g, '')).filter(Boolean)];
-      }
+      const values = parseFlowList(indented.slice(colon + 1).trim());
+      if (values) raw[currentList] = [...(raw[currentList] ?? []), ...values];
       continue;
     }
     if (!unknown.includes(key)) unknown.push(key);
@@ -213,54 +220,7 @@ export function loadStorageConfig(repoPath?: string | null): StorageConfig | nul
   // Read failure is a real error (not a "feature not configured" signal).
   // Throwing here lets the caller decide whether to crash or fall back.
   const content = readFileSync(yamlPath, 'utf-8');
-
-  let raw: RawStorage | null;
-  const unknown: string[] = [];
-  try {
-    raw = parseStorageYaml(content, unknown);
-  } catch (error) {
-    console.warn(
-      `Warning: Failed to parse gbrain.yml: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return null;
-  }
-
-  // No storage section at all → null (with sanity warning).
-  if (raw === null) {
-    if (!_missingStorageWarned) {
-      _missingStorageWarned = true;
-      console.warn(
-        `Warning: ${yamlPath} exists but has no storage configuration. ` +
-          `Add a "storage:" section with db_tracked / db_only arrays, ` +
-          `or remove gbrain.yml to suppress this warning.`,
-      );
-    }
-    return null;
-  }
-
-  for (const key of unknown.filter(key => !_unknownKeysWarned.has(key))) {
-    _unknownKeysWarned.add(key);
-    console.warn(`Warning: ${yamlPath}: unknown storage key '${key}' is ignored; storage takes ${CANONICAL_STORAGE_KEYS.join(', ')} (see docs/storage-tiering.md).`);
-  }
-
-  const merged = normalizeStorageConfig(raw);
-
-  // Empty storage section → return as-is but warn.
-  if (merged.db_tracked.length === 0 && merged.db_only.length === 0 && !merged.keep_db?.length) {
-    if (!_missingStorageWarned) {
-      _missingStorageWarned = true;
-      console.warn(
-        `Warning: ${yamlPath} exists but has no storage configuration. ` +
-          `Add a "storage:" section with db_tracked / db_only arrays, ` +
-          `or remove gbrain.yml to suppress this warning.`,
-      );
-    }
-    return merged;
-  }
-
-  // Normalize cosmetic issues + throw on semantic overlap (D7).
-  // Throws StorageConfigError on overlap — propagates to the caller.
-  return normalizeAndValidateStorageConfig(merged);
+  return storageConfigFromYaml(content, yamlPath);
 }
 
 export class StorageConfigError extends Error {
@@ -426,16 +386,75 @@ export function isKeepDbSlug(slug: string, keepDb: readonly string[]): boolean {
  * `db_only: []` declares no directory and does not count.
  */
 export function hasUnresolvedDbOnlyDeclaration(repoPath: string, config: StorageConfig | null): boolean {
-  if (config && config.db_only.length > 0) return false;
   // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- repoPath is the registered local source root and the file name is a constant; this only reads its gbrain.yml
   const yamlPath = join(repoPath, 'gbrain.yml');
-  const yamlContent = existsSync(yamlPath) ? readFileSync(yamlPath, 'utf-8') : '';
-  return yamlContent.split('\n').some((line) => {
+  return unresolvedDbOnlyIn(existsSync(yamlPath) ? readFileSync(yamlPath, 'utf-8') : '', config);
+}
+
+/**
+ * `hasUnresolvedDbOnlyDeclaration` over gbrain.yml's content. #8015: a db_only or supabase_only key whose inline value
+ * the parser refuses counts even when another key resolved, so a partly read declaration never answers "not db_only".
+ */
+export function unresolvedDbOnlyIn(content: string, config: StorageConfig | null): boolean {
+  const keys = content.split('\n').flatMap((line) => {
     const trimmed = line.trim();
-    if (trimmed.startsWith('#')) return false;
-    const key = /^(db_only|supabase_only)\s*:(.*)$/.exec(trimmed.replace(/\s+#.*$/, ''));
-    return key !== null && key[2]!.replace(/\s+/g, '') !== '[]';
+    const key = trimmed.startsWith('#') ? null : /^(db_only|supabase_only)\s*:(.*)$/.exec(trimmed.replace(/\s+#.*$/, ''));
+    return key ? [key[2]!.trim()] : [];
   });
+  if (keys.some((value) => value !== '' && parseFlowList(value) === null)) return true;
+  if (config && config.db_only.length > 0) return false;
+  return keys.some((value) => value.replace(/\s+/g, '') !== '[]');
+}
+
+/** gbrain.yml content as `loadStorageConfig` reads it (`label` names the file in warnings); throws on overlapping tiers. */
+export function storageConfigFromYaml(content: string, yamlPath: string): StorageConfig | null {
+  let raw: RawStorage | null;
+  const unknown: string[] = [];
+  try {
+    raw = parseStorageYaml(content, unknown);
+  } catch (error) {
+    console.warn(
+      `Warning: Failed to parse gbrain.yml: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+
+  // No storage section at all → null (with sanity warning).
+  if (raw === null) {
+    if (!_missingStorageWarned) {
+      _missingStorageWarned = true;
+      console.warn(
+        `Warning: ${yamlPath} exists but has no storage configuration. ` +
+          `Add a "storage:" section with db_tracked / db_only arrays, ` +
+          `or remove gbrain.yml to suppress this warning.`,
+      );
+    }
+    return null;
+  }
+
+  for (const key of unknown.filter(key => !_unknownKeysWarned.has(key))) {
+    _unknownKeysWarned.add(key);
+    console.warn(`Warning: ${yamlPath}: unknown storage key '${key}' is ignored; storage takes ${CANONICAL_STORAGE_KEYS.join(', ')} (see docs/storage-tiering.md).`);
+  }
+
+  const merged = normalizeStorageConfig(raw);
+
+  // Empty storage section → return as-is but warn.
+  if (merged.db_tracked.length === 0 && merged.db_only.length === 0 && !merged.keep_db?.length) {
+    if (!_missingStorageWarned) {
+      _missingStorageWarned = true;
+      console.warn(
+        `Warning: ${yamlPath} exists but has no storage configuration. ` +
+          `Add a "storage:" section with db_tracked / db_only arrays, ` +
+          `or remove gbrain.yml to suppress this warning.`,
+      );
+    }
+    return merged;
+  }
+
+  // Normalize cosmetic issues + throw on semantic overlap (D7).
+  // Throws StorageConfigError on overlap — propagates to the caller.
+  return normalizeAndValidateStorageConfig(merged);
 }
 
 /**

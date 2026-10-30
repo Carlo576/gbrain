@@ -267,6 +267,7 @@ describe('#8014: a company source keeps database-only pages its manifest lacks',
   const cases: Array<[string, string, { kept: boolean; stray: boolean }]> = [
     ['a declared db_only page stays and a stray page outside db_only is deleted', 'storage:\n  db_only: [archive/]\n', { kept: true, stray: false }],
     ['an invalid gbrain.yml (tiers that overlap) keeps every page whose file is missing', 'storage:\n  db_only:\n    - archive/\n  db_tracked:\n    - archive/\n', { kept: true, stray: true }],
+    ['an uncommitted gbrain.yml does not count: the approved commit decides', 'storage:\n  db_only: [archive/]\n', { kept: false, stray: false }],
   ];
   for (const [name, yml, expected] of cases) test(name, async () => withEnv({ GBRAIN_HOME: home }, async () => {
     for (const engine of engines) {
@@ -281,7 +282,8 @@ describe('#8014: a company source keeps database-only pages its manifest lacks',
       }
       const live = async (slug: string) => (await engine.executeRaw<{ live: boolean }>('SELECT deleted_at IS NULL AS live FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]))[0]?.live;
       writeFileSync(join(root, 'gbrain.yml'), yml);
-      git(root, 'add', '.'); git(root, 'commit', '-qm', 'Synthetic storage tiers');
+      if (name.startsWith('an uncommitted')) writeFileSync(join(root, 'README.md'), '# Excluded scaffolding, edited\n');
+      git(root, 'add', name.startsWith('an uncommitted') ? 'README.md' : '.'); git(root, 'commit', '-qm', 'Synthetic storage tiers');
       await performSync(engine, { sourceId });
       expect({ kept: await live('archive/kept'), stray: await live('notes/stray') }).toEqual(expected);
     }

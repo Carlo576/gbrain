@@ -917,7 +917,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   }
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, strict, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
-    releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path)) || (!dbOnlyUnknown && hold.code === 'file_drift' && hold.meta.reason === 'storage_invalid' && (hold.slug === null || dbOnlyVerdict(hold.slug, storage) !== 'unknown'))).map(hold => hold.path),
+    releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path)) || (!dbOnlyUnknown && hold.code === 'file_drift' && hold.meta.reason === 'storage_invalid' && (!hold.slug || dbOnlyVerdict(hold.slug, storage) !== 'unknown'))).map(hold => hold.path),
     deletionCandidates: deletionCandidates(holds, path => domain.has(path) && !tree.has(path)
       && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !readPresent(root, path, scope), toGit),
     paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3,
