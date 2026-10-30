@@ -64,7 +64,7 @@ import {
   removeClaudeHooks,
 } from '../core/bootstrap/hooks.ts';
 import { removeCodexHooks, writeCodexHooks } from '../core/bootstrap/codex-hooks.ts';
-import { isRegistrationSurface, registeredAdvertise, registeredSurface, registrationAdvertise, stdioServeArgv } from '../core/mcp-registration.ts';
+import { isRegistrationSurface, registeredAdvertise, registeredSurface, REGISTRATION_ADVERTISE, REGISTRATION_SURFACE, registrationAdvertise, stdioServeArgv } from '../core/mcp-registration.ts';
 import type { McpSurface } from '../mcp/surface.ts';
 import {
   guardReceiptOverwrite,
@@ -204,7 +204,7 @@ const SUBCOMMAND_HELP: Record<string, string> = {
   hooks:
     'gbrain bootstrap hooks [--harness claude-code|codex|opencode] [--repair] [--no-hooks] [--gbrain-bin <path>]\n' +
     '                       [--seat <label> | --no-seat] [--surface verbs|starter|full] [--adopt [--name <server>]]\n' +
-    '  Register MCP (--surface full unless given; a replaced entry keeps its surface) (+ per-turn hooks on Claude Code, ON by default; --no-hooks opts out).\n' +
+    `  Register MCP (--surface ${REGISTRATION_SURFACE} --advertise ${REGISTRATION_ADVERTISE} unless given; a replaced entry keeps its surface, full when unreadable) (+ per-turn hooks on Claude Code, ON by default; --no-hooks opts out).\n` +
     '  --seat credits captured sessions to this agent seat (kept on re-install; --no-seat clears it; --seat off records none).\n' +
     '  --adopt (Codex): record the project .codex/config.toml server you manage yourself as the wire evidence after a passing verify; writes no config.',
   verify:
@@ -1487,7 +1487,7 @@ async function runHooks(
             );
             return 1;
           }
-          const re = await runner(surfaceFlag || priorSurface === undefined ? argv : buildArgvs(priorSurface, priorAdvertise)[0]);
+          const re = await runner(surfaceFlag ? argv : buildArgvs(priorSurface === undefined ? 'full' : priorSurface, priorAdvertise)[0]);
           if (re.code !== 0 && !/already exists|already registered/i.test(re.stderr + re.stdout)) {
             console.error(`MCP re-registration failed (${argv.join(' ')}): ${re.stderr.trim() || `exit ${re.code}`}`);
             return 1;

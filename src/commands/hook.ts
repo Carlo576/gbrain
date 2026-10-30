@@ -122,6 +122,7 @@ import { withoutPhysicalRootMetadata } from '../core/persistence/root-metadata.t
 import { HOOK_SUBCOMMANDS as HOOK_EVENTS, ROUTERS, subcommandHelpRequested } from '../cli/subcommands.ts';
 import { isManagedFilesystemPath } from '../core/persistence/filesystem-guard.ts';
 import { brainFirstTurnRule } from '../core/setup/brain-first.ts';
+import { TURN_RULE_LANE, turnRuleHookYields } from '../core/setup/turn-hook.ts';
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 
@@ -342,6 +343,8 @@ export async function runHook(args: string[], io: HookIo = {}): Promise<number> 
   }
   // Plugin lane (the Claude Code and Codex plugin manifests): yields to any other gbrain lane wiring this event.
   if (process.env.GBRAIN_HOOK_LANE === 'plugin' && pluginHookYields(io.harness ?? 'claude-code', event, io.cwd ?? process.cwd())) return 0;
+  // Turn-rule lane (src/core/setup/turn-hook.ts): rule only, and only when no other gbrain lane wires this event.
+  if (process.env.GBRAIN_HOOK_LANE === TURN_RULE_LANE && event === 'user-prompt' && turnRuleHookYields(io.harness ?? 'claude-code', io.cwd ?? process.cwd())) return 0;
 
   switch (event) {
     case 'session-start':
@@ -1127,8 +1130,10 @@ async function hookUserPrompt(io: HookIo): Promise<number> {
     // Push failure wins the single banner slot; the monthly backup notice
     // rides the same rail (systemMessage + additionalContext) when no push
     // failure is pending. Both are cache/file readers, budgeted by the race.
+    turnRule = io.turnRule !== undefined ? io.turnRule : brainFirstTurnRule(io.harness ?? 'claude-code', io.cwd ?? process.cwd());
+    // The turn-rule lane's connection may reach another brain, so it never reads this machine's context or banners.
+    if (process.env.GBRAIN_HOOK_LANE === TURN_RULE_LANE) return { outcome: 'ok', reason: 'rule_only' };
     banner = io.disablePushBanner ? null : (pendingPushFailureBanner() ?? pendingBackupBanner());
-    turnRule = io.turnRule !== undefined ? io.turnRule : brainFirstTurnRule(io.harness ?? 'claude-code');
     const j = await readStdinJson(io, 300);
     if (!j) return { outcome: 'degraded', reason: 'no_stdin' };
 

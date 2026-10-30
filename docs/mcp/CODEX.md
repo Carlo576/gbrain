@@ -212,7 +212,14 @@ re-run upgrades the block in place, `--dry-run` previews it,
 `gbrain setup codex` and `gbrain connect --agent codex --install` write it for
 you; the Codex plugin and a hand-run `codex mcp add` do not. While the block is
 installed, setup's UserPromptSubmit hook also leads every turn with the same rule.
-`gbrain doctor` warns when the block is missing or out of date.
+After a hand-run `codex mcp add`, `--instructions-only` adds that hook on its own
+(a group in `$CODEX_HOME/hooks.json` that prints only the rule, trusted in
+`config.toml`), unless setup, bootstrap or a gbrain plugin already carries it. It
+runs the hook once and exits non-zero with `turn_hook_not_loaded` when it does
+not load ([repair](../guides/repair.md#turn-hook-not-loaded)); `/hooks` inside a
+session lists it.
+`gbrain doctor` warns when the block is missing or out of date, or its per-turn
+hook is missing or untrusted.
 
 ## Always-loaded core memory
 

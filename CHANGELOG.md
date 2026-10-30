@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.505.0] - 2026-10-30
+
+**Every harness install path now puts "check gbrain first" next to each turn, and an install whose per-turn hook can't load fails instead of passing quietly.**
+
+Harness evals found agents use the brain when the rule reaches them on every turn and almost never when it rides only the MCP tool list or a startup file. `gbrain setup claude-code|codex --instructions-only` (the step after a plain `claude mcp add` or `codex mcp add`), `gbrain connect --install`, the hosted `gbrain connect --harness … --install` and `gbrain bootstrap harness` now add one UserPromptSubmit hook that prints only the brain-first rule. It reads no brain data, and it steps aside when setup, bootstrap or a gbrain plugin already wires the event, so a turn gets the rule once. Each install then proves the hook loads: it runs the hook on Claude Code and Codex, `openclaw plugins inspect gbrain-turn-rule --runtime --json` on OpenClaw and `hermes hooks doctor` on Hermes, and exits non-zero with `turn_hook_not_loaded`, naming that check, when it doesn't. With no absolute gbrain binary to put in the hook, the install prints the one-line next step instead.
+
+On OpenClaw and Hermes, a plain MCP registration hides gbrain's tools behind `tool_search`, so the per-turn rule there now names the tools and how to reach them. `_meta.brain_hot_memory` is documented for harness authors.
+
+### What to do after upgrading
+
+- Nothing for a new install. For an install made before this release, `gbrain doctor` (`harness_wiring`) warns when a recorded brain-first block has no per-turn hook and names the command that adds it: `gbrain setup <claude-code|codex> --instructions-only`.
+- `--no-instructions` removes the rule and its hook; `--no-hooks` on `bootstrap harness` installs none.
+
+### Itemized changes
+
+- New `src/core/setup/turn-hook.ts` (the `turn-rule` hook lane: Claude Code `turn-rule-v1` entry, Codex `hooks.json` group plus its trust entry) and `src/core/setup/turn-hook-check.ts` (`inspectTurnHook`, `verifyTurnHook`, the fix that names each harness's own check).
+- New error code `turn_hook_not_loaded` (reasons `missing`, `untrusted`, `hook_failed`, `no_rule`, `not_loaded`); runbook in `docs/guides/repair.md#turn-hook-not-loaded`. Doctor `harness_wiring` reports `details.turn_hooks`.
+- `gbrain bootstrap harness` names the rule hook in its consent block. Registrar mode (a non-loopback URL) stays MCP-only, and `--no-capture` keeps the rule hook because it captures nothing.
+- OpenClaw and Hermes per-turn rule text names the tools and the `tool_search` route (`tool_call` on OpenClaw, `mcp_<server>_<tool>` on Hermes).
+- `docs/protocol/MCP_META_CHANNELS.md` documents `_meta.brain_hot_memory`: when it is sent, which facts, the shape, and how a harness uses it. The QM integration's host serve adds `--advertise verbs` (about 11,800 fewer input tokens per QM request), keeping every operation callable.
+- Plugin per-turn hook follow-ups (#7963): the launcher exits 0 silently for `hook` when no gbrain binary is found and skips the plugin lane on a CLI older than 0.60.498.0; the gbrain-coding and gbrain-daily variants count as plugin lanes (gbrain wins, then gbrain-coding); Codex yields only to a trusted, enabled setup group.
+- Brain-first follow-ups (#7962): a Codex opt-out after `AGENTS.override.md` appears also strips the `AGENTS.md` block; a project-scope Claude Code install rules only inside its project once user scope declines; the Hermes allowlist write takes Hermes's lock; `gbrain bootstrap hooks --help` names the real default, and a replaced registration whose surface can't be read comes back at `full`.
+- Tests: `test/turn-hook-install-paths.test.ts` (new), plus `test/setup-brain-first.test.ts`, `test/connect.test.ts`, `test/bootstrap-harness.serial.test.ts`, `test/brain-first-turn-rule.test.ts`, `test/plugin-turn-hook.test.ts`, `test/bootstrap-plugin-lane.serial.test.ts`.
+
 ## [0.60.504.0] - 2026-10-30
 
 **`gbrain sync status` and doctor stop calling a running managed sync abandoned or killed, a sync that stops for a passing reason ends resumable, and a read-only Postgres serve no longer takes the socket a read-write serve needs.**

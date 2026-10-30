@@ -513,12 +513,32 @@ describe('doctor harness_wiring reports the block', () => {
       expect(missing.details?.instructions).toEqual([{ harness: 'claude-code', path: join(b.home, '.claude', 'CLAUDE.md'), state: 'missing', from: 'default_path' }]);
       expect(missing.fix?.argv).toEqual(['gbrain', 'setup', 'claude-code', '--instructions-only']);
     });
-    await setup(b, ['claude-code', '--instructions-only']);
+    await setup(b, ['claude-code', '--instructions-only', '--gbrain-bin', b.bin]);
     await withEnv(env(b), async () => {
       const current = await harnessWiringCheck({ smoke: false });
       expect(current.status).toBe('ok');
       expect(current.message).toContain('Brain-first instructions current for claude-code.');
       expect(current.details?.instructions).toEqual([expect.objectContaining({ state: 'current', from: 'ledger' })]);
+    });
+  });
+
+  test('a recorded block whose per-turn hook is missing warns turn_hook_not_loaded, naming the native check; the re-run clears it', async () => {
+    const b = box();
+    stdioRegistration(b);
+    await setup(b, ['claude-code', '--instructions-only']);
+    await withEnv(env(b), async () => {
+      const c = await harnessWiringCheck({ smoke: false });
+      expect(c.status).toBe('warn');
+      expect(c.details).toMatchObject({ code: 'turn_hook_not_loaded', turn_hook_reason: 'missing' });
+      expect(c.message).toContain('/hooks (inside a Claude Code session)');
+      expect(c.fix?.argv).toEqual(['gbrain', 'setup', 'claude-code', '--instructions-only']);
+      expect(c.fix?.verify).toEqual({ argv: ['gbrain', 'doctor', '--only', 'harness_wiring', '--json'] });
+    });
+    await setup(b, ['claude-code', '--instructions-only', '--gbrain-bin', b.bin]);
+    await withEnv(env(b), async () => {
+      const c = await harnessWiringCheck({ smoke: false });
+      expect(c.status).toBe('ok');
+      expect(c.details?.turn_hooks).toEqual([expect.objectContaining({ harness: 'claude-code', state: 'wired', via: 'turn-rule' })]);
     });
   });
 

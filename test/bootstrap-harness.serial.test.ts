@@ -475,11 +475,27 @@ describe('full apply', () => {
   test('--no-capture declines the Codex SessionEnd capture hook (capture is its own consent item)', async () => {
     const f = makeFake();
     expect(await applyHarness(flags(['--harness', 'codex', '--no-capture']), f.deps)).toBe(0);
-    expect(existsSync(join(dirname(f.codexConfig), 'hooks.json'))).toBe(false);
+    // The per-turn rule hook is not capture: it stays, and no SessionEnd capture group is written.
+    const declined = readFileSync(join(dirname(f.codexConfig), 'hooks.json'), 'utf8');
+    expect(declined).not.toContain('hook session-end');
+    expect(declined).not.toContain('SessionEnd');
+    expect(declined).toContain('GBRAIN_HOOK_LANE=turn-rule');
     const g = makeFake();
     expect(await applyHarness(flags(['--harness', 'codex']), g.deps)).toBe(0);
     expect(g.out.join('\n')).toMatch(/Codex session-transcript capture/);
     expect(readFileSync(join(dirname(g.codexConfig), 'hooks.json'), 'utf8')).toContain('hook session-end --harness codex');
+  });
+
+  test('codex lane wires the per-turn rule hook, trusted, beside the brain-first block; the consent block names it', async () => {
+    const f = makeFake();
+    expect(await applyHarness(flags(['--harness', 'codex']), f.deps)).toBe(0);
+    expect(f.out.join('\n')).toContain('The per-turn brain-first rule hook (UserPromptSubmit');
+    const hooks = readFileSync(join(dirname(f.codexConfig), 'hooks.json'), 'utf8');
+    expect(hooks).toContain('GBRAIN_HOOK_LANE=turn-rule');
+    expect(hooks).toContain('hook user-prompt');
+    expect(readFileSync(f.codexConfig, 'utf8')).toContain('user_prompt_submit');
+    expect(await removeHarness(flags(['--remove', '--harness', 'codex']), f.deps)).toBe(0);
+    expect(existsSync(join(dirname(f.codexConfig), 'hooks.json')) ? readFileSync(join(dirname(f.codexConfig), 'hooks.json'), 'utf8') : '').not.toContain('GBRAIN_HOOK_LANE=turn-rule');
   });
 
   test('--project must exist [F4]', async () => {

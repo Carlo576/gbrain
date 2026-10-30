@@ -4005,9 +4005,12 @@ The message names the guide for the harness you asked for (OpenClaw:
   `gbrain bootstrap harness --harness <claude-code|codex>`.
 - `unowned_entry`: the harness configuration already has an entry under the
   same MCP server name, and its hash is not one this setup recorded (you or
-  another tool wrote it, or you edited it). Setup never overwrites it. Pick
-  another name with `--name`, or remove that entry yourself and run setup
-  again.
+  another tool wrote it, or you edited it). Setup never overwrites it. A bare
+  `claude mcp add` or `codex mcp add` registration is the usual cause: keep
+  it and run `gbrain setup <claude-code|codex> --instructions-only`, which
+  adds the brain-first block and the per-turn hook and leaves the entry alone.
+  Or pick another name with `--name`, or remove that entry yourself and run
+  setup again.
 - `other_install`: the connection receipt for this name belongs to a gbrain
   install with a different `GBRAIN_HOME`. Run setup with `--name <other>` so
   each install owns its own entries.
@@ -4031,6 +4034,40 @@ because sessions would then read an empty brain while useful memory stays on
 the hosted one. Manage that connection with `gbrain connect <mcp-url>
 --harness <claude-code|codex> --install`; `gbrain doctor --only harness_wiring` shows
 which brain the registration reaches.
+
+### Turn hook not loaded
+
+<a id="turn-hook-not-loaded"></a>
+
+`turn_hook_not_loaded`: the per-turn hook that puts "check GBrain first"
+beside every user turn is not running in the harness. Agents use the brain
+when that rule reaches them on every turn; the MCP tool list or an
+instruction file alone rarely gets the brain used. The `reason` says what
+the install check found:
+
+- `missing`: no gbrain per-turn hook is configured for the harness.
+- `untrusted`: the hook is configured but the harness will not run it yet
+  (Codex: no matching trust entry, trust it in `/hooks`; OpenClaw:
+  `hooks.allowConversationAccess` is off; Hermes: the command is not in
+  `shell-hooks-allowlist.json`).
+- `hook_failed`: the Claude Code or Codex hook command exited non-zero.
+- `no_rule`: the hook ran but added no rule, usually because the
+  brain-first block for that harness was opted out.
+- `not_loaded`: the harness's own check does not show the hook loaded.
+
+Run `fix.argv` (it re-runs the install that writes the hook), then check
+with the harness's own command:
+
+| Harness | Check |
+|---|---|
+| Claude Code | `/hooks` in a session lists the UserPromptSubmit hook |
+| Codex | `/hooks` in a session; trust the hook there if it asks |
+| OpenClaw | `openclaw plugins inspect gbrain-turn-rule --runtime --json` shows it loaded with `before_prompt_build` |
+| Hermes | `hermes hooks doctor` shows the `pre_llm_call` hook healthy |
+
+`gbrain doctor --only harness_wiring --json` reports the same state per
+harness. opencode and Cursor have no per-turn hook gbrain can install; the
+rule reaches them through their instruction file only.
 
 ## Connection notices
 

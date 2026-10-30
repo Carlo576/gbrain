@@ -40,6 +40,7 @@ import type { Check } from '../../doctor.ts';
 import { checkError, doctorVerify, infoCheck } from '../check-fix.ts';
 import type { DoctorContext, DoctorEntry } from '../context.ts';
 import { VERSION } from '../../../version.ts';
+import { TURN_HOOK_NATIVE_INSPECT, inspectTurnHook, turnHookFix, type TurnHookState } from '../../../core/setup/turn-hook-check.ts';
 import { brainFirstTarget, inspectBrainFirst, isBrainFirstHarness, readBrainFirstLedger, renderBrainFirstBlock, type BrainFirstAccess } from '../../../core/setup/brain-first.ts';
 
 export const HARNESS_SMOKE_TIMEOUT_MS = 15_000;
@@ -439,10 +440,38 @@ export function instructionBlockUpgradeHints(): string[] {
   });
 }
 
-/** Registration read (full run) or registration read + smoke (`--only harness_wiring`), plus the brain-first block. */
+/**
+ * The per-turn hook beside every accepted brain-first block on a harness that
+ * has one (Claude Code, Codex, OpenClaw, Hermes). Files only: doctor never runs
+ * the hook; the fix names the harness's own inspect command.
+ */
+export function turnHookViews(views: InstructionBlockView[]): TurnHookState[] {
+  return views.filter((v) => (v.state === 'current' || v.state === 'stale') && TURN_HOOK_NATIVE_INSPECT[v.harness])
+    .map((v) => inspectTurnHook(v.harness, basename(v.path) === 'CLAUDE.local.md' ? { projectDir: dirname(v.path) } : {}));
+}
+
+/** An untrusted per-turn hook, or one missing beside a recorded block, turns an ok wiring into a warn (code turn_hook_not_loaded) whose fix re-runs the install that writes it. */
+export function withTurnHooks(check: Check, views: InstructionBlockView[], hooks: TurnHookState[]): Check {
+  if (hooks.length === 0) return check;
+  const details = { ...(check.details ?? {}), turn_hooks: hooks };
+  // Missing beside a block gbrain recorded writing (the ledger) is a failed install; beside an unrecorded default-path block it is only reported.
+  const bad = hooks.find((h) => h.state === 'untrusted' || (h.state === 'missing' && views.some((v) => v.harness === h.harness && v.from === 'ledger')));
+  if (!bad) return { ...check, details };
+  const message = `${check.message} Per-turn hook: ${bad.detail}, so the brain-first rule does not reach each turn (check: ${bad.native_inspect}).`;
+  if (check.status !== 'ok') return { ...check, message, details };
+  const view = views.find((v) => v.harness === bad.harness);
+  const rerun = view ? repairArgv(view).argv : undefined;
+  const fix: Action = rerun ? turnHookFix(bad.harness, rerun)
+    : { consent: [], actor: 'user', requires_exclusive: false, verify: doctorVerify(NAME), why: turnHookFix(bad.harness, []).why,
+      user_message: `The gbrain per-turn hook for ${bad.harness} is not active: ${bad.detail}. From that project directory, run: gbrain setup ${bad.harness} --instructions-only` };
+  return { name: NAME, status: 'warn', message, details: { ...details, code: 'turn_hook_not_loaded', turn_hook_reason: bad.state }, fix };
+}
+
+/** Registration read (full run) or registration read + smoke (`--only harness_wiring`), plus the brain-first block and its per-turn hook. */
 export async function harnessWiringCheck(opts: { smoke: boolean }): Promise<Check> {
   const regs = readHarnessRegistrations();
-  return withSurfaceNote(withInstructionBlocks(await registrationCheck(opts, regs), instructionBlockViews(regs)), regs);
+  const views = instructionBlockViews(regs);
+  return withSurfaceNote(withTurnHooks(withInstructionBlocks(await registrationCheck(opts, regs), views), views, turnHookViews(views)), regs);
 }
 
 /**
