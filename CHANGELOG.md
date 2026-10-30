@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.520.0] - 2026-10-30
 
 **The Heavy nightly's Codex plugin door test checks the plugin's MCP surface against `PLUGIN_SURFACE`, the surface the plugin's `mcp.json` actually serves, instead of `REGISTRATION_SURFACE`. A unit-shard listing that dies on a signal now names the signal instead of an empty error.**
 
