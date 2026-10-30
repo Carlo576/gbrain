@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.509.0] - 2026-10-30
 
 **Doctor stops flagging harnesses you already wired, large file uploads no longer load the whole file into memory, `restore --detach` keeps database-only pages, and you can clear Git push failures that no retry will ever fix.**
 
