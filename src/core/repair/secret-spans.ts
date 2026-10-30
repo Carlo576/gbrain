@@ -353,6 +353,10 @@ export const secretSpansRepair: RepairHandler = {
   publication: 'projection',
   async plan(engine, scope, after, opts): Promise<RepairPlan> {
     if (opts?.remote !== false) throw trustedCliRequired('gbrain repair secret-spans reads and rewrites stored credentials, so it runs only from the trusted local CLI on the brain host.');
+    if (!opts.apply && !opts.slugs?.length) {
+      return { items: [], residuals: { pages_to_redact: 0, spans: 0, clean: 0, refused: 0, retained_versions: 0 },
+        warnings: ['No page named, so nothing was read. Preview the pages to redact: gbrain repair secret-spans --source <id> --slug <slug>... (repeatable).'] };
+    }
     const selection = selectionOf(scope, opts.slugs, opts.rules);
     const rules = resolveSecretRules(selection.rules);
     const command = previewCommand(selection);

@@ -1221,7 +1221,9 @@ gbrain repair secret-spans --source <id> --slug <slug>... --apply --expect <hash
 `openai`, `aws_access_key`, `github_token`, `jwt`, `bearer` and
 `private_key_pem`). The two broad heuristics, `high_entropy_assignment` and
 `labeled_credential`, run only when named, because they also match things that
-are not keys. An unknown rule name refuses before anything is read.
+are not keys. An unknown rule name refuses before anything is read. A preview
+with no `--slug` (the command `gbrain doctor --remediation-plan` lists) reads
+nothing and prints how to name the pages; an apply still needs both.
 
 What it reads and rewrites for each page: the title, every string value in the
 frontmatter (keys are never touched), the body (inline, or the live generation

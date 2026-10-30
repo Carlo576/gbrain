@@ -118,7 +118,11 @@ describe('GST-327 gbrain repair secret-spans on a repo-less brain', () => {
         const remote = { engine, config: { engine: engine.kind }, logger, dryRun: true, remote: true, sourceId: 'default' } as never;
         await expect(runRepair(remote, secretSpansRepair, scope, { apply: false, explicit: true, slugs })).rejects.toMatchObject({ code: 'permission_denied' });
         await expect(repairRunner(engine, { apply: true, logger }).then(runner => runner.run('secret-spans', scope, { explicit: true, slugs }))).rejects.toThrow(/preview/i);
-        await expect(repairRunner(engine, { apply: false, logger }).then(runner => runner.run('secret-spans', scope, { explicit: true }))).rejects.toThrow(/--slug/);
+        await expect(repairRunner(engine, { apply: true, logger }).then(runner => runner.run('secret-spans', scope, { explicit: true, expect: 'x' }))).rejects.toThrow(/--slug/);
+        const before0 = await snapshotDb(engine);
+        const unnamed = await repairRunner(engine, { apply: false, logger }).then(runner => runner.run('secret-spans', scope, { explicit: true }));
+        expect({ affected: unnamed.affected, hash: unnamed.preview_hash, warning: unnamed.warnings?.[0] }).toEqual({ affected: 0, hash: undefined, warning: expect.stringContaining('--slug <slug>') });
+        expect(await snapshotDb(engine)).toEqual(before0);
 
         const before = await snapshotDb(engine);
         const first = await preview();
