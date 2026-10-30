@@ -812,6 +812,74 @@ Do not delete binding rows by hand: the repair rechecks, in the same
 statement, that the binding is still orphaned and that no pending write
 request uses it.
 
+<a id="former-binding-effects"></a>
+### Parked Git effects of a former binding
+
+**Say to your agent:** *"writer status still shows a parked Git group, the
+exact retry says the canonical binding changed, and the bulk retry previews
+zero requests."*
+
+A Git effect records the canonical worktree binding it was queued under. After
+the source moves to another worktree (set-path, a transfer, a re-claim) or is
+re-created, the binding guard refuses that effect `source_changed` on every
+retry, and the bulk retries (`--parked-code`, `--parked-pushes`) select only
+the current binding's effects. A zero there is a different selection, not a
+clearance, and a healthy current binding or native-lock probe says nothing
+about the old effect. The guard stays: never claim or transfer the source,
+re-create it, or edit journal rows to force the effect through.
+
+How it shows up: writer status and doctor `parked_effects` list the effect in
+its own parked group with `former_binding` (`reason`, the recorded
+`worktree_ids`, the `current_worktree_id`, up to five `requests`), and the
+group's `command` is the settle preview; doctor's per-effect command is
+`settle-effects --request-id <id> --dry-run`; the exact
+`retry-effects --request-id <id> --dry-run` refusal names both bindings and
+has that preview as its `fix`; the bulk retry names the effects it leaves out
+under `former_worktree`.
+
+Disposition, with the user:
+
+1. `reason: binding_changed` (same source, new worktree): preview
+   `gbrain sources writer settle-effects <source> --request-id <id> --dry-run`.
+   It settles the effect only on proof that the current worktree committed and
+   pushed the page's current bytes and the fetched remote branch holds them
+   ([settle-effects](write-refusals.md#settle-effects)). Each refusal names the
+   missing piece: `no_covering_receipt` means no later write of the page went
+   through the current binding, so write the page through gbrain (its Git effect
+   commits and pushes it); `bytes_unpushed` waits for that push;
+   `remote_ref_missing` or `remote_ref_stale` needs a fetch in the checkout.
+   Preview again, show the user the proof, and run the printed `apply_command`
+   only after they agree. The settlement keeps the failure, request and bytes,
+   and `--unsettle` reverses it.
+2. The page has since moved on (a later write committed a new revision), was
+   deleted, or another page took its slug: nothing current owes the old
+   bytes, so add `--retire` to the preview. Each target is listed with its
+   evidence (`moved`, `deleted`, `replaced` or `absent`, with the owed and
+   current revision). A page still at the owed revision is refused
+   `page_not_moved`: write it through gbrain first. An effect of the current
+   binding is refused `not_former_binding`.
+3. `reason: source_replaced` (the source was archived, removed or re-created
+   after the effect): it owes nothing to the current source, so retry never
+   runs it and plain settle refuses `source_replaced`. Preview
+   `settle-effects <source> --request-id <id> --retire --dry-run` (the group's
+   command); the source being replaced is the evidence.
+
+A retirement is a settlement with proof `former_binding_retired`: preview
+first, bound to the plan hash (a settle plan never applies as a retirement),
+asked of the user (`actor: user`), recorded in `data.settled` and
+`data.settlements`, never requeued or replayed against the current binding,
+idempotent (a second preview lists nothing) and reversed by `--unsettle`. The
+exact retry keeps refusing the effect `source_changed`.
+
+These do not apply to it: `gbrain repair stuck-recovery` resolves recovery
+records blocked on unexpected file bytes, and a parked Git effect without a
+recovery record gives it nothing to resolve; cancelling the request returns a
+committed request unchanged; receipt
+compaction skips requests with uncommitted effects. A `write-request` read that
+returns `not_found` under another writer identity is a visibility limit, not
+proof the request is gone: writer status and the settle preview read the
+journal of the source.
+
 ### Managed sync orphans
 
 <a id="managed-sync-orphans"></a>

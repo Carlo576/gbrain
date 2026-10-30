@@ -158,7 +158,7 @@ a receipt can report has a row here.
 | `writer_identity_invalid` | `writer_identity_invalid` | This host's local writer identity file is unreadable or has an unknown format. | Run `gbrain doctor` on the host; it names the identity file to repair. |
 | `writer_not_initialized` | `writer_not_initialized` | The brain has no persistence identity yet, usually because migrations have not run. | Run `gbrain apply-migrations --yes` on the brain host. |
 | <a id="managed-guard-page-children"></a>`writer_coordinator_required: canonical writer must use the persistence coordinator` on a tag, timeline or take write; on the client `storage_error: Publication failed (P0001)` | `writer_coordinator_required` (`storage_error` on the stored receipt) | On a managed brain whose `tags`, `timeline_entries` or `takes` table has a `source_id` column gbrain does not create, the managed writer guard of a gbrain older than v0.60.38.0 refuses every insert and update of those rows, including coordinated ones. gbrain v0.60.38.0 and later take those rows' source from their page and ignore the column; an uncoordinated delete of such a row on a live page is refused, as on every other brain. | Upgrade to v0.60.38.0 or later on the brain host, then follow its recovery steps in the [CHANGELOG](../../CHANGELOG.md#060380---2026-10-03) (or [repair](repair.md#recover-after-an-upgrade)): `gbrain sync … --no-pull`, `gbrain extract --stale`, `gbrain extract timeline --source db`, a previewed `gbrain facts relink`, then `gbrain repair failed-writes` (preview, then `--apply --expect <hash>`) for the refused `put_page`, `add_timeline_entry` and `remember` calls; see [failed writes](repair.md#failed-writes). |
-| `writer_coordinator_required` | `writer_coordinator_required` | The operation needs managed persistence (the write coordinator) and this brain or call path does not use it. A file write refused because the path sits in a managed canonical worktree names that worktree in the message, and its `detail` reads `root=<directory> source=<id or unknown> evidence=<marker file, managed-root registry or source binding>`. | Run the operation through the command the message names, on a managed brain. When the brain is not managed and the evidence is an ownership file (`.gbrain-owner.json`, `.gbrain-owner-<hash>.json`, `.gbrain-managed`), check it with `gbrain sources writer status` before removing anything: a half-finished claim is finished or rolled back through writer administration. |
+| `writer_coordinator_required` | `writer_coordinator_required` | The operation needs managed persistence (the write coordinator) and this brain or call path does not use it. A file write refused because the path sits in a managed canonical worktree names that worktree in the message, and its `detail` reads `root=<directory> source=<id or unknown> evidence=<marker file, managed-root registry or source binding>`. | Run the operation through the command the message names, on a managed brain. When the brain is not managed and the evidence is an ownership file (`.gbrain-owner.json`, `.gbrain-owner-<hash>.json`, `.gbrain-managed`), check it with `gbrain sources writer status` before removing anything: a half-finished claim is finished or rolled back through writer administration. A `gbrain-managed.json` an older gbrain wrote in a repository that only encloses a managed root (a dotfiles home) is named in the message; `gbrain sources writer deactivate` removes it (preview with `--dry-run --json`), then activate again. |
 | `fact_already_expired` | `fact_already_expired` | The fact the write targets is already expired or withdrawn. | Nothing to do; list active facts to find the current one. |
 | `source_writeback_required` | `source_writeback_required` | The write needs a correction to the source's repository files, and this caller or profile never writes them. | Make the correction in the source repository, then sync. |
 | `writer_upgrade_required` | `writer_upgrade_required` | The brain's schema is older than this operation needs. | Run `gbrain upgrade` (or `gbrain apply-migrations --yes`) on the brain host. |
@@ -193,7 +193,13 @@ retry parks it again; or the effect belongs to a former canonical worktree (the
 source was moved with set-path or a transfer), so `retry-effects --request-id`
 refuses it `source_changed` and `--parked-pushes`, which only reaches the current
 worktree, previews nothing (it now names those effects under `former_worktree`,
-and doctor's `git_push_holds` fix for them is the settle preview). Do not claim
+and doctor's `git_push_holds` fix for them is the settle preview). Doctor
+`parked_effects` and writer status give such effects their own parked group
+(`former_binding`: the recorded worktree, the current one, the request ids and
+the settle preview as `command`), and the exact retry's refusal names both
+bindings with `settle-effects --request-id <id> --dry-run` as its fix; the
+bulk retry's zero never covers them
+([disposition](repair.md#former-binding-effects)). Do not claim
 or transfer the source to force the old effect through. Settle it on proof
 instead: preview with `gbrain sources writer settle-effects <source> --parked-code
 <code> --dry-run` (or `--request-id <id>`), show the user each effect's proof, and
@@ -209,7 +215,12 @@ with its refusal: `retry_instead` (current binding: retry it),
 `remote_ref_missing` or `remote_ref_stale` (fetch in the checkout, then preview
 again), `content_changed`, `content_missing`, `unknown_target`, `withdrawal_effect`
 (never settled), `recovery_open`, `claimed`, `authority_changed`, `source_replaced` and
-`owner_unavailable`. A settlement is recorded on the effect (`data.settled`, every
+`owner_unavailable`. `--retire` (#7985) settles an effect of a former binding
+that nothing current owes, on evidence instead of a remote proof: its source was
+replaced, or each target's page moved to a later revision, was deleted or lost
+its slug to another page (proof `former_binding_retired`; refusals
+`page_not_moved` and `not_former_binding`; the apply asks the user,
+[disposition](repair.md#former-binding-effects)). A settlement is recorded on the effect (`data.settled`, every
 settle and unsettle appended to `data.settlements`); its failure, request, intent
 and target bytes are kept. Doctor `parked_effects`, writer status, the bulk retries
 and `sync status` skip settled effects. `--unsettle` with the same selector
