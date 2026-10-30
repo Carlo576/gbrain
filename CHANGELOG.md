@@ -22,6 +22,18 @@ The user step now checks that its commit landed. It retries while another Git pr
 
 - `scripts/persistence/ops.ts`: `userEdit` writes and commits the user's files and verifies them clean at HEAD (retrying a held lock, throwing otherwise) before `executeOp`'s try, and `runSync` now only runs `sync_brain`; a sync observation keeps the commits and counts the sync reported. `scripts/persistence/crash-robot.ts`: the failure trace prints that for sync and connector ops.
 - Tests: `test/persistence-crash-robot.test.ts`, under "a sync op whose user commit did not land". The forced probe holds `index.lock` across the user's commit: on the previous code it reproduces the CI result (sy2 `uncoordinated local edit`, sy1 committed, `lost_write`), and now the commit lands and the race leaves no violation. A refused commit fails the op instead of reporting it committed, and a committed sync whose marker the page lacks is still `lost_write`.
+## [0.60.513.0] - 2026-10-30
+
+**A search on a brain with many pages still waiting for a projection no longer spends seconds in the readiness check: the probe stops after it finds a pending page instead of also walking every unsealed page for the `by_design` answer it then discards (#8000).**
+
+The readiness probe that runs before every uncached `search` and `query` asked two questions in one statement: is any page in scope pending, and are the only unsealed pages protected ones (`by_design`). The second answer is only used when nothing is pending, but Postgres evaluated both. While pages are pending there is usually no protected page for its `LIMIT 1` to stop at, so it read every unsealed page on every cold call. On a synthetic brain with 235k pending image pages that was most of the `meta_readiness` stage. The statement now evaluates `by_design` only when nothing is pending, still in one round trip, and returns the same `ready`, `projection_pending` and `by_design` answers.
+
+Contributed by @Masashi-Ono0611, whose #8004 proposed the short-circuit.
+
+### Itemized changes
+
+- `src/core/search/projection-readiness.ts`: the probe reads `pending` in a materialized CTE and `by_design` inside `CASE WHEN pending THEN false ELSE … END`, so its subplan never runs while pages are pending.
+- Tests: `test/projection-readiness.test.ts` (PGLite) and `test/e2e/projection-readiness-plan-postgres.test.ts` (Postgres) pin the plan: with pending pages only one scan of `pages` executes.
 
 ## [0.60.512.0] - 2026-10-30
 
