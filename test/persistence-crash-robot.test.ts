@@ -14,10 +14,10 @@
  * Seams: none (the fault hook stays uninstalled); PGLite.
  */
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { descriptor, executeOp, parseDescriptor, SessionDrops } from '../scripts/persistence/ops.ts';
+import { descriptor, executeOp, parseDescriptor, SessionDrops, type OpObservation } from '../scripts/persistence/ops.ts';
 import { ReferenceModel } from '../scripts/persistence/model.ts';
 import { crossBoundarySequences, pageBody, randomSchedule } from '../scripts/persistence/generator.ts';
 import { ROBOT_RANDOM_SEEDS, ROBOT_ROTATION_SEEDS, ROBOT_TOPOLOGY, explorationSeeds, restrict, runRobotPhase, type RobotRun } from '../scripts/persistence/robot-driver.ts';
@@ -130,6 +130,57 @@ describe('concurrent connector publish and direct write', () => {
       model.beginStep(true);
       await model.settleGroup([again, racing], [connector, put]);
       expect(model.violations.map(v => v.class)).toEqual(['lost_write']);
+    });
+  }, 120_000);
+});
+
+describe('a sync op whose user commit did not land (run 41092788952)', () => {
+  // The robot ignored git's exit status: a user commit that never landed still ran the sync and was folded as a
+  // committed write of the user's marker, so the group check called the page lost. Another Git process holding the
+  // index lock is the stand-in for whatever refused the commit (CI kept no stderr).
+  const raceOps = () => {
+    const schedule = crossBoundarySequences(ROBOT_TOPOLOGY).find(s => s.label === 'sync_and_connector_race_direct_write')!;
+    const keep = new Set(['sy0', 'sy1', 'sy2']);
+    return { ...schedule, ops: schedule.ops.filter(d => keep.has(d.id)), groups: schedule.groups.filter(g => g.includes('sy1')) };
+  };
+  const gitIn = (root: string) => (...args: string[]) => Bun.spawnSync(['git', '-C', root, ...args], { stdout: 'pipe', stderr: 'pipe' });
+  const gitPath = (root: string, name: string) => gitIn(root)('rev-parse', '--path-format=absolute', '--git-path', name).stdout.toString().trim();
+
+  test('a commit held off by an index lock lands before the sync runs, and the race leaves no violation', async () => {
+    await robotBrain(async ({ world }) => {
+      const schedule = raceOps(); const sync = schedule.ops.find(d => d.id === 'sy1')!;
+      const root = world.roots![sync.source]; const lock = gitPath(root, 'index.lock');
+      world.onSubmit = d => { if (d.id === 'sy1') { writeFileSync(lock, ''); setTimeout(() => rmSync(lock, { force: true }), 300); } };
+      const model = new ReferenceModel(world);
+      world.descriptors = new Map(schedule.ops.map(d => [d.id, d]));
+      await runSteps(world, model, schedule);
+      expect(model.violations).toEqual([]);
+      expect(world.observations.get('sy1')!.status).toBe('committed');
+      expect(gitIn(root)('show', 'HEAD:./notes/alpha.md').stdout.toString()).toContain('Marker: mk-sy1');
+    });
+  }, 120_000);
+
+  test('a commit that cannot land fails the run; the sync is never reported committed', async () => {
+    await robotBrain(async ({ world }) => {
+      const schedule = raceOps(); const sync = schedule.ops.find(d => d.id === 'sy1')!;
+      const root = world.roots![sync.source]; const hook = join(gitPath(root, 'hooks'), 'pre-commit');
+      writeFileSync(hook, '#!/bin/sh\necho "pre-commit refused" >&2\nexit 1\n'); chmodSync(hook, 0o755);
+      await expect(executeOp(world, sync)).rejects.toThrow(/sy1: the user's commit of notes\/alpha did not land \(git commit exit 1\): pre-commit refused/);
+      expect(world.observations.has('sy1')).toBe(false);
+    });
+  }, 120_000);
+
+  test('a committed sync whose marker the page lacks is still a lost write', async () => {
+    await robotBrain(async ({ world }) => {
+      const schedule = raceOps(); const [put, sync] = schedule.ops;
+      const model = new ReferenceModel(world);
+      world.descriptors = new Map(schedule.ops.map(d => [d.id, d]));
+      await runSteps(world, model, { ...schedule, ops: [put], groups: [] });
+      const claimed: OpObservation = { id: sync.id, kind: sync.kind, actor: sync.actor, source: sync.source, requestId: sync.requestId, status: 'committed', values: {}, raw: { status: 'synced' } };
+      model.beginStep(true);
+      await model.observe(sync, claimed);
+      await model.settleGroup([sync], [claimed]);
+      expect(model.violations.map(v => [v.class, v.detail])).toEqual([['lost_write', 'no committed whole-page write of the group is visible in robot-0/notes/alpha']]);
     });
   }, 120_000);
 });
