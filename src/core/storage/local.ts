@@ -34,6 +34,7 @@ export class LocalStorage implements StorageBackend {
   async uploadFile(path: string, filePath: string, _mime?: string, sha256?: string): Promise<void> {
     const full = this.contained(path);
     mkdirSync(dirname(full), { recursive: true });
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- full is contained() under the storage root; the partial is its sibling named from its basename and random hex
     const partial = join(dirname(full), `.${basename(full)}.${randomBytes(6).toString('hex')}.partial`);
     const hash = createHash('sha256');
     try {

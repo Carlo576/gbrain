@@ -610,6 +610,7 @@ function classifyPushStatusFiles(): Array<PushStatusEntry | 'gone' | 'unreadable
     return legacy ? [legacy] : existsSync(pushStatusPath()) ? ['unreadable'] : [];
   }
   return names.map((n) => {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- n is a readdirSync(dir) entry that matched PUSH_STATUS_FILE_RE
     const entry = parsePushStatusFile(join(dir, n));
     if (!entry) return 'unreadable';
     // A record whose workspace no longer exists is a ghost: it can never be
