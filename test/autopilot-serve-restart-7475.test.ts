@@ -9,7 +9,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planServeRestart, restartServeAfterSelfUpgrade, type ServeRestartOutcome } from '../src/commands/upgrade-restart.ts';
-import { readRecentSelfUpgrades } from '../src/core/audit/self-upgrade-audit.ts';
+import { logSelfUpgrade, readRecentSelfUpgrades } from '../src/core/audit/self-upgrade-audit.ts';
+import { checkSelfUpgradeHealth } from '../src/commands/doctor/checks/upgrade-health.ts';
 import type { HostProcess } from '../src/core/upgrade-restart.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -35,6 +36,17 @@ describe('planServeRestart (#7475)', () => {
     expect(plan).toMatchObject({ outcome: 'manual' });
     expect('detail' in plan && plan.detail).toContain('gbrain upgrade --restart-only');
     expect('detail' in plan && plan.detail).toContain('kill 77');
+  });
+
+  test('a serve with no recorded build restarts only when it started before the install was written', () => {
+    expect(planServeRestart([serve(9, null, { started_ms: 1_000 })], SERVE_SERVICE, NEW, null, 5_000)).toMatchObject({ steps: [{ kind: 'service', pids: [9] }] });
+    expect(planServeRestart([serve(9, null, { started_ms: 9_000 })], SERVE_SERVICE, NEW, null, 5_000)).toEqual({ outcome: 'current' });
+    expect(planServeRestart([serve(9, null)], SERVE_SERVICE, NEW, null, null)).toEqual({ outcome: 'current' });
+    expect(planServeRestart([serve(9, null, { started_ms: null })], SERVE_SERVICE, NEW, null, 5_000)).toEqual({ outcome: 'current' });
+  });
+
+  test('a serve on a newer build than the autopilot is left alone', () => {
+    expect(planServeRestart([serve(9, '0.60.999.0')], SERVE_SERVICE, NEW, null, 5_000)).toEqual({ outcome: 'current' });
   });
 
   test('a serve the service starts from another install is reported, not restarted onto the old build', () => {
@@ -110,5 +122,14 @@ describe('restartServeAfterSelfUpgrade (#7475)', () => {
       expect(r.calls).toBe(0);
       expect(r.state.tried).toBe(false);
     }
+  });
+
+  test('a restart_serve row does not hide doctor\'s held auto-upgrade warning', async () => {
+    const { home, audit } = brainHome('auto', true);
+    await withEnv({ GBRAIN_HOME: home, GBRAIN_AUDIT_DIR: audit }, async () => {
+      logSelfUpgrade({ channel: 'autopilot', action: 'unsupported_runtime', current: '0.42.0', latest: '0.99.0', outcome: 'skipped', reason: 'gbrain 0.99.0 requires Bun >=9.0.0' });
+      await restartServeAfterSelfUpgrade(idle, { state: { tried: false }, restart: async () => ({ outcome: 'unverified', detail: 'serve did not come back' }) });
+      expect(checkSelfUpgradeHealth().message).toContain('Auto-upgrade to 0.99.0 held');
+    });
   });
 });

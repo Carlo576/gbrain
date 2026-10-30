@@ -8,7 +8,7 @@
  * onto the build already installed (doctor's `runtime_build_skew` fix);
  * `--dry-run` prints the plan and changes nothing.
  */
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { spawnSync } from '../core/spawn.ts';
@@ -24,6 +24,7 @@ import { readSupervisorBuild, readSupervisorPid } from '../core/minions/supervis
 import { parseEtimeToMs, readWorkers } from '../core/minions/worker-registry.ts';
 import { installedVersion, runtimeInstallRoot } from '../core/runtime-build.ts';
 import { VERSION } from '../version.ts';
+import { compareWriterVersions } from '../core/persistence/writer-versions.ts';
 import { resolveQuietHoursWindow, resolveSelfUpgradeMode } from '../core/self-upgrade.ts';
 import { evaluateQuietHours } from '../core/minions/quiet-hours.ts';
 import { logSelfUpgrade } from '../core/audit/self-upgrade-audit.ts';
@@ -298,9 +299,16 @@ export async function runHostRestart(opts: HostRestartOptions & { dryRun: boolea
 
 export type ServeRestartOutcome = { outcome: 'no_service' | 'current' } | { outcome: 'manual' | 'restarted' | 'unverified'; detail: string };
 
-/** #7475: the serve-only restart plan when the serve service can move every stale serve onto `expected` by itself; otherwise the outcome. */
-export function planServeRestart(processes: readonly HostProcess[], serveService: ServiceHandle, expected: string, ownRoot: string | null): RestartPlan | ServeRestartOutcome {
-  const plan = planRestart(processes.filter(p => p.role === 'serve'), { expected, serveService, autopilotService: null, stopMcp: false, ownInstallRoot: ownRoot });
+/**
+ * #7475: the serve-only restart plan when the serve service can move every older serve onto `expected` by itself;
+ * otherwise the outcome. A serve counts as older only on evidence: a recorded build below `expected`, or no recorded
+ * build and a start before the install on disk was written (`installedMs`). A newer or unknown serve is left alone.
+ */
+export function planServeRestart(processes: readonly HostProcess[], serveService: ServiceHandle, expected: string, ownRoot: string | null, installedMs: number | null = null): RestartPlan | ServeRestartOutcome {
+  const older = processes.filter(p => p.role === 'serve' && (p.version !== null
+    ? (compareWriterVersions(p.version, expected) ?? 0) < 0
+    : installedMs !== null && p.started_ms !== null && p.started_ms < installedMs));
+  const plan = planRestart(older, { expected, serveService, autopilotService: null, stopMcp: false, ownInstallRoot: ownRoot });
   if (!plan.stale.length) return { outcome: 'current' };
   if (plan.manual.length || plan.steps.some(step => step.kind !== 'service')) {
     return { outcome: 'manual', detail: `run \`gbrain upgrade --restart-only\`: ${[...describeSteps(plan), ...plan.manual.map(m => m.instruction)].join(' ')}` };
@@ -320,7 +328,12 @@ export async function restartStaleServeService(): Promise<ServeRestartOutcome> {
   const { sources, close, pidFile } = await hostSources();
   try {
     const collectServe = async () => (await collectHostProcesses(sources)).filter(p => p.role === 'serve');
-    const plan = planServeRestart(await collectServe(), services.serve, VERSION, ownInstallRoot());
+    const root = ownInstallRoot();
+    const onDisk = installedVersion(root);
+    if (onDisk !== VERSION) return { outcome: 'manual', detail: `the install on disk holds ${onDisk ? `v${onDisk}` : 'an unknown build'}, not this autopilot's v${VERSION}; run \`gbrain upgrade --restart-only\`` };
+    let installedMs: number | null = null;
+    try { installedMs = statSync(join(root!, 'package.json')).mtimeMs; } catch { /* no install time: a serve with no recorded build stays as it is */ }
+    const plan = planServeRestart(await collectServe(), services.serve, VERSION, root, installedMs);
     if (!('steps' in plan)) return plan;
     const { probeCliSocket } = await import('../core/cli-socket/probe.ts');
     const warmBefore = await probeCliSocket();
