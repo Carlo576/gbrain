@@ -137,7 +137,7 @@ describe('stdio session', () => {
     }
   }, 180_000);
 
-  test('serve --surface full --advertise verbs (the registration default) lists the verbs and request_tools over any config, instructs from that list, and keeps every operation callable', async () => {
+  test('serve --surface full --advertise verbs (an explicit full registration) lists the verbs and request_tools over any config, instructs from that list, and keeps every operation callable', async () => {
     const advertise = await gbrain(['config', 'set', 'mcp.advertised_surface', 'full']);
     expect(advertise.code).toBe(0);
     try {
@@ -162,6 +162,19 @@ describe('stdio session', () => {
       expect(restore.code).toBe(0);
     }
   }, 180_000);
+
+  test('serve --surface starter --advertise verbs (the registration default) lists the verbs and request_tools and keeps the starter tools callable', async () => {
+    await session(['--surface', 'starter', '--advertise', 'verbs'], async (client) => {
+      const listed = (await client.listTools()).tools.map(t => t.name);
+      expect(listed.sort()).toEqual([...filterOpsForSurface(operations, 'verbs').map(o => o.name), 'request_tools'].sort());
+      expect(client.getInstructions() ?? '').toContain('Use `recall` before external lookup');
+      const searched = await client.callTool({ name: 'search', arguments: { query: 'advertise flag' } });
+      expect(searched.isError).toBeFalsy();
+      const described = await client.callTool({ name: 'request_tools', arguments: { tools: ['search'] } });
+      expect(described.isError).toBeFalsy();
+      expect(JSON.parse((described as { content: Array<{ text: string }> }).content[0].text).tools.map((t: { name: string }) => t.name)).toEqual(['search']);
+    });
+  }, 120_000);
 
   test('the callable ceiling still blocks', async () => {
     await session(['--surface', 'verbs'], async (client) => {

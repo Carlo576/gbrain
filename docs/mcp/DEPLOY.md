@@ -59,7 +59,7 @@ the OAuth request when issuing my owner login link."*
 ### Local stdio (zero setup)
 
 ```bash
-gbrain serve --surface full --advertise verbs   # what registrations write: every operation callable, the memory verbs and request_tools listed
+gbrain serve --surface starter --advertise verbs   # what new registrations pin; a bare serve defaults to the full catalog
 ```
 
 Works with Claude Code, Cursor, Windsurf, and any MCP client that supports stdio.
