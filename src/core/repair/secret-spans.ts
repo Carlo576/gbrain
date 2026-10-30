@@ -10,7 +10,8 @@
  * are never touched), its body (inline columns, or the live generation of a
  * segmented body, restaged and flipped), its timeline rows (page or event
  * page), the fact rows it holds or that name it with no holding page, its take
- * rows, its outgoing link contexts and the string leaves of its raw data. Chunk
+ * rows, its outgoing link contexts and the string leaves of its raw data (an
+ * ontology fact's resolved value is scanned, and a match refuses the page). Chunk
  * rows that hold a value are deleted and the projection is rebuilt from the
  * redacted body (vectors of unchanged chunk texts are kept); derivation rows and
  * view digests that may hold one are deleted. Fact and take vectors of a
@@ -73,23 +74,27 @@ interface PageRow {
 }
 
 type Refusal = 'page_not_found' | 'page_kind_unsupported' | 'page_too_large';
+type PlanRefusal = 'proof_failed' | 'fact_value_unsupported' | 'timeline_rows_collide';
 /** `text`: the body's truth and timeline regions as stored (inline columns, or a segmented body read in full). */
 interface Read { page: PageRow; fields: Field[]; text: { truth: string; tail: string } }
 interface Planned { read: Read; results: FieldRedaction[]; digest: string }
 
 interface Selection { source_ids: string[]; slugs: string[]; rules: string[] }
-interface FieldSummary { key: string; spans: number; old_sha256: string; new_sha256: string; spans_sha256: string }
+/** `old_fp` / `new_fp`: the first 64 bits of the field's SHA-256, so a field that is only a short value is not printed as its full hash. */
+interface FieldSummary { key: string; spans: number; old_fp: string; new_fp: string; spans_sha256: string }
 interface PlannedPage {
   source_id: string; slug: string; id: number; revision: string; generation: string; storage: string; digest: string;
   rules: Record<string, number>; echo: number; fields: FieldSummary[]; versions: number;
 }
 interface SpanItem extends RepairItem { page: PlannedPage; hash: string; rules: string[]; last: boolean }
 
-const REFUSAL_TEXT: Record<Refusal | 'proof_failed', string> = {
+const REFUSAL_TEXT: Record<Refusal | PlanRefusal, string> = {
   page_not_found: 'no live page with this slug in the source',
   page_kind_unsupported: 'only markdown pages are redacted here (code and image pages index the file itself)',
   page_too_large: `the segmented body is over the ${PAGE_MAX_BYTES / 1024 ** 2} MiB single-string ceiling this repair reads`,
   proof_failed: 'the planned spans and the scanner\'s own redaction disagree, so nothing on the page is rewritten',
+  fact_value_unsupported: 'an ontology fact\'s resolved value holds a match; its value_hash keys the fact\'s dedup, so this repair does not rewrite it (retire the fact with gbrain forget, then preview again)',
+  timeline_rows_collide: 'two timeline rows of one day would read the same once redacted, which their dedup key refuses; delete the duplicate row, then preview again',
 };
 
 function previewCommand(selection: Selection): string {
@@ -149,7 +154,7 @@ async function readFields(engine: BrainEngine, sourceId: string, slug: string): 
   };
   rows('timeline_entries', ['summary', 'detail', 'source'], await engine.executeRaw(
     'SELECT id,summary,detail,source FROM timeline_entries WHERE page_id=$1 OR event_page_id=$1 ORDER BY id', [id]));
-  rows('facts', ['fact', 'context'], await engine.executeRaw(`SELECT id,fact,context FROM facts
+  rows('facts', ['fact', 'context', 'value'], await engine.executeRaw(`SELECT id,fact,context,value FROM facts
     WHERE source_id=$1 AND (source_markdown_slug=$2 OR (source_markdown_slug IS NULL AND entity_slug=$2)) ORDER BY id`, [sourceId, slug]));
   rows('takes', ['claim', 'source', 'resolved_source'], await engine.executeRaw('SELECT id,claim,source,resolved_source FROM takes WHERE page_id=$1 ORDER BY id', [id]));
   rows('links', ['context'], await engine.executeRaw('SELECT id,context FROM links WHERE from_page_id=$1 ORDER BY id', [id]));
@@ -167,6 +172,27 @@ function planPage(read: Read, rules: SecretRuleSet): Planned {
     results.map(result => [result.key, result.old_sha256, result.spans_sha256])]) };
 }
 
+/**
+ * Why a planned page cannot be rewritten as planned, or null. A timeline row's dedup key (page, date, summary, source)
+ * is checked against every row of the pages its rows belong to, because the event-page rows sit on other pages.
+ */
+async function planRefusal(engine: BrainEngine, planned: Planned): Promise<PlanRefusal | null> {
+  if (planned.results.some(result => !result.proven)) return 'proof_failed';
+  const changed = changedOf(planned);
+  if (changed.some(result => /^facts\/\d+\/value$/.test(result.key))) return 'fact_value_unsupported';
+  if (!changed.some(result => result.key.startsWith('timeline_entries/'))) return null;
+  const next = new Map(planned.results.map(result => [result.key, result.next]));
+  const rows = await engine.executeRaw<{ id: number | string; page_id: number | string; date: string; summary: string; source: string }>(`SELECT id,page_id,date::text AS date,summary,source
+    FROM timeline_entries WHERE page_id IN (SELECT page_id FROM timeline_entries WHERE page_id=$1 OR event_page_id=$1)`, [planned.read.page.id]);
+  const keys = new Set<string>();
+  for (const row of rows) {
+    const key = JSON.stringify([String(row.page_id), row.date, next.get(`timeline_entries/${row.id}/summary`) ?? row.summary, next.get(`timeline_entries/${row.id}/source`) ?? row.source]);
+    if (keys.has(key)) return 'timeline_rows_collide';
+    keys.add(key);
+  }
+  return null;
+}
+
 const changedOf = (planned: Planned) => planned.results.filter(result => result.spans.length);
 
 function summaryOf(planned: Planned, versions: number): PlannedPage {
@@ -175,7 +201,7 @@ function summaryOf(planned: Planned, versions: number): PlannedPage {
   const counts = spanCounts(changed.flatMap(result => result.spans));
   return { source_id: page.source_id, slug: page.slug, id: page.id, revision: page.revision, generation: page.generation, storage: page.body_storage,
     digest: planned.digest, rules: counts.rules, echo: counts.echo, versions,
-    fields: changed.map(result => ({ key: result.key, spans: result.spans.length, old_sha256: result.old_sha256, new_sha256: result.new_sha256, spans_sha256: result.spans_sha256 })) };
+    fields: changed.map(result => ({ key: result.key, spans: result.spans.length, old_fp: result.old_sha256.slice(0, 16), new_fp: result.new_sha256.slice(0, 16), spans_sha256: result.spans_sha256 })) };
 }
 
 const ruleText = (rules: Record<string, number>) => Object.entries(rules).sort().map(([rule, n]) => `${rule}=${n}`).join(', ');
@@ -250,15 +276,22 @@ async function writePage(tx: BrainEngine, planned: Planned): Promise<{ unsealed:
     await tx.executeRaw('UPDATE pages SET knowledge_revision=gen_random_uuid() WHERE id=$1', [page.id]);
     if (page.body_storage === 'segmented') await sealSegmentedPage(tx, page.id);
   }
+  // Rows holding a value are matched here, never in SQL, so no secret is ever sent as a statement parameter (which a
+  // server's slow-statement log would keep).
   const values = valuesOf(planned);
+  const holds = (text: string | null | undefined) => !!text && values.some(value => text.includes(value));
   if (page.body_storage !== 'segmented') {
-    await tx.executeRaw(`DELETE FROM content_chunks c WHERE c.page_id=$1 AND EXISTS (SELECT 1 FROM unnest($2::text[]) v
-      WHERE strpos(c.chunk_text,v)>0 OR strpos(COALESCE(c.doc_comment,''),v)>0)`, [page.id, values]);
+    const chunks = await tx.executeRaw<{ id: number | string; chunk_text: string; doc_comment: string | null }>(
+      'SELECT id,chunk_text,doc_comment FROM content_chunks WHERE page_id=$1 -- chunk-visibility-ok: every stored row of the page is checked for a value', [page.id]);
+    const doomed = chunks.filter(chunk => holds(chunk.chunk_text) || holds(chunk.doc_comment)).map(chunk => Number(chunk.id));
+    if (doomed.length) await tx.executeRaw('DELETE FROM content_chunks WHERE id=ANY($1::int[])', [doomed]);
     await queuePageProjection(tx, page.source_id, page.slug, 'secret_spans');
   }
-  await tx.executeRaw(`DELETE FROM page_segment_derivations d WHERE d.page_id=$1 AND d.output IS NOT NULL
-    AND EXISTS (SELECT 1 FROM unnest($2::text[]) v WHERE strpos(d.output::text,v)>0)`,
-  [page.id, [...new Set([...values, ...values.map(value => JSON.stringify(value).slice(1, -1))])]]);
+  const derivations = await tx.executeRaw<{ pipeline: string; occurrence_id: number | string; output: unknown }>(
+    'SELECT pipeline,occurrence_id,output FROM page_segment_derivations WHERE page_id=$1 AND output IS NOT NULL', [page.id]);
+  for (const row of derivations.filter(row => leaves(row.output).some(leaf => holds(leaf.text)))) {
+    await tx.executeRaw('DELETE FROM page_segment_derivations WHERE page_id=$1 AND pipeline=$2 AND occurrence_id=$3', [page.id, row.pipeline, row.occurrence_id]);
+  }
   await tx.executeRaw('DELETE FROM page_view_digests WHERE page_id=$1', [page.id]);
   return { unsealed };
 }
@@ -337,9 +370,10 @@ export const secretSpansRepair: RepairHandler = {
         }
         const plan = planPage(read, rules);
         const label = `${sourceId}:${slug} (revision ${read.page.revision})`;
-        if (plan.results.some(result => !result.proven)) {
+        const refusal = await planRefusal(engine, plan);
+        if (refusal) {
           residuals.refused!++;
-          listing.push({ item: label, class: 'refused', detail: `proof_failed: ${REFUSAL_TEXT.proof_failed}` });
+          listing.push({ item: label, class: 'refused', detail: `${refusal}: ${REFUSAL_TEXT[refusal]}` });
           continue;
         }
         if (!changedOf(plan).length) { residuals.clean!++; continue; }
@@ -351,6 +385,8 @@ export const secretSpansRepair: RepairHandler = {
         residuals.retained_versions! += page.versions;
         listing.push({ item: label, class: 'redact', detail: changeDetail(page) });
       }
+      // Items run in cursor (page id) order, so a resumed apply after --limit or a stop continues with the rest.
+      planned.sort((a, b) => a.id - b.id);
       const hash = await hashOf(engine, scope, selection, planned);
       if (planned.length) await saveApprovedSet<PlannedPage & { selection: Selection }>(engine, { command: 'secret-spans', hash }, planned.map(page => ({ ...page, selection })));
       return { items: planned.map((page, index) => item(page, hash, selection.rules, index === planned.length - 1)), preview_hash: hash, residuals, listing,
@@ -391,11 +427,13 @@ export const secretSpansRepair: RepairHandler = {
           if (typeof read === 'string') return { refused: read };
           const planned = planPage(read, rules);
           if (read.page.id !== page.id || planned.digest !== page.digest) return { refused: 'changed_since_preview' };
+          const refusal = await planRefusal(tx, planned);
+          if (refusal) return { refused: refusal };
           const { unsealed } = await writePage(tx, planned);
           const [after] = await tx.executeRaw<{ revision: string }>('SELECT knowledge_revision::text AS revision FROM pages WHERE id=$1', [page.id]);
           const receipt = { kind: 'secret-spans', hash, source_id: page.source_id, slug: page.slug, page_id: page.id, revision_before: page.revision,
-            revision_after: after?.revision ?? null, rules: rules.rules, fields: changedOf(planned).map(result => ({ key: result.key, old_sha256: result.old_sha256,
-              new_sha256: result.new_sha256, spans_sha256: result.spans_sha256, spans: result.spans.map(span => [span.start, span.end, span.rule, span.echo ? 1 : 0]) })) };
+            revision_after: after?.revision ?? null, rules: rules.rules, fields: changedOf(planned).map(result => ({ key: result.key, old_fp: result.old_sha256.slice(0, 16),
+              new_fp: result.new_sha256.slice(0, 16), spans_sha256: result.spans_sha256, spans: result.spans.map(span => [span.start, span.end, span.rule, span.echo ? 1 : 0]) })) };
           await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at) VALUES ($1,$2,$3::text::jsonb,now())
             ON CONFLICT (op,fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys,updated_at=now()`,
           [SECRET_SPANS_RECEIPT_OP, receiptKey(hash, page.id), JSON.stringify([receipt])]);
@@ -423,7 +461,7 @@ export const secretSpansRepair: RepairHandler = {
   },
   render(details) {
     return ((details.pages ?? []) as PlannedPage[]).flatMap(page => [`  ${page.source_id}:${page.slug} (${page.storage}): ${changeDetail(page)}`,
-      ...page.fields.map(field => `    ${field.key}: ${field.spans} span(s), sha256 ${field.old_sha256.slice(0, 12)} -> ${field.new_sha256.slice(0, 12)}, spans ${field.spans_sha256.slice(0, 12)}`)]);
+      ...page.fields.map(field => `    ${field.key}: ${field.spans} span(s), sha256 ${field.old_fp} -> ${field.new_fp}, spans ${field.spans_sha256.slice(0, 12)}`)]);
   },
   async report(ctx, scope, result, opts) {
     if (result.mode !== 'apply' || !opts.slugs?.length || scope.source_ids.length !== 1) return {};

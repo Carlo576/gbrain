@@ -209,6 +209,41 @@ describe('GST-327 gbrain repair secret-spans on a repo-less brain', () => {
   }), 300_000);
 });
 
+describe('GST-327 gbrain repair secret-spans: resume and refusals', () => {
+  test('an apply stopped by --limit resumes in page-id order and finishes; colliding timeline rows and ontology values refuse their page', () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const { engine } = repoLess[0]!;
+    const AWS2 = 'AKIA' + 'EXAMPLENOTREAL01';
+    // Imported first, so its id is lower although its slug sorts last.
+    await importFromContent(engine, 'notes/z-old-example', `---\ntype: note\ntitle: Old\n---\n\nOld key ${AWS}.\n`, { noEmbed: true, sourceId: 'default' });
+    await importFromContent(engine, 'notes/a-new-example', `---\ntype: note\ntitle: New\n---\n\nNew key ${AWS2}.\n`, { noEmbed: true, sourceId: 'default' });
+    await importFromContent(engine, 'notes/dup-example', '---\ntype: note\ntitle: Dup\n---\n\nNo key in the body.\n', { noEmbed: true, sourceId: 'default' });
+    await importFromContent(engine, 'notes/value-example', '---\ntype: note\ntitle: Value\n---\n\nNo key in the body.\n', { noEmbed: true, sourceId: 'default' });
+    const dup = await pageRow(engine, 'notes/dup-example');
+    await engine.executeRaw("INSERT INTO timeline_entries(page_id,date,source,summary,detail) VALUES ($1,'2024-05-01','import',$2,''),($1,'2024-05-01','import',$3,'')",
+      [dup.id, `Rotated ${AWS}`, `Rotated ${AWS2}`]);
+    await engine.executeRaw(`INSERT INTO facts(source_id,entity_slug,fact,value,source,kind) VALUES ('default','notes/value-example','Credential on file',$1,'test','fact')`, [AWS]);
+    const scope = await resolveRepairScope(engine, 'default');
+    const slugs = ['notes/a-new-example', 'notes/z-old-example', 'notes/dup-example', 'notes/value-example'];
+    const timelineBefore = await engine.executeRaw('SELECT id,summary FROM timeline_entries WHERE page_id=$1 ORDER BY id', [dup.id]);
+
+    const preview = await (await repairRunner(engine, { apply: false, logger, noEmbed: true })).run('secret-spans', scope, { explicit: true, sourceFlag: 'default', slugs });
+    expect(preview.listing!.map(entry => [entry.class, entry.item.split(' ')[0], entry.detail?.split(':')[0]])).toEqual([
+      ['redact', 'default:notes/a-new-example', '1 span(s) in 1 field(s)'], ['refused', 'default:notes/dup-example', 'timeline_rows_collide'],
+      ['refused', 'default:notes/value-example', 'fact_value_unsupported'], ['redact', 'default:notes/z-old-example', '1 span(s) in 1 field(s)']]);
+    const apply = (limit?: number) => repairRunner(engine, { apply: true, logger, noEmbed: true })
+      .then(runner => runner.run('secret-spans', scope, { explicit: true, sourceFlag: 'default', slugs, expect: preview.preview_hash, ...(limit ? { limit } : {}) }));
+    const first = await apply(1);
+    expect(first.applied).toBe(1);
+    expect((await pageRow(engine, 'notes/z-old-example')).compiled_truth).not.toContain(AWS);
+    const rest = await apply();
+    expect(rest.applied).toBe(1);
+    expect(rest.complete).toBe(true);
+    expect((await pageRow(engine, 'notes/a-new-example')).compiled_truth).not.toContain(AWS2);
+    expect(await engine.executeRaw('SELECT id,summary FROM timeline_entries WHERE page_id=$1 ORDER BY id', [dup.id])).toEqual(timelineBefore);
+    expect(await engine.executeRaw("SELECT value FROM facts WHERE entity_slug='notes/value-example'")).toEqual([{ value: AWS }]);
+  }), 120_000);
+});
+
 for (const backend of testBackends()) describe(`GST-327 gbrain repair secret-spans on a managed brain (${backend})`, () => {
   test('a held page is redacted in the database; its file, its hold and Git stay as they are', () => managedBrain(async ({ engine, ctx, root }) => {
     const slug = 'notes/held-example';
