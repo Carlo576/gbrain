@@ -10,6 +10,22 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.511.0] - 2026-10-30
+
+**After an automatic self-upgrade, the autopilot now restarts the serve your installed service runs when it is still on the old build, so one auto-upgrade no longer leaves two builds running until someone runs `gbrain upgrade --restart-only` by hand.**
+
+With `self_upgrade.mode auto`, the autopilot's `--swap-only` channel installs the new build and exits so its own supervisor relaunches it. The serve that launchd (`com.gbrain.serve`) or systemd (`gbrain-serve.service`) runs kept the old build, doctor's `runtime_build_skew` failed, and the audit's `restart_pending` was never acted on. The relaunched autopilot now checks that serve once per process. When it reports an older build, the autopilot restarts it through the service and verifies that it came back on the new build, under the same auto-mode, quiet-hours and idle gates as the swap. It records the step in the self-upgrade audit as `restart_serve` (`applied`, or `skipped` with `manual` or `unverified`). A serve that the service does not run, one started by hand or from another install, is never touched, and doctor's fix for it stays `gbrain upgrade --restart-only`.
+
+The systemd pid read also stopped passing a value flag to `systemctl show` and parses the `MainPID=` line instead, which removes a flag that `gbrain upgrade`, `gbrain post-upgrade` and `gbrain autopilot` listed as accepted but never took.
+
+### Itemized changes
+
+- `src/commands/upgrade-restart.ts`: `planServeRestart`, `restartStaleServeService` and `restartServeAfterSelfUpgrade` (auto mode, quiet hours and idle only, once per autopilot process, audited as `restart_serve`); the systemd `MainPID` read parses `MainPID=<n>`.
+- `src/commands/autopilot-daemon.ts`: runs the serve check after `attemptAutopilotSelfUpgrade` with the autopilot's idle signal; `src/commands/autopilot.ts` exports `computeAutopilotIdle` for it.
+- `src/core/cli-flag-registry.generated.ts`: regenerated; the never-accepted value flag is gone from the `upgrade`, `post-upgrade` and `autopilot` rows.
+- Docs: the Restart section of `docs/guides/upgrades-auto-update.md` and the `upgrade-restart.ts` key-files entry.
+- Tests: `test/autopilot-serve-restart-7475.test.ts`.
+
 ## [0.60.510.0] - 2026-10-30
 
 **Tier 2's keyed nightly now actually gives the agent gbrain's MCP tools and fails any test in which the agent never called one, and a Tier 1 graduation shard that executed nothing now fails instead of passing.**
