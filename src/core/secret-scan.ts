@@ -1096,6 +1096,9 @@ function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+/** Every named rule the default scan applies (the opt-in `high_entropy_assignment` and `labeled_credential` heuristics excluded), sorted. */
+export const NAMED_SECRET_RULES: readonly string[] = [...new Set([...CORE_PATTERNS.map((p) => p.name), 'private_key_pem'])].sort();
+
 const PATTERN_SINCE: ReadonlyMap<string, string> = new Map([
   ...CORE_PATTERNS.flatMap((p): Array<[string, string]> => (p.since ? [[p.name, p.since]] : [])),
   ['private_key_pem', SECURITY_WAVE_SINCE],
