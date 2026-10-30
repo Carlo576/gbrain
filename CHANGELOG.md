@@ -10,6 +10,27 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.502.0] - 2026-10-30
+
+**The secret scanner now catches OpenRouter, Groq, xAI, Perplexity and Replicate API keys.**
+
+A raw OpenRouter key (`sk-or-v1-` plus 64 hex) slipped past every lane: the bare OpenAI rule stops at the dash after `sk-or`, so the key didn't block `gbrain sources push`, wasn't replaced with `<REDACTED:…>` in search, recall or transcript import, and wasn't counted by `gbrain transcripts audit-secrets`, which left doctor's `transcript_secret_exposure` reading clean. Groq (`gsk_`), xAI (`xai-`), Perplexity (`pplx-`) and Replicate (`r8_`) keys had the same gap. Each now has its own rule with the provider's published fixed length and a hard right edge, so a longer run of the same characters is never cut into a false key. Anthropic (`sk-ant-`), project-scoped OpenAI (`sk-proj-`) and Google (`AIza`) keys were already caught and are unchanged.
+
+### What to do after upgrading
+
+- A push that worked before can now stop with `rule [openrouter] blocks pushes since gbrain v0.60.502.0` (or groq, xai, perplexity, replicate). Rotate the key with the provider and remove it from the page. Don't allowlist a live key.
+- `gbrain doctor` asks for a fresh transcript audit once, because the audit's detectors changed. Run `gbrain transcripts audit-secrets --json` to list conversation pages that still hold such a key (slugs and line numbers, never values).
+
+### Itemized changes
+
+- `src/core/secret-scan.ts`: five vendor rules (`openrouter`, `groq`, `xai`, `perplexity`, `replicate`) with `since` `PROVIDER_KEYS_SINCE`, placed with the vendor rules ahead of the catch-alls, so `Bearer <key>` keeps the vendor name. No existing rule changed or moved.
+- `src/core/transcripts/secret-audit.ts`: `TRANSCRIPT_SECRET_AUDIT_VERSION` 1 → 2, so a clean audit cached by the old detectors no longer reads ok.
+- Tests build every key at runtime (`test/helpers/provider-keys.ts`) and pin each rule through the scanner, retrieval redaction, transcript import, the audit and the push gate, plus near misses (one character short or long, wrong case or separator, the prefix inside a longer word) that fire no rule.
+
+Reported by @lelle-bot (#7959). Contributed by @Masashi-Ono0611 (#7961), who proposed the OpenRouter rule.
+
+Supersedes #7961
+
 ## [0.60.501.0] - 2026-10-29
 
 **`gbrain repair file-drift` can now resolve the `file_drift` holds that no command could clear before, and `--prefer file` keeps the file exactly as written.**
