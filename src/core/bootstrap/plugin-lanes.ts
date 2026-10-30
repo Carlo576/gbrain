@@ -30,14 +30,14 @@ import { CLAUDE_HOOK_SUBCOMMAND, claudeUserSettingsPath, codexConfigPath, codexH
  * serve the `gbrain` MCP server, in fixed per-turn hook precedence: when
  * several are enabled, only the first one's hook runs (pluginHookYields).
  */
-export const GBRAIN_PLUGIN_NAMES = ['gbrain', 'gbrain-coding', 'gbrain-daily'] as const;
+export const PLUGIN_LANE_NAMES = ['gbrain', 'gbrain-coding', 'gbrain-daily'] as const;
 
-const pluginNamesFor = (name: string): readonly string[] => (name === 'gbrain' ? GBRAIN_PLUGIN_NAMES : [name]);
+const pluginNamesFor = (name: string): readonly string[] => (name === 'gbrain' ? PLUGIN_LANE_NAMES : [name]);
 
 /**
  * Marketplace-qualified id (`<plugin>@<marketplace>`) when an ENABLED codex
  * plugin providing server `name` exists in the codex config, else null (for
- * `gbrain`, the first enabled of GBRAIN_PLUGIN_NAMES). Line-anchored
+ * `gbrain`, the first enabled of PLUGIN_LANE_NAMES). Line-anchored
  * table-header scan — a commented-out lookalike or an inline mention never
  * matches — followed by `enabled = true` before the next table header.
  */
@@ -75,7 +75,7 @@ function codexPluginEnabled(configPath: string, name: string): string | null {
  * Marketplace-qualified id when an ENABLED Claude Code plugin providing
  * server `name` exists in `~/.claude/settings.json` (`enabledPlugins`:
  * `"<plugin>@<mkt>": true` — the shape verified on a live install), else
- * null (for `gbrain`, the first enabled of GBRAIN_PLUGIN_NAMES). User-level
+ * null (for `gbrain`, the first enabled of PLUGIN_LANE_NAMES). User-level
  * file only; project-scope enablement is out of best-effort scope.
  */
 export function claudePluginProvidesName(settingsPath: string, name: string): string | null {
@@ -194,12 +194,12 @@ export function claudeAnyRegistrationExists(
  * Codex: a setup or bootstrap group in CODEX_HOME/hooks.json that Codex runs
  * (trusted in config.toml and not disabled). A persona variant
  * (GBRAIN_PLUGIN, set by its manifest) also yields to an enabled plugin
- * earlier in GBRAIN_PLUGIN_NAMES. Fail-open: an unreadable file counts as
+ * earlier in PLUGIN_LANE_NAMES. Fail-open: an unreadable file counts as
  * not wired.
  */
 export function pluginHookYields(harness: string, subcommand: string, cwd: string): boolean {
-  const rank = (GBRAIN_PLUGIN_NAMES as readonly string[]).indexOf(process.env.GBRAIN_PLUGIN ?? '');
-  for (const plugin of GBRAIN_PLUGIN_NAMES.slice(0, Math.max(rank, 0))) {
+  const rank = (PLUGIN_LANE_NAMES as readonly string[]).indexOf(process.env.GBRAIN_PLUGIN ?? '');
+  for (const plugin of PLUGIN_LANE_NAMES.slice(0, Math.max(rank, 0))) {
     if (harness === 'codex' ? codexPluginEnabled(codexConfigPath(), plugin) : claudePluginEnabled(claudeUserSettingsPath(), plugin)) return true;
   }
   const receipt = harness === 'codex' ? codexSetupPaths('gbrain').receiptPath : claudeSetupPaths({ name: 'gbrain', scope: 'user' }).receiptPath;
