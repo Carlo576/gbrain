@@ -199,7 +199,7 @@ async function userEdit(world: World, d: OpDescriptor): Promise<void> {
     if (status.exitCode === 0 && status.stdout.length === 0) return;
     const stderr = commit.stderr.toString().trim();
     if (!GIT_LOCK_BUSY.test(stderr) || Date.now() > deadline) {
-      throw new Error(`op descriptor ${d.id}: the user's commit of ${slug} did not land (git ${commit === add ? 'add' : 'commit'} exit ${commit.exitCode}): ${stderr || status.stdout.toString().trim()}`);
+      throw new Error(`op descriptor ${d.id}: the user's commit of ${slug} did not land (git ${commit === add ? 'add' : 'commit'} exit ${commit.exitCode}): ${stderr || status.stderr.toString().trim() || status.stdout.toString().trim()}`);
     }
     await Bun.sleep(100);
   }
@@ -376,7 +376,7 @@ export async function executeOp(world: World, d: OpDescriptor): Promise<OpObserv
       const result = d.kind === 'sync' ? await runSync(world, run) : await runConnector(world, run);
       const status = String(result.status);
       observation = { ...base, status: ['synced', 'first_sync', 'up_to_date'].includes(status) ? 'committed' : status === 'partial' ? 'pending' : 'refused',
-        ...(['synced', 'first_sync', 'up_to_date', 'partial'].includes(status) ? {} : { code: status }), values: {}, raw: jsonSafe({ status, reason: result.reason }) };
+        ...(['synced', 'first_sync', 'up_to_date', 'partial'].includes(status) ? {} : { code: status }), values: {}, raw: jsonSafe({ status, reason: result.reason, fromCommit: result.fromCommit, toCommit: result.toCommit, added: result.added, modified: result.modified }) };
     } catch (error) {
       const e = error as { code?: string; message?: string };
       observation = { ...base, status: 'refused', code: e.code ?? 'uncoded_error', agentCode: agentEnvelopeCode(error, 'sync_brain'),
