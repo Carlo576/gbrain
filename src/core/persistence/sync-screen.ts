@@ -92,6 +92,14 @@ export function driftBaselineContent(gitRoot: string, entry: Pick<SyncEntry, 'dr
   try { return readBlobContents(gitRoot, [{ oid: entry.driftBaseline, size: SYNC_READ_BOUND }]).get(entry.driftBaseline) ?? null; } catch { return null; }
 }
 
+/** #7199: whether the page still holds what the entry's baseline or one of its earlier committed versions (`driftHistory`) imports, tried in order. */
+export async function pageHoldsDriftBaseline(gitRoot: string, entry: Pick<SyncEntry, 'drift' | 'driftBaseline' | 'driftHistory'>, same: (content: string | null) => Promise<boolean>): Promise<boolean> {
+  if (await same(driftBaselineContent(gitRoot, entry))) return true;
+  if (entry.drift !== 'unknown') return false;
+  for (const oid of entry.driftHistory ?? []) if (await same(driftBaselineContent(gitRoot, { drift: 'unknown', driftBaseline: oid }))) return true;
+  return false;
+}
+
 /** The frozen import content of one entry (`readSyncContent`); a committed entry's pinned blob is read with the entries after it. */
 export function pinnedContent(cursor: SyncDiscovery & { index: number }, entry: SyncEntry): string {
   const content = entry.working ? null : readPinnedContent(cursor.gitRoot, cursor.target, syncGitPath(cursor, entry.path), upcomingGitPaths(cursor));
