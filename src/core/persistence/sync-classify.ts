@@ -214,8 +214,9 @@ function afterHold(s: SyncPathState): Matched {
     }
   }
   if ((!fileSame && proof && live) || !live) return { cls: 'import', settled: false, action: 'import' };
-  // #7199: an older side-`unknown` hold's pass moved the baseline to its own level, so its one re-screen runs as drift.
-  if (live && s.record?.revision == null && s.level !== null && s.level === s.baseline && !s.hold?.unscreened) return { cls: 'legacy_unverified', settled: true, action: 'none' };
+  // #7199: an older side-`unknown` hold's pass moved the baseline to its own level, so its one re-screen runs as drift. #7931: so
+  // does a hold someone asked to re-screen (`sources retry-held`, a `release_hold` apply): as legacy_unverified it would stand.
+  if (live && s.record?.revision == null && s.level !== null && s.level === s.baseline && !s.hold?.unscreened && !s.hold?.retried) return { cls: 'legacy_unverified', settled: true, action: 'none' };
   if (live && s.keepDb && s.mode === 'committed' && s.dirty === 'clean') return { cls: 'keep_db', settled: false, action: 'keep_db' };
   return { cls: 'drift', settled: false, action: 'hold', side: s.record?.revision != null ? 'both' : 'unknown' };
 }

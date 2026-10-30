@@ -219,8 +219,13 @@ async function asLocalCli<T>(engine: BrainEngine, run: () => Promise<T>): Promis
   return withVerifiedLocalRegistration(engine, await readLocalWriter(engine, 'cli'), run);
 }
 
-function requestIdFor(hash: string, page: Pick<ApprovedPage, 'source_id' | 'slug'>): string {
-  const h = digest(['file-drift-request-v1', hash, page.source_id, page.slug]);
+/**
+ * The request id of one approved page's apply. #7931: it names the exact artifact the preview approved (a reconcile
+ * preview carries its own preview id), so a rerun of the same approved set replays its request, while an apply refused
+ * before it published reserves nothing for the next preview's apply under the same --expect.
+ */
+function requestIdFor(hash: string, page: Pick<ApprovedPage, 'source_id' | 'slug' | 'artifact_digest'>): string {
+  const h = digest(['file-drift-request-v2', hash, page.source_id, page.slug, page.artifact_digest]);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 

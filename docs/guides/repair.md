@@ -2525,7 +2525,10 @@ would change anything else.
 
 A held page whose page and file agree now is listed `release_hold` under
 either `--prefer`: its apply writes nothing to the page or the file, and only
-asks the next sync to re-screen the file, which releases the hold. A page with
+asks the next sync to re-screen the file, which releases the hold. Page and
+file agree when they differ only in formatting sync does not import (frontmatter
+key order or quoting). An apply refused before it published reserves no request
+id, so the apply a fresh preview prints goes through. A page with
 no recorded file origin (no source path, and a source URI that is not a
 `file:` URI) is compared with, and adopts, the file at its slug path, spelled
 as sync imports it (`README.md` for slug `readme`); the apply records that
