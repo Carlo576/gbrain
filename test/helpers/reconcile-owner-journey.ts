@@ -1,22 +1,22 @@
 import { expect, test } from 'bun:test';
-import { PENDING_WRITE_EXIT_CODE } from '../src/core/exit-codes.ts';
+import { PENDING_WRITE_EXIT_CODE } from '../../src/core/exit-codes.ts';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { importFromContent } from '../src/core/import-file.ts';
-import { parseMarkdown, serializePageToMarkdown } from '../src/core/markdown.ts';
-import { parseFactsFence } from '../src/core/facts-fence.ts';
-import { inspectLockHolder } from '../src/core/pglite-lock.ts';
-import { claimWorktree, getWorktreeBinding } from '../src/core/persistence/ownership.ts';
-import { registerLocalWriter } from '../src/core/persistence/identity.ts';
-import { acquireNativeLock, type NativeLockHandle } from '../src/core/persistence/native-lock.ts';
-import { persistenceSocketPathForConfig, requestPersistenceCapabilities } from '../src/core/persistence/ipc.ts';
-import { runCli, type CliResult } from './helpers/cli-spawn.ts';
-import { keylessBrainEnv, PROVIDER_ENV_KEYS } from './helpers/provider-env.ts';
-import { withEnv } from './helpers/with-env.ts';
-import { waitFor } from './helpers/wait-for.ts';
+import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import { importFromContent } from '../../src/core/import-file.ts';
+import { parseMarkdown, serializePageToMarkdown } from '../../src/core/markdown.ts';
+import { parseFactsFence } from '../../src/core/facts-fence.ts';
+import { inspectLockHolder } from '../../src/core/pglite-lock.ts';
+import { claimWorktree, getWorktreeBinding } from '../../src/core/persistence/ownership.ts';
+import { registerLocalWriter } from '../../src/core/persistence/identity.ts';
+import { acquireNativeLock, type NativeLockHandle } from '../../src/core/persistence/native-lock.ts';
+import { persistenceSocketPathForConfig, requestPersistenceCapabilities } from '../../src/core/persistence/ipc.ts';
+import { runCli, type CliResult } from './cli-spawn.ts';
+import { keylessBrainEnv, PROVIDER_ENV_KEYS } from './provider-env.ts';
+import { withEnv } from './with-env.ts';
+import { waitFor } from './wait-for.ts';
 
 const slug = 'people/example';
 const sourceId = 'workspace';
@@ -49,7 +49,7 @@ function privateSummary(result: CliResult) {
   expect(result.stdout).not.toContain('compiled_truth');
 }
 
-for (const transport of ['stdio', 'http'] as const) {
+export function ownerJourney(transport: 'stdio' | 'http') {
   for (const enabled of [false, true]) {
     test(`${transport} resident owner: preview, resolve, pending/restart/replay, and independent remember readback with activation ${enabled ? 'on' : 'off'}`, async () => {
       const home = mkdtempSync(join(tmpdir(), 'gbrain-reconcile-owner-'));
@@ -99,8 +99,8 @@ for (const transport of ['stdio', 'http'] as const) {
         const port = reservation?.port;
         await reservation?.stop(true);
         const args = transport === 'stdio'
-          ? [join(import.meta.dir, 'fixtures/persistence-stdio-owner.ts')]
-          : [join(import.meta.dir, '../src/cli.ts'), 'serve', '--http', '--bind', '127.0.0.1', '--port', String(port)];
+          ? [join(import.meta.dir, '../fixtures/persistence-stdio-owner.ts')]
+          : [join(import.meta.dir, '../../src/cli.ts'), 'serve', '--http', '--bind', '127.0.0.1', '--port', String(port)];
         owner = Bun.spawn([process.execPath, '--no-env-file', ...args], {
           cwd: home, env, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
         });
