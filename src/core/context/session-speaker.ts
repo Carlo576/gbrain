@@ -26,8 +26,8 @@
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
-import { speakerFileName } from './corpus-segments.ts';
+import { basename, dirname, join } from 'node:path';
+import { corpusFileSessionId, speakerFileName } from './corpus-segments.ts';
 
 export const SESSION_AGENT_ENV = 'GBRAIN_SESSION_AGENT';
 /** Principal recorded for a session detection marked as agent-launched. */
@@ -150,7 +150,38 @@ export function writeSpeakerSidecar(dir: string, sessionId: string, speaker: { p
   renameSync(tmp, file);
 }
 
+/** The agent speaker of a corpus file's session (the sidecar beside the file); undefined means the owner. */
+export function corpusFileSpeaker(full: string): { principal: string } | undefined {
+  const sidecar = readSpeakerSidecar(dirname(full), corpusFileSessionId(basename(full)));
+  return sidecar ? { principal: sidecar.principal } : undefined;
+}
+
+/** `corpusFileSpeaker` as a pipeline-context spread (`{ speaker }` or nothing). */
+export function speakerOf(full: string): { speaker?: { principal: string } } {
+  const speaker = corpusFileSpeaker(full);
+  return speaker ? { speaker } : {};
+}
+
 /** The context note a fact from an agent session carries. */
 export function speakerContextNote(principal: string): string {
   return `speaker: agent ${principal}, not the owner`;
+}
+
+/**
+ * The hook's banking decision for one event: `bank: true` (an agent speaker
+ * is recorded first), `'skip'` (the launcher opted out) or `'failed'` (the
+ * marker could not be written, so nothing is banked rather than banking an
+ * agent session as the owner's). `reasons` are heartbeat notes.
+ */
+export function bankAsSpeaker(dir: string, sessionId: string, speaker: SessionSpeaker, harness: string):
+  { bank: true; reasons: string[] } | { bank: 'skip' | 'failed'; reason: 'capture_opt_out' | 'speaker_write_failed'; reasons: string[] } {
+  if (speaker.kind === 'skip') return { bank: 'skip', reason: 'capture_opt_out', reasons: [] };
+  if (speaker.kind === 'owner') return { bank: true, reasons: [] };
+  const reasons = speaker.invalid ? ['speaker_label_invalid'] : [];
+  try {
+    writeSpeakerSidecar(dir, sessionId, speaker, harness);
+  } catch {
+    return { bank: 'failed', reason: 'speaker_write_failed', reasons };
+  }
+  return { bank: true, reasons };
 }
