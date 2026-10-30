@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { codexHookCensus, codexHookGroupRuns } from './codex-hooks.ts';
 import { classifyHarnessHook } from './hooks.ts';
+import { isTurnRuleEntry } from '../setup/turn-hook.ts';
 import { claudeSetupPaths } from '../setup/claude-code.ts';
 import { codexSetupPaths } from '../setup/codex.ts';
 import { CLAUDE_HOOK_SUBCOMMAND, claudeUserSettingsPath, codexConfigPath, codexHooksPath, GBRAIN_HOOK_MARKER_KEY } from './host-specs.ts';
@@ -220,7 +221,7 @@ export function pluginHookYields(harness: string, subcommand: string, cwd: strin
       if (!Array.isArray(groups)) continue;
       for (const g of groups) {
         const entries = (g as { hooks?: unknown })?.hooks;
-        if (Array.isArray(entries) && entries.some((e) => typeof (e as Record<string, unknown> | null)?.[GBRAIN_HOOK_MARKER_KEY] === 'string' || classifyHarnessHook(e, event, 'any'))) return true;
+        if (Array.isArray(entries) && entries.some((e) => typeof (e as Record<string, unknown> | null)?.[GBRAIN_HOOK_MARKER_KEY] === 'string' || classifyHarnessHook(e, event, 'any') || isTurnRuleEntry(e))) return true;
       }
     } catch { /* fail-open */ }
   }

@@ -36,7 +36,11 @@ export async function runHarnessConnect(args: string[]): Promise<void> {
       console.error(`If it was exposed: ${token.if_exposed.steps.join(' Then: ')} See ${token.if_exposed.docs_url}.`);
       if (token.token_warning) console.error(`WARNING: ${token.token_warning}`);
     }
-    if (result.status === 'pending' || 'remote_membership_pending' in result && result.remote_membership_pending) setCliExitVerdict(2);
+    const turnHookError = (result as { turn_hook?: { error?: { message: string; fix: { argv?: string[] } } } }).turn_hook?.error;
+    if (turnHookError) {
+      console.error(`turn_hook_not_loaded: the per-turn gbrain hook is not active: ${turnHookError.message}. Fix: ${turnHookError.fix.argv?.join(' ')}`);
+      setCliExitVerdict(1);
+    } else if (result.status === 'pending' || 'remote_membership_pending' in result && result.remote_membership_pending) setCliExitVerdict(2);
   } catch (error) {
     console.log(JSON.stringify({ status: 'error', reason: 'connection_setup_failed', message: error instanceof Error ? error.message : 'Connection setup failed' }));
     setCliExitVerdict(1);

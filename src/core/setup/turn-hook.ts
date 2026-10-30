@@ -180,7 +180,7 @@ function syncCodex(bin: string, home: string | undefined, paths: { hooks: string
   if (index === undefined) return print(`${paths.hooks} did not take the hook`);
   const entry = codexSetupTrustEntry(paths.hooks, EVENT, index, group);
   const existing = readCodexTomlTable(paths.config, trustPath(entry.key)) as { trusted_hash?: unknown } | undefined;
-  if (existing === undefined) appendCodexTomlTable(paths.config, trustPath(entry.key), { trusted_hash: entry.trusted_hash }, 'gbrain turn-rule hook: trusts the per-turn brain-first rule; owned by its hash');
+  if (existing === undefined) appendCodexTomlTable(paths.config, trustPath(entry.key), { trusted_hash: entry.trusted_hash }, 'gbrain setup (turn-rule): trusts the per-turn brain-first rule hook; owned by its hash');
   else if (existing.trusted_hash !== entry.trusted_hash) return print(`${paths.config} already has a different [hooks.state."${entry.key}"]; trust gbrain's UserPromptSubmit hook in Codex's /hooks`);
   return { harness: 'codex', action: 'write', path: paths.hooks, detail };
 }
