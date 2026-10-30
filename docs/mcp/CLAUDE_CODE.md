@@ -80,7 +80,7 @@ without output, so each turn gets it once. `GBRAIN_HOOKS=0`, or a recorded `gbra
 ## Option 1: Local (recommended, zero server needed)
 
 ```bash
-claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter
+claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter --advertise verbs
 gbrain setup claude-code --instructions-only
 ```
 

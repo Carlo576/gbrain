@@ -453,7 +453,7 @@ export async function harnessWiringCheck(opts: { smoke: boolean }): Promise<Chec
 export function withSurfaceNote(check: Check, regs: HarnessRegistration[]): Check {
   const full = regs.filter((r) => r.kind === 'stdio' && !r.env?.GBRAIN_SURFACE && r.args?.[r.args.indexOf('--surface') + 1] === 'full' && r.args.includes('--surface'));
   if (full.length === 0) return check;
-  return { ...check, details: { ...(check.details ?? {}), surface_note: `${full.map((r) => HARNESS_LABEL[r.harness]).join(', ')} registered with --surface full, which stays supported. New installs register starter (a smaller tool list; request_tools reaches the rest).` } };
+  return { ...check, details: { ...(check.details ?? {}), surface_note: `${full.map((r) => HARNESS_LABEL[r.harness]).join(', ')} registered with --surface full, which stays supported. New installs register starter listing the memory verbs (request_tools reaches the rest).` } };
 }
 
 async function registrationCheck(opts: { smoke: boolean }, regs: HarnessRegistration[]): Promise<Check> {
