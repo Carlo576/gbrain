@@ -356,6 +356,7 @@ export function removeCodexHooks(opts: { hooksPath?: string; configPath?: string
 // (src/core/setup/codex.ts), so an edited group is preserved, never removed.
 
 export const CODEX_SETUP_LANE_TOKEN = 'GBRAIN_HOOK_LANE=setup';
+const TURN_RULE_LANE_TOKEN = 'GBRAIN_HOOK_LANE=turn-rule';
 export const CODEX_SETUP_EVENTS = ['SessionStart', 'UserPromptSubmit', 'SessionEnd'] as const;
 export type CodexSetupEvent = (typeof CODEX_SETUP_EVENTS)[number];
 
@@ -370,9 +371,9 @@ const SETUP_EVENT_SPECS: Record<CodexSetupEvent, { stateName: string; timeout: n
 
 export interface CodexHookGroup { hooks: Array<{ type: 'command'; command: string; timeout: number }> }
 
-/** Setup's group for one event. `env` is POSIX `env` (any $SHELL parses it); the values pin this install. */
-export function codexSetupHookGroup(gbrainBin: string, event: CodexSetupEvent, env: { GBRAIN_HOME?: string; GBRAIN_SOURCE?: string }): CodexHookGroup {
-  const assignments = [CODEX_SETUP_LANE_TOKEN, ...(env.GBRAIN_HOME ? [`GBRAIN_HOME=${env.GBRAIN_HOME}`] : []), ...(env.GBRAIN_SOURCE ? [`GBRAIN_SOURCE=${env.GBRAIN_SOURCE}`] : [])];
+/** Setup's group for one event (or the turn-rule lane's, src/core/setup/turn-hook.ts). `env` is POSIX `env` (any $SHELL parses it); the values pin this install. */
+export function codexSetupHookGroup(gbrainBin: string, event: CodexSetupEvent, env: { GBRAIN_HOME?: string; GBRAIN_SOURCE?: string }, lane = 'setup'): CodexHookGroup {
+  const assignments = [`GBRAIN_HOOK_LANE=${lane}`, ...(env.GBRAIN_HOME ? [`GBRAIN_HOME=${env.GBRAIN_HOME}`] : []), ...(env.GBRAIN_SOURCE ? [`GBRAIN_SOURCE=${env.GBRAIN_SOURCE}`] : [])];
   const spec = SETUP_EVENT_SPECS[event];
   const command = event === 'SessionEnd'
     ? ['env', ...assignments].map(shellQuote).join(' ') + ' ' + buildCodexSessionEndCommand(gbrainBin)
@@ -387,7 +388,7 @@ export function codexSetupTrustEntry(hooksPath: string, event: CodexSetupEvent, 
   return { key: `${hooksPath}:${stateName}:${index}:0`, trusted_hash: codexHookTrustHash(stateName, handler.command, handler.timeout) };
 }
 
-export interface CodexHookCensusGroup { event: string; index: number; hash: string; lane: 'setup' | 'bootstrap' | 'other'; commands: string[] }
+export interface CodexHookCensusGroup { event: string; index: number; hash: string; lane: 'setup' | 'bootstrap' | 'turn-rule' | 'other'; commands: string[] }
 
 function loadHooksJson(hooksPath: string): { doc: HooksJson; hooks: NonNullable<HooksJson['hooks']> } {
   if (!existsSync(hooksPath)) return { doc: {}, hooks: {} };
@@ -418,6 +419,7 @@ export function codexHookCensus(hooksPath: string): CodexHookCensusGroup[] {
     groups.forEach((group, index) => {
       const commands = (Array.isArray(group?.hooks) ? group.hooks : []).map((h) => h?.command).filter((c): c is string => typeof c === 'string');
       const lane = commands.some((c) => c.includes(CODEX_SETUP_LANE_TOKEN)) ? 'setup'
+        : commands.some((c) => c.includes(TURN_RULE_LANE_TOKEN)) ? 'turn-rule'
         : commands.some((c) => CONTEXT_LANE_TOKENS.some((t) => c.includes(t))) ? 'bootstrap' : 'other';
       out.push({ event, index, hash: ownedEntryFingerprint(group), lane, commands });
     });

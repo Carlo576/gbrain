@@ -123,3 +123,16 @@ export function removeHermesTurnHook(opts: { hermesHome: string; dryRun: boolean
     return { action: 'skip', path, detail: `per-turn rule hook in ${path} left as it is (${(e as Error).message})` };
   }
 }
+
+/** Read-only: is the marked hook in config.yaml, and does Hermes's allowlist approve its exact command? */
+export function inspectHermesTurnHook(hermesHome: string): { state: 'absent' | 'unapproved' | 'approved'; path: string; command?: string } {
+  const path = join(hermesHome, 'config.yaml');
+  try {
+    const probe = probeBlock(MARKERS, existsSync(path) ? readFileSync(path, 'utf8') : '');
+    const command = probe.state === 'present' ? commandIn(probe.interior) : null;
+    if (!command) return { state: 'absent', path };
+    return { state: readAllowlist(join(hermesHome, ALLOWLIST)).approvals.some((e) => approves(e, command)) ? 'approved' : 'unapproved', path, command };
+  } catch {
+    return { state: 'absent', path };
+  }
+}

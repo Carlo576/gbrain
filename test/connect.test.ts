@@ -509,6 +509,7 @@ function installDeps(over: Partial<ConnectDeps> = {}): ConnectDeps {
     registerOAuthClient: () => ({ ok: true, clientId: 'gbrain_cl_minted', clientSecret: 'gbrain_cs_minted' }),
     writeOpencodeRemoteEntry: (name) => ({ configPath: `/tmp/xdg/opencode/opencode.jsonc (${name})`, replacedPrior: false }),
     writeInstructions: (agent, name, optOut) => (optOut ? null : `write    instructions brain-first block for ${agent} '${name}'`),
+    writeTurnHook: (agent) => ({ lines: [`write    turn hook per-turn rule hook for ${agent}`], ok: true }),
     ...over,
   };
 }

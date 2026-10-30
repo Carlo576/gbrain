@@ -22,7 +22,7 @@
  */
 import { existsSync, lstatSync, readFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 import { atomicWriteTextFile } from '../bootstrap/atomic-write.ts';
 import { claudeUserMemoryPath, codexAgentsOverridePath, codexGlobalAgentsPath, opencodeConfigDir } from '../bootstrap/host-specs.ts';
@@ -96,11 +96,29 @@ export function renderBrainFirstTurnRule(access: BrainFirstAccess): string {
  * on only while a block is recorded as installed for that harness (its access
  * names the tools), off under GBRAIN_AGENT_INSTRUCTIONS=0.
  */
-export function brainFirstTurnRule(harness: string): string | null {
+export function brainFirstTurnRule(harness: string, cwd: string = process.cwd()): string | null {
   if (process.env[BRAIN_FIRST_OPT_OUT_ENV] === '0') return null;
-  const installed = readBrainFirstLedger().filter((e) => e.harness === harness && e.status === 'installed' && e.access)
+  // A project-scope record (CLAUDE.local.md, a Cursor rule) applies only inside its project, and a
+  // user-scope opt-out silences the rule everywhere else, so a project install never leaks into other sessions.
+  const entries = readBrainFirstLedger().filter((e) => e.harness === harness && e.access);
+  const userDeclined = entries.some((e) => !isProjectSurface(e.harness, e.path) && e.status === 'declined');
+  const installed = entries.filter((e) => e.status === 'installed' && (isProjectSurface(e.harness, e.path) ? isInside(cwd, projectRootOf(e.harness, e.path)) : !userDeclined))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))[0];
   return installed ? renderBrainFirstTurnRule(installed.access) : null;
+}
+
+/** A block written into one project (Claude Code's CLAUDE.local.md, a Cursor rule), not a user-global file. */
+export function isProjectSurface(harness: string, path: string): boolean {
+  return (harness === 'claude-code' && basename(path) === 'CLAUDE.local.md') || harness === 'cursor';
+}
+
+function projectRootOf(harness: string, path: string): string {
+  return harness === 'cursor' ? dirname(dirname(dirname(path))) : dirname(path);
+}
+
+function isInside(cwd: string, root: string): boolean {
+  const rel = relative(root, cwd);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 export const CURSOR_HEAD = '---\ndescription: GBrain memory, managed by gbrain\nalwaysApply: true\n---\n';
@@ -137,12 +155,17 @@ export function openclawStateDir(): string {
   return join(home(), profile && profile !== 'default' ? `.openclaw-${profile}` : '.openclaw');
 }
 
+/** openclaw.json: OPENCLAW_CONFIG_PATH, else <state dir>/openclaw.json. */
+export function openclawConfigPath(): string {
+  return process.env.OPENCLAW_CONFIG_PATH?.trim() ? expandHome(process.env.OPENCLAW_CONFIG_PATH.trim()) : join(openclawStateDir(), 'openclaw.json');
+}
+
 /**
  * openclaw.json is JSON5. Comments and trailing commas parse as JSONC; bare
  * object keys are quoted first. Anything else reads as unparseable, and the
  * caller asks for --workspace rather than guess.
  */
-function parseJson5ish(text: string): unknown {
+export function parseJson5ish(text: string): unknown {
   const quotedKeys = text.replace(/([{,]\s*)([A-Za-z_$][\w$-]*)\s*:/g, '$1"$2":');
   const doubleQuoted = quotedKeys.replace(/'((?:[^'\\\n]|\\.)*)'/g, (_m, s: string) => JSON.stringify(s.replace(/\\'/g, "'")));
   for (const candidate of [text, quotedKeys, doubleQuoted]) {
@@ -161,7 +184,7 @@ function parseJson5ish(text: string): unknown {
  * workspace, so the caller must name one.
  */
 export function resolveOpenclawWorkspace(): { path: string } | { error: string } {
-  const configPath = process.env.OPENCLAW_CONFIG_PATH?.trim() ? expandHome(process.env.OPENCLAW_CONFIG_PATH.trim()) : join(openclawStateDir(), 'openclaw.json');
+  const configPath = openclawConfigPath();
   let configured: string | undefined;
   if (existsSync(configPath)) {
     const cfg = parseJson5ish(readFileSync(configPath, 'utf8')) as { agents?: { defaults?: { workspace?: unknown }; list?: unknown; entries?: unknown } } | undefined;
@@ -337,6 +360,13 @@ export function syncBrainFirst(opts: { target: BrainFirstTarget; access: BrainFi
       return out('preserve', `the brain-first markers in ${target.path} were hand-edited (duplicate, orphan or out of order); fix or delete them, then re-run`);
     }
     if (decision.value === 'declined') {
+      // The target moved (Codex: a non-empty AGENTS.override.md now wins), so an opt-out also strips the
+      // blocks this harness still has at its other user-global paths; otherwise their records keep the per-turn rule on.
+      if (!target.project) {
+        for (const other of readBrainFirstLedger().filter((e) => e.harness === target.harness && e.path !== target.path && e.status === 'installed' && !isProjectSurface(e.harness, e.path))) {
+          syncBrainFirst({ ...opts, target: { ...target, path: other.path }, access: other.access });
+        }
+      }
       if (before.state === 'no_file' || before.state === 'absent') {
         record('declined', false);
         return out('skip', `no brain-first block in ${target.path}; opt-out recorded`);
