@@ -125,7 +125,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   // `explain: true` — every row carries its score breakdown (kept in lean rows).
   if (p.explain === true) for (const r of results) r.score_details = buildScoreDetails(r);
   // #7156: the returned score follows the returned order.
-  results = neutralizeTranscriptRows(scoresFollowRank(results));
+  results = neutralizeTranscriptRows(scoresFollowRank(results), evidence?.delivery.date_header === true);
   // The shape is reported where it can vary: remote callers, or an explicit `fields`.
   const shown = ctx.remote !== false || p.fields !== undefined ? { rows } : {};
   // Stage timings are read last, after the returned rows are assembled (meta only, never content).

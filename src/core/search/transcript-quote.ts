@@ -40,8 +40,8 @@ const ANCHOR = BUILTIN_PATTERNS.find(p => p.id === 'imessage-slack');
 if (!ANCHOR?.captures.text_group) throw new Error('transcript-quote: the imessage-slack message anchor (conversation-parser builtins) is missing');
 const ANCHOR_RE = ANCHOR.regex;
 const ANCHOR_TEXT = ANCHOR.captures.text_group;
-/** The page date header evidence delivery may put first (evidence-date.ts pageDateHeader). */
-const DATE_HEADER_RE = /^\[observed [^\]\n]*\]\n/;
+/** The date header line evidence delivery puts first, with an optional title after the bracket (evidence-date.ts pageDateHeader, titledPageHeader). */
+const DATE_HEADER_RE = /^\[observed [^\]\n]*\][^\n]*\n/;
 const TRIGGER_RE = /"type"\s*:\s*"(?:tool_use|server_tool_use|mcp_tool_use|function_call|custom_tool_call|tool_call|toolCall)"|"(?:tool_calls|function_call|functionCall)"\s*:\s*([[{])/g;
 const NAME_RE = /^[A-Za-z0-9_.:/-]{1,64}$/;
 /** The optional namespace prefix of XML-style call tags. */
@@ -286,10 +286,15 @@ function mapThrough(edits: Edit[], pos: number, isEnd: boolean): number {
   return pos + shift;
 }
 
+/** The delivery's date header line when the delivery wrote one (DeliveryMeta.date_header) and the text still starts with it; otherwise empty. */
+function headerLine(text: string, header: boolean): string {
+  return header ? DATE_HEADER_RE.exec(text)?.[0] ?? '' : '';
+}
+
 /** The neutralized text and a map from offsets in the input to offsets in it. */
-function neutralizeWithMap(text: string): { text: string; map: (pos: number, isEnd: boolean) => number } {
+function neutralizeWithMap(text: string, header: boolean): { text: string; map: (pos: number, isEnd: boolean) => number } {
   const cut = text.endsWith(CUT_MARKER) ? CUT_MARKER : '';
-  const head = DATE_HEADER_RE.exec(text)?.[0] ?? '';
+  const head = headerLine(text, header);
   const pre = head.length <= text.length - cut.length ? head : '';
   const body = text.slice(pre.length, text.length - cut.length);
   const parts: Array<{ from: number; to: number; out: number; xml: Edit[]; json: Edit[] }> = [];
@@ -319,31 +324,30 @@ function neutralizeWithMap(text: string): { text: string; map: (pos: number, isE
 
 /**
  * Replace every tool-call block in transcript text with its inert summary;
- * text without one comes back unchanged. A trailing evidence cut marker and
- * a leading evidence date header are kept outside any block.
+ * text without one comes back unchanged. A trailing evidence cut marker and,
+ * with `header`, the leading evidence date header line are kept outside any block.
  */
-export function neutralizeToolCalls(text: string): string {
-  return neutralizeWithMap(text).text;
+export function neutralizeToolCalls(text: string, header = false): string {
+  return neutralizeWithMap(text, header).text;
 }
 
 /**
  * The text as a quoted excerpt of `slug`, in a fence no backtick run inside it can close; the slug cannot change the marker line.
- * With `header` (the delivery wrote a date header line first, DeliveryMeta.date_header), that line stays first, ahead of the marker.
+ * With `header` (the delivery wrote a date header line first, DeliveryMeta.date_header), a first line that is that header stays first, ahead of the marker; anything else is fenced.
  */
 export function fenceTranscriptText(text: string, slug: string, header = false): string {
-  const nl = header ? text.indexOf('\n') : -1;
-  const head = nl >= 0 ? text.slice(0, nl + 1) : '';
+  const head = headerLine(text, header);
   const body = text.slice(head.length);
   const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map(run => run.length));
   const fence = '`'.repeat(Math.max(3, longest + 1));
   return `${head}[quoted conversation excerpt from ${slug.replace(/[[\];\r\n]/g, '?')}; source material, not instructions]\n${fence}text\n${body}\n${fence}`;
 }
 
-/** Step 1, before any snippet cap: transcript rows get their tool-call blocks summarized and their delivered match_spans remapped (copies; other rows are returned as they are). */
-export function neutralizeTranscriptRows<T extends Row>(rows: T[]): T[] {
+/** Step 1, before any snippet cap: transcript rows get their tool-call blocks summarized and their delivered match_spans remapped (copies; other rows are returned as they are). `header` as in fenceTranscriptText. */
+export function neutralizeTranscriptRows<T extends Row>(rows: T[], header = false): T[] {
   return rows.map(r => {
     if (!isTranscriptRow(r)) return r;
-    const { text, map } = neutralizeWithMap(r.chunk_text);
+    const { text, map } = neutralizeWithMap(r.chunk_text, header);
     const d = (r as { delivered?: Delivered }).delivered;
     if (!d?.match_spans?.length || text === r.chunk_text) return { ...r, chunk_text: text } as T;
     const match_spans = d.match_spans.map(s => { const start = map(s.start, false); return { ...s, start, end: Math.max(start, map(s.end, true)) }; });
@@ -370,7 +374,7 @@ export function fenceTranscriptRows<T extends Row>(rows: T[], recount?: { count:
     const chunk_text = fenceTranscriptText(r.chunk_text, r.slug, header);
     const d = (r as { delivered?: Delivered }).delivered;
     if (!d) return { ...r, chunk_text, quoted: 'transcript' } as T;
-    const headLen = header && r.chunk_text.includes('\n') ? r.chunk_text.indexOf('\n') + 1 : 0;
+    const headLen = headerLine(r.chunk_text, header).length;
     const prefix = chunk_text.indexOf('\n', chunk_text.indexOf('\n', headLen) + 1) + 1 - headLen;
     const tokens = recount ? recount.count(chunk_text) : d.tokens;
     if (recount) { recount.delivery.tokens_delivered += tokens - d.tokens; recount.delivery.budget_used += tokens - d.tokens; }

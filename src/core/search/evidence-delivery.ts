@@ -1723,7 +1723,7 @@ export async function assembleEvidenceForHits(engine: BrainEngine, input: Assemb
     return { results: fenceTranscriptRows(out.results), delivery: null, unresolved };
   }
   const d = await deliverEvidence(engine, rows, plan, scope, { liveHits: true, ...(input.query ? { query: input.query } : {}) });
-  const out = redactRetrievalOutput(neutralizeTranscriptRows(d.results), d.delivery);
+  const out = redactRetrievalOutput(neutralizeTranscriptRows(d.results, d.delivery.date_header === true), d.delivery);
   return { results: fenceTranscriptRows(capEvidenceToBudget(out.results, out.meta, true), { count: text => countEvidenceTokens(text, out.meta.tokenizer), delivery: out.meta }), delivery: out.meta, unresolved };
 }
 
