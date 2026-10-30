@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.514.0] - 2026-10-30
+
+**A correctly redacted transcript page now clears `gbrain transcripts audit-secrets`, and a missing-file page under a `db_only` directory is kept rather than deleted in two more cases: on company-brain sources (#8014), and whenever gbrain.yml's storage lines cannot be fully resolved (#8015).**
+
+The importer writes redaction markers like `login **<REDACTED:user-pattern>**`, and the `labeled_credential` detector read the marker itself as a typed user/password pair, so a page that was already redacted failed every audit (#7997). The labeled patterns now scan a copy of the line in which a standalone marker is rewritten to an inert token of the same length, while the reported value is still cut from the original line. A password written beside a marker, or glued straight onto one, is still found. The audit detector version moves to 3, so `gbrain doctor` asks for one fresh audit.
+
+Company-brain sources skipped the `db_only` check when retiring pages whose files are not in the approved manifest, so they deleted live database-only pages (#8014). Their deletes now go through the same verdict as other managed sources, read from gbrain.yml at the approved commit, never from the working tree.
+
+The `db_only` resolver now fails closed (#8015). A `db_only` or `supabase_only` line whose inline value the parser refuses (a missing comma, a nested list, an unquoted value with spaces) counts as unresolved even when another key resolved, and a held page is released only when its verdict is known. A deprecated `supabase_only` list ignored beside canonical keys now holds only the pages under its directories that `db_only` does not cover, `gbrain storage status` names those directories, and the deprecation warnings no longer point to a `gbrain doctor --fix` rename that does not exist.
+
+Contributed by @Masashi-Ono0611 (#7997 report and #7999).
+
+### Itemized changes
+
+- `src/core/secret-scan-labeled.ts`, `src/core/secret-scan.ts`: `neutralizeRedactionMarkers` and a per-pattern scan subject; `src/core/transcripts/secret-audit.ts`: audit version 3.
+- `src/core/persistence/sync-discovery.ts`: company delete entries carry their slug and go through `retireDbOnlyDeletes` with a verdict from the approved commit's gbrain.yml.
+- `src/core/storage-config.ts`: `dbOnlyVerdict`, a stricter flow-list parser, `ignored_db_only` in place of a boolean, and the stricter unresolved rule; `src/core/persistence/sync-pass.ts` and `source-storage.ts` use the per-slug verdict; `src/commands/storage.ts` warns about ignored directories.
+- Docs: `docs/storage-tiering.md`, `docs/guides/repair.md`. Three `BEHAVIOR_CHANGES` rows.
+- Tests: `test/secret-scan-redaction-marker-7997.test.ts` (new), `test/company-brain-runtime.test.ts`, `test/sync-storage-invalid-8007.test.ts`, `test/storage-config.test.ts`, `test/storage-pglite.test.ts`.
+
 ## [0.60.513.0] - 2026-10-30
 
 **A search on a brain with many pages still waiting for a projection no longer spends seconds in the readiness check: the probe stops after it finds a pending page instead of also walking every unsealed page for the `by_design` answer it then discards (#8000).**
