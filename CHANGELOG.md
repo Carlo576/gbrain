@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.503.0] - 2026-10-30
+## [0.60.504.0] - 2026-10-30
 
 **`gbrain sync status` and doctor stop calling a running managed sync abandoned or killed, a sync that stops for a passing reason ends resumable, and a read-only Postgres serve no longer takes the socket a read-write serve needs.**
 
@@ -31,6 +31,25 @@ gbrain doctor --only managed_sync_blocked
 - Lean read-only Postgres serve: a source-keyed read socket; hooks try source, then read, then legacy; delegated sync never targets the read socket (#7612).
 - `EffectWorkerOptions.lockWaitMs` (test seam, default unchanged) cuts the w5 contention scenario from 37 s to 2.5 s (#7782).
 - Tests: `test/sync-pass-readers-7614.test.ts` (new), `test/resolve-ipc-source-keyed.test.ts`, `test/e2e/serve-read-only-session-lane-postgres.test.ts`, plus isolation fixes in four suites that failed only on dev machines.
+
+## [0.60.503.0] - 2026-10-30
+
+**New harness and bot registrations list the seven memory verbs plus `request_tools`, and every tool they could call before stays callable.**
+
+`gbrain setup claude-code|codex`, `gbrain bootstrap hooks` and the readiness and `gbrain init` registration lines now write `serve --surface starter --advertise verbs`. The agent's tool list shows `recall`, `remember`, `entity`, `synthesize`, `forget`, `context_pack`, `delta` and `request_tools`, and the rest of the starter surface stays callable. `request_tools` lists the other tools, returns their full schemas and adds a described tool to the session's list. The initialize instructions follow the listed tools, so they point agents at `recall` instead of `search`. `gbrain mcp expose` runs `serve --http --surface full --advertise verbs`. A new `gbrain mcp provision` grant with the memory-reader, memory-writer or coding-agent profile, and a new `gbrain agent register` daily-driver or coding-agent client, keep the full callable surface but list the same tools. The harness eval measured no pass-rate cost, no cross-scope reads and recall about three times faster than search.
+
+### What to do after upgrading
+
+- Nothing. Existing registrations, exposures and OAuth clients keep their listing and are never rewritten.
+- To list a whole surface, pass it explicitly: `--surface full` (or `starter`, or `verbs`) lists everything it serves. `gbrain auth rescope-client <client_id> --surface full` does the same for a remote client.
+
+### Itemized changes
+
+- New `gbrain serve --advertise <verbs|starter|full>` (stdio and `--http`) sets the listing per server and wins over config `mcp.advertised_surface`. A listing narrower than the callable set always includes `request_tools`.
+- `src/core/mcp-registration.ts`: `REGISTRATION_ADVERTISE` (`verbs`), `stdioServeArgv` writes `--advertise` only when it is narrower than the surface, and `registrationAdvertise`/`registeredAdvertise` keep an existing registration's own listing. A surface the user chose (flag or `GBRAIN_SURFACE`) is listed in full.
+- Grants: the memory-reader, memory-writer and coding-agent provision profiles and the agent-register presets set the listing with `surface_set_by='install'`; `auth list-clients` shows `full (set by install)`.
+- doctor `harness_wiring`'s surface note says new installs list the memory verbs.
+- Install docs, harness guides and the agent-operator protocol show the new registration commands.
 
 ## [0.60.502.0] - 2026-10-30
 

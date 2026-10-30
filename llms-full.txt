@@ -45,7 +45,7 @@ in this shape.
 ## What `gbrain mcp expose` does
 
 ```bash
-gbrain mcp expose                # tailnet-only, port 3131, full surface, service installed
+gbrain mcp expose                # tailnet-only, port 3131, full surface listing the memory verbs, service installed
 gbrain mcp expose --funnel       # also reachable by cloud agents (public HTTPS)
 gbrain mcp expose --dry-run      # print the plan, change nothing
 ```
@@ -96,7 +96,7 @@ alone. Which exit 2 it is matters:
 The wrapper reads the admin token from its file at run time, sources your
 shell profile and `~/.gbrain/env`, prepends the Bun directory to `PATH`, and
 `exec`s `gbrain serve --http --port N --public-url URL [--surface X]
-[--enable-dcr]`. The token never lands in the plist, unit or wrapper.
+[--advertise verbs] [--enable-dcr]`. The token never lands in the plist, unit or wrapper.
 
 Paths above use the default GBrain home. Use the receipt's `admin_token_file`
 and `mcp_url` for the intended server, especially with a custom `GBRAIN_HOME`.
@@ -159,7 +159,7 @@ gbrain mcp expose --remove [--yes] [--json]
 | --- | --- |
 | `--port N` | Local port for `gbrain serve --http` (default `3131`). Tailscale proxies `:443` on your MagicDNS name to it. With `--status` or `--remove` and no receipt, the port whose leftover `:443` handler is looked for and cleaned up. |
 | `--funnel` | Public HTTPS via Tailscale Funnel instead of tailnet-only Serve. Required for cloud agents. |
-| `--surface verbs\|starter\|full` | Tool surface of the served MCP server (default `full`, same as `serve --http`). |
+| `--surface verbs\|starter\|full` | Tool surface, listed in full. Default: `full` with `--advertise verbs` (lists the memory verbs and `request_tools`; all stays callable). Older exposures keep their listing. |
 | `--enable-dcr` | Turn on self-service client registration on the served server (off by default; every self-registered connection still stops for your approval in the admin dashboard). |
 | `--no-tailscale` | Skip Tailscale entirely: install the service on loopback only, publish nothing. Exclusive with `--funnel`. |
 | `--no-service` | Do not create a user service; only publish a server you run yourself. Also the way to publish from a host with no brain config (`no_brain_config`). |
@@ -170,7 +170,7 @@ gbrain mcp expose --remove [--yes] [--json]
 | `--json` | One JSON document on stdout: `{ status, receipt, checks: [{name, status, detail}], next_actions, reason?, message? }`; prose goes to stderr. |
 
 `--status` and `--remove` are exclusive with each other. Defaults: port
-3131, tailnet-only, `--surface full`, DCR off, service installed whenever a
+3131, tailnet-only, `--surface full --advertise verbs`, DCR off, service installed whenever a
 supervisor exists.
 
 ### `--status`
@@ -1543,14 +1543,14 @@ are one principal. See [shared brain skills](shared-brain-skills.md).
 
 | Profile | Access | Native MCP surface |
 | --- | --- | --- |
-| `memory-reader` | Read selected memory | Full |
-| `memory-writer` | Read and write selected memory | Full |
-| `coding-agent` | Isolated project writes and explicit project reads | Full |
+| `memory-reader` | Read selected memory | Full, lists verbs |
+| `memory-writer` | Read and write selected memory | Full, lists verbs |
+| `coding-agent` | Isolated project writes and explicit project reads | Full, lists verbs |
 | `operator` | Read, write, and eligible brain administration operations | Full |
 | `delegating-agent` | Memory plus explicitly bound delegation | Starter |
 | `full` | All eligible remote capabilities at grant time, including bound delegation | Full |
 
-A **profile grants authority**. A **surface selects visible tools**. Full surface does not bypass a grant, and `admin` does not imply delegation, the named shared-skill scopes, or owner dashboard/client-management authority. Starter includes authorized skill discovery and membership; the exact seven-tool `verbs` surface is memory-only. Thin CLI adapters use the full surface while retaining their source, operation, and write restrictions. Direct local CLI access is trusted access to the local computer; OAuth profiles do not confine a local shell.
+A **profile grants authority**. A **surface selects visible tools**. Full surface does not bypass a grant, and `admin` does not imply delegation, the named shared-skill scopes, or owner dashboard/client-management authority. Starter includes authorized skill discovery and membership; the exact seven-tool `verbs` surface is memory-only. `rescope-client <client_id> --surface full` lists every tool. Thin CLI adapters use the full surface while retaining their source, operation, and write restrictions. Direct local CLI access is trusted access to the local computer; OAuth profiles do not confine a local shell.
 
 Clients granted a memory profile before the full-surface default keep their stored `starter` surface; no migration or repair widens it, and only an explicit `--profile` application regrants it. New grants snapshot operation names and source access. A later server upgrade does not silently give a snapshot-bound client new operations. The connection's own `whoami` reports `grant_diagnosis`: which blocker applies (scope, operation snapshot, client pin or server ceiling) and how many operations it hides, without naming them; `gbrain doctor` on the host reports the same as `grant_new_ops_available` with the commands. The connection is also told once per session, in band, by the `grant_blocked_operations` notice (same blockers and counts, the owner's preview-then-apply command as `fix`, `next: tell_user_to_run`; once per grant revision for stateless HTTP calls), and a read that left out takes a hidden tool serves carries `hidden_tool_content` with the next step that connection can actually take ([connection notices](repair.md#connection-notices)). Neither notice changes what the connection can call. A grant written before snapshots recorded their operation catalog says "original intent unknown" rather than claiming it predates the operations. Explicitly regrant to include them: `gbrain auth rescope --client <client_id> --operations <op,...> --surface full --dry-run` (then without `--dry-run`; `--surface full` only when the stored surface also blocks) for OAuth clients, or `gbrain auth rescope-token <name> --refresh-operations` (preview) then `--add <op,...>` for legacy tokens ([grants that cannot reach new operations](../mcp/ADMIN.md#grants-that-cannot-reach-new-operations)). `gbrain auth rescope --client <client_id> --operations all` (alias: `gbrain auth rescope-client <client_id> --allowed-operations all`) stores no snapshot and clears the profile instead, so the scopes and the surface alone decide, including operations later upgrades add. `gbrain auth clients` marks such a client `operations: "all"` with `includes_future_operations: true` and the command that re-pins it. A `bootstrap harness` re-run carries the replaced token's grants and does not widen its snapshot ([legacy token grants](../mcp/ADMIN.md#legacy-token-grants)). Archived sources are excluded. Legacy clients with a `NULL` operation snapshot retain their prior operation behavior.
 
@@ -3169,7 +3169,7 @@ model gbrain removed in v0.33, needs `gbrain skillpack migrate-fence` once.)
 **If you are Hermes:** register gbrain as your MCP server:
 
 ```bash
-printf 'Y\n' | hermes mcp add gbrain --env GBRAIN_HOME=$HOME --connect-timeout 60 --command $(which gbrain) --args serve --surface starter
+printf 'Y\n' | hermes mcp add gbrain --env GBRAIN_HOME=$HOME --connect-timeout 60 --command $(which gbrain) --args serve --surface starter --advertise verbs
 ```
 
 Keep `--args` last (everything after it becomes server argv) and verify with
@@ -3179,7 +3179,7 @@ Keep `--args` last (everything after it becomes server argv) and verify with
 **If you are Grok Build** (xAI's `grok` CLI): register gbrain as your MCP server:
 
 ```bash
-grok mcp add gbrain -e "GBRAIN_HOME=$HOME" -- "$(command -v gbrain)" serve --surface starter
+grok mcp add gbrain -e "GBRAIN_HOME=$HOME" -- "$(command -v gbrain)" serve --surface starter --advertise verbs
 ```
 
 The add is lazy (exit 0 without connecting) — verify with
@@ -3195,7 +3195,7 @@ install, follow `BOOTSTRAP_FOR_AGENTS.md` instead of this page. For the
 brain-only MCP registration:
 
 ```bash
-opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve --surface starter
+opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve --surface starter --advertise verbs
 ```
 
 The add is lazy (exit 0 without connecting) — verify with `opencode mcp list`,
@@ -3877,7 +3877,7 @@ stdout (`--json`):
           "options": [
             {
               "id": "wire",
-              "label": "Register `<absolute path to gbrain> serve --surface starter` as a stdio MCP server in your agent host; the install section lists the exact command per harness (Claude Code, Codex, Grok Build, opencode, OpenClaw)."
+              "label": "Register `<absolute path to gbrain> serve --surface starter --advertise verbs` as a stdio MCP server in your agent host; the install section lists the exact command per harness (Claude Code, Codex, Grok Build, opencode, OpenClaw)."
             },
             {
               "id": "skip",
@@ -5155,7 +5155,7 @@ The repo is not a complete backup; see the [bootstrap guide](docs/guides/bootstr
 
 ### Connect GBrain to your AI client (MCP)
 
-- **Local stdio client:** `claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter` (`--surface full` lists every tool); Codex, Cursor, Windsurf and other stdio clients take the same command. Then run `gbrain setup <harness> --instructions-only`: agents seldom call a brain nobody told them about.
+- **Local stdio client:** `claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter --advertise verbs` (lists the memory verbs; `--surface full` lists every tool); Codex, Cursor, Windsurf and other stdio clients take the same command. Then run `gbrain setup <harness> --instructions-only`: agents seldom call a brain nobody told them about.
 - **Plugins with curated skills:** Codex `codex plugin marketplace add garrytan/gbrain@codex-plugin` + `codex plugin add gbrain@gbrain`; Claude Code `/plugin marketplace add garrytan/gbrain` + `/plugin install gbrain@gbrain`.
 - **This brain from anywhere:** `gbrain mcp expose` publishes it on your Tailscale tailnet as a user service (`--funnel` for cloud agents such as Grok Bot, Muse and ChatGPT). [Guide](docs/guides/remote-mcp.md).
 - **A brain on another host:** `gbrain connect https://your-host/mcp --token gbrain_xxx --install` (add `--agent codex` for Codex). Hosted brains use [native OAuth or a private handoff](docs/guides/hosted-harness-access.md); dashboard, clients and permissions live in [MCP administration](docs/mcp/ADMIN.md).
@@ -6730,243 +6730,6 @@ Note: there is no SQLite engine. PGLite uses the same SQL as Postgres, so no sep
 
 ---
 
-## docs/schema-author-tutorial.md
-
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/schema-author-tutorial.md
-
-# Tutorial: Build your first schema pack
-
-You'll fork the bundled `gbrain-base` pack, add a custom `researcher` page type, import a handful of placeholder researcher pages, backfill their `page.type` column with one command, then prove the wiring works by running `gbrain whoknows` and seeing your new type surface in results. End state: a forked-and-active pack on disk, ~5 pages typed as `researcher`, and a query that proves the pack-aware routing fires end-to-end.
-
-**Want the WHY before the HOW?** Read [`what-schemas-unlock.md`](what-schemas-unlock.md) first — 7 concrete use cases (4000 invisible meetings, the founder ops brain, the research brain, the legal brain, the team brain, agent-as-co-curator) plus the structural argument for why types matter at query time. Then come back here for the 5-minute walkthrough.
-
-The whole walkthrough takes about 5 minutes. You'll see something working by step 3.
-
-## What you'll need
-
-- gbrain installed (`gbrain --version` to check)
-- A brain that's been initialized (`gbrain init` already run; either PGLite or Postgres is fine)
-- A terminal you can paste commands into
-
-That's it. No API keys required for this tutorial — every step works against the bundled pack and local-only commands.
-
-## Step 1: See what pack is active today
-
-```bash
-gbrain schema active
-```
-
-You'll see something like:
-
-```text
-Active pack: gbrain-base v1.0.0
-Source: default
-Pack identity: ...
-Page types: 22
-Link verbs: 12
-Takes kinds: hot, warm, cold
-```
-
-`Source: default` means you haven't customized anything — you're on the bundled pack. `Page types: 22` is the universal starter (person, company, meeting, note, etc.). (Agents needing this as JSON use the MCP op `get_active_schema_pack` — the CLI subcommand prints human output only.)
-
-**You can't mutate bundled packs directly.** Step 2 forks it so you have something writable.
-
-## Step 2: Fork the bundled pack
-
-```bash
-gbrain schema fork gbrain-base mine
-```
-
-Output: `Forked 'gbrain-base' → 'mine' at ~/.gbrain/schema-packs/mine/pack.json`.
-
-The fork is a byte-for-byte copy of `gbrain-base` living at `~/.gbrain/schema-packs/mine/pack.json`. Now you have a writable pack you can mutate.
-
-## Step 3: Activate the fork
-
-```bash
-gbrain schema use mine
-```
-
-Output: `Pack: mine (json) ... Active.`
-
-Run `gbrain schema active` again to confirm `Active pack:` now says `mine` and `Source:` is `home-config` (read from `~/.gbrain/config.json`).
-
-**You've already accomplished something visible** — the active pack changed, and any future query will route through your fork. The next four steps add a custom type and prove it works.
-
-## Step 4: Add a researcher type
-
-```bash
-gbrain schema add-type researcher \
-  --primitive entity \
-  --prefix people/researchers/ \
-  --extractable \
-  --expert
-```
-
-Output: `Pack: mine (json)` + `Sha8: <prev> → <new>`.
-
-What just happened:
-- The mutation went through `withMutation`'s 8-step skeleton: bundled-guard → per-pack lock → read → mutate → file-plane lint validation → atomic write → audit log → cache invalidation.
-- The pack now declares `researcher` as an entity primitive bound to `people/researchers/`, marked `extractable: true` (eligible for facts extraction) and `expert_routing: true` (surfaces in `whoknows` queries).
-- An audit row landed in `~/.gbrain/audit/schema-mutations-YYYY-Www.jsonl` with your type name SHA-8-redacted and the prefix's first segment only (`people`) for privacy.
-
-Verify the type is in the pack:
-
-```bash
-gbrain schema explain researcher
-```
-
-You'll see the resolved settings printed back.
-
-## Step 5: Import some placeholder researcher pages
-
-You need pages under `people/researchers/` for the next step to do anything. If your brain repo already has them, skip ahead. If not, drop 3-5 placeholder markdown files into `<your-brain-repo>/people/researchers/` and import:
-
-```bash
-mkdir -p people/researchers
-cat > people/researchers/alice-example.md <<'EOF'
----
-title: Alice Example
----
-
-ML researcher at Example Lab. Works on contrastive embeddings.
-EOF
-
-cat > people/researchers/bob-example.md <<'EOF'
----
-title: Bob Example
----
-
-Vision researcher at Widget University. Recent paper on diffusion models.
-EOF
-
-cat > people/researchers/charlie-example.md <<'EOF'
----
-title: Charlie Example
----
-
-RL researcher at Acme Research. Focus on inverse reinforcement learning.
-EOF
-
-gbrain sync
-```
-
-The sync imports the new files. They'll be stored in the database but their `type` column will still be empty — the new type was added to the pack AFTER these pages already existed (the typical real-world scenario for an agent walking into an existing brain).
-
-## Step 6: See the gap with `stats`
-
-```bash
-gbrain schema stats --json | jq '.aggregate, .dead_prefixes'
-```
-
-You'll see `untyped_pages: 3` (or however many you just imported) and `dead_prefixes: []` — your new prefix has 3 matching pages, so it's not dead.
-
-The 3 researcher pages are "orphaned" by type even though they live in the right directory. The next step backfills them.
-
-## Step 7: Backfill with `sync --apply`
-
-First dry-run to see what would happen:
-
-```bash
-gbrain schema sync --json
-```
-
-You'll see something like:
-
-```json
-{
-  "schema_version": 1,
-  "apply": false,
-  "per_prefix": [
-    {
-      "type": "researcher",
-      "prefix": "people/researchers/",
-      "would_apply": 3,
-      "sample_slugs": ["people/researchers/alice-example", "people/researchers/bob-example", "people/researchers/charlie-example"],
-      "applied": 0
-    }
-  ],
-  "total_would_apply": 3,
-  "total_applied": 0
-}
-```
-
-`would_apply: 3` is what you'd touch. `sample_slugs` is the agent's drilldown signal — if those slugs look wrong, abort. They look right, so apply:
-
-```bash
-gbrain schema sync --apply
-```
-
-You'll see per-batch progress lines on stderr and a final `total_applied: 3`. The UPDATE ran in chunks of 1000 (yours fit in one chunk) and never wedged any concurrent writer.
-
-## Step 8: Prove the wiring works
-
-```bash
-gbrain whoknows "machine learning"
-```
-
-If your researcher pages contain ML-related content, they'll surface in the ranked results — even though they're typed `researcher`, not `person` or `company`.
-
-**This is the load-bearing demonstration of the pack-aware wiring.** `whoknows` consults the active pack's `expert_routing: true` types via `expertTypesFromPack(pack.manifest)` rather than a hardcoded `['person', 'company']` list, so your custom type routes through expert search instead of being ignored.
-
-## What you built
-
-You now have:
-- A fork of `gbrain-base` named `mine` at `~/.gbrain/schema-packs/mine/pack.json`, active in your brain via `~/.gbrain/config.json`.
-- A `researcher` page type registered in the pack with `entity` primitive, `people/researchers/` prefix, `extractable: true`, `expert_routing: true`.
-- 3 pages typed as `researcher` (backfilled from disk via `gbrain schema sync --apply`).
-- A query path that routes through the new type: `gbrain whoknows` reads the pack and includes `researcher` in its type filter.
-
-You also exercised the full mutation skeleton: bundled-pack guard, per-pack lock, validation gate, atomic write, audit log, cache invalidation. Every step was idempotent — re-running any of them is a no-op.
-
-## Next steps
-
-**Add a type set by frontmatter only.** Some types don't live in one directory: an `archive` page can sit anywhere and is typed by its frontmatter `type: archive`. Declare it with `--no-prefix` instead of `--prefix`:
-
-```bash
-gbrain schema add-type archive --primitive concept --no-prefix
-```
-
-The pack records `path_prefixes: []`, so pages get this type only from frontmatter. Leaving out both `--prefix` and `--no-prefix` is refused (exit 2, `invalid_params`), and `--no-prefix` can't be combined with `--extractable` or `--expert` (lint rules `extractable_empty_corpus`, `expert_routing_without_prefix`).
-
-**Add a link verb.** A `researcher` can `author` a `paper`. To model that:
-
-```bash
-gbrain schema add-type paper --primitive annotation --prefix research/papers/ --extractable
-gbrain schema add-link-type authored --page-type researcher --target-type paper
-gbrain schema graph
-```
-
-The graph now shows `researcher --(authored)--> paper`.
-
-**Add aliases for query closure.** If you want `gbrain query researcher` to also surface `person` rows (because researchers ARE people):
-
-```bash
-gbrain schema add-alias researcher person
-```
-
-Read [`skills/conventions/schema-evolution.md`](../skills/conventions/schema-evolution.md) for the decision tree on when to add types vs aliases vs prefixes. The short version: <20 pages → don't pack-codify; 20-100 → alias on existing type; 100+ → first-class type.
-
-**Lint your pack before shipping.** The 14-rule lint surface (with the optional `--with-db` flag for DB-aware checks, including the stored-type alias/undeclared rules) catches dangling references, prefix collisions, and dead-corpus warnings:
-
-```bash
-gbrain schema lint --with-db
-```
-
-**Commit your pack to source control.** If `~/.gbrain/schema-packs/mine/` is a git repo, commit `pack.json` and push. Your pack survives across machines, and the `mutation_count_anomaly` lint rule will nudge you when you hit >50 mutations in a week (the "you should be committing this" signal).
-
-**For agents (MCP):** the same operations are reachable over HTTPS MCP as schema ops. Register an admin-scope OAuth client and `schema_apply_mutations` lets a remote agent compose multi-step refactors as one atomic batch. The batched MCP op + per-pack lock + audit log are the load-bearing primitives that make remote schema authoring safe. See [`skills/schema-author/SKILL.md`](../skills/schema-author/SKILL.md) for the agent dispatcher.
-
-**Undo a mistake.** Every mutation primitive has an inverse (`remove-type`, `remove-alias`, `remove-prefix`, `remove-link-type`, `set-extractable false`, etc.). If you fork twice and want to revert, `gbrain schema downgrade --to <pack>` re-activates the pack you name (e.g. `--to gbrain-base`). The bare history-based form depends on `~/.gbrain/schema-pack-history.jsonl`, which nothing writes today — always pass `--to`.
-
-## Related docs
-
-- **Reference:** `gbrain schema --help` for the full CLI surface (30+ subcommands); the "Schema packs: mutation surface" section of `docs/architecture/KEY_FILES.md` for the module-by-module architecture.
-- **How-to:** [`skills/schema-author/SKILL.md`](../skills/schema-author/SKILL.md) — the agent dispatcher with the 7-phase workflow (brain → assess → propose → apply → sync → verify → commit).
-- **Explanation:** [`skills/conventions/schema-evolution.md`](../skills/conventions/schema-evolution.md) — when to add a type vs alias vs prefix.
-
----
-
 ## docs/guides/live-sync.md
 
 Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/live-sync.md
@@ -8530,7 +8293,7 @@ the same registry.
 
 ```bash
 gbrain init --pglite                                      # 2-second local brain
-claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter   # daily-driver tools, the verbs included
+claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter --advertise verbs   # lists the verbs; the daily-driver tools stay callable
 gbrain remember "gbrain install check" --provenance install-check
 gbrain recall --query "gbrain install check"              # …now ask your agent in a NEW session
 ```
@@ -8545,23 +8308,26 @@ If `claude` is not found: install Claude Code first, or use a block below.
 
 **Codex**
 ```bash
-codex mcp add gbrain -- "$(command -v gbrain)" serve --surface starter
+codex mcp add gbrain -- "$(command -v gbrain)" serve --surface starter --advertise verbs
 ```
 
 **Grok Build** (verify with `grok mcp doctor gbrain` — the add is lazy)
 ```bash
-grok mcp add gbrain -e "GBRAIN_HOME=$HOME" -- "$(command -v gbrain)" serve --surface starter
+grok mcp add gbrain -e "GBRAIN_HOME=$HOME" -- "$(command -v gbrain)" serve --surface starter --advertise verbs
 ```
 
 **opencode** (verify with `opencode mcp list` — the add is lazy, and list SPAWNS the server)
 ```bash
-opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve --surface starter
+opencode mcp add gbrain --env GBRAIN_HOME=$HOME -- "$(command -v gbrain)" serve --surface starter --advertise verbs
 ```
 
 **OpenClaw / any stdio MCP host** — register the server command
-`gbrain serve --surface starter`. Remote brains: `gbrain serve --http` on the
+`gbrain serve --surface starter --advertise verbs`. Remote brains: `gbrain serve --http` on the
 host, then `gbrain connect https://host/mcp --token gbrain_xxx --install` on
 each client.
+
+**Listing:** `--advertise verbs` (gbrain's registrations) lists the verbs
+plus `request_tools`, which describes the rest; all of `--surface` stays callable.
 
 **Surface modes:** `--surface verbs` exposes EXACTLY the seven verbs —
 advertised list AND dispatch are filtered fail-closed (a hidden op returns

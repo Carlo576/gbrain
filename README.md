@@ -158,7 +158,7 @@ The repo is not a complete backup; see the [bootstrap guide](docs/guides/bootstr
 
 ### Connect GBrain to your AI client (MCP)
 
-- **Local stdio client:** `claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter` (`--surface full` lists every tool); Codex, Cursor, Windsurf and other stdio clients take the same command. Then run `gbrain setup <harness> --instructions-only`: agents seldom call a brain nobody told them about.
+- **Local stdio client:** `claude mcp add gbrain -- "$(command -v gbrain)" serve --surface starter --advertise verbs` (lists the memory verbs; `--surface full` lists every tool); Codex, Cursor, Windsurf and other stdio clients take the same command. Then run `gbrain setup <harness> --instructions-only`: agents seldom call a brain nobody told them about.
 - **Plugins with curated skills:** Codex `codex plugin marketplace add garrytan/gbrain@codex-plugin` + `codex plugin add gbrain@gbrain`; Claude Code `/plugin marketplace add garrytan/gbrain` + `/plugin install gbrain@gbrain`.
 - **This brain from anywhere:** `gbrain mcp expose` publishes it on your Tailscale tailnet as a user service (`--funnel` for cloud agents such as Grok Bot, Muse and ChatGPT). [Guide](docs/guides/remote-mcp.md).
 - **A brain on another host:** `gbrain connect https://your-host/mcp --token gbrain_xxx --install` (add `--agent codex` for Codex). Hosted brains use [native OAuth or a private handoff](docs/guides/hosted-harness-access.md); dashboard, clients and permissions live in [MCP administration](docs/mcp/ADMIN.md).
