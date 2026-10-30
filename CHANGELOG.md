@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.517.0] - 2026-10-30
 
 **The crash robot now runs two writer runs at a time, with the same runs, faults and manifest order as before, so its Postgres and PGLite cells finish well inside their ceilings again (#8036). reconcile-owner-journey is split by transport, so neither half hits the serial lane's 300 s per-file cap on a slow runner (#8040).**
 
