@@ -15,10 +15,10 @@
 # Needs only bash, curl, python3, ssh, ssh-keygen, and tar locally, so it works
 # from dev boxes, containers, and cloud sandboxes.
 #
-# Ownership: VMs are named ubirun-<owner>-<epoch>-<suffix>. <owner> is UBI_OWNER
+# Ownership: VMs are named ubirun-<owner>-<epoch>-<suffix>-t<H>. <owner> is UBI_OWNER
 # (lowercased, letters and digits only, at most 12 characters, starting with a
 # letter) or a random per-machine id kept in $STATE_ROOT/owner-id. Ubicloud names
-# allow 63 characters of [a-z0-9-], so a full name stays under 40.
+# allow 63 characters of [a-z0-9-], so a full name stays under 50.
 #
 # Expiry: every name `up` and `run` generate ends in a TTL,
 # ubirun-<owner>-<epoch>-<suffix>-t<H>, expiring H hours after creation: H is

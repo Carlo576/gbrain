@@ -34,11 +34,13 @@ the quota. Ubicloud names allow 63 characters of `[a-z0-9-]`, so a full name
 stays under 50.
 
 Ubicloud has no VM tags, so the TTL lives in the name, and gstack's
-`ubi-runner.sh reap` reads it the same way. `ci:ubicloud` gives every gate VM a
+`ubi-runner.sh reap` reads the TTL of every name gbrain generates the same way. `ci:ubicloud` gives every gate VM a
 two-hour TTL (`--ttl-hours N` changes it, up to 999). `ubi-runner.sh up` and
 `run` take the same `--ttl-hours H`; without it their VMs get `-t999` (about
-41 days) for long dev, benchmark and eval VMs, and gstack's reap destroys a
-`ubirun-*` VM with no TTL once it is four hours old. `scripts/ubicloud/reap-expired.ts` is the operator
+41 days) for long dev, benchmark and eval VMs. gstack's `up` also destroys
+the caller's own (`UBI_OWNER`) `ubirun-*` VMs that carry no `-t<H>` (TTL-less or
+older `-x<expiry>` names) once they are four hours old, so give a long-lived VM a
+TTL before running gstack's runner under the same owner. `scripts/ubicloud/reap-expired.ts` is the operator
 side of the leak guard: run from the operator's Capy automation, where the
 Ubicloud token already lives (never from GitHub Actions), it lists the project's
 VMs, selects only names with a TTL (or the older
