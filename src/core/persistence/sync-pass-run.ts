@@ -23,7 +23,7 @@ import type { Cursor, RetryWait } from './sync-run.ts';
 import { getWriteRequestById } from './journal.ts';
 import type { WriteRequest } from './model.ts';
 import { managedSyncWriteDiagnostic } from './sync-write-diagnostic.ts';
-import { recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
+import { recordedStop, replaysUnchangedRefusal, resumableRowStop } from './sync-stop-class.ts';
 import { adoptLegacyPage, incomingId, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
 import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { recordPassFenceTrend, type PassStamp, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
@@ -42,6 +42,7 @@ import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
 import { idleClear, readIdleFacts } from './sync-idle-skips.ts';
 import { digest } from './digest.ts';
 import { readSyncTail } from './sync-tail-record.ts';
+import { movedDriftHolds } from './sync-prescreen.ts';
 import { clearGitHold, clearGitHoldRetryPaths, holdRescreenDue, readGitHoldRetryPaths, readSyncHoldPolicy, readGitSourceHolds, readSyncImportProvenances, settledDeletionHolds, syncImportParserFor } from './sync-holds.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { loadConfig } from '../config.ts';
@@ -153,7 +154,8 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     identity: Array<{ entry: ShadowPath; origin: ShadowPath | null; slug: string; ids: { page: string; file: string } }> }> {
   await faultPoint('sync:batch_entries', { sourceId: level.sourceId });
   const working = (entry: ShadowPath) => level.mode === 'working' && entry.state.level !== entry.state.tree;
-  const deleteEntries = new Map<string, PassEntry>(deletes.map(entry => [entry.path, { ...entryPaths(level, entry.path), action: 'delete' as const, working: level.mode === 'working',
+  const committedOnly = level.strict ? { committedOnly: true as const } : {};
+  const deleteEntries = new Map<string, PassEntry>(deletes.map(entry => [entry.path, { ...entryPaths(level, entry.path), ...committedOnly, action: 'delete' as const, working: level.mode === 'working',
     slug: entry.slug!, pageId: entry.pageId, revision: entry.revision, level: null, ...(entry.result.heldDeletion ? { heldDeletion: entry.result.heldDeletion } : {}) }]));
   const leaving = new Map(deletes.map(entry => [entry.path, entry]));
   const fresh = imports.filter(entry => !entry.state.page);
@@ -205,7 +207,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   for (const entry of imports) {
     if (step.due()) await step.pause();
     const paths = entryPaths(level, entry.path);
-    const base = { ...paths, action: 'import' as const, working: working(entry), level: entry.state.level, ...(entry.result.cls === 'drift' && entry.result.side && entry.result.side !== 'deleted' ? { drift: entry.result.side, ...(driftBaseline(entry) ? { driftBaseline: driftBaseline(entry) } : {}) } : {}) };
+    const base = { ...paths, ...committedOnly, action: 'import' as const, working: working(entry), level: entry.state.level, ...(entry.result.cls === 'drift' && entry.result.side && entry.result.side !== 'deleted' ? { drift: entry.result.side, ...(driftBaseline(entry) ? { driftBaseline: driftBaseline(entry) } : {}) } : {}) };
     if (entry.state.page) { entries.push({ ...base, slug: entry.slug!, pageId: entry.pageId, revision: entry.revision }); continue; }
     const slug = slugOf.get(entry.path);
     if (!slug) { skipped.push(entry); continue; }
@@ -241,7 +243,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     if (losers.length) collisions.push({ slug, kept: kept ?? entryPaths(level, winner!.path).sourcePath, skipped: losers.map(entry => entryPaths(level, entry.path).sourcePath) });
     if (!winner) continue;
     const paths = entryPaths(level, winner.path);
-    const base = { ...paths, action: 'import' as const, working: working(winner), level: winner.state.level, slug, ...legacySlugs.get(winner.path) };
+    const base = { ...paths, ...committedOnly, action: 'import' as const, working: working(winner), level: winner.state.level, slug, ...legacySlugs.get(winner.path) };
     if (holder) {
       // #6729: a file whose frontmatter id differs from the page's is another document; it inherits nothing. GBRA-130 B-4: it is
       // held alone and the page keeps its slug (its origin's deletion waits with it); discovery still refuses the source.
@@ -257,7 +259,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
       // unbound (#5254) is not guarded: its preparation refuses the file that now occupies its path (source_changed).
       entries.push({ ...base, pageId: Number(holder.id), revision: holder.revision,
         ...(holder.source_path !== null ? { renameFrom: { sourcePath: holder.source_path, slug, pageId: Number(holder.id), revision: holder.revision } } : {}),
-        ...(holder.source_path === null && !holder.deleted && !holder.unbound ? { drift: 'unknown' as const } : {}) });
+        ...(holder.source_path === null && !holder.deleted && !holder.unbound && !level.strict ? { drift: 'unknown' as const } : {}) });
       if (holderPath !== null && deleteEntries.delete(holderPath)) renamed.add(holderPath);
       continue;
     }
@@ -385,18 +387,20 @@ async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNull
   const [headLine, refLine] = syncGit(context.gitRoot, ['rev-parse', 'HEAD', '--abbrev-ref', 'HEAD']).split('\n');
   const head = headLine!.trim();
   const detached = refLine?.trim() === 'HEAD';
-  const mode: SyncSelection['mode'] = detached || (opts.workingTree ?? configuredWorking === 'true') ? 'working' : 'committed';
+  // G3: a strict source's pass reads its commit alone, a detached HEAD's too (sync-pass.ts).
+  const strict = context.source.config?.canonical === 'git';
+  const mode: SyncSelection['mode'] = !strict && (detached || (opts.workingTree ?? configuredWorking === 'true')) ? 'working' : 'committed';
   const selection = passSelection(patterns, opts, context, mode);
   const configured = !remote && !opts.exclude?.length && !opts.includeHidden?.length && opts.srcSubpath === undefined
     && (opts.strategy === undefined || opts.strategy === ((context.source.config?.strategy as string | undefined) ?? 'markdown'))
-    && (detached || opts.workingTree === undefined || opts.workingTree === (configuredWorking === 'true'));
+    && (strict || detached || opts.workingTree === undefined || opts.workingTree === (configuredWorking === 'true'));
   // GBRA-150: `sync.metafile_pages typed` widens the level's universe, so it joins the selection fingerprint (`off` keeps
   // the fingerprint an older pass stamped): the first pass after the upgrade or a flip reads the whole level once.
   const metafilePages = await readMetafilePagesMode(engine);
   // GBRA-133: so does `sync.apply_held_deletions` when on (sync-held-deletions.ts): turning it on reads the level, and its held deletions, once.
   // `sync.level_reuse` rides the same read (sync-tree-reuse.ts); it changes how the level is read, not what it is.
   const { heldDeletions, levelReuse } = await readPassSwitches(engine, sourceId);
-  const selectionFp = digest({ ...selection, ...(metafilePages === 'off' ? {} : { metafile_pages: metafilePages }), ...(heldDeletions ? { apply_held_deletions: true } : {}) }), parserFp = parserFingerprint();
+  const selectionFp = digest({ ...selection, ...(metafilePages === 'off' ? {} : { metafile_pages: metafilePages }), ...(heldDeletions ? { apply_held_deletions: true } : {}), ...(strict ? { canonical: 'git' } : {}) }), parserFp = parserFingerprint();
   const obligations: ManagedSyncPassValue['obligations'] = prior ? structuredClone(prior.value.obligations)
     : { baseline_commit: context.source.last_commit, mismatch: {}, not_converged_streak: 0, faults: {} };
   obligations.mismatch ??= {}; obligations.faults ??= {}; obligations.not_converged_streak ??= 0;
@@ -422,6 +426,8 @@ async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNull
   const converged = obligations.converged;
   const probe = converged ? rowProbe : null;
   const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
+  // GBRA-133: a file_drift hold whose page moved since it was held is re-screened even when Git did not move.
+  const driftMoved = (await movedDriftHolds(engine, sourceId, holds)).size > 0;
   // Working mode (design §2.2): the stat cache this process kept from the round its last stamp used; a cold process has none.
   const cacheKey = passFingerprint(sourceId, incarnation);
   const kindStarted = Date.now();
@@ -434,7 +440,7 @@ async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNull
     head, parserFp, pack, selectionFp, now: started, openEpisode: !!episode, owedTail: tail !== null, retryRow: retry.length > 0,
     notConvergedStreak: obligations.not_converged_streak, mismatchStreak: Object.keys(obligations.mismatch).length,
     requestNewer: probe?.newer === true, openAtStampFinished: !!converged && (converged.open_at_stamp === null || (probe?.stillOpen ?? 0) < converged.open_at_stamp.length),
-    writebackOpen: probe?.writebackOpen === true, workingChange: working.changed, rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true });
+    writebackOpen: probe?.writebackOpen === true, workingChange: working.changed, rescreenDueHold: driftMoved || holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true, fullRound: opts.fullRound === true });
   // Design §2.6: a withheld mass delete is applied by a full round once the owner host's env valve allows it.
   const valveOpen = !remote && !!obligations.deletes_withheld && massReconcileAllowed();
   // Design §4: keep_db writes the previous pass deferred (`keep_db_pending`: its cap, or write capacity) are owed to this pass, so it is
@@ -754,7 +760,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const stampFor = (level: ShadowLevel) => passStampFor(engine, { context, head, slugMode: levelSlugMode, episode, selection, configured, mode, leaseToken: lease.token, retry, level, selectionFp, parserFp,
     pack, full: kind === 'full', counts, extract: !processingOptions.noExtract, since: value.telemetry.started_at, rescreen: legacyWaived.size > 0, closures });
 
-  const save = async (outcome: PassOutcome, stopReason: string | null, pin = false) => {
+  const save = async (outcome: PassOutcome, stopReason: string | null, pin = false, fenced = true, onlyOpen = false) => {
     await beat.pending; const ended = outcome !== 'open';
     if (ended && outcome !== 'synced') {
       const open = await openPassRequests(engine, { sourceId, passId, carried: value.obligations.pending_requests ?? [] });
@@ -764,7 +770,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       classes: applied.classes, ...(applied.summary ? { summary: applied.summary } : {}),
       ...(ended ? { ended_at: new Date().toISOString(), duration_ms: Date.now() - started } : {}) };
     if (outcome === 'blocked' || stopReason === 'not_converged') value.obligations.stuck_since ??= new Date().toISOString();
-    await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin }); });
+    await engine.transaction(async tx => { if (fenced) await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin, onlyOpen }); });
   };
   // GBRA-108: a committed legacy-sweep slice is progress the row and the drain's governor see; #7355: so is a level read still working (`levelBeat`).
   const onSwept = async () => { assertActive(); await save('open', null); opts.onProgress?.({ phase: 'managed_sync.legacy_swept', bankedFiles: sliceBase.pages }); }, beat = levelBeat(opts, sliceBase, () => save('open', null));
@@ -961,7 +967,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       const fold = passFold(level, levelCache, { imports, entries: built.entries, unsettled: deletes.length + inFlight.length + owed.length + mismatch.length + legacyWaived.size + retry.length,
         remote, episodeFullId: episode?.full_id ?? null });
       for (let i = 0; i < built.entries.length; i += PASS_BATCH_MAX) {
-        const chunk = built.entries.slice(i, i + PASS_BATCH_MAX), last = !!fold && i + chunk.length >= built.entries.length;
+        const chunk = built.entries.slice(i, i + PASS_BATCH_MAX), last = !!fold && i + chunk.length >= built.entries.length; opts.onProgress?.({ phase: 'managed_sync.round_batch', round: { round, target: head, paths: level.paths.length, batch: i / PASS_BATCH_MAX + 1, batches: Math.ceil(built.entries.length / PASS_BATCH_MAX), base: i } });
         // A folded stamp writes the pass row with the obligations as they stand when its import is frozen.
         const stopped = await drain(chunk, last ? { ...await stampFor(level), fold: { ...fold, obligations: structuredClone(value.obligations), batch: chunk.length } } : undefined);
         if (stopped) return stop(stopped);
@@ -992,11 +998,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') {
       // A folded stamp with nothing since ended the pass: the abort stops nothing it owes.
       if (folded?.done === doneKey()) return synced(true);
-      await save('resumable', 'timeout').catch(() => undefined); return result('partial', 'timeout');
+      await save('resumable', 'timeout', false, true, true).catch(() => undefined); return result('partial', 'timeout');
     }
     // A Git listing that did not finish cleanly classifies nothing (design v3.2 §9): the pass stops blocked, having written nothing for that round.
     if (error instanceof SyncTreeReadIncomplete) { await save('blocked', 'reconcile_read_incomplete').catch(() => undefined); return result('blocked_by_failures', 'reconcile_read_incomplete'); }
-    throw error;
+    const stop = resumableRowStop(error); if (stop) await save('resumable', stop, false, stop !== 'lease_lost', true).catch(() => undefined); throw error;
   } finally {
     unregisterPassCost(passId);
   }

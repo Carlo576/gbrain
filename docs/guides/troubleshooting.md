@@ -29,6 +29,14 @@
 | A gbrain call failed with a code you don't recognize | follow `fix.next` ([protocol](../protocol/AGENT_OPERATOR_v1.md)); `gbrain errors <code>` | agent | as the fix's `consent` | the fix's `verify` |
 | A graph read omits a relationship you know existed, or says someone still works somewhere they left | the default read returns relationships true today: repeat with `status: "all"` or `as_of`; to record an end, add a dated timeline line (`Ended works_at [[companies/x]]`) or `add_link ... valid_until` ([temporal edges](temporal-edges.md)) | agent | none | `gbrain doctor --only edge_validity --json` |
 | A command exited 3 (`confirmation_required`) | relay `user_message`; run `fix.command` only after the user agrees | agent, after the user agrees | the payload's `effects` | the fix's `verify` |
+| A scheduled job, workspace script or hook finds nothing in the brain (every lookup empty), or its log shows `no_brain` or `GBRAIN_DB_ACCESS no_url`, while the same command works by hand | the job runs without the brain's config: call gbrain through one wrapper that sets `GBRAIN_HOME` and loads the brain's env file, and stop discarding its stderr ([the wrapper](cron-schedule.md#calling-gbrain-unattended)); `gbrain doctor --only cron_gbrain_home --json` names crontab lines that skip it | agent | none | the job's log shows results, and `gbrain engine status --json` run through the wrapper names the expected `db_url_source` |
+| `gbrain sources refresh` refuses `refresh_not_owner` from cron or a script but works by hand | the caller resolves another gbrain home, so it is another host; the refusal names the identity file, `HOME` and `GBRAIN_HOME` it read. Set the owner's `GBRAIN_HOME` in the wrapper (not `HOME`, which also swaps git credentials); never copy or delete a `host.json` | agent | none | `gbrain sources refresh <id> --dry-run` through the wrapper |
+| `gbrain sources refresh` refuses `refresh_diverged` on every run | something commits into the managed checkout outside gbrain, usually a script that writes files and runs `git commit` without pushing. `git log @{upstream}..HEAD` names the commits; move that writer to `gbrain git commit-push -- <paths>`, then publish the stray commits merged with the upstream (`gbrain git commit-push --push-only --keep-checkout --path <checkout>`) and retry, as the [refusal](write-refusals.md#refresh_diverged) says; never force ([scripts and the managed checkout](shared-checkout-git.md#scripts-and-the-managed-checkout)) | agent; reconciling after the user agrees | `destructive` when reconciling drops local commits | `gbrain sources refresh <id> --dry-run` |
+| A `--json` caller fails to parse gbrain's output | something other than gbrain wrote to stdout, usually a wrapper or a hook it runs; send that output to a log file or stderr (gbrain's own notices already go to stderr) | agent | none | the same call piped to `jq .` parses |
+| gbrain calls time out from a script or language runtime but finish by hand, or each search takes several seconds | a cold CLI start takes 3–6 s on a pooled Postgres brain: set caller timeouts of at least 10 s in both the shell and the runtime (a runtime exec timeout can override the shell's), and turn on the [warm CLI socket](cli-socket.md). If warm searches stay slow, measure the round trip to the database; one in another region dominates search time | agent; moving the database after the user agrees | none | `GBRAIN_DEBUG=1 gbrain search <query>` prints a `[cli-socket] warm:` line |
+| After a database change some processes still use the old server, or a URL variable silently keeps its old value | a shell-sourced env file has an unquoted `&` (the assignment ends there), or a process kept the environment it started with. Quote every value, keep Postgres URLs to `?sslmode=require` (driver options as variables, such as `GBRAIN_PREPARE=false`), update every URL variable the tooling reads, restart every gbrain process, and prove the switch from the database side ([switching a database](../../INSTALL_FOR_AGENTS.md#switching-a-database)). Never paste `env` output into a transcript while debugging | agent, after the user agrees | none | a row written after the restart appears on the new server |
+| Doctor `parked_effects` lists `git_target_ignored` effects | a `.gitignore` rule excludes those pages' files, so their Git effects cannot commit. The user decides: un-ignore (narrow the rule, commit it, then `gbrain sources writer retry-effects <source> --parked-code git_target_ignored`) or keep the pages database-only and leave the effects parked ([gitignored paths](shared-checkout-git.md#scripts-and-the-managed-checkout)) | agent, after the user decides | none | `gbrain sources writer status --source <id> --json` |
+| Sync and the maintenance cycle re-read a whole source on every run after its Git history was rewritten (force-push, `git filter-repo`) | the recorded base commit no longer exists. Move the checkout onto the new history ([upstream rewritten](#upstream-rewritten)); before the next rewrite, run `gbrain sources set-sync <id> off` and `gbrain sources mirror-readonly <id>` first | agent; the reset after the user agrees | `destructive` (the reset keeps a backup ref) | `gbrain doctor --only sync_failures --json` |
 | [Database unreachable or `GBRAIN_DB_ACCESS <reason>`](#database-unreachable) | `gbrain engine status --probe`, then `gbrain db-repair` (diagnose); `gbrain db-repair --yes` applies safe fixes | agent; `--yes` after the user agrees | none to diagnose; `--apply-rewrites` rewrites the config URL (undoable) | `gbrain engine status --probe --json` |
 | [PGLite `RuntimeError: Aborted()` at startup](#pglite-aborted) | automatic repair on the next command; else `gbrain pglite-repair --dry-run`, then `gbrain pglite-repair --yes` | agent; `--yes` after the user agrees | `destructive` (a WAL backup is kept and the restore command printed) | `gbrain doctor --only connection --json` |
 | [`expected N dimensions, not M` on import](#embedding-dimensions) | `gbrain doctor` prints the exact `gbrain config set …` or `gbrain migrate embeddings --to <provider:model>` command | agent, after the user agrees | `migrate embeddings`: `paid`, needs the brain's writer lock | `gbrain doctor --only embeddings,embedding_width_consistency --json` |
@@ -127,9 +135,9 @@ Turning the `preparation_deadlines` switch off (`gbrain config set persistence.p
 
 <a id="embed-backfill-skipped"></a>**A sync job or `embed-backfill` job reports `embed_backfill_skipped` (reason `embedding_disabled`)?** Nothing is wrong: the brain is keyless by choice (`embedding_disabled`), so sync queues no embed-backfill and a backfill already queued ends on its first attempt without reading a page. Search stays keyword-only. The notice appears once per brain state (the first skip after the brain became keyless); its fix is the optional step that turns embedding on and names the provider key it needs (effects `credentials` and `paid`: ask the user first).
 
-**`gbrain doctor` warns `default_source_local_path`?** Your `default` source has no `local_path` AND that null pointer is provably breaking write-through (the repo fallback is another source's own working tree, or file-backed default pages have no resolvable root). A null `local_path` on its own is the designed fallback topology and reports ok. The repair is a pointer update, never a file move: `gbrain sources set-path default <path>` prints the prior value before changing it and refuses a path that nests inside or swallows another source's tree (exit 6; `--force` bypasses). **Say to your agent:** *"Run a brain health check and fix what you find"* — the maintain skill runs `gbrain doctor` and applies the printed repair.
+**`gbrain doctor` warns `default_source_local_path`?** Your `default` source has no `local_path` AND that null pointer is provably breaking write-through (the repo fallback is another source's own working tree, or file-backed default pages have no resolvable root). A null `local_path` on its own is the designed fallback topology and reports ok. The repair is a pointer update, never a file move: `gbrain sources set-path default <path>` prints the prior value before changing it and refuses a path that nests inside or swallows another source's tree (exit 6; `--force` bypasses). The check also warns when any source's `local_path` is a relative path such as `.`, or when a `default` source with no path falls back to a relative `sync.repo_path`, because sync refuses those (`sync_anchor_relative`); see [relative source path](#relative-source-path). **Say to your agent:** *"Run a brain health check and fix what you find"* — the maintain skill runs `gbrain doctor` and applies the printed repair.
 
-**A Gmail, Calendar or GitHub connector source still has an old `local_path`?** Connector sources sync from their provider, so autopilot ignores their `local_path`: once a connector has synced (or tried to) at least once, autopilot syncs it on every interval and runs its database phases with no checkout. A connector that has never synced stays idle until you run `gbrain sync --source <id>` once; autopilot prints that command the first time it skips one. To remove the stale pointer, run `gbrain sources set-path <id> --clear` (connector sources only; it refuses a filesystem source and a connector bound to a canonical owner). `config.syncEnabled=false` still opts a source out. **Say to your agent:** *"My Gmail source points at an old folder. Clear it and keep it syncing."*
+**A Gmail, Calendar or GitHub connector source still has an old `local_path`?** Connector sources sync from their provider, so autopilot ignores their `local_path`: once a connector has synced (or tried to) at least once, autopilot syncs it on every interval and runs its database phases with no checkout. A connector that has never synced stays idle until you run `gbrain sync --source <id>` once; autopilot prints that command the first time it skips one. To remove the stale pointer, run `gbrain sources set-path <id> --clear` (connector sources, or any source whose `local_path` is relative; it refuses a filesystem source with an absolute path and any source bound to a canonical owner). `config.syncEnabled=false` still opts a source out. **Say to your agent:** *"My Gmail source points at an old folder. Clear it and keep it syncing."*
 
 <a id="write-refused"></a>**A save, sync or background effect was refused with a named reason?** Reasons such as `file_database_drift`, `ambiguous_source_path`, `physical_root_device_changed`, `cursor_processing_options_conflict`, `take_row_collision`, `invalid_source_uri`, `queue_capacity` and parked effects (`targets_parked`, doctor `parked_effects`) each come with a recovery step in the error's `suggestion`. [Write refusal reasons](write-refusals.md) explains each one and its recovery. **Say to your agent:** *"My save was refused. Explain the reason and show me the fix before you run it."*
 
@@ -159,7 +167,7 @@ Turning the `preparation_deadlines` switch off (`gbrain config set persistence.p
 
 <a id="session-timeouts-not-applied"></a>**Doctor warns `persistence_session_timeouts` with `session_timeouts_not_applied`?** gbrain sets `statement_timeout` (`GBRAIN_STATEMENT_TIMEOUT`, default 5min) and `idle_in_transaction_session_timeout` as connection startup parameters, and a transaction-mode pooler (PgBouncer with `ignore_startup_parameters`, Supavisor) drops them: `SHOW statement_timeout` through the configured URL reads `0`, so a statement outside a transaction has no server-side bound and a relation lock held in another session (a migration's `ALTER TABLE pages` queued behind a long transaction, for example) holds it for as long as the lock lasts. Managed write *preparation* reads are not affected since v0.60.108: they run under a transaction-local `statement_timeout` of the write's remaining preparation budget, so a lock-blocked read ends at the budget and the member is released `preparation_deadline` with no statement left on the server (#6278). For every other autocommit statement, set the default on the role instead of the connection: `ALTER ROLE <gbrain role> SET statement_timeout = '5min'` (read-only to check: `gbrain doctor --only persistence_session_timeouts --json`). Setting `GBRAIN_STATEMENT_TIMEOUT` has no effect through such a pooler.
 
-<a id="managed-sync-blocked"></a>**A managed sync run is blocked (doctor `managed_sync_blocked`, a freshness `sync` job ended `dead`, or get_brain_health reports `sync_blocked`)?** The source's unfinished run stopped on a page request that did not commit and recorded the stop, so it resumes nothing by itself while the other sources keep syncing (#6858: one source stopped for 21 hours while every freshness job reported `completed`). Such a job now ends `dead`: its error names the stop and the run's `next` command, and `gbrain jobs get <id> --json` carries `outcome`, `drain` and `next` in its progress. Doctor warns as soon as a run is blocked and fails once it has been blocked for more than an hour; get_brain_health turns to `attention` past the same hour, with a count band and no source names. A sync pass that stopped before it finished (in discovery, path `<discovery>`, or on one file) counts as blocked too, until a later sync of the source succeeds. Run `gbrain sync status --source <id> --json` (read-only): it names the page, its fault class and its exit. Clear the cause it names and run the step it prints; the next freshness job resumes the run once the cause is gone. A page publication that `gbrain repair stuck-recovery --keep disk` abandoned is not a blocker: the next plain sync retries that page after the rest of its run, imports it when the kept file is committed, and holds it `worktree_dirty` otherwise.
+<a id="managed-sync-blocked"></a>**A managed sync run is blocked (doctor `managed_sync_blocked`, a freshness `sync` job ended `dead`, or get_brain_health reports `sync_blocked`)?** The source's unfinished run stopped on a page request that did not commit and recorded the stop, so it resumes nothing by itself while the other sources keep syncing (#6858: one source stopped for 21 hours while every freshness job reported `completed`). Such a job now ends `dead`: its error names the stop and the run's `next` command, and `gbrain jobs get <id> --json` carries `outcome`, `drain` and `next` in its progress. Doctor warns as soon as a run is blocked and fails once it has been blocked for more than an hour; get_brain_health turns to `attention` past the same hour, with a count band and no source names. A sync pass that stopped before it finished (in discovery, path `<discovery>`, or on one file) counts as blocked too, until a later sync of the source succeeds. So does an open pass whose process was killed or crashed with no process left holding its drain lease (code `pass_interrupted`, aged from the pass row's last write), and passes that keep stopping that way (`pass_abandoned`). Run `gbrain sync status --source <id> --json` (read-only): it names the page, its fault class and its exit. Clear the cause it names and run the step it prints; the next freshness job resumes the run once the cause is gone. A page publication that `gbrain repair stuck-recovery --keep disk` abandoned is not a blocker: the next plain sync retries that page after the rest of its run, imports it when the kept file is committed, and holds it `worktree_dirty` otherwise.
 
 <a id="managed-sync-not-moving"></a>**The catch-up is parked (`sources status --json` says `data_moving: false`, doctor warns `managed_sync_not_moving`, `gbrain sources writer movement` exited 1), or the drain stopped `drain_stalled` with `cause: owner_wedged_here`?** Liveness is not movement: `/health` can be ok, the pid alive and `sync_running: true` while no page has committed for weeks. A managed source is *not moving* when an unfinished `managed-sync` cursor has had neither a committed `managed_sync_*` receipt nor a head step advance for longer than `persistence.preparation_ceiling_ms` (600 s) while a drain or a full consumer is live on the owner host; with nothing live it is `movement_state: parked` (a cursor left between cron runs; informational, not scored). A parked cursor whose write queue still holds admitted requests while no consumer runs and nothing has moved for longer than that ceiling is stranded: nothing will ever drain it, so doctor `managed_sync_not_moving` fails (#6552, #6712 PR 2) and its fix is the resume sync with the cursor's stored options (`gbrain sync --source <id> …`), which consumes the queue itself; `details.stranded` counts such sources. When the sync backlog itself cannot be read, every surface says `movement_state: unknown` (`unknown.reason: backlog_read_failed`) instead of `nothing_pending`: doctor warns with `details.health: unknown`, `sources status` prints a `movement UNKNOWN` line, and `gbrain sources writer movement` exits 1 with code `movement_unknown` (`--warn-only` exits 0); rerun the movement command, and run `gbrain doctor --json` if the read keeps failing. Every surface routes to the same two read-only calls, so the agent reaches the owner, the step and the next action without SQL:
 
@@ -240,7 +248,7 @@ A spike warns only on its own: when at least `persistence.terminal_failures.spik
 ```bash
 gbrain doctor --only persistence_terminal_failures --json      # blockers, unresolved, historical, the fix
 gbrain sync status --source <id>                               # the same summary for one source, with BLOCKING lines
-gbrain sources writer failures <id> --group-by category        # groups on code + origin + category, each with its drill-down
+gbrain sources writer failures <id> --group-by category        # groups on code + origin + category (+ operation for a sync_fault), each with its drill-down
 gbrain sources writer failures <id> --category owner_exception --code storage_error --origin owner_exception --json
 gbrain write-request <request> --json                          # one receipt: write_error_reason, suggestion, diagnosis.fix
 ```
@@ -389,9 +397,8 @@ runs its phases in-process rather than spawning a child `gbrain init
 --migrate-only` per phase; a spawned child is what dies on
 Windows + bun + Supabase pooler with a DNS-resolution failure even
 though the parent connects fine, and running in-process removes the
-spawn entirely. The grandfather migration runs as a chunked bulk SQL
-pass (keyed on the page PK, soft-delete-filtered, source-safe) and
-completes in seconds on an 80K-page PGLite brain.
+spawn entirely. The v0.13.1 grandfather migration writes nothing since #7814: it
+records completion and leaves every page as it was.
 
 <a id="ghost-pages"></a>**A write refuses `source_changed` with "The canonical file was removed outside coordinated publication." (`canonical_file_missing`), or doctor `ghost_pages` warns?** The page is a ghost: its canonical file is gone on the owner host but the database page is live, so every write refuses and no sync can import a file that is not there. On the owner host, list them with `gbrain pages ghosts --source <id>` (read-only). For each, the user decides: to keep the page, restore its file at the recorded path (from Git or a backup; gbrain has no automated file restore) and run `gbrain sync --source <id>`; to remove it, preview `gbrain repair ghost-pages --source <id>`, show the user the list, and after they agree run the printed `--apply --expect <hash> --yes`. Removed pages are purged after 72 h; `gbrain restore <slug> --force` undoes one until then. Off the owner host it refuses `not_owner_host`; on an unreadable checkout `ghost_storage_unknown`; when ghosts are more than half of the source's file-backed pages `ghost_mass_delete_refused` (check the checkout first). See [ghost pages](repair.md#ghost-pages). **Say to your agent:** *"Which pages lost their files? Show me the list before you remove anything."*
 
@@ -812,3 +819,70 @@ syncs keep ending `partial` or failing has none, however many pages it imported.
   - `last_attempt_unsuccessful`: read the job (`gbrain jobs get <id> --json`)
     or the managed failure, then retry.
   - `no_attempt`: run `gbrain sync --source <id>` (`--no-pull` on a managed brain).
+
+## Relative source path
+
+<a id="relative-source-path"></a>
+
+**Say to your agent:** *"Sync refused with `sync_anchor_relative`, or doctor warns that my default source's local_path is relative."*
+
+A source's stored directory (`sources.local_path`, or the legacy `sync.repo_path`)
+must be an absolute path. A relative one such as `.` names whatever directory
+gbrain runs from, so it cannot say which folder is the brain. Before #7630, a
+`gbrain sync --source default` or `gbrain sync --all` run from an unrelated
+folder treated that folder as the brain repo: it ran `git init`, committed
+everything in it and imported its markdown. Sync now refuses
+`sync_anchor_relative` (exit 3) before any Git probe, cost estimate or import,
+and nothing is changed. Doctor's `default_source_local_path` check warns on
+every source with a relative path, and on a relative `sync.repo_path` behind a
+default source with no path.
+
+Ask the user which directory holds the source, then do one of:
+
+- `gbrain sources set-path <id> <absolute-directory>` points the source at that
+  directory (non-destructive; it only updates the pointer).
+- `gbrain sources set-path <id> --clear` clears the relative pointer. It changes
+  no file or page. A `default` source with no path writes through
+  `sync.repo_path` (the designed fallback), and its sync refuses until a path
+  is set again. On a managed brain, a source with a canonical owner refuses
+  `--clear` (`writer_transfer_required`); point it at its directory instead.
+
+A path that is absolute only on another operating system (a Windows drive path
+such as `C:\brain-example`, set by another host sharing the brain, read on Linux
+or macOS) is refused the same way, as not an absolute path on this host. Use
+`set-path` with this host's directory (or `gbrain config set sync.repo_path` for
+the legacy key); `--clear` refuses such a path. An explicit absolute `--repo`
+passes the refusal, but it never advances the sync position of a source whose
+stored path is relative.
+
+Until the path is absolute, the main readers do not treat the folder gbrain
+runs from as the source either: page and fact writes skip the file and stay in
+the database (`repo_not_found`, `no_repo_configured`), a captured file keeps
+no origin path, matching a folder to its source ignores the path, fence repair
+edits stored pages, managed activation refuses it (`source_changed`, detail
+`source_path_missing`), the dream, autopilot, per-phase and global
+maintenance cycles and `gbrain maintain` run only their database phases
+(a cycle run on a directory that matches no registered source fails its
+sync phase `sync_anchor_relative` while the `default` source's path is
+relative),
+`sources set-path` does not count it as another source's tree, the
+write-through leak guard counts a live source's relative path as owning any
+tree (so every source with no `local_path`, the `default` source and any
+`.sources/<id>` source, saves its pages to the database only, `source_repo_belongs_to_other_source`, until that path is set
+or cleared), `gbrain autopilot
+--install` asks for `--repo`, a remote `submit_job` for the source is
+refused, import does not count the folder as a configured root or stamp it
+fresh, and a managed brain does not record it as a managed root. A few other
+local commands may still read it from the folder they run in, so set the path
+first. A managed brain that ran before this fix may already have recorded the
+folders it ran from as managed roots; those records stay until an operator
+drains them (tracked in #7646).
+
+For `sync.repo_path`: `gbrain config set sync.repo_path <absolute-directory>`.
+`config set` refuses a relative value and writes nothing.
+
+If an earlier sync already initialized and imported the wrong folder, the user
+decides what to undo: the folder's new `.git` directory and the pages imported
+from it are theirs to review before anything is removed.
+Verify with `gbrain sources status <id> --json` and
+`gbrain doctor --only default_source_local_path --json`.

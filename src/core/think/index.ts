@@ -38,6 +38,7 @@ import { resolveThinkWindow } from './temporal-window.ts';
 import { resolveThinkTemporalContext } from './temporal-context.ts';
 import { resolveExcludePrivatePages } from '../search/private-visibility.ts';
 import { deliverEvidence, effectivePlan, resolveEvidencePlan, EVIDENCE_BLOCK_CHAR_CAP, THINK_RETURN_UNIT_CONFIG_KEY, type DeliveryMeta } from '../search/evidence-delivery.ts';
+import { evidenceTitlesEnabled } from '../search/evidence-date.ts';
 import { startThinkDecide, thinkAbstainResult, type ThinkAbstention } from './decide.ts';
 import { classifyIntent } from './intent.ts';
 import { deriveTrust, type TaintRef } from '../trust/taint.ts';
@@ -283,11 +284,14 @@ const THINKING_DEFAULT_MAX_OUTPUT_TOKENS = 16000;
 // OpenAI reasoning models spend output budget on internal reasoning tokens
 // the same way — reasoning tokens are billed as output and count against
 // `max_tokens` — so they get the same headroom. Deliberately scoped to the
-// gpt-5 family and the numbered o-series only; anything else (gpt-4o, the
-// non-reasoning `*-chat` snapshots like gpt-5-chat-latest, other providers'
-// reasoning models routed through their own recipes) keeps the conservative
-// 4000 default.
-const OPENAI_REASONING_MODEL_RE = /^openai[:/](?:gpt-5|o[0-9]+)(?:[.-]|$)/i;
+// gpt-5-and-later families and the numbered o-series only; anything else
+// (gpt-4o, the non-reasoning `*-chat` snapshots like gpt-5-chat-latest, other
+// providers' reasoning models routed through their own recipes) keeps the
+// conservative 4000 default. #7421: matched behind any provider-prefix chain
+// (`openai:`, `litellm:`, `openrouter:openai/`), like the Claude regexes,
+// because the proxy route does not change how the model bills reasoning; an
+// opaque proxy alias (`litellm:my-reasoner`) still cannot be recognized.
+const OPENAI_REASONING_MODEL_RE = /[:/](?:gpt-[5-9]|o[0-9]+)(?:[.-]|$)/i;
 const OPENAI_CHAT_SNAPSHOT_RE = /-chat(?:-|$)/i; // gpt-5-chat-latest, gpt-5.2-chat-latest
 // #4375: the default deep tier (anthropic:claude-opus-4-7) routinely needs
 // more than 4000 tokens for the synthesis JSON envelope; at 4000 the envelope
@@ -552,17 +556,18 @@ function stampCitationSources(citations: ParsedCitation[], pages: SearchResult[]
 }
 
 async function renderThinkPages(engine: BrainEngine, opts: RunThinkOpts, pages: SearchResult[], timeZone: string, warnings: string[]): Promise<{ pagesBlock: string; evidenceTruncated: boolean; evidenceDelivery?: DeliveryMeta }> {
-  const [plan, budget] = await Promise.all([
+  const [plan, budget, titles] = await Promise.all([
     resolveEvidencePlan(engine, {
       remote: opts.remote, returnUnit: undefined, returnWindow: undefined, budget: undefined,
       snippetChars: undefined, snippetCap: 0, configKey: THINK_RETURN_UNIT_CONFIG_KEY, op: 'think',
     }),
     readThinkPagesBudget(engine, warnings), // #5461
+    evidenceTitlesEnabled(engine), // GBRA-205
   ]);
   const excerptLen = pagesBlockExcerptLen(pages.length, undefined, budget);
   const applied = effectivePlan(plan, pages);
   if (!applied) {
-    const rendered = renderPagesBlockDetailed(pages, excerptLen, opts.question, { timeZone });
+    const rendered = renderPagesBlockDetailed(pages, excerptLen, opts.question, { timeZone, titles });
     return { pagesBlock: rendered.text, evidenceTruncated: rendered.truncated };
   }
   const delivered = await deliverEvidence(engine, pages, applied, {
@@ -572,8 +577,8 @@ async function renderThinkPages(engine: BrainEngine, opts: RunThinkOpts, pages: 
   });
   const rendered = applied.unit === 'auto'
     ? renderPagesBlockDetailed(delivered.results, excerptLen, opts.question,
-      { verbatim: r => r.delivered?.reason !== 'not_conversation' && r.delivered?.reason !== 'conversation_over_budget', verbatimLen: EVIDENCE_BLOCK_CHAR_CAP, timeZone })
-    : renderPagesBlockDetailed(delivered.results, EVIDENCE_BLOCK_CHAR_CAP, opts.question, { verbatim: true, timeZone });
+      { verbatim: r => r.delivered?.reason !== 'not_conversation' && r.delivered?.reason !== 'conversation_over_budget', verbatimLen: EVIDENCE_BLOCK_CHAR_CAP, timeZone, titles })
+    : renderPagesBlockDetailed(delivered.results, EVIDENCE_BLOCK_CHAR_CAP, opts.question, { verbatim: true, timeZone, titles });
   return { pagesBlock: rendered.text, evidenceTruncated: rendered.truncated, evidenceDelivery: delivered.delivery };
 }
 

@@ -8,7 +8,7 @@ import { loadGbrainEnvFile } from './gbrain-env-file.ts';
 import { dotenvValuesForKey } from './env-trust.ts';
 import { REMOTE_PRIVATE_PAGES_KEY } from './search/private-visibility.ts';
 import { RUNTIME_READER_CONFIG_KEYS } from './config-runtime-keys.ts';
-import { mergeServeCliSocket } from './published-config.ts';
+import { mergeServeCliSocket, mergeServeVectorPrewarm } from './published-config.ts';
 export { MERGED_CONFIG_BY_ENGINE } from './published-config.ts';
 
 /**
@@ -313,6 +313,8 @@ export interface GBrainConfig {
   embedding_multimodal_model?: string;
   /** DB-plane `serve.cli_socket`: the serve opens the warm CLI socket without `--cli-socket` (see published-config.ts). */
   serve_cli_socket?: boolean;
+  /** DB-plane `serve.vector_prewarm`: the serve prewarms the HNSW indexes into shared_buffers once at start (core/vector-prewarm.ts), default off. */
+  serve_vector_prewarm?: boolean;
 
   /**
    * v0.42 (#1981) — Retrieval Reflex. The context engine's deterministic
@@ -1227,7 +1229,7 @@ export async function loadConfigWithEngine(
       : engine,
   );
 
-  return mergeServeCliSocket(merged, snapshot);
+  return mergeServeVectorPrewarm(mergeServeCliSocket(merged, snapshot), snapshot);
 }
 
 /**
@@ -1364,6 +1366,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.image_query.daily_budget_usd_per_client',
   'search.image_query.remote_max_bytes',
   'search.mcp_keyword_only',
+  'search.remote_page_cap', // GBRA-156: distinct-page cap of a remote search/query without limit (search/remote-page-cap.ts)
   REMOTE_PRIVATE_PAGES_KEY,
   'search.track_retrieval',
   // Retrieval feedback (feedback/settings.ts).
@@ -1432,10 +1435,13 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.auto_packing',
   'search.long_page_unit', 'search.long_page_min_chars', // F2: delivery unit for long (rendered body >= min_chars, default 20000) non-conversation hits under an implied auto: off (default) | window | section | page (search/evidence-delivery.ts)
   'search.evidence_date_header', // C1: one-line date header per delivered block (default off; search/evidence-date.ts)
+  'search.evidence_titles', 'search.query_budget_unit', // GBRA-205, default off: titles on page date headers and think <page> tags (search/evidence-date.ts); query token_budget as the delivery hard cap, chunk | auto (search/evidence-packing.ts)
   'search.evidence_tail_trim', // GBRA-156: protected top-3 tail trim of auto conversation blocks (default off; search/evidence-tail-trim.ts)
   'search.entity_anchoring', // entity-anchored retrieval for entity-scoped current-state query/search (default off; search/entity-anchor.ts)
   'search.query_facts_arm', // query adds matching active facts as rows in spare capacity (default on; search/facts-arm.ts)
+  'search.saved_facts_supersede', // search saved_facts: a newer fact with a correction cue goes ahead of the fact it corrects, labelled corrected_by (default on; search/saved-facts-match.ts)
   'search.temporal_fact_reserve', // temporal-cue queries reserve up to 15% of the token budget for question-ranked dated facts (default off; search/facts-arm.ts)
+  'search.query_facts_block', 'search.fact_source_pages', // GBRA-205: a dated facts block (up to 22% of a query budget) ahead of the pages, default on; matched facts' source conversations join the hits, default off (search/facts-arm.ts)
   'search.page_rank_cut', // W5: whole_pages (default) | off — page unit + caller token_budget stops adding pages once their whole pages fill factor x the budget (search/page-rank-cut.ts)
   'search.page_rank_cut_factor', // W5: whole_pages target = factor x the budget (default 1.5)
   'think.return_unit',
@@ -1517,6 +1523,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // didn't specify one: 'private' (default) | 'world'. Resolved by
   // src/core/facts/visibility.ts; explicit caller values always win.
   'facts.default_visibility',
+  'storage.git_lfs', // G7a: a git-canonical door commit under a Git LFS rule commits the LFS pointer; default off refuses it (persistence/git-declared.ts)
   'visibility.honor_aliases', // remote page reads honor `access`/`confidentiality` aliases on pages without `visibility`; default on, false opts out (search/private-visibility.ts)
   'facts.entity_inference', // #5836: write-time subject inference kill switch (subject-infer.ts)
   'facts.candidate_fusion', // C2: 'rrf_free' (default, cosine arm) | 'interleave' (cosine + keyword; facts/single-prepare.ts)

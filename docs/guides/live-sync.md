@@ -545,7 +545,7 @@ vars — incident-time escape hatches, not everyday knobs.
    never holds it. The fence repair still repairs such a file: on a legacy
    source it re-reads the file, backs it up under `~/.gbrain/backups/`,
    writes and imports it, and leaves the change for you to commit
-   (`gbrain sources status` names the `git add`/`git commit` command until
+   (`gbrain sources status` names the `gbrain git commit-push` command until
    you do). Holds never count toward the
    legacy auto-skip streak below. A source blocked by such a file before this
    release recovers on its next sync, or now with
@@ -653,9 +653,21 @@ vars — incident-time escape hatches, not everyday knobs.
    `--wait-drain <seconds>` (default 60; `sources.refresh_drain_wait_ms`,
    `GBRAIN_REFRESH_DRAIN_WAIT_MS`) and `--fetch-timeout-ms` (default 120000;
    `sources.refresh_fetch_timeout_ms`, `GBRAIN_REFRESH_FETCH_TIMEOUT_MS`).
-   A refresh interrupted by a crash is finished by the restarted owner or by
-   `gbrain sources refresh <source-id> --resume`. A cron that keeps a managed
-   brain current runs the refresh instead of `git pull`.
+   A refresh whose process died (a crash, a replaced container) does not
+   wedge the checkout: the owner finishes what it can on its own, and the next
+   `gbrain sources refresh <source-id>` on the owner host finishes the rest
+   the way `gbrain sources refresh <source-id> --resume` does before its own
+   refresh. A refresh whose process is still running is never taken over, and
+   one whose HEAD cannot be verified waits for the user
+   ([`refresh_recovery_required`](write-refusals.md#refresh_recovery_required)).
+   `gbrain sources writer status <source-id>` shows who holds a refresh and
+   whether it is orphaned. A cron that keeps a managed
+   brain current runs the refresh instead of `git pull`, through the same
+   [wrapper](cron-schedule.md#calling-gbrain-unattended) as every other
+   scheduled gbrain call (so it runs as the owner host). `refresh_diverged`
+   means something commits into the checkout outside gbrain: fix that writer
+   instead of forcing the checkout
+   ([scripts and the managed checkout](shared-checkout-git.md#scripts-and-the-managed-checkout)).
 
    **Say to your agent:** *"Bring my notes source up to date with its remote."*
 
