@@ -2560,6 +2560,11 @@ so the page may hold the only copy. `--prefer file` deletes it after review;
 committing the file again clears the hold. Reason `origin_unknown` means the
 sync's history read did not finish, so it could not tell whether a commit held
 the file and kept the page; the provenance below reads the whole history.
+Reason `storage_invalid` (#8007) means `gbrain.yml`'s storage section did not
+load, or declared `db_only` in a form that resolved no directory, so the sync
+could not tell whether the page is database-only and kept it: run
+`gbrain storage status`, fix `gbrain.yml`, commit it and sync again; the hold
+clears and the page is decided under the fixed config.
 
 <a id="file-drift-provenance"></a>**Provenance: who deleted each gone file.** Every page of a
 `--held --side deleted --state file_gone` preview names where its file went

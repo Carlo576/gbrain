@@ -24,7 +24,7 @@ import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { join } from 'node:path';
-import { isDeclaredDbOnlySlug, isKeepDbSlug, loadStorageConfig } from '../storage-config.ts';
+import { hasUnresolvedDbOnlyDeclaration, isDeclaredDbOnlySlug, isKeepDbSlug, loadStorageConfig } from '../storage-config.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { currentCompanyBrainSync, getCompanyBrainProfile } from '../company-brain/profile.ts';
 import { sha256 } from './digest.ts';
@@ -639,7 +639,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const settings = await readLevelSettings(engine, context, scope, input);
   timings.setup = t();
   if (!settings) return null;
-  const { slugMode, exclude, pack, mirror, strategy, includeHidden, keepDbPrefixes, storage, workingConfig, metafilePages, strict } = settings;
+  const { slugMode, exclude, pack, mirror, strategy, includeHidden, keepDbPrefixes, storage, dbOnlyUnknown, workingConfig, metafilePages, strict } = settings;
   const sourceRelative = (gitPath: string) => (scope ? gitPath.slice(scope.length + 1) : gitPath);
   let metafilePage: (gitPath: string) => boolean = () => false;
   // Eligibility of a path outside the cached tree (every path of the tree is eligible); origins validate per call: a
@@ -810,7 +810,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && live && (record ? pages.fullEpisode[at!] : undefined) !== input.pass.episodeFullId
         : input.full === true && live,
       derivedCurrent: live && pages.derivedCurrent(at!), fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
-      keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes), dbOnly: row && isDeclaredDbOnlySlug(pages.slug[at!]!, storage),
+      keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes), dbOnly: row && (dbOnlyUnknown ? 'unknown' : isDeclaredDbOnlySlug(pages.slug[at!]!, storage)),
       openWork: row && open.pageIds.has(Number(pages.id[at!])) || open.origins.has(origin),
     };
     return { state, ...(row ? { at } : {}), ...(legacyPageless ? { legacyPageless } : {}) };
@@ -829,7 +829,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     }).then(found => { timings.legacy = t(); return found; })
     : new Map<string, string>();
 
-  const classifiedKey = JSON.stringify([treeKey, mode, strict, input.pass?.episodeFullId ?? null, input.full === true, mirror, keepDbPrefixes, storage?.db_only ?? [], pack?.identity ?? null, baselineCommit, !!input.pass?.bootstrap, [...colonRefused].sort()]);
+  const classifiedKey = JSON.stringify([treeKey, mode, strict, input.pass?.episodeFullId ?? null, input.full === true, mirror, keepDbPrefixes, storage?.db_only ?? [], dbOnlyUnknown, pack?.identity ?? null, baselineCommit, !!input.pass?.bootstrap, [...colonRefused].sort()]);
   const reuse = snapshot.changed && priorClassified?.key === classifiedKey ? reusableMatched(priorClassified.paths, matchedUnchanged({ pages, tree, byOrigin, claimants, holds: holdByGitPath, markers, open,
     changed: confirmChangedPaths(pages, snapshot.changed, (sourcePath, slug) => gitPathOf(pageOrigin(sourcePath, slug))), indexDelta, spelled: path => twins.has(path) || legacySpelling.has(path), originOf })) : null;
   // A round that reuses nothing lets the previous round's paths go before it builds its own: one level held, not two.
@@ -917,7 +917,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   }
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, strict, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
-    releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
+    releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path)) || (!dbOnlyUnknown && hold.code === 'file_drift' && hold.meta.reason === 'storage_invalid')).map(hold => hold.path),
     deletionCandidates: deletionCandidates(holds, path => domain.has(path) && !tree.has(path)
       && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !readPresent(root, path, scope), toGit),
     paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3,
@@ -963,11 +963,12 @@ async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContex
   ]);
   const settled = <T>(read: PromiseSettledResult<T>): T => { if (read.status === 'rejected') throw read.reason; return read.value; };
   if (settled(company)) return null;
-  const storage = (() => { try { return loadStorageConfig(root); } catch { return null; } })();
+  let storageInvalid = false;
+  const storage = (() => { try { return loadStorageConfig(root); } catch { storageInvalid = true; return null; } })();
   return { slugMode: settled(slugModeRead), exclude: settled(excludeRead), pack: settled(packRead), mirror: settled(mirrorRead), workingConfig: settled(workingRead),
     metafilePages: settled(metafilePagesRead), strict: context.source.config?.canonical === 'git', strategy: input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown',
     includeHidden: [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))],
-    keepDbPrefixes: storage?.keep_db ?? [], storage };
+    keepDbPrefixes: storage?.keep_db ?? [], storage, dbOnlyUnknown: storageInvalid || hasUnresolvedDbOnlyDeclaration(root, storage) };
 }
 
 /** A failed mark, proof or delta read: the round reads again without them (it aborted a Postgres snapshot). */

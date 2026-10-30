@@ -105,10 +105,11 @@ function parseStorageYaml(content: string, unknown: string[] = []): RawStorage |
     const key = indented.slice(0, colon).trim();
     if (STORAGE_KEYS.has(key)) {
       currentList = key as keyof RawStorage;
-      // Inline empty list: `db_only: []`.
-      const remainder = indented.slice(colon + 1).trim();
-      if (remainder === '[]' && !raw[currentList]) {
-        raw[currentList] = [];
+      // Inline flow list on one line: `db_only: []` or `db_only: [dir/, 'other/']`.
+      const flow = /^\[(.*)\]$/.exec(indented.slice(colon + 1).trim());
+      if (flow) {
+        const values = flow[1]!.split(',').map((value) => value.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+        raw[currentList] = [...(raw[currentList] ?? []), ...values];
       }
       continue;
     }
@@ -395,11 +396,11 @@ export function isKeepDbSlug(slug: string, keepDb: readonly string[]): boolean {
 /**
  * True when gbrain.yml has a `db_only` (or deprecated `supabase_only`) key
  * line but no db_only directory resolved from it. `loadStorageConfig` warns
- * and resolves nothing for syntax the narrow parser does not handle (e.g.
- * flow-style `db_only: [dir/]`), so a caller that must not guess a tier
- * refuses instead. Only YAML key lines count, not comments or prose that
- * mention the word. Known false positive: an intentionally empty
- * `db_only: []` also counts, since it resolves to the same empty config.
+ * and resolves nothing for syntax the narrow parser does not handle (e.g. a
+ * flow list split over several lines, or a key outside the storage section),
+ * so a caller that must not guess a tier refuses instead. Only YAML key lines
+ * count, not comments or prose that mention the word; an explicit empty
+ * `db_only: []` declares no directory and does not count.
  */
 export function hasUnresolvedDbOnlyDeclaration(repoPath: string, config: StorageConfig | null): boolean {
   if (config && config.db_only.length > 0) return false;
@@ -409,7 +410,8 @@ export function hasUnresolvedDbOnlyDeclaration(repoPath: string, config: Storage
   return yamlContent.split('\n').some((line) => {
     const trimmed = line.trim();
     if (trimmed.startsWith('#')) return false;
-    return /^(db_only|supabase_only)\s*:/.test(trimmed);
+    const key = /^(db_only|supabase_only)\s*:(.*)$/.exec(trimmed.replace(/\s+#.*$/, ''));
+    return key !== null && key[2]!.replace(/\s+/g, '') !== '[]';
   });
 }
 

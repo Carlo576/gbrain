@@ -35,6 +35,7 @@ storage:
 Path requirements:
 
 - Each directory must end with `/` for canonical form. The validator auto-normalizes missing trailing slashes (one-time info note shows what changed).
+- A tier may also be a one-line flow list, `db_only: [media/x/, 'media/articles/']`. A flow list split over several lines, or a `db_only` key outside `storage:`, resolves no directory: `gbrain storage status` names it, and until it is fixed a managed sync keeps every live page whose file is gone (held as `file_drift` with reason `storage_invalid`) instead of deleting it, because it cannot tell which pages are database-only (#8007). A tier overlap holds them the same way. Fix `gbrain.yml`, commit it and sync again; the holds clear and each page is decided under the fixed config.
 - A directory cannot appear in both tiers — that's a tier-overlap error and `loadStorageConfig` throws `StorageConfigError`. Edit `gbrain.yml` to remove the overlap and try again.
 - Any other key under `storage:` is ignored with a warning naming it (a typo such as `kep_db` used to be ignored silently).
 

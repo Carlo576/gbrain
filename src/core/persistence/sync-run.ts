@@ -304,6 +304,7 @@ function result(cursor: Cursor | CursorHeader, status: SyncResult['status'], rea
     deleted: cursor.counts.deleted, renamed: cursor.counts.renamed ?? 0, chunksCreated: cursor.counts.chunks, embedded: 0, pagesAffected: [],
     ...(cursor.slugCollisions?.length ? { slugCollisions: cursor.slugCollisions } : {}), ...(cursor.identityDowngrades?.length ? { identityDowngrades: cursor.identityDowngrades } : {}),
     ...(cursor.fileRefusals?.length ? { fileRefusals: cursor.fileRefusals } : {}), ...(cursor.workingTreeKept?.length ? { working_tree_kept: cursor.workingTreeKept.length } : {}),
+    ...(cursor.storageInvalidKept?.length ? { storage_invalid_kept: cursor.storageInvalidKept.length } : {}),
     ...(cursor.stagedHead && !cursor.authority.writer.remote ? { staged: { target: cursor.target, head: cursor.stagedHead, ...(cursor.slice && !cursor.slice.done ? { slice: { phase: cursor.slice.phase, after: cursor.slice.after } } : {}) } } : {}),
     waived: { imports: cursor.counts.waived?.imports ?? 0, deletes: cursor.counts.waived?.deletes ?? 0 }, prescreened: cursor.counts.prescreened ?? 0,
     filesImported: cursor.index, bankedFiles: cursor.index,

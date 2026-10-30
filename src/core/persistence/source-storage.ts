@@ -46,6 +46,19 @@ function load(root: string): StorageConfig | null {
  * logged once per version; `refuse` then throws `storage_error`, while
  * `not_db_only` answers false so the caller keeps its non-db_only behavior.
  */
+/**
+ * #8007: whether a page slug is database-only at this source root, or `unknown` when gbrain.yml cannot be read, its tiers
+ * overlap or it declares db_only in syntax resolving nothing. A caller deciding whether a missing file deletes its page
+ * holds the page on `unknown` instead of guessing.
+ */
+export function sourceDbOnlyVerdict(root: string, slug: string): boolean | 'unknown' {
+  try {
+    return isDeclaredDbOnlySlug(slug, load(root));
+  } catch {
+    return 'unknown';
+  }
+}
+
 /** #7423: the declared `storage.db_only` dir this page slug falls under at this source root, or null; an invalid gbrain.yml refuses (`storage_error`). */
 export function sourceDbOnlyDir(root: string, slug: string): string | null {
   const config = load(root);
