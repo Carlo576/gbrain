@@ -10,6 +10,20 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**gbrain's Ubicloud VMs now carry a TTL in gstack's name grammar, `ubirun-<owner>-<epoch>-<suffix>-t<H>`. gstack's runner reaps any TTL-less `ubirun-*` VM of the caller's owner after 4 h; under the new names, a gbrain gate, soak or dev VM lives until its own TTL ends and no longer.**
+
+`ci:ubicloud` names gate VMs `…-ciNN<hex>-t2` by default. `--ttl-hours` takes 1 to 999; `0` (no expiry) is gone. `ubi-runner.sh up` and `run` give every name they generate a TTL: `--ttl-hours H`, or `-t999` (about 41 days) without it. The production soak defaults to `-t15`. The operator reaper (`scripts/ubicloud/reap-expired.ts`) reads `-t<H>` names from every owner and tool as expiring H hours after creation. It keeps reaping the older `-x<expiry>` names until none are left, and still never selects a TTL-less, untagged-legacy or foreign name. Follow-ups are in #8050.
+
+### Itemized changes
+
+- `scripts/ubicloud/reap-expired.ts`: a `-t<H>` grammar ahead of the `-x<expiry>` one; `expiringVmName` writes `-t<H>`, 1 to 999.
+- `scripts/ubicloud/ubi-runner.sh`: `new_name` always appends `-t<H>` (default 999); `--ttl-hours` accepts 1 to 999.
+- `scripts/ci-ubicloud.ts`: `--ttl-hours` accepts 1 to 999; batch log names drop the TTL suffix.
+- `scripts/bench/production-soak/ubicloud.sh`: default TTL 15.
+- Docs: `scripts/ubicloud/README.md`, the runner header and usage text, `docs/TESTING.md`.
+
 ## [0.60.514.0] - 2026-10-30
 
 **A correctly redacted transcript page now clears `gbrain transcripts audit-secrets`, and a missing-file page under a `db_only` directory is kept rather than deleted in two more cases: on company-brain sources (#8014), and whenever gbrain.yml's storage lines cannot be fully resolved (#8015).**
