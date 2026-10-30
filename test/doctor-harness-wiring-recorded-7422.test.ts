@@ -20,6 +20,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { harnessWiringCheck } from '../src/commands/doctor/checks/harness-wiring.ts';
+import { renderBrainFirstSnippet } from '../src/core/setup/brain-first.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const roots: string[] = [];
@@ -61,6 +62,9 @@ describe('#7422 harness_wiring consults the bootstrap registration record', () =
     const b = box();
     receipt(b, [{ host: 'claude-code', scope: 'project', detail: 'mcp+hooks' }]);
     writeFileSync(join(b.ws, '.mcp.json'), JSON.stringify({ mcpServers: { gbrain: STDIO } }));
+    // A complete wiring also carries the brain-first block, or harness_wiring warns on it.
+    mkdirSync(b.env.CLAUDE_CONFIG_DIR!, { recursive: true });
+    writeFileSync(join(b.env.CLAUDE_CONFIG_DIR!, 'CLAUDE.md'), renderBrainFirstSnippet('claude-code', { kind: 'mcp', server: 'gbrain' }));
     const c = await check(b);
     expect(c.status).toBe('ok');
     expect(c.details).toMatchObject({ reason: 'registration_unverified', harnesses: ['claude-code'] });
