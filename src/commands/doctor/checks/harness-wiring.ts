@@ -34,7 +34,9 @@ import { verifiedStatusMarkers } from '../../../core/serve-http-status-marker.ts
 import { agentProcessMarker } from '../../../core/interaction.ts';
 import { resolveGbrainBin } from '../../../core/gbrain-bin.ts';
 import { enabledPluginLanes } from '../../../core/bootstrap/plugin-lanes.ts';
-import { claudeConfigDir } from '../../../core/bootstrap/host-specs.ts';
+import { claudeConfigDir, opencodeProjectConfigPath } from '../../../core/bootstrap/host-specs.ts';
+import { readReceipt } from '../../../core/bootstrap/format.ts';
+import { resolveGbrainHome } from '../../../core/gbrain-home.ts';
 import type { Action } from '../../../core/agent-output.ts';
 import type { Check } from '../../doctor.ts';
 import { checkError, doctorVerify, infoCheck } from '../check-fix.ts';
@@ -86,16 +88,24 @@ function stringRecord(v: unknown): Record<string, string> | undefined {
   return out;
 }
 
+/** #7422: the install receipt `gbrain bootstrap` keeps (its workspace and the registrations it made), or null. */
+function bootstrapReceipt(): ReturnType<typeof readReceipt> {
+  try { return readReceipt(resolveGbrainHome()); } catch { return null; }
+}
+
 function claudeRegistration(name: string): HarnessRegistration | null {
   const path = join(home(), '.claude.json');
   const cfg = readJson(path) as { mcpServers?: Record<string, unknown>; projects?: Record<string, { mcpServers?: Record<string, unknown> }> } | null;
-  if (!cfg) return null;
-  const candidates = [cfg.mcpServers?.[name], ...Object.values(cfg.projects ?? {}).map((p) => p?.mcpServers?.[name])];
-  const entry = candidates.find((c) => c && typeof c === 'object') as Record<string, unknown> | undefined;
-  if (!entry) return null;
-  if (typeof entry.url === 'string') return { harness: 'claude-code', source: path, kind: 'http', url: entry.url };
+  const ws = bootstrapReceipt()?.workspace_dir;
+  const projectPath = ws ? join(ws, '.mcp.json') : null;
+  const project = projectPath ? readJson(projectPath) as { mcpServers?: Record<string, unknown> } | null : null;
+  const candidates: Array<[string, unknown]> = [[path, cfg?.mcpServers?.[name]], ...Object.values(cfg?.projects ?? {}).map((p): [string, unknown] => [path, p?.mcpServers?.[name]])];
+  if (projectPath) candidates.push([projectPath, project?.mcpServers?.[name]]);
+  const [source, entry] = (candidates.find(([, c]) => c && typeof c === 'object') ?? []) as [string?, Record<string, unknown>?];
+  if (!source || !entry) return null;
+  if (typeof entry.url === 'string') return { harness: 'claude-code', source, kind: 'http', url: entry.url };
   if (typeof entry.command !== 'string') return null;
-  return { harness: 'claude-code', source: path, kind: 'stdio', command: entry.command, args: strings(entry.args) ?? [], env: stringRecord(entry.env) };
+  return { harness: 'claude-code', source, kind: 'stdio', command: entry.command, args: strings(entry.args) ?? [], env: stringRecord(entry.env) };
 }
 
 /** `[mcp_servers.<name>]` from Codex's config.toml: the `command`/`args`/`url`/`env` keys only. */
@@ -123,14 +133,17 @@ export function parseCodexRegistration(text: string, name: string, source: strin
   return { harness: 'codex', source, kind: 'stdio', command, args: strings(parse(value('args'))) ?? [], env };
 }
 
+const codexConfigPath = () => join(process.env.CODEX_HOME || join(home(), '.codex'), 'config.toml');
+const opencodeConfigPath = () => join(process.env.XDG_CONFIG_HOME || join(home(), '.config'), 'opencode', 'opencode.json');
+
 function codexRegistration(name: string): HarnessRegistration | null {
-  const path = join(process.env.CODEX_HOME || join(home(), '.codex'), 'config.toml');
+  const path = codexConfigPath();
   if (!existsSync(path)) return null;
   try { return parseCodexRegistration(readFileSync(path, 'utf8'), name, path); } catch { return null; }
 }
 
 function opencodeRegistration(name: string): HarnessRegistration | null {
-  const path = join(process.env.XDG_CONFIG_HOME || join(home(), '.config'), 'opencode', 'opencode.json');
+  const path = opencodeConfigPath();
   const cfg = readJson(path) as { mcp?: Record<string, Record<string, unknown>> } | null;
   const entry = cfg?.mcp?.[name];
   if (!entry) return null;
@@ -143,6 +156,27 @@ function opencodeRegistration(name: string): HarnessRegistration | null {
 /** Every gbrain MCP registration this machine's harness configs carry. */
 export function readHarnessRegistrations(name = 'gbrain'): HarnessRegistration[] {
   return [claudeRegistration(name), codexRegistration(name), opencodeRegistration(name)].filter((r): r is HarnessRegistration => r !== null);
+}
+
+interface RecordedRegistration { harness: ReadinessHarness; scope: string; config: string }
+
+/**
+ * #7422: MCP registrations `gbrain bootstrap` recorded for these harnesses
+ * whose config file this process cannot read (a service running under
+ * another HOME, a permission): unverified here, not missing. A readable
+ * config without the registration is not listed (it was removed).
+ */
+function recordedUnreadableRegistrations(harnesses: readonly ReadinessHarness[]): RecordedRegistration[] {
+  const receipt = bootstrapReceipt();
+  if (!receipt) return [];
+  const configFor = (harness: ReadinessHarness, scope: string): string => harness === 'claude-code'
+    ? (scope === 'project' ? join(receipt.workspace_dir, '.mcp.json') : join(home(), '.claude.json'))
+    : harness === 'codex' ? codexConfigPath() : scope === 'project' ? opencodeProjectConfigPath(receipt.workspace_dir) : opencodeConfigPath();
+  const readable = (path: string) => { try { readFileSync(path); return true; } catch { return false; } };
+  return receipt.registrations
+    .filter((r) => harnesses.includes(r.host) && (r.detail?.split('+') ?? []).includes('mcp'))
+    .map((r) => ({ harness: r.host, scope: r.scope, config: configFor(r.host, r.scope) }))
+    .filter((r) => !readable(r.config));
 }
 
 /** Harnesses installed on this machine: the active agent marker, else their config files. */
@@ -496,7 +530,13 @@ async function registrationCheck(opts: { smoke: boolean }, regs: HarnessRegistra
   if (regs.length === 0) {
     const detected = detectedHarnesses();
     const plugins = enabledPluginLanes('gbrain').filter((lane) => detected.includes(lane.harness));
-    const harnesses = detected.filter((h) => !plugins.some((lane) => lane.harness === h));
+    const recorded = recordedUnreadableRegistrations(detected.filter((h) => !plugins.some((lane) => lane.harness === h)));
+    const harnesses = detected.filter((h) => !plugins.some((lane) => lane.harness === h) && !recorded.some((r) => r.harness === h));
+    if (detected.length > 0 && harnesses.length === 0 && recorded.length > 0) {
+      return infoCheck(NAME, `${recorded.map((r) => `${HARNESS_LABEL[r.harness]}: \`gbrain bootstrap\` recorded a gbrain MCP registration (${r.scope} scope)`).join('; ')}, `
+        + `but this process cannot read its config, so doctor did not verify it here. Verify it with \`gbrain doctor --only harness_wiring\` run as the user who runs the agent app.`,
+        'unknown', undefined, { reason: 'registration_recorded', harnesses: recorded.map((r) => r.harness), registrations: recorded });
+    }
     if (detected.length > 0 && harnesses.length === 0) {
       return { name: NAME, status: 'ok',
         message: `${plugins.map((p) => `${HARNESS_LABEL[p.harness]} gets gbrain from the enabled '${p.plugin}' plugin`).join('; ')}. Enabled is a config signal: doctor does not smoke-test plugin lanes, so verify by starting a new session in that app and checking that gbrain's tools (recall, remember) are listed.`,
