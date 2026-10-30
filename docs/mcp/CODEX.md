@@ -259,7 +259,7 @@ codex mcp remove gbrain
 - The token is a long-lived, full-access secret. Keep `GBRAIN_REMOTE_TOKEN` out of
   version control and prefer a scoped token if your host supports one.
 - Local stdio also works if you run the brain on the same machine:
-  `codex mcp add gbrain -- "$(command -v gbrain)" serve --surface starter`, the
+  `codex mcp add gbrain -- "$(command -v gbrain)" serve --surface starter --advertise verbs`, the
   daily-driver tool list every new registration gbrain writes pins (`request_tools`
   reaches the rest; `--surface full` is the opt-in for every operation). A
   `GBRAIN_SURFACE` value in the Codex server entry's `env` table overrides the flag.
