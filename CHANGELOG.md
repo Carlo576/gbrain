@@ -10,6 +10,19 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.516.0] - 2026-10-30
+
+**The crash robot no longer reports a lost write when the user's own Git commit in a sync race never landed (#8043).**
+
+In `sync_and_connector_race_direct_write`, the robot plays a user who edits a page file, commits it and syncs while an agent edits the same page. It ran `git add` and `git commit` without reading their exit status. On one Postgres run (seed 5105, `sync:mid_checkpoint#13`) the commit did not land, but the sync ran anyway and was counted as a committed write of the user's marker. Sync correctly imports nothing from an uncommitted file, so the group check called the page lost. The same missing commit explains why the agent's edit was refused as an "uncoordinated local edit" rather than `pending_import` (what it gets whenever the commit lands, 150 of 150 local Postgres runs), and why the planned fault was never reached: there were no imports to checkpoint. CI kept no git stderr, so this is the best-supported cause, not a proven one: a sync that advanced its cursor without importing the page would leave the same signature. The fix tells the two apart, so a `lost_write` here from now on is a real sync bug.
+
+The user step now checks that its commit landed. It retries while another Git process holds a lock, for up to 20 s. Any other failure throws with git's stderr and fails the run as a harness error, so the model never sees a sync whose commit does not exist. A failing run's trace now also shows each sync's `fromCommit`, `toCommit`, `added` and `modified`, so a recurrence is diagnosable from the manifest. The reference model is unchanged.
+
+### Itemized changes
+
+- `scripts/persistence/ops.ts`: `userEdit` writes and commits the user's files and verifies them clean at HEAD (retrying a held lock, throwing otherwise) before `executeOp`'s try, and `runSync` now only runs `sync_brain`; a sync observation keeps the commits and counts the sync reported. `scripts/persistence/crash-robot.ts`: the failure trace prints that for sync and connector ops.
+- Tests: `test/persistence-crash-robot.test.ts`, under "a sync op whose user commit did not land". The forced probe holds `index.lock` across the user's commit: on the previous code it reproduces the CI result (sy2 `uncoordinated local edit`, sy1 committed, `lost_write`), and now the commit lands and the race leaves no violation. A refused commit fails the op instead of reporting it committed, and a committed sync whose marker the page lacks is still `lost_write`.
+
 ## [0.60.515.0] - 2026-10-30
 
 **gbrain's Ubicloud VMs now carry a TTL in gstack's name grammar, `ubirun-<owner>-<epoch>-<suffix>-t<H>`. gstack's runner reaps any TTL-less `ubirun-*` VM of the caller's owner after 4 h; under the new names, a gbrain gate, soak or dev VM lives until its own TTL ends and no longer.**
