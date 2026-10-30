@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.516.0] - 2026-10-30
 
 **The crash robot no longer reports a lost write when the user's own Git commit in a sync race never landed (#8043).**
 
@@ -22,6 +22,7 @@ The user step now checks that its commit landed. It retries while another Git pr
 
 - `scripts/persistence/ops.ts`: `userEdit` writes and commits the user's files and verifies them clean at HEAD (retrying a held lock, throwing otherwise) before `executeOp`'s try, and `runSync` now only runs `sync_brain`; a sync observation keeps the commits and counts the sync reported. `scripts/persistence/crash-robot.ts`: the failure trace prints that for sync and connector ops.
 - Tests: `test/persistence-crash-robot.test.ts`, under "a sync op whose user commit did not land". The forced probe holds `index.lock` across the user's commit: on the previous code it reproduces the CI result (sy2 `uncoordinated local edit`, sy1 committed, `lost_write`), and now the commit lands and the race leaves no violation. A refused commit fails the op instead of reporting it committed, and a committed sync whose marker the page lacks is still `lost_write`.
+
 ## [0.60.515.0] - 2026-10-30
 
 **gbrain's Ubicloud VMs now carry a TTL in gstack's name grammar, `ubirun-<owner>-<epoch>-<suffix>-t<H>`. gstack's runner reaps any TTL-less `ubirun-*` VM of the caller's owner after 4 h; under the new names, a gbrain gate, soak or dev VM lives until its own TTL ends and no longer.**
