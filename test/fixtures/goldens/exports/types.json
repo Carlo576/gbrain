@@ -1534,6 +1534,7 @@
           "page_id: number",
           "page_slug?: string | undefined",
           "provenance?: \"generated\" | undefined",
+          "quoted?: \"transcript\" | undefined",
           "rank_prior?: number | undefined",
           "rank_score?: number | undefined",
           "recency_boost?: number | undefined",
@@ -7738,7 +7739,7 @@
         "kind": "function",
         "name": "capEvidenceToBudget",
         "signature": [
-          "<T extends SearchResult & { delivered?: DeliveredEvidence; }>(results: T[], delivery: DeliveryMeta) => T[]"
+          "<T extends SearchResult & { delivered?: DeliveredEvidence; }>(results: T[], delivery: DeliveryMeta, quote?: boolean) => T[]"
         ]
       },
       {
@@ -9628,6 +9629,7 @@
           "page_id: number",
           "page_slug?: string | undefined",
           "provenance?: \"generated\" | undefined",
+          "quoted?: \"transcript\" | undefined",
           "rank_prior?: number | undefined",
           "rank_score?: number | undefined",
           "recency_boost?: number | undefined",
