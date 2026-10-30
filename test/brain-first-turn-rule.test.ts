@@ -154,6 +154,54 @@ describe('per-turn rule: Hermes pre_llm_call hook in config.yaml', () => {
     expect(approvals(d)).toEqual([other]);
   });
 
+  // Hermes's own writer (agent/shell_hooks.py _locked_update_approvals): an
+  // exclusive fcntl.flock on the sibling .lock around read-modify-write.
+  const HERMES_WRITER = [
+    'import fcntl, json, os, sys, time',
+    'home, hold = sys.argv[1], float(sys.argv[2])',
+    'path = os.path.join(home, "shell-hooks-allowlist.json")',
+    'with open(path + ".lock", "a+") as lock:',
+    '    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)',
+    '    print("locked", flush=True)',
+    '    data = json.load(open(path, encoding="utf-8-sig")) if os.path.exists(path) else {"approvals": []}',
+    '    time.sleep(hold)',
+    '    data["approvals"].append({"event": "post_tool_call", "command": "/opt/hermes-side", "approved_at": "x", "script_mtime_at_approval": None})',
+    '    open(path + ".tmp", "w").write(json.dumps(data))',
+    '    os.replace(path + ".tmp", path)',
+    '    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)',
+  ].join('\n');
+  async function hermesHoldsLock(d: string, holdSecs: number) {
+    const proc = Bun.spawn(['python3', '-c', HERMES_WRITER, d, String(holdSecs)], { stdout: 'pipe', stderr: 'inherit' });
+    const reader = proc.stdout.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain('locked');
+    reader.releaseLock();
+    return proc;
+  }
+
+  test.skipIf(!Bun.which('python3'))('the approval waits for Hermes\'s allowlist flock, so an approval Hermes records at the same moment survives', async () => {
+    const d = hermes('model: x\n');
+    const proc = await hermesHoldsLock(d, 0.8);
+    expect(syncHermesTurnHook({ hermesHome: d, access, dryRun: false }).action).toBe('write');
+    expect(await proc.exited).toBe(0);
+    expect(approvals(d).map((a) => a.command)).toEqual(['/opt/hermes-side', cmd]);
+  });
+
+  test.skipIf(!Bun.which('python3'))('a flock Hermes holds past the wait refuses loudly and leaves the allowlist untouched', async () => {
+    const d = hermes('model: x\n', [{ event: 'pre_tool_call', command: '/usr/bin/true' }]);
+    const before = readFileSync(join(d, 'shell-hooks-allowlist.json'), 'utf8');
+    const proc = await hermesHoldsLock(d, 8);
+    try {
+      const o = syncHermesTurnHook({ hermesHome: d, access, dryRun: false });
+      expect(o.action).toBe('print');
+      expect(o.detail).toContain('shell-hooks-allowlist.json.lock');
+      expect(readFileSync(join(d, 'shell-hooks-allowlist.json'), 'utf8')).toBe(before);
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  });
+
   test('new rule text rewrites the block in place and moves the approval to the new command', () => {
     const d = hermes('');
     syncHermesTurnHook({ hermesHome: d, access, dryRun: false });

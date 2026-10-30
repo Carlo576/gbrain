@@ -49,6 +49,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { atomicWriteTextFile } from './atomic-write.ts';
 import { ownedEntryFingerprint } from './adopted-connections.ts';
+import { readCodexTomlTable } from './codex-toml.ts';
 import type { HostSpecTarget } from './host-specs.ts';
 import { CODEX_HOOK_EVENTS, codexConfigPath, codexHooksPath } from './host-specs.ts';
 
@@ -425,6 +426,29 @@ export function codexHookCensus(hooksPath: string): CodexHookCensusGroup[] {
     });
   }
   return out;
+}
+
+/**
+ * Whether Codex runs gbrain's handler in group `index` of a context event
+ * (SessionStart, UserPromptSubmit): its `[hooks.state."<hooksPath>:<state>:
+ * <index>:<handler>"]` entry in `configPath` is not `enabled = false` and its
+ * `trusted_hash` equals the hash of the handler as written (gbrain's shape: no
+ * matcher, not async, an unset timeout normalized to 600). Codex never runs an
+ * untrusted or disabled user-layer hook. Throws on an unparseable file.
+ */
+export function codexHookGroupRuns(hooksPath: string, configPath: string, group: { event: string; index: number }): boolean {
+  if (group.event !== 'SessionStart' && group.event !== 'UserPromptSubmit') return false;
+  const { stateName } = SETUP_EVENT_SPECS[group.event];
+  const handlers = loadHooksJson(hooksPath).hooks[group.event]?.[group.index]?.hooks;
+  if (!Array.isArray(handlers)) return false;
+  const states = readCodexTomlTable(configPath, ['hooks', 'state']) as Record<string, { enabled?: unknown; trusted_hash?: unknown } | undefined> | undefined;
+  return handlers.some((h, i) => {
+    const command = h?.command;
+    if (typeof command !== 'string' || !(command.includes(CODEX_SETUP_LANE_TOKEN) || CONTEXT_LANE_TOKENS.some((t) => command.includes(t)))) return false;
+    const state = states?.[`${hooksPath}:${stateName}:${group.index}:${i}`];
+    if (!state || state.enabled === false) return false;
+    return state.trusted_hash === codexHookTrustHash(stateName, command, typeof h.timeout === 'number' ? Math.max(1, h.timeout) : 600);
+  });
 }
 
 /**
