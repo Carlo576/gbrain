@@ -12,7 +12,7 @@ import { digest, sha256 } from './digest.ts';
 import { getWriteRequest, admitWriteInTransaction, foregroundPriority, intentDigest, receiptFor } from './journal.ts';
 import { preflightSyncCapacity } from './sync-capacity-preflight.ts';
 import { preparationConfigView } from './config-snapshot.ts';
-import { isWriteCapacityWait, retryWriteAdmission } from './admission-retry.ts';
+import { retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer } from './service.ts';
 import { assertSyncEntryOrigin, discoverManagedSync, readManagedSyncRows, resolveManagedSyncContext, readSyncFile, syncGit, type ManagedSyncContext, type SyncDiscovery } from './sync-discovery.ts';
 import { checkpointRevival } from './sync-slug-mode.ts';
@@ -44,7 +44,6 @@ import { admittedBy, localResumeRequired, readAdmitted, withoutUnadmitted } from
 import { cursorFenceCause, isSyncKnockOn } from './sync-knock-on.ts';
 import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
-import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
 import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
 import { readDryRunWriterState } from './sync-dry-run-writer.ts';
 import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, originConflictHold, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, unreadableFileHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
@@ -65,11 +64,11 @@ import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
 import { outOfAttemptsHold, addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
-import { receiptClass, recordedStop, replaysContentRefusal, resumableStop, stopRecorded } from './sync-stop-class.ts';
+import { receiptClass, recordedStop, replaysContentRefusal, resumableStop, stopRecorded, unrecordedStop } from './sync-stop-class.ts';
 import { advanceHeld, committedPast, deletionSettled, entryOf, indexOf, promoteWindow, waivedCursor, withHeldKeys, withoutPending } from './sync-cursor-moves.ts';
 import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
-import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts';
+import { LockUnavailableError, syncLockId } from '../db-lock.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { assertPassAdmission, isPassBatchKey, passBatchStep, passedOverBefore, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
 import type { PassStamp } from './sync-prepare.ts';
@@ -1364,11 +1363,9 @@ async function recordRunFailure(engine: BrainEngine, error: unknown, run: { curs
   discoveryRun: string; context: ManagedSyncContext; remote: boolean; syncOptions: Cursor['syncOptions']; processingOptions: NonNullable<Cursor['processingOptions']>; repoPath: string | undefined }): Promise<void> {
   const { cursor, key, phase, discoveryTarget, discoveryRun, context, syncOptions, processingOptions } = run;
   const code = error instanceof OperationError ? error.code : 'storage_error';
-  // A refresh fence, or an admission refused while other requests hold the writer's outstanding cap (#6278: the drain
-  // waits for them), is transient admission back-pressure, not a sync failure to record. #6340: neither is a lost
-  // database connection or a statement timeout: the cursor and its frozen manifest stay, and the next pass resumes them.
-  if (!['permission_denied', 'worktree_refreshing', 'refresh_recovery_required'].includes(code) && !isWriteCapacityWait(error) && !(error instanceof LockStolenError)
-    && !isRetryableConnError(error) && !isStatementTimeoutError(error)) {
+  // A refresh fence, write back-pressure, a lost connection or a statement timeout is not a sync failure to record: the
+  // cursor and its frozen manifest stay, and the next pass resumes them (`unrecordedStop`).
+  if (!unrecordedStop(error)) {
     const [stored] = cursor ? [] : await engine.executeRaw<{ completed_keys: [CursorHeader] }>('SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [OP, key]);
     const failedCursor = cursor ?? stored?.completed_keys?.[0];
     const { failure } = await recordManagedSyncFailure(engine, { source_id: context.sourceId, source_incarnation: context.incarnation, path: cursor?.entries[cursor.index]?.path ?? failedCursor?.pending?.intent.path ?? `<${phase}>`, code,

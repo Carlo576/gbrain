@@ -10,6 +10,28 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.504.0] - 2026-10-30
+
+**`gbrain sync status` and doctor stop calling a running managed sync abandoned or killed, a sync that stops for a passing reason ends resumable, and a read-only Postgres serve no longer takes the socket a read-write serve needs.**
+
+A pass whose holder still renews its drain lease now reads running (`pass_unfinished`) even when earlier passes were interrupted, and doctor's `managed_sync_blocked` lists nothing for it. Lock liveness is judged on the database clock, so a reader whose clock runs ahead no longer reads a renewing holder as dead, and a pass that ends between the pass read and the lease read is no longer reported killed. A pass that stops on a lost connection, a statement timeout, write back-pressure, a refresh fence or a lost lease now ends `resumable` (`stop_reason` `transient` or `lease_lost`) instead of staying open and reading `pass_interrupted`, then `pass_abandoned`. A killed holder's lock row no longer defers the on-commit notifier, so the next sync takes the expired lease over. On Postgres, `gbrain serve --access read-only` (stdio) binds its own read socket for resolve, turn_context and context_pack, so a read-write serve started later for the same source always answers delegated sync requests instead of `unsupported_kind`.
+
+### How to use it
+
+```bash
+gbrain sync status --source <id> --json    # a renewing holder reads pass_unfinished; a passing stop reads resumable
+gbrain doctor --only managed_sync_blocked
+```
+
+### Itemized changes
+
+- Sync pass and lease readers (`sync-status`, doctor `managed_sync_blocked`): one observation per decision, database-clock lock liveness, `openPassRowsStill`, one `inspectLocks` query for every open-pass source (#7611, #7614).
+- `resumableRowStop`: transient and lease-lost stops end the pass row `resumable`, while a permission refusal keeps the row open so it still reads interrupted, then abandoned; a lost-lease row is written under its own lease token only, and a stop never rewrites a row its pass already ended (a folded stamp's `synced` row keeps its watermark) (#7614).
+- `readLiveDrainHolder`: the notifier block, the on-commit notifier and `sources status` `writer_heartbeat` read the drain holder only while it renews (#7614).
+- Lean read-only Postgres serve: a source-keyed read socket; hooks try source, then read, then legacy; delegated sync never targets the read socket (#7612).
+- `EffectWorkerOptions.lockWaitMs` (test seam, default unchanged) cuts the w5 contention scenario from 37 s to 2.5 s (#7782).
+- Tests: `test/sync-pass-readers-7614.test.ts` (new), `test/resolve-ipc-source-keyed.test.ts`, `test/e2e/serve-read-only-session-lane-postgres.test.ts`, plus isolation fixes in four suites that failed only on dev machines.
+
 ## [0.60.503.0] - 2026-10-30
 
 **New harness and bot registrations list the seven memory verbs plus `request_tools`, and every tool they could call before stays callable.**
