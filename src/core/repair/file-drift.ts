@@ -805,6 +805,13 @@ export const fileDriftRepair: RepairHandler = {
           if (!opts.allDrifted && !opts.held && !selectedByGlobs(live.path, opts)) { count('not_selected'); continue; }
           const agreedHold = live.reason !== 'agrees' || !live.db_revision ? null : target?.hold
             ?? (source && live.path ? await readGitHold(engine, sourceId, source.incarnation, live.path) : null);
+          if (agreedHold?.code === 'file_drift' && live.db_revision && (live.path !== agreedHold.path || !live.file_hash)) {
+            count('unknown_release_unproven');
+            listing.push({ item: `${sourceId}:${slug}`, class: 'unknown', detail: live.file_hash
+              ? `the page agrees with ${live.path}, not with the held file ${agreedHold.path}; the hold stays until that file is resolved`
+              : `no file at ${agreedHold.path} to agree with; the hold stays` });
+            continue;
+          }
           if (agreedHold?.code === 'file_drift' && live.db_revision) {
             pages.push({ slug, prefer: opts.prefer, exceptions: [], release_hold: { path: agreedHold.path, incarnation: agreedHold.incarnation, revision: live.db_revision,
               file_hash: live.file_hash ?? null, observed_at: agreedHold.observed_at } });

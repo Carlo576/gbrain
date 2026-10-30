@@ -2521,7 +2521,8 @@ the two `--prefer` values do opposite things in each state.
 `--prefer file` keeps the file's bytes: it adds only protected frontmatter keys the
 file lacks and database-only timeline rows, and refuses
 [`file_wins_rewrite`](write-refusals.md#file_wins_rewrite) when the result
-would change anything else.
+would change anything else (a database-only timeline row dated before the
+file's rows included).
 
 A held page whose page and file agree now is listed `release_hold` under
 either `--prefer`, whether `--held` or `--slug` selected it: its apply writes
