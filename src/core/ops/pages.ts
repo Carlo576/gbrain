@@ -25,6 +25,7 @@ import { getPageKnownAsOf, KNOWN_AS_OF_PARAM } from './known-as-of.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
+import { isQuotedPageType, quotePageBody, unquoteTranscriptText } from '../search/transcript-quote.ts';
 import { getContentFlag } from '../quarantine.ts';
 import { fileHeldField, readHeldPages } from '../persistence/held-reads.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
@@ -204,6 +205,8 @@ const get_page: Operation = {
     const visibleBody = isUntrustedReader && page.body_storage !== 'segmented'
       ? stripPrivacyFencesForRemoteReader(page)
       : page;
+    // #8042: an untrusted reader gets a third-party page's body fenced as quoted source material; trusted local reads stay raw.
+    const quoted = isUntrustedReader && isQuotedPageType(page.type);
     // v0.42 (#1699) agent-warning channel: surface the page's content_flag
     // marker as a top-level field (parallel to SearchResult.content_flag) so
     // an agent reading a page directly gets the same "this looks odd, examine
@@ -232,17 +235,20 @@ const get_page: Operation = {
     const whole = bodyRequest.mode === 'full'
       || (bodyRequest.mode === 'auto' && !segmented && bodyBytes(visibleBody) <= await inlineBodyBytes(ctx));
     if (!whole) {
-      const partial = await readPartialBody(ctx, { page, visibleBody, revision: snapshot!.revision, tags, quarantined, trust: readable.trust, pin,
+      const partial = await readPartialBody(ctx, { page, visibleBody, revision: snapshot!.revision, tags, quarantined, trust: readable.trust, pin, quote: quoted,
         extras: { ...(quarantined ? { quarantined } : {}), ...(timelineEntries ? { timeline_entries: timelineEntries } : {}), ...fileHeld,
           ...(resolved_slug ? { resolved_slug } : {}), ...(content_flag ? { content_flag } : {}) } }, bodyRequest);
       return lineGrammar ? { ...partial, line_grammar: lineGrammar } : partial;
     }
     if (segmented) throw await segmentedFullReadError(ctx, page, bodyRequest, { ...pin, revision: snapshot!.revision });
-    const projected = projectGetPage(visibleBody, {
-      revision: snapshot!.revision, tags, includeContent, contentOnly, resolved_slug, content_flag, quarantined, trust: readable.trust,
-      ...(timelineEntries ? { timeline_entries: timelineEntries } : {}),
-      ...fileHeld,
-    });
+    const projected = {
+      ...projectGetPage(quoted ? quotePageBody(visibleBody) : visibleBody, {
+        revision: snapshot!.revision, tags, includeContent, contentOnly, resolved_slug, content_flag, quarantined, trust: readable.trust,
+        ...(timelineEntries ? { timeline_entries: timelineEntries } : {}),
+        ...fileHeld,
+      }),
+      ...(quoted ? { quoted: 'transcript' as const } : {}),
+    };
     if (ctx.remote !== false) await assertFullReadFits(ctx, visibleBody, projected, bodyRequest);
     return lineGrammar ? { ...projected, line_grammar: lineGrammar } : projected;
   },
@@ -305,14 +311,15 @@ const fetch_page: Operation = {
     const segmented = isSegmentedPage(page);
     const visibleBody = ctx.remote === false || segmented ? page : stripPrivacyFencesForRemoteReader(page);
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true);
+    const quoted = ctx.remote !== false && isQuotedPageType(page.type); // #8042, as get_page
     if (!quarantined?.body_omitted && (segmented || (ctx.remote !== false && bodyBytes(visibleBody) > await inlineBodyBytes(ctx)))) {
       const pin = authorizedReadPin(ctx, page, snapshot!.bodyGeneration, p.min_trust, missing);
-      return fetchWindowResult(ctx, { page, visibleBody: visibleBody as Page, revision: snapshot!.revision, tags, quarantined, trust: readable.trust, extras: {}, pin }, id, identity ? decodeDeepResearchAnchor(id) : null);
+      return fetchWindowResult(ctx, { page, visibleBody: visibleBody as Page, revision: snapshot!.revision, tags, quarantined, trust: readable.trust, extras: {}, pin, quote: quoted }, id, identity ? decodeDeepResearchAnchor(id) : null);
     }
     return {
       id: identity ? id : page.slug,
       title: page.title,
-      text: projectFetchText(visibleBody as Page, tags, quarantined, readable.trust),
+      text: projectFetchText(quoted ? quotePageBody(visibleBody as Page) : visibleBody as Page, tags, quarantined, readable.trust),
       // Pages have no public http home; a stable brain-local URI satisfies
       // the contract's citation slot without inventing a fake web URL.
       url: deepResearchPageUrl(page.source_id, page.slug),
@@ -321,7 +328,7 @@ const fetch_page: Operation = {
         type: page.type,
         source_id: page.source_id,
         updated_at: page.updated_at,
-        tags, ...(quarantined ? { quarantined } : {}), ...readable.trust,
+        tags, ...(quarantined ? { quarantined } : {}), ...readable.trust, ...(quoted ? { quoted: 'transcript' } : {}),
       },
     };
   },
@@ -367,7 +374,9 @@ const put_page: Operation = {
       return { dry_run: true, action: 'put_page', slug: p.slug };
     }
     if (ctx.remote !== false && typeof p.slug === 'string') await assertLargePageAdmission(ctx.engine, p.slug, sourceId, p);
-    return submitPageMutation(ctx, { operation: 'put_page', params: p }).then(funnelPassThrough('save')).catch(error => rethrowNamingRevisionSource(ctx, sourceId, p, error));
+    // #8042: a remote round trip of get_page content writes the page body, not the quote fence get_page put around it.
+    const params = ctx.remote !== false && typeof p.slug === 'string' && typeof p.content === 'string' ? { ...p, content: unquoteTranscriptText(p.content, p.slug) } : p;
+    return submitPageMutation(ctx, { operation: 'put_page', params }).then(funnelPassThrough('save')).catch(error => rethrowNamingRevisionSource(ctx, sourceId, p, error));
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
 };

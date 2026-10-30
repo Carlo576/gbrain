@@ -6,6 +6,7 @@ import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
 import { parseWriteRequestId } from '../persistence/preconditions.ts';
 import { countEvidenceTokens, deliverEvidence, effectivePlan, resolveEvidencePlan, type DeliveryMeta, type EvidencePlan } from '../search/evidence-delivery.ts';
 import { withFactDateHeaders } from '../search/evidence-date.ts';
+import { fenceTranscriptRows, neutralizeTranscriptRows, quoteFact } from '../search/transcript-quote.ts';
 import { randomUUID } from 'node:crypto';
 import { readHolders } from './context.ts';
 /**
@@ -345,7 +346,7 @@ const recall: Operation = {
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote); // #4352: fact and page arms alike
     const eligibility = await resolveReadEligibility(ctx, { minTrust: p.min_trust }); // #5575 floor + quarantine/rederive hiding
 
-    type FactRows = Array<Awaited<ReturnType<typeof ctx.engine.listFactsByEntity>>[number] & { entity_slugs?: string[]; collapsed_count?: number }>;
+    type FactRows = Array<Awaited<ReturnType<typeof ctx.engine.listFactsByEntity>>[number] & { entity_slugs?: string[]; collapsed_count?: number; quoted?: 'transcript' }>;
     type FactRowItem = FactRows[number];
     // Per-arm merge key: each arm's engine query ORDERs by a different column
     // (supersessions by COALESCE(expired_at, valid_until) — #3014, entity by
@@ -547,7 +548,12 @@ const recall: Operation = {
     // Pack what is delivered: results redacted for all; facts for remote only (localVerbatim).
     const view = redactRetrievalOutput([{ facts: rows.map(r => ({ fact: r.fact, context: r.context, source: r.source })), results: searchResults }], {}).results[0];
     searchResults = view.results;
-    if (ctx.remote !== false) rows = rows.map((r, i) => ({ ...r, ...view.facts[i] }));
+    if (ctx.remote !== false) {
+      rows = rows.map((r, i) => quoteFact({ ...r, ...view.facts[i] }));
+      // #8042: third-party text reaches a remote reader quoted, before packing so the budget prices the fence.
+      const header = delivery?.date_header === true;
+      searchResults = fenceTranscriptRows(neutralizeTranscriptRows(searchResults, header), delivery ? { count: text => countEvidenceTokens(text, delivery!.tokenizer), delivery } : undefined);
+    }
 
     let packedFacts = rows;
     let packedResults = searchResults;
@@ -611,7 +617,7 @@ const recall: Operation = {
         // pre-v1 consumers — legacy fields are frozen byte-equal). `provenance`
         // is the protocol name for the stored source attribution.
         fact_id: String(r.id),
-        provenance: r.source, ...(r.attributed_to ? { attributed_to: r.attributed_to } : {}),
+        provenance: r.source, ...(r.attributed_to ? { attributed_to: r.attributed_to } : {}), ...(r.quoted ? { quoted: r.quoted } : {}),
         ...(r.entity_slugs ? { entity_slugs: r.entity_slugs } : {}), ...(r.collapsed_count ? { collapsed_count: r.collapsed_count } : {}),
         ...(ranking ? { relevance: ranking.relevance.get(r.id) } : {}),
       })), f => f.id)),
@@ -635,6 +641,7 @@ const recall: Operation = {
               // #4830: a row without a source takes the scope's single source; a federated read leaves it absent.
               ...((r.source_id ?? scalarSource) ? { source_id: r.source_id ?? scalarSource } : {}),
               ...(r.delivered ? { delivered: r.delivered } : {}),
+              ...(r.quoted ? { quoted: r.quoted } : {}),
               ...(r.relational ? { relational: r.relational } : {}),
               ...(r.trust_tier ? { trust_tier: r.trust_tier, origin: r.origin, ...(r.unconfirmed ? { unconfirmed: true } : {}) } : {}),
             })),
