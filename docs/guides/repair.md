@@ -172,6 +172,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `missing-tables` | `schema_missing_tables` | Explicit-only, preview-bound. Recreates, empty, a rebuildable cache table (`query_cache`, `code_traversal_cache`) that the applied migrations created but the brain no longer has, on a brain whose schema version already covers its creating migration, so `apply-migrations` never recreates it (#6911). DDL only (`IF NOT EXISTS`), no journal admission, brain-wide. See [missing tables](#missing-tables). | `user_data_tables`: a missing table that holds user data; this repair never recreates it, so restore its rows from a backup first. `other_tables`: a missing table that holds no user data; `gbrain init --migrate-only` recreates it if the base schema defines it. |
 | `url-clone-fences` | none (`gbrain sync --source <id>` stops at the pull with `pull_blocked_local_changes`) | Explicit-only, preview-bound, destructive consent. Clears the `## Facts` fence rows an older gbrain appended to files of a clone it owns (`gbrain sources add --url`), which block every `git pull --ff-only` that touches those files (#6946). The preview proves each changed file differs from HEAD only by appended fence rows; `--apply --expect <hash> --yes` backs each file up, keeps its rows database-only and restores the file from HEAD. Unmanaged brains only. See [URL clone fences](#url-clone-fences). | `non_fence_edit`, `unparsed_fence`, `staged_change`, `deleted`, `not_in_head`, `unreadable_checkout`: a file with any other difference from HEAD, named with why; a file whose HEAD would not import as its page (`visibility_noncanonical` and the other import holds): apply keeps its rows database-only and restores the file so the clone can pull, but does not import HEAD and reports `held`; files that changed after the preview (`changed_since_preview`). |
 | `segmented-mirror` | none (doctor does not read segmented files; run the preview once if the brain ran a version before v0.60.299.0) | Explicit-only, preview-bound, destructive consent. Rewrites the canonical file of a page stored in segments that an older binary's withdrawal mirror passed by (`page_body_segmented`), so the file still holds a row `forget`, `forget_fact` or `purge_fact` removed from the database. The file becomes the page's canonical render (`gbrain export`'s bytes), written by the withdrawal mirror and committed by its Git effect. See [segmented mirror](#segmented-mirror). | `file_database_drift`: the file also differs from the database for another reason; it is listed held and never rewritten. `not_owner_host`: the preview ran off the source's owner host and read none of its files. |
+| `secret-spans` | none (the operator names the pages) | Explicit-only, preview-bound, trusted local CLI. Replaces the credentials the secret scanner finds in the database copies of the named pages with `<REDACTED:rule>` markers and changes nothing else: title, frontmatter values (never keys), the body (inline or segmented), timeline, fact, take and link rows, raw data; chunks holding a value are rebuilt. Database only: no file write, no Git commit, and a sync hold stays. `--source <id> --slug <slug>... [--rules <list>]`, then `--apply --expect <hash>`. See [secret spans](#secret-spans). | `clean` (no match), `refused` (`page_not_found`, `page_kind_unsupported`, `page_too_large`, `proof_failed`, `fact_value_unsupported`, `timeline_rows_collide`); pages that moved after the preview (`preview_changed`, `changed_since_preview`). |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -1197,6 +1198,74 @@ is added, removed or rewritten (a dropped copy shared its row with the one that
 stays). An apply refuses `preview_changed` when a previewed page moved since the
 preview; preview again. Undo a page on a managed source with `git revert` of its
 commit, or `gbrain revert`.
+
+### Secret spans
+
+A credential pasted into a page is often stored in more places than the page
+file: the page row, a held page the sync left alone, timeline, fact and take
+rows, link contexts, raw connector data and the chunks built from them. This
+explicit-only, preview-bound kind replaces each value the secret scanner finds
+in those database copies with a `<REDACTED:rule>` marker and leaves every other
+byte as it was. Redacting the files themselves is a separate step through the
+normal write path; this kind never writes a file or a commit.
+
+**Say to your agent:** *"Preview the secret spans on these pages, show me the
+counts by rule, then apply after I agree."*
+
+```bash
+gbrain repair secret-spans --source <id> --slug <slug>... [--rules <rule,...>]     # preview: counts and hashes, never values
+gbrain repair secret-spans --source <id> --slug <slug>... --apply --expect <hash>  # rewrites exactly the previewed pages
+```
+
+`--rules` picks the scanner rules (default: every named credential rule, such as
+`openai`, `aws_access_key`, `github_token`, `jwt`, `bearer` and
+`private_key_pem`). The two broad heuristics, `high_entropy_assignment` and
+`labeled_credential`, run only when named, because they also match things that
+are not keys. An unknown rule name refuses before anything is read. A preview
+with no `--slug` (the command `gbrain doctor --remediation-plan` lists) reads
+nothing and prints how to name the pages; an apply still needs both.
+
+What it reads and rewrites for each page: the title, every string value in the
+frontmatter (keys are never touched), the body (inline, or the live generation
+of a segmented page, which is restaged in place), timeline rows of the page or
+its event page, fact rows held by the page or naming it with no holding page,
+take rows, the context of its outgoing links and every string value of its raw
+data. A value found by a rule in one place is also replaced where it appears
+bare elsewhere on the same page (an echo). A key glued to an existing marker is
+replaced too, and text that is already only markers is left alone, so a second
+preview of an applied page is empty.
+
+The preview lists each page with its spans per rule and, for each changed
+field, the first 64 bits of its old and new SHA-256 and a hash of the span
+offsets. It never prints a value. It also counts the retained page versions,
+which are kept as history and not rewritten. A page is `refused`, and nothing
+on it changes, when it does not exist, is a code or image page, has a segmented
+body over 24 MiB, when the planned spans and the scanner's own redaction of the
+text disagree (`proof_failed`), when an ontology fact's resolved value holds a
+match (`fact_value_unsupported`: the value keys the fact's dedup; retire the
+fact with `gbrain forget`), or when two timeline rows of one day would read the
+same once redacted (`timeline_rows_collide`: delete the duplicate row first).
+
+The apply checks every previewed page again before writing anything and
+refuses `preview_changed` if one moved; preview again. Each page is then one
+transaction under its page lock: a coordinated maintenance write on a managed
+brain, an attributed maintenance transaction on any other brain (repo-less
+brains included). Trust tiers are kept. Chunks that held a value are deleted
+and rebuilt from the redacted body, keeping the vectors of unchanged chunks;
+changed chunks are embedded unless `--no-embed` or the page carries
+`embed_skip`. Fact and take vectors of a rewritten row are cleared. A
+value-free receipt per page (field fingerprints and span offsets) is stored
+with the write, where a resumed apply finds it for the next 7 days, and
+appended to the `secret-spans` audit log, and the apply re-scans each
+page and reports any match left (`residual`, expected 0).
+
+There is no undo: the old value is gone from the live copies. Page versions,
+write receipts and Git history are kept and still hold it. On a brain with a
+repository, redact the file too: a later import of the unredacted file (a full
+sync, `gbrain repair file-drift --prefer file`, an edit) writes the value back
+into the database. It runs only from
+the trusted local CLI on the brain host, only when named, and never from `--all`, doctor's remediation plan, the maintenance
+cycle or an upgrade.
 
 ### Timeline history scan coverage
 
@@ -2562,7 +2631,8 @@ sync's history read did not finish, so it could not tell whether a commit held
 the file and kept the page; the provenance below reads the whole history.
 Reason `storage_invalid` (#8007) means `gbrain.yml`'s storage section did not
 load, declared `db_only` in a form that resolved no directory, or listed a
-deprecated `supabase_only` next to canonical keys (ignored), so the sync
+deprecated `supabase_only` next to canonical keys (ignored) whose directory
+holds the page and is not also under `db_only`, so the sync
 could not tell whether the page is database-only and kept it: run
 `gbrain storage status`, fix `gbrain.yml`, commit it and sync again; the hold
 clears and the page is decided under the fixed config.
@@ -3756,7 +3826,7 @@ Each heading below is the `docs` anchor a refusal carries.
 ### Explicit-only repair kinds
 
 `google-file-modes`, `stale-atoms`, `extractor-facts`, `captured-facts`,
-`loop-facts`, `ontology-facts`, `file-drift`, `missing-tables` and `segmented-mirror` run only when named: `gbrain repair <kind>` previews, and
+`loop-facts`, `ontology-facts`, `file-drift`, `missing-tables`, `segmented-mirror` and `secret-spans` run only when named: `gbrain repair <kind>` previews, and
 `gbrain repair <kind> --apply` applies (every kind but `google-file-modes`
 also needs `--expect <hash>`, so it applies exactly the previewed set; `google-file-modes` re-checks each file's owner,
 type and mode at apply time). They are excluded everywhere else:

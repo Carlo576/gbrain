@@ -544,6 +544,10 @@ src/core/repair/redacted-facts.ts	pageTexts	sql	INLINE	page_versions rows that h
 src/core/repair/redacted-facts.ts	restoreFencedRows	call:serializePageToMarkdown	INLINE	inline pages only: a segmented page returns before the read, and its fenced rows preview as class segmented
 src/core/repair/redacted-facts.ts	restoreFencedRows	field	INLINE	inline pages only: a segmented page returns before the read, and its fenced rows preview as class segmented
 src/core/repair/safe-chunks.ts	safeChunksRepair	sql	META	
+src/core/repair/secret-spans.ts	PAGE_SQL	sql	INLINE	inline body columns; a segmented body is read whole through materializeSegmentedBody, refused page_too_large over the single-string ceiling
+src/core/repair/secret-spans.ts	readFields	field	INLINE	inline body columns; a segmented body is read whole through materializeSegmentedBody, refused page_too_large over the single-string ceiling
+src/core/repair/secret-spans.ts	writePage	call:contentHash	INLINE	runs only for an inline page; a segmented body is restaged through prepareSegmentedBody and applySegmentedBody
+src/core/repair/secret-spans.ts	writePage	sql	INLINE	runs only for an inline page; a segmented body is restaged through prepareSegmentedBody and applySegmentedBody
 src/core/repair/segmented-mirror.ts	fileHoldsWithdrawnRows	field	NONE	the overlay result of one file fragment (a facts fence block) for the region digests (body-digests.ts); no page body is read
 src/core/repair/slug-conflicts.ts	pageContent	call:serializePageToMarkdown	SEGW	
 src/core/repair/split-facts.ts	mergeOne	call:serializePageToMarkdown	SEGW	

@@ -174,6 +174,27 @@ Measured on ubicloud-standard-4, full scope, run 39996381819:
   `overlapping_slugs_two_sources` (2.4 s in the other cell). 880 s is the slowest cell plus
   about 30%; the nightly's two exploration seeds (about 15–20 s each on Postgres) fit inside
   that margin.
+- **Two runs at a time (#8036).** A full Postgres run went 899 s against 880 s on a
+  pull request that doesn't touch persistence (run 41087538943). Across the 13 full-scope Postgres
+  cells on ubicloud-standard-4 from 2026-10-30, wall time ranged from 379 s to 899 s with the same
+  54 runs. Two things varied: runner speed (the runs other than the two waiting faults took
+  342 s to 769 s), and whether `pooler_disconnect` waited out a 2-minute effect-claim lease
+  (125–132 s in 8 of the 13 cells, 2–8 s in the rest). One run at a time adds both waits to the wall
+  clock in full. Since #8036 the driver runs `ROBOT_CONCURRENCY` (2) runs at a time. Each run
+  still owns its database, scratch root and home. Every fault is drawn before any crash runs, so
+  the runs, the faults and the manifest order are the same as one at a time (unit-tested, and
+  identical in all four local manifests below). The process faults start first, so their waits
+  overlap the crash runs.
+
+  | Measurement | One at a time | Two at a time |
+  |---|---|---|
+  | Local postgres, 4 vCPU, full scope | 423 s | 258 s (each run about 15% slower) |
+  | Local pglite, 4 vCPU, full scope | 699 s | 418 s (each run about 20% slower) |
+  | Slowest CI cell (run 41087538943) | 899 s measured | 528 s predicted |
+
+  The prediction replays that cell's 54 measured run times, slowed by 15%, through two lanes. The
+  same model predicts 250 s for the local cell, which measured 258 s. The ceilings are unchanged,
+  so the slowest cell observed now uses about 60% of 880 s.
 - **Pull requests, 820 s PGLite and 620 s Postgres.** Scope `pr` crashes each seam once
   and skips the Postgres lease-bound seams. PGLite measured 510 s and 427 s (run
   40003479271), then 529 s and 474 s (run 40018836178); 820 s is the slowest plus about 30%.
