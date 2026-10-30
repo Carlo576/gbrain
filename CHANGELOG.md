@@ -10,6 +10,23 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.517.0] - 2026-10-30
+
+**The crash robot now runs two writer runs at a time, with the same runs, faults and manifest order as before, so its Postgres and PGLite cells finish well inside their ceilings again (#8036). reconcile-owner-journey is split by transport, so neither half hits the serial lane's 300 s per-file cap on a slow runner (#8040).**
+
+Every crash-robot run was executing one after another, so a slow runner plus the 2-minute `pooler_disconnect` lease wait pushed the Postgres cell to 899 s against its 880 s ceiling. The driver now draws every random schedule, fault point and seed in the old order before anything runs, executes `ROBOT_CONCURRENCY` (2) runs at a time, each with its own scratch root, database and `GBRAIN_HOME`, and reports results in the original manifest order. Ceilings and seeds are unchanged. Measured locally, Postgres went from 423 s to 258 s and PGLite from 699 s to 418 s, with identical manifests and no violations; on CI, Postgres took 369 s against its 880 s ceiling and PGLite 531 s against 1200 s.
+
+`test/reconcile-owner-journey.serial.test.ts` ran its stdio and http owner journeys in one file. On a runner pinned to one core it was killed at 301 s. Each transport is now its own file over a shared helper (`test/helpers/reconcile-owner-journey.ts`), with the same four cases and assertions; on that probe the two halves passed in 214 s and 193 s.
+
+The pregate allowlists `pii.phone.e164` only for `scripts/*-weights.metadata.json`, whose run IDs look like phone numbers, and two comments about the 22-minute unit job timeout no longer carry a bare shard-count literal.
+
+### Itemized changes
+
+- `scripts/persistence/robot-driver.ts`: a `pooled` runner at `ROBOT_CONCURRENCY`, results stored by item index, and a per-run `HOME`/`GBRAIN_HOME`. `test/persistence-crash-robot.test.ts` checks that concurrent runs cover exactly the serial runs, faults and manifest order.
+- `test/helpers/reconcile-owner-journey.ts`, `test/reconcile-owner-journey.serial.test.ts`, `test/reconcile-owner-journey-http.serial.test.ts`; `scripts/serial-files.tsv` gains the http file.
+- `.gstack/pregate.json`: the scoped allowlist. `scripts/test-shard.sh`, `test/scripts/unit-shard-budget.test.ts`: comment wording.
+- Docs: `scripts/persistence/README.md`, `docs/ci-event-parity.md`.
+
 ## [0.60.516.0] - 2026-10-30
 
 **The crash robot no longer reports a lost write when the user's own Git commit in a sync race never landed (#8043).**

@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { descriptor, executeOp, parseDescriptor, SessionDrops, type OpObservation } from '../scripts/persistence/ops.ts';
 import { ReferenceModel } from '../scripts/persistence/model.ts';
 import { crossBoundarySequences, pageBody, randomSchedule } from '../scripts/persistence/generator.ts';
-import { ROBOT_RANDOM_SEEDS, ROBOT_ROTATION_SEEDS, ROBOT_TOPOLOGY, explorationSeeds, restrict, runRobotPhase, type RobotRun } from '../scripts/persistence/robot-driver.ts';
+import { ROBOT_CONCURRENCY, ROBOT_RANDOM_SEEDS, ROBOT_ROTATION_SEEDS, ROBOT_TOPOLOGY, explorationSeeds, restrict, runRobotPhase, type RobotRun } from '../scripts/persistence/robot-driver.ts';
 import { robotCeilingUse, robotFailure, robotFullGate, robotOverBudget, runValidation, spawnWorker } from '../scripts/persistence/validate.ts';
 import { faultPoint, installFaultHook, type FaultDetail, type FaultPoint } from '../src/core/persistence/fault-points.ts';
 import { shrinkRun } from '../scripts/persistence/shrink.ts';
@@ -632,21 +632,28 @@ await faultPoint('effect:git:mid', { requestId: 'r1', signal: cyclic as never })
 describe('every robot run covers a fixed schedule list (reuse of a passed run is sound)', () => {
   const COUNTS = { 'consumer:claiming': 2, 'effect:git:mid': 1 };
   const clean = { violations: [], deferred: [] };
-  async function plan(o: { engine?: 'pglite' | 'postgres'; seconds: number; scope?: 'pr' | 'full'; extraSeeds?: number[] }) {
+  async function plan(o: { engine?: 'pglite' | 'postgres'; seconds: number; scope?: 'pr' | 'full'; extraSeeds?: number[]; concurrency?: number; workerMs?: number }) {
     const scratch = mkdtempSync(join(tmpdir(), 'gbrain-crash-robot-plan-'));
     const calls: { schedule: string; role: string; point?: string; process?: string }[] = [];
+    let inFlight = 0; let widest = 0;
     const spawn = ((path: string, _home: string, _mode: string, [role]: string[]) => {
       const config = JSON.parse(readFileSync(path, 'utf8'));
       calls.push({ schedule: config.schedule.label, role, ...(config.fault ? { point: config.fault.point } : {}), ...(config.process ? { process: config.process } : {}) });
+      if (role !== 'recover') widest = Math.max(widest, ++inFlight);
       const events: Record<string, unknown> = role === 'count' ? { done: { result: { ...clean, counts: COUNTS } } }
         : role === 'run' && config.fault ? { fault: config.fault } : { done: { result: clean } };
-      const event = (name: string) => name in events ? Promise.resolve({ event: name, ...(events[name] as object) }) : new Promise<never>(() => {});
+      const event = async (name: string) => {
+        if (!(name in events)) return new Promise<never>(() => {});
+        await Bun.sleep(o.workerMs ?? 0);
+        if (name === 'done' && role !== 'recover' || name === 'fault') inFlight--;
+        return { event: name, ...(events[name] as object) };
+      };
       return { child: { pid: 0 }, event, done: () => event('done'), failureDiagnostics: () => [], async kill() {} };
     }) as unknown as typeof spawnWorker;
     try {
       const robot = await runRobotPhase({ engine: o.engine ?? 'pglite', seed: 0, seconds: o.seconds, scope: o.scope, extraSeeds: o.extraSeeds,
-        scratch, home: scratch, databases: [], spawn, track: () => {}, log: () => {} });
-      return { robot, calls };
+        concurrency: o.concurrency, scratch, home: scratch, databases: [], spawn, track: () => {}, log: () => {} });
+      return { robot, calls, widest };
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   }
   const randomLabels = (calls: { schedule: string; role: string }[]) => [...new Set(calls.filter(c => c.schedule.startsWith('random-')).map(c => c.schedule))];
@@ -672,6 +679,17 @@ describe('every robot run covers a fixed schedule list (reuse of a passed run is
     expect(full.calls.filter(c => c.schedule.startsWith('random-') && c.role === 'run').map(c => c.point)).toEqual(ROBOT_RANDOM_SEEDS.map(() => 'consumer:claiming'));
     expect((full.robot as { lease_bound_seams_skipped?: string[] }).lease_bound_seams_skipped).toEqual([]);
     expect(((await plan({ engine: 'postgres', seconds: 1, scope: 'pr' })).robot as { lease_bound_seams_skipped?: string[] }).lease_bound_seams_skipped).toEqual(['effect:git:mid']);
+  });
+
+  test('runs execute ROBOT_CONCURRENCY at a time and cover exactly the runs, faults and manifest order of one at a time (#8036)', async () => {
+    const key = (r: RobotRun) => JSON.stringify([r.schedule, r.seed, r.fault ?? null, r.process ?? null]);
+    for (const o of [{ engine: 'pglite' as const }, { engine: 'postgres' as const }, { engine: 'postgres' as const, scope: 'pr' as const }]) {
+      const serial = await plan({ ...o, seconds: 600, extraSeeds: explorationSeeds(20_000), concurrency: 1, workerMs: 1 });
+      const parallel = await plan({ ...o, seconds: 600, extraSeeds: explorationSeeds(20_000), workerMs: 1 });
+      expect({ serial: serial.widest, parallel: parallel.widest }).toEqual({ serial: 1, parallel: ROBOT_CONCURRENCY });
+      expect(parallel.robot.runs.map(key)).toEqual(serial.robot.runs.map(key));
+      expect([...parallel.calls].map(c => JSON.stringify(c)).sort()).toEqual([...serial.calls].map(c => JSON.stringify(c)).sort());
+    }
   });
 
   test('a run past its ceiling is over_budget, and validation fails it loudly', async () => {
