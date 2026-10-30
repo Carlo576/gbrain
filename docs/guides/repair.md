@@ -2521,11 +2521,19 @@ the two `--prefer` values do opposite things in each state.
 `--prefer file` keeps the file's bytes: it adds only protected frontmatter keys the
 file lacks and database-only timeline rows, and refuses
 [`file_wins_rewrite`](write-refusals.md#file_wins_rewrite) when the result
-would change anything else.
+would change anything else (a database-only timeline row dated before the
+file's rows included).
 
 A held page whose page and file agree now is listed `release_hold` under
-either `--prefer`: its apply writes nothing to the page or the file, and only
-asks the next sync to re-screen the file, which releases the hold. A page with
+either `--prefer`, whether `--held` or `--slug` selected it: its apply writes
+nothing to the page or the file, and only asks the next sync to re-screen the
+file, which releases the hold. The apply rechecks the page, the file and the
+hold the preview observed, and answers `changed_since_preview` when any of
+them changed. A preview that finds nothing still prints an apply command; it
+applies nothing. Page and
+file agree when they differ only in formatting sync does not import (frontmatter
+key order or quoting). An apply refused before it published reserves no request
+id, so the apply a fresh preview prints goes through. A page with
 no recorded file origin (no source path, and a source URI that is not a
 `file:` URI) is compared with, and adopts, the file at its slug path, spelled
 as sync imports it (`README.md` for slug `readme`); the apply records that

@@ -320,7 +320,7 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   const recordedPath = snapshot?.page.source_path || snapshot?.page.withheld_source_path || null;
   const mode = recordedPath ? await scannerSlugRootMode(engine, row.source_id, root) : undefined;
   const candidate = resolveSourceLocalFilePath(root, recordedPath, row.slug, mode)
-    ?? (capturedPath ? join(root, capturedPath) : snapshot ? slugPathFile(root, row.slug) : join(root, `${row.slug}.md`));
+    ?? (capturedPath ? join(root, capturedPath) : snapshot ? slugPathFile(root, row.slug, await scannerSlugRootMode(engine, row.source_id, root)) : join(root, `${row.slug}.md`));
   if (isWindowsColonTarget(relative(root, candidate))) {
     if (!options.allowMissing && publishesDatabaseOnly(root, row.slug, snapshot)) return undefined;
     throw colonSlugWindowsRefusal(row.slug, row.source_id);

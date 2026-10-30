@@ -59,6 +59,8 @@ export interface SyncEntry { path: string; sourcePath: string; action: 'import' 
   drift?: SyncDriftSide;
   /** #6712: for `both`, the blob the last recorded import left on disk; #7338: for `unknown`, the file at the baseline commit. The freeze imports when the page still holds what that blob imports. */
   driftBaseline?: string;
+  /** #7199: for an older side-`unknown` hold, the file's earlier committed blobs; the freeze imports when the page still holds what one imports. */
+  driftHistory?: string[];
   /** #6727: live pages with no recorded origin whose slugs fold to this file's slug, several or one the importer cannot write; the freeze holds it `legacy_slug_conflict`. */
   legacySlugs?: string[];
   /** #6729 x #6727: the one legacy page carries an explicit frontmatter id that differs from the file's, so it is another document; held `legacy_slug_conflict` (`explicit_id_conflict`). */
@@ -182,6 +184,32 @@ export function assertConfiguredSyncRoot(root: string, configuredRoot: string | 
 export function syncGitPath(context: Pick<SyncDiscovery, 'root' | 'gitRoot'>, path: string): string {
   return relative(realpathSync.native(context.gitRoot), resolve(realpathSync.native(context.root), path)).split(sep).join('/');
 }
+type SyncTreeItem = { mode: string; kind: string; object: string; name: string };
+const treeName = (name: string): string => process.platform === 'win32' ? name.toLowerCase() : name;
+/**
+ * GBRA-135: one Git tree's entries by name (case-folded on Windows), memoized by object id. A tree object never changes,
+ * so the freeze, the claim and the publish of every committed delete under one directory share one `git ls-tree`
+ * instead of spawning it three times per delete and level (10,000 deletes: about 30,000 spawns). Only a full object id
+ * is memoized (a ref name moves); the cache keeps the most recently used `SYNC_TREE_LISTING_CAP` trees.
+ */
+const SYNC_TREE_LISTING_CAP = 64;
+const syncTreeListings = new Map<string, Map<string, SyncTreeItem[]>>();
+function syncTreeListing(gitRoot: string, tree: string): Map<string, SyncTreeItem[]> {
+  const key = `${gitRoot}\0${tree}`;
+  const cached = syncTreeListings.get(key);
+  if (cached) { syncTreeListings.delete(key); syncTreeListings.set(key, cached); return cached; }
+  const listing = new Map<string, SyncTreeItem[]>();
+  for (const row of syncGit(gitRoot, ['ls-tree', '-z', tree]).split('\0').filter(Boolean)) {
+    const tab = row.indexOf('\t'), [mode, kind, object] = row.slice(0, tab).split(' ');
+    const item = { mode: mode!, kind: kind!, object: object!, name: row.slice(tab + 1) };
+    const name = treeName(item.name);
+    listing.set(name, [...(listing.get(name) ?? []), item]);
+  }
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) return listing;
+  syncTreeListings.set(key, listing);
+  if (syncTreeListings.size > SYNC_TREE_LISTING_CAP) syncTreeListings.delete(syncTreeListings.keys().next().value!);
+  return listing;
+}
 export function assertSyncEntryOrigin(context: Pick<SyncDiscovery, 'root' | 'gitRoot' | 'target' | 'slugMode'>,
   entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'action'> & { working?: boolean }): void {
   const gitPath = syncGitPath(context, entry.path);
@@ -200,10 +228,7 @@ export function assertSyncEntryOrigin(context: Pick<SyncDiscovery, 'root' | 'git
   let tree = context.target;
   const parts = syncOriginPath(gitPath).split('/');
   for (const [index, part] of parts.entries()) {
-    const matches = syncGit(context.gitRoot, ['ls-tree', '-z', tree]).split('\0').filter(Boolean).map(row => {
-      const tab = row.indexOf('\t'), [mode, kind, object] = row.slice(0, tab).split(' ');
-      return { mode, kind, object, name: row.slice(tab + 1) };
-    }).filter(item => item.name === part || process.platform === 'win32' && item.name.toLowerCase() === part.toLowerCase());
+    const matches = syncTreeListing(context.gitRoot, tree).get(treeName(part)) ?? [];
     if (!matches.length) return;
     // GBRA-133 S-22: a directory where the deleted file was (notes/a.md became notes/a.md/x.md) means the file origin is gone.
     if (index === parts.length - 1 && matches.every(item => item.kind === 'tree')) return;
