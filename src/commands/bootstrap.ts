@@ -1487,7 +1487,7 @@ async function runHooks(
             );
             return 1;
           }
-          const re = await runner(surfaceFlag ? argv : buildArgvs(priorSurface ?? 'full', priorAdvertise)[0]);
+          const re = await runner(surfaceFlag ? argv : buildArgvs(priorSurface === undefined ? 'full' : priorSurface, priorAdvertise)[0]);
           if (re.code !== 0 && !/already exists|already registered/i.test(re.stderr + re.stdout)) {
             console.error(`MCP re-registration failed (${argv.join(' ')}): ${re.stderr.trim() || `exit ${re.code}`}`);
             return 1;
