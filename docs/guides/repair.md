@@ -2518,6 +2518,22 @@ the two `--prefer` values do opposite things in each state.
 | `purged_differs` | Removes the file. | Imports the file as a new page. |
 | `file_gone` | Recreates the file from the page. | Soft-deletes the page (the mass-delete valve applies). |
 
+`--prefer file` keeps the file's bytes: it adds only protected frontmatter keys the
+file lacks and database-only timeline rows, and refuses
+[`file_wins_rewrite`](write-refusals.md#file_wins_rewrite) when the result
+would change anything else.
+
+A held page whose page and file agree now is listed `release_hold` under
+either `--prefer`: its apply writes nothing to the page or the file, and only
+asks the next sync to re-screen the file, which releases the hold. A page with
+no recorded file origin (no source path, and a source URI that is not a
+`file:` URI) is compared with, and adopts, the file at its slug path, spelled
+as sync imports it (`README.md` for slug `readme`); the apply records that
+path. A sync re-screens a held page that changed since it was held even when
+Git did not move. A page a read-only mirror stored database-only (`mirror_read_only`)
+is compared with the file at its slug path once its source is writable again;
+the apply records that path and clears the stamp.
+
 A held preview covers one window of the selected holds, in held-path order:
 at most 200 pages, and it starts no page after 60 seconds of work (each page
 reads the database a few dozen times, so a large held set against a remote
