@@ -533,11 +533,11 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     const included = company.plan.manifest.filter(entry => entry.disposition === 'included');
     const present = new Set(included.map(entry => syncOriginPath(entry.path)));
     for (const entry of included) entries.set(entry.path, { path: entry.path, sourcePath: entry.path, action: 'import', working: false, slug: entry.page!.slug });
-    const pages = await engine.executeRaw<{ source_path: string }>('SELECT source_path FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND source_path IS NOT NULL', [sourceId]);
+    const pages = await engine.executeRaw<{ source_path: string; slug: string }>('SELECT source_path, slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND source_path IS NOT NULL', [sourceId]);
     assertDistinctSyncOrigins([...present, ...pages.map(page => page.source_path)]);
     for (const page of pages) {
       const origin = syncOriginPath(page.source_path);
-      if (!present.has(origin)) entries.set(origin, { path: origin, sourcePath: origin, action: 'delete', working: false });
+      if (!present.has(origin)) entries.set(origin, { path: origin, sourcePath: origin, action: 'delete', working: false, slug: page.slug });
     }
   }
   const selected = [...entries.values()].sort((a, b) => a.action.localeCompare(b.action) || a.path.localeCompare(b.path));
@@ -675,7 +675,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       else winner.renameHeld = held;
     }
   }
-  if (!company) Object.assign(discovered, retireDbOnlyDeletes(root, selected, retired));
+  Object.assign(discovered, retireDbOnlyDeletes(root, selected, retired));
   if (retired.size) discovered.entries = selected.filter(entry => !retired.has(entry));
   if (collisions.length) discovered.slugCollisions = collisions;
   // Identities and origin collisions were resolved over the whole target above; only the frozen manifest is cut.

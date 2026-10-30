@@ -18,10 +18,11 @@ export interface StorageConfig {
    */
   keep_db?: string[];
   /**
-   * #8007: a deprecated `supabase_only` list sat next to canonical keys and was ignored (canonical wins), so which pages
-   * are database-only is ambiguous; a caller deciding whether a missing file deletes its page holds it instead.
+   * #8007/#8015: the directories of a deprecated `supabase_only` list that sat next to canonical keys and was ignored
+   * (canonical wins), minus those `db_only` already covers. Whether a page under one is database-only is ambiguous, so
+   * a caller deciding whether its missing file deletes it holds it instead (`dbOnlyVerdict`).
    */
-  deprecated_db_only_ignored?: true;
+  ignored_db_only?: string[];
 }
 
 export type StorageTier = 'db_tracked' | 'db_only' | 'unspecified';
@@ -112,9 +113,10 @@ function parseStorageYaml(content: string, unknown: string[] = []): RawStorage |
       currentList = key as keyof RawStorage;
       // Inline flow list on one line: `db_only: []` or `db_only: [dir/, 'other/']`.
       const flow = /^\[(.*)\]$/.exec(indented.slice(colon + 1).trim());
-      if (flow && !/[[\]]/.test(flow[1]!)) {
-        const values = [...flow[1]!.matchAll(/\s*("[^"]*"|'[^']*'|[^,]*)\s*(?:,|$)/g)].map((m) => m[1]!.replace(/^["']|["']$/g, '').trim()).filter(Boolean);
-        raw[currentList] = [...(raw[currentList] ?? []), ...values];
+      // A nested list, or an unquoted value holding whitespace (a missing comma: `[a/ b/]`), resolves nothing (#8015).
+      const tokens = flow && !/[[\]]/.test(flow[1]!) ? [...flow[1]!.matchAll(/\s*("[^"]*"|'[^']*'|[^,]*)\s*(?:,|$)/g)].map((m) => m[1]!.trim()) : null;
+      if (tokens && !tokens.some((token) => !/^["']/.test(token) && /\s/.test(token))) {
+        raw[currentList] = [...(raw[currentList] ?? []), ...tokens.map((token) => token.replace(/^["']|["']$/g, '')).filter(Boolean)];
       }
       continue;
     }
@@ -132,7 +134,7 @@ function parseStorageYaml(content: string, unknown: string[] = []): RawStorage |
  * Resolution order (per plan eng-review pass 2 finding #2):
  *   1. If canonical keys present, use them.
  *   2. Else if deprecated keys present, map to canonical AND emit a
- *      once-per-process deprecation warning suggesting `gbrain doctor --fix`.
+ *      once-per-process deprecation warning asking for a rename by hand.
  *   3. If both are present, canonical wins. Deprecated keys are ignored
  *      with a stronger warning (the user is mid-migration).
  *
@@ -156,13 +158,12 @@ function normalizeStorageConfig(raw: RawStorage): StorageConfig {
       console.warn(
         `Warning: ${which} in gbrain.yml is deprecated and ignored ` +
           `(canonical keys db_tracked/db_only are present). ` +
-          `Remove the deprecated keys, or run \`gbrain doctor --fix\`.`,
+          `Move their directories under db_tracked / db_only by hand and remove them (see docs/storage-tiering.md).`,
       );
     } else {
       console.warn(
         `Warning: ${which} in gbrain.yml is deprecated. ` +
-          `Rename to db_tracked / db_only — see docs/storage-tiering.md. ` +
-          `Run \`gbrain doctor --fix\` for an automated rename.`,
+          `Rename them to db_tracked / db_only by hand — see docs/storage-tiering.md.`,
       );
     }
   }
@@ -173,7 +174,7 @@ function normalizeStorageConfig(raw: RawStorage): StorageConfig {
       db_tracked: raw.db_tracked ?? [],
       db_only: raw.db_only ?? [],
       ...keep,
-      ...(raw.supabase_only?.length ? { deprecated_db_only_ignored: true as const } : {}),
+      ...(raw.supabase_only?.length ? { ignored_db_only: raw.supabase_only } : {}),
     };
   }
 
@@ -355,7 +356,7 @@ export function normalizeAndValidateStorageConfig(input: StorageConfig): Storage
   }
 
   return { db_tracked: tracked.normalized, db_only: dbonly.normalized, ...(keep ? { keep_db: keep.normalized } : {}),
-    ...(input.deprecated_db_only_ignored ? { deprecated_db_only_ignored: true as const } : {}) };
+    ...ignoredDbOnly(input.ignored_db_only, dbonly.normalized) };
 }
 
 /**
@@ -391,6 +392,21 @@ export function isDbOnly(slug: string, config: StorageConfig): boolean {
  * `effectiveDbOnlyDirs`, issue #3766). Only declared dirs count: the
  * derive-phase defaults may be file-backed on some brains.
  */
+function ignoredDbOnly(ignored: string[] | undefined, dbOnly: string[]): { ignored_db_only?: string[] } {
+  const uncovered = (ignored ?? []).map((dir) => (dir.endsWith('/') ? dir : dir + '/'))
+    .filter((dir) => !dbOnly.some((declared) => dir.toLowerCase() === declared.toLowerCase() || matchesTierDir(dir.toLowerCase(), declared.toLowerCase())));
+  return uncovered.length ? { ignored_db_only: uncovered } : {};
+}
+
+/**
+ * #8007/#8015: whether a page slug is database-only under this config, for a delete decision: true under a declared
+ * db_only dir, `unknown` under an ignored deprecated `supabase_only` dir that db_only does not cover, false otherwise.
+ */
+export function dbOnlyVerdict(slug: string, config: StorageConfig | null): boolean | 'unknown' {
+  if (isDeclaredDbOnlySlug(slug, config)) return true;
+  return config?.ignored_db_only?.some((dir) => matchesTierDir(slug, dir.toLowerCase())) ? 'unknown' : false;
+}
+
 export function isDeclaredDbOnlySlug(slug: string, config: StorageConfig | null): boolean {
   return config?.db_only.some((dir) => matchesTierDir(slug, dir.toLowerCase())) ?? false;
 }
