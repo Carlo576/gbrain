@@ -24,7 +24,7 @@ import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { join } from 'node:path';
-import { isKeepDbSlug, loadStorageConfig } from '../storage-config.ts';
+import { isDeclaredDbOnlySlug, isKeepDbSlug, loadStorageConfig } from '../storage-config.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { currentCompanyBrainSync, getCompanyBrainProfile } from '../company-brain/profile.ts';
 import { sha256 } from './digest.ts';
@@ -639,7 +639,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const settings = await readLevelSettings(engine, context, scope, input);
   timings.setup = t();
   if (!settings) return null;
-  const { slugMode, exclude, pack, mirror, strategy, includeHidden, keepDbPrefixes, workingConfig, metafilePages, strict } = settings;
+  const { slugMode, exclude, pack, mirror, strategy, includeHidden, keepDbPrefixes, storage, workingConfig, metafilePages, strict } = settings;
   const sourceRelative = (gitPath: string) => (scope ? gitPath.slice(scope.length + 1) : gitPath);
   let metafilePage: (gitPath: string) => boolean = () => false;
   // Eligibility of a path outside the cached tree (every path of the tree is eligible); origins validate per call: a
@@ -810,7 +810,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && live && (record ? pages.fullEpisode[at!] : undefined) !== input.pass.episodeFullId
         : input.full === true && live,
       derivedCurrent: live && pages.derivedCurrent(at!), fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
-      keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes),
+      keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes), dbOnly: row && isDeclaredDbOnlySlug(pages.slug[at!]!, storage),
       openWork: row && open.pageIds.has(Number(pages.id[at!])) || open.origins.has(origin),
     };
     return { state, ...(row ? { at } : {}), ...(legacyPageless ? { legacyPageless } : {}) };
@@ -829,7 +829,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     }).then(found => { timings.legacy = t(); return found; })
     : new Map<string, string>();
 
-  const classifiedKey = JSON.stringify([treeKey, mode, strict, input.pass?.episodeFullId ?? null, input.full === true, mirror, keepDbPrefixes, pack?.identity ?? null, baselineCommit, !!input.pass?.bootstrap, [...colonRefused].sort()]);
+  const classifiedKey = JSON.stringify([treeKey, mode, strict, input.pass?.episodeFullId ?? null, input.full === true, mirror, keepDbPrefixes, storage?.db_only ?? [], pack?.identity ?? null, baselineCommit, !!input.pass?.bootstrap, [...colonRefused].sort()]);
   const reuse = snapshot.changed && priorClassified?.key === classifiedKey ? reusableMatched(priorClassified.paths, matchedUnchanged({ pages, tree, byOrigin, claimants, holds: holdByGitPath, markers, open,
     changed: confirmChangedPaths(pages, snapshot.changed, (sourcePath, slug) => gitPathOf(pageOrigin(sourcePath, slug))), indexDelta, spelled: path => twins.has(path) || legacySpelling.has(path), originOf })) : null;
   // A round that reuses nothing lets the previous round's paths go before it builds its own: one level held, not two.
@@ -963,10 +963,11 @@ async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContex
   ]);
   const settled = <T>(read: PromiseSettledResult<T>): T => { if (read.status === 'rejected') throw read.reason; return read.value; };
   if (settled(company)) return null;
+  const storage = (() => { try { return loadStorageConfig(root); } catch { return null; } })();
   return { slugMode: settled(slugModeRead), exclude: settled(excludeRead), pack: settled(packRead), mirror: settled(mirrorRead), workingConfig: settled(workingRead),
     metafilePages: settled(metafilePagesRead), strict: context.source.config?.canonical === 'git', strategy: input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown',
     includeHidden: [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))],
-    keepDbPrefixes: (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })() };
+    keepDbPrefixes: storage?.keep_db ?? [], storage };
 }
 
 /** A failed mark, proof or delta read: the round reads again without them (it aborted a Postgres snapshot). */
@@ -1259,7 +1260,7 @@ export async function passIdleProbe(engine: Pick<BrainEngine, 'executeRaw'>, inp
         AND 'r:'||request_id::text IN (SELECT id FROM stamp))
         + (SELECT count(*) FROM persistence_effects e JOIN persistence_requests r ON r.id = e.request_id
             WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text IN (SELECT id FROM stamp)) AS still_open,
-      EXISTS (SELECT 1 FROM persistence_effects e WHERE e.kind = 'git' AND e.state <> 'committed' AND e.request_id IN (SELECT id::uuid FROM pass,
+      EXISTS (SELECT 1 FROM persistence_effects e WHERE e.kind = 'git' AND e.state <> 'committed' AND NOT (e.data ? 'settled') AND e.request_id IN (SELECT id::uuid FROM pass,
         jsonb_array_elements_text(CASE WHEN jsonb_typeof(value->'obligations'->'converged'->'writeback')='array' THEN value->'obligations'->'converged'->'writeback' ELSE '[]'::jsonb END) AS w(id))) AS writeback_open`,
     [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, input.openAtStamp ? [...input.openAtStamp] : null, input.sourceId, input.incarnation]);
   return { passRow: probe?.pass_row ?? null, newer: probe?.newer === true, pending: probe?.pending === true, stillOpen: Number(probe?.still_open ?? 0), writebackOpen: probe?.writeback_open === true };
