@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { readCheckoutHead } from '../src/core/checkout-head.ts';
+import { readGitPendingEvidence } from '../src/core/sync-pending.ts';
 import { assertLegacyFilesystemWriter, isManagedFilesystemPath, refreshManagedFilesystemRoots } from '../src/core/persistence/filesystem-guard.ts';
 import { recordManagedRoots } from '../src/core/persistence/root-registry.ts';
 import { deactivatePersistence } from '../src/core/persistence/deactivation.ts';
@@ -99,5 +100,7 @@ test('the HEAD probe reads no HEAD for a root its enclosing repository does not 
     mkdirSync(clone, { recursive: true });
     expect(await readCheckoutHead(clone)).toBeNull();
     expect((await readCheckoutHead(home))?.head).toBe(git(home, 'rev-parse', 'HEAD'));
+    expect(await readGitPendingEvidence(clone, '0000000000000000000000000000000000000000')).toBeNull();
+    expect(await readGitPendingEvidence(home, '0000000000000000000000000000000000000000')).toMatchObject({ head: git(home, 'rev-parse', 'HEAD'), behind: true });
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
