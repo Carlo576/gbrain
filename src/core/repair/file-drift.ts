@@ -73,6 +73,7 @@ import { auditDriftConflicts, DRIFT_CLASSES, driftClass, liveFileDrift, type Dri
 import { protectedReconcileKey, reconcileCanonical, RECONCILE_SCAN_KEYS, type ReconcileDecision } from '../persistence/reconcile-merge.ts';
 import { fileWinsContent } from '../persistence/file-wins-content.ts';
 import { ABSENT_FILE_HASH, canonicalDeletionState, missingFileRoute, readCanonicalFileText, readDeletedDriftTarget, readReconcileState, type DeletedDriftChange, type DeletedDriftTarget, type ReconcileArtifact } from '../persistence/reconcile-state.ts';
+import { sourceDbOnlyVerdict } from '../persistence/source-storage.ts';
 import { clearGitHold, fileDriftActionVerb, fileDriftSide, FILE_DRIFT_DELETED_STATES, FILE_DRIFT_SIDES, GIT_HOLD_OP, heldDriftPreviewArgv, requestGitHoldRetry, type FileDriftDeletedState, type FileDriftSide, type GitHoldRecord } from '../persistence/sync-holds.ts';
 import { prepareRepairPublication, repairScreenConfig, submitManagedFileRepair } from '../persistence/file-repair.ts';
 import { maintenancePreflight, submitDatabaseMaintenanceIntent, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
@@ -524,6 +525,8 @@ async function fileGonePage(engine: BrainEngine, sourceId: string, slug: string,
   const root = join(binding!.local_path!, binding!.relative_path);
   const deletion = canonicalDeletionState(root, join(root, ...now.ghost.path.split('/')));
   if (deletion !== 'gone') return { skip: deletion === 'in_head' ? 'deletion_uncommitted' : 'unknown_deletion_state', detail: missingFileRoute(sourceId, slug, now.ghost.path, deletion) };
+  if (opts.prefer === 'file' && sourceDbOnlyVerdict(root, slug) === 'unknown') return { skip: 'storage_invalid',
+    detail: `gbrain.yml's storage section is invalid or ambiguous about db_only, so whether ${slug} is database-only is unknown and --prefer file would delete it (#8007): run gbrain storage status, fix gbrain.yml, commit it, then sync source ${sourceId} again` };
   if (opts.provenance === 'never_committed' && target?.provenance?.kind === 'never_committed') {
     return { page: { slug, prefer: 'database', exceptions: [], detach_page: { path: now.ghost.path, page_id: now.ghost.page_id, revision: now.ghost.revision, observed_at: target.hold.observed_at } },
       detail: `keeps the page database-only: no commit ever held ${now.ghost.path}, so the page holds the only copy; no file is written and the page forgets that path` };
