@@ -2094,7 +2094,7 @@ export const DEGRADED_STAGES = [
   'keyword_candidates_incomplete',
   'projection_pending', 'projection_by_design',
   'projection_status_unknown',
-  'keyword_count_unavailable',
+  'keyword_count_unavailable', 'saved_facts_withheld',
 ] as const;
 export type DegradedStage = (typeof DEGRADED_STAGES)[number];
 

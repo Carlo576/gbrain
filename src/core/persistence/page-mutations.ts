@@ -254,8 +254,8 @@ export async function submitPageMutation(ctx: OperationContext,
 
 /**
  * #8042: a remote put_page (put_pages too) of a quoted page's get_page content writes the page body, not the fences
- * get_page added (search/transcript-quote.ts). Only a page get_page quotes, by its stored type or the type the new
- * content declares, loses a fence naming it; a note's own fence-like text is kept.
+ * get_page added (search/transcript-quote.ts). A fence naming the page is removed when its stored type or the type the
+ * new content declares is one get_page quotes (either, so a retype keeps the body); a note's own fence-like text is kept.
  */
 async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: string, content: string): Promise<string> {
   const unquoted = unquoteTranscriptText(content, slug);
@@ -314,9 +314,6 @@ export async function preparePageAdmission(ctx: OperationContext,
   if (input.batch) p.page_batch = { id: input.batch.id, index: input.batch.index, size: input.batch.size, ...(input.batch.repeats?.length ? { repeats: input.batch.repeats } : {}) };
   const requestId = input.batch ? input.batch.requestId : typeof p.request_id === 'string' ? p.request_id : randomUUID();
   const sourceId = pageMutationSource(ctx, p, input.operation);
-  if (input.operation === 'put_page' && ctx.remote === true && typeof p.content === 'string' && typeof p.slug === 'string') {
-    p.content = await unquotedPutContent(ctx.engine, sourceId, p.slug.toLowerCase(), p.content);
-  }
   await initializeLocalPersistence(ctx);
   const captureSlug = input.operation === 'capture' ? await resolveCaptureFile(ctx, sourceId, p) : null;
   const principal = await requestPrincipalForContext(ctx);
@@ -339,6 +336,10 @@ export async function preparePageAdmission(ctx: OperationContext,
   if (!source || source.archived) {
     throw new OperationError('source_changed', 'The write source is not active.',
       `Source ${sourceId} is archived or not registered, so nothing was written. Write to an active source (sources_list shows them).`);
+  }
+  // After the replay check: the request digest covers what the caller sent, so a retry matches whatever the page's type is by then.
+  if (input.operation === 'put_page' && ctx.remote !== false && typeof p.content === 'string' && typeof p.slug === 'string') {
+    p.content = await unquotedPutContent(ctx.engine, sourceId, p.slug.toLowerCase(), p.content);
   }
   let slug = typeof p.slug === 'string' ? p.slug.toLowerCase() : '';
   const intent = ['takes_add','takes_update','takes_supersede','takes_resolve','takes_remove'].includes(input.operation)

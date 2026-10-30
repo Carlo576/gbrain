@@ -93,7 +93,10 @@ close. Third-party text is a page whose type holds someone else's words
 or a fact taken from one, marker `fact <id>`: saved by the conversation-facts
 extractor (provenance `cli:extract-conversation-facts`), or recorded as
 derived from or held on such a page (the facts backstop on a synced Slack,
-email or meeting page, `extract_facts`). Each tool-call or function-call JSON block in it (Gemini
+email or meeting page, `extract_facts`; for older backstop facts, the page
+its `source_session` names). If that lookup fails, `saved_facts` is left out
+(degraded stage `saved_facts_withheld`) and remote `recall` returns no facts
+(`facts_degraded.reason: "saved_facts_withheld"`), never unquoted facts. Each tool-call or function-call JSON block in it (Gemini
 `functionCall` included) is replaced by
 `[tool call: <name>, arguments omitted]`, and so is each XML-style call
 block (`function_calls`, `invoke`, `tool_use`, `tool_call`). `search`, `query` and

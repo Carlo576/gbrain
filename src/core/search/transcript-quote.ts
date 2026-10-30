@@ -5,9 +5,9 @@
  * A row whose page type holds someone else's words (`isQuotedPageType`:
  * imported conversations, Slack, iMessage, email, meeting and other chat
  * pages) or a fact taken from such a page (`isQuotedFactSource`: the
- * conversation-facts extractor saved it; `factsFromQuotedPages`: its page
- * or derivation input is one, as for the facts backstop on a synced Slack
- * page) can quote instructions or tool-call JSON that an
+ * conversation-facts extractor saved it; `factsFromQuotedPages`: its page,
+ * derivation input or backstop session page is one, as for the facts
+ * backstop on a synced Slack page) can quote instructions or tool-call JSON that an
  * agent reading the result mistakes for its own or for a live call. Two
  * read-time steps, run only on such rows, never on stored data and never on
  * other rows:
@@ -91,18 +91,29 @@ export function isQuotedFactSource(source: string | null | undefined): boolean {
 }
 
 /**
- * Of `ids`, the facts taken from a page whose type holds third-party text: the page that holds the fact
- * (`source_markdown_slug`) or a page recorded as its derivation input (`derivation_inputs`, which the facts
- * backstop writes for a fact it extracts from a synced or put page, and extract_facts for its page). Read time only.
+ * The page the facts backstop names in `source_session` for each provenance it writes: `sync:<slug>` for a synced
+ * page (commands/sync/finalize.ts) and `put_page:<slug>` for a written one (persistence/effect-facts.ts).
+ */
+const BACKSTOP_SESSION_PREFIXES: ReadonlyArray<readonly [source: string, prefix: string]> = [['sync:import', 'sync:'], ['mcp:put_page', 'put_page:']];
+
+/**
+ * Of `ids`, the facts taken from a page whose type holds third-party text, in the fact's own source: the page that
+ * holds the fact (`source_markdown_slug`), a page recorded as its derivation input (`derivation_inputs`, which the
+ * facts backstop and extract_facts already write), or the page a backstop fact's `source_session` names (facts saved
+ * before those edges, or rebuilt from git without them). Read time only; a session naming a chat page can only add a fence.
  */
 export async function factsFromQuotedPages(engine: Pick<BrainEngine, 'executeRaw'>, ids: readonly number[]): Promise<ReadonlySet<number>> {
   if (!ids.length) return new Set();
+  const [[syncSource, syncPrefix], [putSource, putPrefix]] = BACKSTOP_SESSION_PREFIXES;
   const rows = await engine.executeRaw<{ id: number | string }>(
     `SELECT f.id FROM facts f WHERE f.id = ANY($1::bigint[]) AND (
        EXISTS (SELECT 1 FROM pages p WHERE p.source_id = f.source_id AND p.slug = f.source_markdown_slug AND p.type = ANY($2::text[]))
        OR EXISTS (SELECT 1 FROM derivation_inputs d JOIN pages p ON p.id = (CASE WHEN d.input_id ~ '^[0-9]{1,18}$' THEN d.input_id::bigint END)
-         WHERE d.derived_table = 'facts' AND d.derived_id = f.id::text AND d.input_table = 'pages' AND p.type = ANY($2::text[])))`,
-    [[...new Set(ids.map(Number))], [...QUOTED_PAGE_TYPES]]);
+         WHERE d.derived_table = 'facts' AND d.derived_id = f.id::text AND d.input_table = 'pages' AND p.type = ANY($2::text[]))
+       OR EXISTS (SELECT 1 FROM pages p WHERE p.source_id = f.source_id AND p.type = ANY($2::text[]) AND p.slug = (CASE
+         WHEN f.source = $3::text AND left(f.source_session, length($4::text)) = $4::text THEN substr(f.source_session, length($4::text) + 1)
+         WHEN f.source = $5::text AND left(f.source_session, length($6::text)) = $6::text THEN substr(f.source_session, length($6::text) + 1) END)))`,
+    [[...new Set(ids.map(Number))], [...QUOTED_PAGE_TYPES], syncSource, syncPrefix, putSource, putPrefix]);
   return new Set(rows.map(r => Number(r.id)));
 }
 

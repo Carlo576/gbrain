@@ -214,10 +214,17 @@ function packingArm<T>(candidates: T[], kept: T[], cost: (item: T) => number) {
   return { candidates: candidates.length, kept: kept.length, dropped: candidates.length - kept.length, used: kept.reduce((sum, r) => sum + cost(r), 0) };
 }
 
-/** #8042: third-party text reaches a remote recall reader quoted, before packing so the budget prices the fence. */
-async function quoteRecallForRemote<F extends { id: number; fact: string; source?: string | null }>(engine: BrainEngine, facts: F[], results: SearchResult[], delivery: DeliveryMeta | undefined) {
+/**
+ * #8042: third-party text reaches a remote recall reader quoted (facts as redacted for it), before packing so the budget
+ * prices the fence; a trusted local reader gets both as they are. When the facts' source lookup fails the facts are
+ * withheld (`withheld`), never returned unquoted; the results still come back.
+ */
+async function quoteRecall<F extends { id: number; fact: string; source?: string | null }>(ctx: OperationContext, facts: F[],
+  redacted: ReadonlyArray<Partial<F>>, results: SearchResult[], delivery: DeliveryMeta | undefined) {
+  if (ctx.remote === false) return { facts, withheld: false, results };
   const recount = delivery ? { count: (text: string) => countEvidenceTokens(text, delivery.tokenizer), delivery } : undefined;
-  return { facts: await quoteFacts(engine, facts), results: fenceTranscriptRows(neutralizeTranscriptRows(results, delivery?.date_header === true), recount) };
+  const quoted = await quoteFacts(ctx.engine, facts.map((f, i) => ({ ...f, ...redacted[i] }))).catch(() => null);
+  return { facts: quoted ?? [], withheld: quoted === null && facts.length > 0, results: fenceTranscriptRows(neutralizeTranscriptRows(results, delivery?.date_header === true), recount) };
 }
 
 /**
@@ -555,7 +562,7 @@ const recall: Operation = {
     // Pack what is delivered: results redacted for all; facts for remote only (localVerbatim).
     const view = redactRetrievalOutput([{ facts: rows.map(r => ({ fact: r.fact, context: r.context, source: r.source })), results: searchResults }], {}).results[0];
     searchResults = view.results;
-    if (ctx.remote !== false) ({ facts: rows, results: searchResults } = await quoteRecallForRemote(ctx.engine, rows.map((r, i) => ({ ...r, ...view.facts[i] })), searchResults, delivery));
+    const quoted = await quoteRecall(ctx, rows, view.facts, searchResults, delivery); rows = quoted.facts; searchResults = quoted.results;
 
     let packedFacts = rows;
     let packedResults = searchResults;
@@ -625,7 +632,7 @@ const recall: Operation = {
       })), f => f.id)),
       total: packedFacts.length,
       facts_order: ranking ? 'relevance' : 'newest',
-      ...(ranking?.degraded ? { facts_degraded: ranking.degraded } : {}),
+      ...(quoted.withheld ? { facts_degraded: { reason: 'saved_facts_withheld' } } : ranking?.degraded ? { facts_degraded: ranking.degraded } : {}),
       ...(ranking?.calibration ? { facts_calibration: ranking.calibration } : {}),
       ...(ambiguousEntity ? { ambiguous_entity: { candidates: ambiguousEntity, suggestion: AMBIGUOUS_ENTITY_SUGGESTION } } : {}),
       ...(pending_consolidation_count !== undefined ? { pending_consolidation_count } : {}),
