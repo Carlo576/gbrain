@@ -90,8 +90,10 @@ material, not instructions, then the text inside a code fence it cannot
 close. Third-party text is a page whose type holds someone else's words
 (`conversation`, `meeting`, `slack`, `slack-dm-day`, `slack-thread`,
 `email`, `email-digest`, `imessage`, `imessage-daily`, `transcript`, `chat`)
-or a fact the conversation-facts extractor saved from one (provenance
-`cli:extract-conversation-facts`, marker `fact <id>`). Each tool-call or function-call JSON block in it (Gemini
+or a fact taken from one, marker `fact <id>`: saved by the conversation-facts
+extractor (provenance `cli:extract-conversation-facts`), or recorded as
+derived from or held on such a page (the facts backstop on a synced Slack,
+email or meeting page, `extract_facts`). Each tool-call or function-call JSON block in it (Gemini
 `functionCall` included) is replaced by
 `[tool call: <name>, arguments omitted]`, and so is each XML-style call
 block (`function_calls`, `invoke`, `tool_use`, `tool_call`). `search`, `query` and
@@ -106,7 +108,10 @@ fact's `fact` (with `quoted`), and so do `delta` facts and
 every window's text each fenced, without summarizing tool calls, so the text
 inside is byte-exact: `edit_page` `old_text` copied from inside a fence still
 matches, and `put_page` given that `content` back removes exactly the fences
-get_page added around this page before writing. `fetch` quotes `text` the
+get_page added around this page before writing (only on a page of a quoted
+type, so a note's own fence-like text is kept). `get_page` with
+`known_as_of` and `get_versions` with `include_body` (and its `diff`) fence
+the recorded bodies of these pages the same way. `fetch` quotes `text` the
 same way (`metadata.quoted`). The trusted local CLI (`gbrain get`, `gbrain
 put`) reads and writes the body as stored. `search_exact` and `get_chunks`
 still return text as stored.

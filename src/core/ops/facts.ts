@@ -6,7 +6,7 @@ import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
 import { parseWriteRequestId } from '../persistence/preconditions.ts';
 import { countEvidenceTokens, deliverEvidence, effectivePlan, resolveEvidencePlan, type DeliveryMeta, type EvidencePlan } from '../search/evidence-delivery.ts';
 import { withFactDateHeaders } from '../search/evidence-date.ts';
-import { fenceTranscriptRows, neutralizeTranscriptRows, quoteFact } from '../search/transcript-quote.ts';
+import { fenceTranscriptRows, neutralizeTranscriptRows, quoteFacts } from '../search/transcript-quote.ts';
 import { randomUUID } from 'node:crypto';
 import { readHolders } from './context.ts';
 /**
@@ -214,15 +214,16 @@ function packingArm<T>(candidates: T[], kept: T[], cost: (item: T) => number) {
   return { candidates: candidates.length, kept: kept.length, dropped: candidates.length - kept.length, used: kept.reduce((sum, r) => sum + cost(r), 0) };
 }
 
+/** #8042: third-party text reaches a remote recall reader quoted, before packing so the budget prices the fence. */
+async function quoteRecallForRemote<F extends { id: number; fact: string; source?: string | null }>(engine: BrainEngine, facts: F[], results: SearchResult[], delivery: DeliveryMeta | undefined) {
+  const recount = delivery ? { count: (text: string) => countEvidenceTokens(text, delivery.tokenizer), delivery } : undefined;
+  return { facts: await quoteFacts(engine, facts), results: fenceTranscriptRows(neutralizeTranscriptRows(results, delivery?.date_header === true), recount) };
+}
+
 /**
  * A result row's cost in recall's packing. A delivered block costs what delivery counted (its text and title in
  * delivery's tokenizer), so recall never re-cuts a set delivery already fit using a different estimator.
  */
-/** #8042: third-party text reaches a remote recall reader quoted, before packing so the budget prices the fence. */
-function quoteRecallForRemote<F extends { id: number; fact: string; source?: string | null }>(facts: F[], results: SearchResult[], delivery: DeliveryMeta | undefined) {
-  const recount = delivery ? { count: (text: string) => countEvidenceTokens(text, delivery.tokenizer), delivery } : undefined;
-  return { facts: facts.map(quoteFact), results: fenceTranscriptRows(neutralizeTranscriptRows(results, delivery?.date_header === true), recount) };
-}
 
 function recallResultCost(delivery: DeliveryMeta | undefined): (r: SearchResult) => number {
   if (!delivery) return resultTokens;
@@ -554,7 +555,7 @@ const recall: Operation = {
     // Pack what is delivered: results redacted for all; facts for remote only (localVerbatim).
     const view = redactRetrievalOutput([{ facts: rows.map(r => ({ fact: r.fact, context: r.context, source: r.source })), results: searchResults }], {}).results[0];
     searchResults = view.results;
-    if (ctx.remote !== false) ({ facts: rows, results: searchResults } = quoteRecallForRemote(rows.map((r, i) => ({ ...r, ...view.facts[i] })), searchResults, delivery));
+    if (ctx.remote !== false) ({ facts: rows, results: searchResults } = await quoteRecallForRemote(ctx.engine, rows.map((r, i) => ({ ...r, ...view.facts[i] })), searchResults, delivery));
 
     let packedFacts = rows;
     let packedResults = searchResults;

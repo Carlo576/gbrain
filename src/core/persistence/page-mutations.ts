@@ -22,7 +22,7 @@ import { parseWireWriteWaitMs } from './write-wait.ts';
 import { assertTimelineNotOmitted, isTimelineSection, timelineSectionOf, type TimelineSection } from './timeline-omission.ts';
 import { contentOriginTier } from '../trust/tier.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
-import { contentSizeHold } from '../markdown.ts';
+import { contentSizeHold, parseMarkdownHead } from '../markdown.ts';
 import { throwIfHeld } from '../trust/gate-outcomes.ts';
 import { admitWrite, assertPageRequestIdentity, assertReplayIntent, getWriteRequest, intentDigest, type WriteAdmission } from './journal.ts';
 import { submissionAuthority, authorizeStoredRequest } from './authority.ts';
@@ -43,7 +43,7 @@ import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { liveSearchable } from './searchable.ts';
 import { cachedPreadmitBrain, dropPreadmitCache, preadmitReads, preadmitRecheckFailed } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
-import { unquoteTranscriptText } from '../search/transcript-quote.ts';
+import { isQuotedPageType, unquoteTranscriptText } from '../search/transcript-quote.ts';
 import { isMirrorOnlyPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 
 export async function requestPrincipalForContext(ctx: OperationContext): Promise<Principal> {
@@ -253,6 +253,18 @@ export async function submitPageMutation(ctx: OperationContext,
 }
 
 /**
+ * #8042: a remote put_page (put_pages too) of a quoted page's get_page content writes the page body, not the fences
+ * get_page added (search/transcript-quote.ts). Only a page get_page quotes, by its stored type or the type the new
+ * content declares, loses a fence naming it; a note's own fence-like text is kept.
+ */
+async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: string, content: string): Promise<string> {
+  const unquoted = unquoteTranscriptText(content, slug);
+  if (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? ''))) return unquoted;
+  const [stored] = await engine.executeRaw<{ type: string | null }>('SELECT type FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
+  return isQuotedPageType(stored?.type) ? unquoted : content;
+}
+
+/**
  * Every check a page mutation passes before it is journaled, without admitting
  * it: either the authorized prior request with this request_id (a replay), or
  * the admission to submit. `put_pages` admits several of these together.
@@ -262,9 +274,6 @@ export async function preparePageAdmission(ctx: OperationContext,
     /** #6712 `repair overwritten-edits`: publish to the database only, so the restore never rewrites the committed file. */
     databaseOnly?: 'overwrite_restore' | 'detached'; stagedBody?: true }
 ): Promise<{ prior: WriteRequest; admission?: undefined; typeWarning?: undefined; slugAdvisory?: undefined } | { prior?: undefined; admission: WriteAdmission; typeWarning: PageTypeWarning | null; slugAdvisory: string | null }> {
-  // #8042: a remote put_page (put_pages too) of get_page content writes the page body, not the quote fences get_page added.
-  const { content: putContent, slug: putSlug } = input.params;
-  if (input.operation === 'put_page' && ctx.remote !== false && typeof putContent === 'string' && typeof putSlug === 'string') input = { ...input, params: { ...input.params, content: unquoteTranscriptText(putContent, putSlug) } };
   if (input.operation === 'put_page' && ['kind', 'preview', 'backup_reference'].some(key => Object.hasOwn(input.params, key))) {
     if (ctx.remote !== false || input.managedFileImport !== true || !OWNER_FILE_INTENTS.has(String(input.params.kind)) ||
       ['preview', 'backup_reference'].some(key => Object.hasOwn(input.params, key))) {
@@ -305,6 +314,9 @@ export async function preparePageAdmission(ctx: OperationContext,
   if (input.batch) p.page_batch = { id: input.batch.id, index: input.batch.index, size: input.batch.size, ...(input.batch.repeats?.length ? { repeats: input.batch.repeats } : {}) };
   const requestId = input.batch ? input.batch.requestId : typeof p.request_id === 'string' ? p.request_id : randomUUID();
   const sourceId = pageMutationSource(ctx, p, input.operation);
+  if (input.operation === 'put_page' && ctx.remote === true && typeof p.content === 'string' && typeof p.slug === 'string') {
+    p.content = await unquotedPutContent(ctx.engine, sourceId, p.slug.toLowerCase(), p.content);
+  }
   await initializeLocalPersistence(ctx);
   const captureSlug = input.operation === 'capture' ? await resolveCaptureFile(ctx, sourceId, p) : null;
   const principal = await requestPrincipalForContext(ctx);

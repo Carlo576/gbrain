@@ -1123,7 +1123,7 @@ export interface SearchResult {
    */
   entity_anchored?: 'entity' | 'linked';
   /** Set on a saved-fact row the `search.query_facts_arm` arm added (search/facts-arm.ts); page_id is 0. */
-  fact_row?: { id: number; valid_from: string; valid_until: string | null; source?: string };
+  fact_row?: { id: number; valid_from: string; valid_until: string | null; source?: string; from_quoted_page?: true };
   /** Fact rows only, and what callers see of them: never a page (no slug or id); follow with `follow_up`, read `page_slug` when the entity page exists. */
   result_type?: 'fact'; fact_id?: string; page_slug?: string; follow_up?: { op: 'recall'; args: Record<string, string> };
   /** #7600, #8042: a row of third-party text (a chat page or a fact saved from one), returned fenced as quoted source material with its tool-call blocks summarized (search/transcript-quote.ts). */

@@ -32,7 +32,7 @@ import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from '
 import type { HybridSearchMeta, SearchResult } from '../types.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { applySnippetCap, DEFAULT_AGENT_SNIPPET_CHARS, resultChunkCap } from '../search/snippet-cap.ts';
-import { fenceTranscriptRows, neutralizeTranscriptRows, quoteFact } from '../search/transcript-quote.ts';
+import { fenceTranscriptRows, neutralizeTranscriptRows, quoteFacts } from '../search/transcript-quote.ts';
 import { scoresFollowRank } from '../search/score-contract.ts';
 import { redactRetrievalOutput } from '../search/output-redaction.ts';
 import { leanRowsKeepId, projectRows, resultRowsFor } from '../search/lean-rows.ts';
@@ -441,9 +441,9 @@ async function buildRetrievalResponseMeta(
     ...matchedFacts.filter(m => !entityFacts.some(e => e.id === m.id))].filter(f => !factRowIds.has(f.id)));
   const shownAs = new Map([...factRowIds].map(id => [id, id]));
   for (const f of merged) for (const id of f.collapsed_ids ?? [f.id]) shownAs.set(id, f.id);
-  const savedFacts = merged.map(({ corrected_by, ...f }) => {
+  const savedFacts = (await quoteFacts(ctx.engine, merged)).map(({ corrected_by, ...f }) => {
     const by = corrected_by === undefined ? undefined : shownAs.get(corrected_by);
-    return quoteFact(stripCollapseColumns(by === undefined || by === f.id ? f : { ...f, corrected_by: by }));
+    return stripCollapseColumns(by === undefined || by === f.id ? f : { ...f, corrected_by: by });
   });
   const heldTotal = [...heldBySource.values()].reduce((sum, n) => sum + n, 0);
   const embedding = embeddingHeld?.total ? embeddingHeld : null;

@@ -422,8 +422,9 @@ A row of third-party text is returned as a quoted excerpt (#7600, #8042,
 `search/transcript-quote.ts`): a page whose type holds someone else's words
 (`conversation`, `meeting`, `slack`, `slack-dm-day`, `slack-thread`,
 `email`, `email-digest`, `imessage`, `imessage-daily`, `transcript`, `chat`)
-or a fact row the conversation-facts extractor saved from one
-(`facts.source` `cli:extract-conversation-facts…`, marker `fact <id>`).
+or a fact row taken from one (marker `fact <id>`): `facts.source`
+`cli:extract-conversation-facts…`, or a fact whose `source_markdown_slug` or
+`derivation_inputs` page is such a page (the facts backstop's facts).
 Tool-call blocks become a one-line summary, then a marker line and a code
 fence wrap the text. `assemble_evidence`, `search` and `query` quote these
 rows for every caller; `recall` quotes its `results` and `facts` for remote
