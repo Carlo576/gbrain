@@ -18,6 +18,7 @@ import { withEnv } from './helpers/with-env.ts';
 import { installerTurnHook, verifyTurnHook } from '../src/core/setup/turn-hook-check.ts';
 import { TURN_RULE_LANE_TOKEN, TURN_RULE_MARKER } from '../src/core/setup/turn-hook.ts';
 import { syncHermesTurnHook } from '../src/core/setup/hermes-turn-hook.ts';
+import { BRAIN_FIRST_BEGIN, brainFirstTurnRule } from '../src/core/setup/brain-first.ts';
 import { openclawTurnPluginDir, openclawTurnPluginFiles } from '../src/core/setup/openclaw-turn-plugin.ts';
 
 const CLI = resolve(import.meta.dir, '..', 'src', 'cli.ts');
@@ -113,6 +114,33 @@ describe('setup --instructions-only after a plain mcp add', () => {
     expect(claudePromptEntries(b)).toHaveLength(1);
     expect((await setup(b, ['claude-code', '--instructions-only', '--no-instructions', '--json'])).exitCode).toBe(0);
     expect(claudePromptEntries(b)).toHaveLength(0);
+  });
+});
+
+describe('the rule follows the recorded decision (#7962)', () => {
+  test('codex: --no-instructions after an AGENTS.override.md appears also strips the AGENTS.md block, so the rule stops', async () => {
+    const b = box();
+    const agents = join(b.home, '.codex', 'AGENTS.md');
+    mkdirSync(join(b.home, '.codex'), { recursive: true });
+    writeFileSync(agents, '# Codex house rules\n');
+    expect((await setup(b, ['codex', '--instructions-only', '--gbrain-bin', b.bin, '--json'])).exitCode).toBe(0);
+    expect(readFileSync(agents, 'utf8')).toContain(BRAIN_FIRST_BEGIN);
+    writeFileSync(join(b.home, '.codex', 'AGENTS.override.md'), '# my override\n');
+    expect((await setup(b, ['codex', '--instructions-only', '--no-instructions', '--json'])).exitCode).toBe(0);
+    expect(readFileSync(agents, 'utf8')).toBe('# Codex house rules\n');
+    await withEnv(b.env, async () => { expect(brainFirstTurnRule('codex', b.project)).toBeNull(); });
+  });
+
+  test('claude-code: a project-scope install rules only inside its project once the user scope declines', async () => {
+    const b = box();
+    expect((await setup(b, ['claude-code', '--instructions-only', '--scope', 'project', '--gbrain-bin', b.bin, '--json'])).exitCode).toBe(0);
+    expect((await setup(b, ['claude-code', '--instructions-only', '--no-instructions', '--json'])).exitCode).toBe(0);
+    const elsewhere = join(b.root, 'elsewhere');
+    mkdirSync(elsewhere);
+    await withEnv(b.env, async () => {
+      expect(brainFirstTurnRule('claude-code', join(b.project, 'src'))).toContain('GBrain: before answering this turn');
+      expect(brainFirstTurnRule('claude-code', elsewhere)).toBeNull();
+    });
   });
 });
 
