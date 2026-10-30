@@ -481,7 +481,7 @@ export function writeCodexSetupHooks(hooksPath: string, opts: {
     let next: typeof groups;
     if (wanted) {
       const first = ours[0];
-      next = first === undefined ? [...groups, wanted] : groups.flatMap((g, i) => (i === first ? [wanted] : ours.includes(i) ? [] : [g]));
+      next = first === undefined ? [...groups, wanted] : groups.flatMap<(typeof groups)[number]>((g, i) => (i === first ? [wanted] : ours.includes(i) ? [] : [g]));
       indexes[event] = first ?? next.length - 1;
       if (first !== undefined && ownedEntryFingerprint(groups[first]) === wantedHash && ours.length === 1) continue;
     } else {
