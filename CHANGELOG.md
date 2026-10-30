@@ -10,6 +10,19 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Tier 2's keyed nightly now actually gives the agent gbrain's MCP tools and fails any test in which the agent never called one, and a Tier 1 graduation shard that executed nothing now fails instead of passing.**
+
+Tier 2 wrote its gbrain MCP server into `~/.openclaw/config.json`, which OpenClaw 2026.4.9 never reads, since it reads `mcp.servers` in `~/.openclaw/openclaw.json`. The agent ran with no gbrain tools, and each test checked only that OpenClaw exited 0 and printed something, which it also does when the model key is rejected (#8002). The job now saves the server with `openclaw mcp set` and fails unless `openclaw mcp show` reads it back. The server runs behind `scripts/ci-mcp-tap.sh`, which logs every JSON-RPC request, and each Tier 2 test fails unless the agent made a gbrain tool call while it ran. The `tier1-graduation` shards now run `scripts/require-executed-tests.ts` after their tests, because the graduation files skip without `DATABASE_URL` and `run-e2e.sh` exits 0 on an all-skip run, so a shard with a broken database env used to pass with nothing executed (#8003).
+
+### Itemized changes
+
+- `.github/workflows/e2e.yml`: Tier 2's "Configure OpenClaw MCP" step runs `scripts/ci-openclaw-mcp.sh` and its test step gets `GBRAIN_TEST_TIER2_MCP_TAP_LOG`; each `tier1-graduation` shard runs the executed-tests check on lane `tier1`.
+- `scripts/ci-openclaw-mcp.sh`, `scripts/ci-mcp-tap.sh` and `scripts/mcp-tap-calls.ts`: the MCP registration, the request tap and its reader.
+- `test/e2e/skills.test.ts`: each test asks for a gbrain MCP tool and requires a gbrain tool call.
+- Tests: `test/scripts/tier2-openclaw-mcp.test.ts` and two new cases in `test/scripts/require-executed-tests.test.ts`.
+
 ## [0.60.508.0] - 2026-10-30
 
 **The E2E full run is shorter and Tier 2 no longer reports green on a run where it executed nothing: Selected E2E uses up to 14 workers, Tier 1's graduation files run in 2 shards of their own, and Tier 2 runs keyed on the nightly schedule with a check that fails when any of its tests skipped.**
