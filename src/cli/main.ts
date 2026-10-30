@@ -55,6 +55,7 @@ import { runCliPreflight } from '../core/cli-preflight.ts';
 import { isBooleanLiteral, isKnownOpFlag } from '../core/op-flag-tokens.ts';
 import { conceptNudge } from '../core/search/query-intent.ts';
 import { redactRetrievalOutput } from '../core/search/output-redaction.ts';
+import { pageCapLine } from '../core/search/remote-page-cap.ts';
 import { formatSearchExact } from './search-exact-format.ts';
 import { routeCommand } from './command-route.ts';
 import type { CliOptions } from '../core/cli-options.ts';
@@ -1664,6 +1665,8 @@ export function formatResult(
       const { results, meta } = redactRetrievalOutput(result as any[], lastRetrievalMeta);
       const answerId = typeof meta?.answer_id === 'string' ? meta.answer_id : undefined;
       if (answerId && results.length > 0) process.stderr.write(`answer: ${answerId} (rate with: gbrain rate ${answerId} 1-5)\n`);
+      const capLine = pageCapLine(meta, '--limit');
+      if (capLine) process.stderr.write(capLine + '\n');
       if (params.json === true) {
         const incompleteNotice = retrievalIncompleteLine(meta);
         if (incompleteNotice) process.stderr.write(incompleteNotice);
