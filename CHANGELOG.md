@@ -16,6 +16,8 @@ identifiers and attribution are available in the pre-removal Git revision
 
 Set `GBRAIN_SESSION_AGENT=<label>` on a worker's process and the capture hooks still save the session, but every claim from its user turns is saved as `attributed_to: other` with the context note `speaker: agent <label>, not the owner`, and the extractor is told the agent wrote them. `GBRAIN_SESSION_AGENT=off` saves nothing from the session; `owner` declares the turns yours. With the variable unset, a headless `claude -p` or `codex exec` session whose ancestors include another claude or codex process is detected and saved as agent `agent-launched`'s. The marker is a `<session>.speaker.json` sidecar written before any corpus file; if it can't be written, nothing is saved. Agent claims are never consolidated into your own takes.
 
+For facts already saved as yours, `gbrain repair agent-session-facts` previews a re-attribution: facts from sessions with a speaker marker, sessions you name (`--session`), or sessions whose working directory sits under a path you name (`--cwd`, for an orchestrator's worktree root). Sessions whose first turn opens with the same 160 characters as at least 3 other sessions (a template brief) are listed as ambiguous and change only with `--include-ambiguous`. `--apply --expect <hash> --yes` sets exactly the previewed facts to `attributed_to: other` with the speaker note and retires the self takes consolidate built only from them. It deletes nothing, keeps a claim you also made in another session, and works on repo-less brains. `gbrain doctor` (`agent_session_facts`) counts the candidates, and `doctor --remediation-plan` lists the preview command.
+
 ### Itemized changes
 
 - `src/core/context/session-speaker.ts` (new): the env contract, ancestry detection, the speaker sidecar.
@@ -23,7 +25,8 @@ Set `GBRAIN_SESSION_AGENT=<label>` on a worker's process and the capture hooks s
 - `src/core/facts/backstop.ts`, `src/core/facts/extract.ts`, `src/core/facts/speaker-context.ts`, `src/core/persistence/facts-maintenance.ts`: the `speaker` pipeline option.
 - `src/core/context/checkpoint-harvest.ts`, `src/core/sweep.ts`: the capture lanes pass the corpus file's speaker.
 - `src/core/transcripts/codex-hook-lane.ts`: `event_msg` / `thread_settings_applied` counts as a recognized record.
-- `docs/guides/ambient-writeback.md`: "Sessions an agent launches".
+- `src/core/repair/agent-session-facts.ts` (new), `src/commands/doctor/checks/agent-session-facts.ts` (new): the explicit-only repair kind, its `managed_maintenance_agent_session_facts` request and the `agent_session_facts` doctor check; registry, preview-approval and doctor goldens updated.
+- `docs/guides/ambient-writeback.md`: "Sessions an agent launches"; `docs/guides/repair.md`: the new kind.
 
 ## [0.60.519.0] - 2026-10-30
 
