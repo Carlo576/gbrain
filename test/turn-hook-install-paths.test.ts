@@ -10,7 +10,7 @@
  * Spawns `bun src/cli.ts setup` against a temp HOME / GBRAIN_HOME.
  */
 import { afterAll, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runCli } from './helpers/cli-spawn.ts';
@@ -114,6 +114,42 @@ describe('setup --instructions-only after a plain mcp add', () => {
     expect(claudePromptEntries(b)).toHaveLength(1);
     expect((await setup(b, ['claude-code', '--instructions-only', '--no-instructions', '--json'])).exitCode).toBe(0);
     expect(claudePromptEntries(b)).toHaveLength(0);
+  });
+});
+
+describe('review fixes: repo-committed hooks, the hooks opt-outs, Hermes without a SOUL.md', () => {
+  test('a project whose committed .claude/settings.json carries a bare gbrain marker is never run, and does not count as carrying the rule', async () => {
+    const b = box();
+    const ran = join(b.root, 'ran');
+    mkdirSync(join(b.project, '.claude'), { recursive: true });
+    writeFileSync(join(b.project, '.claude', 'settings.json'), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: `touch '${ran}'`, _gbrain: 'setup-v1' }] }] } }));
+    const r = await setup(b, ['claude-code', '--instructions-only', '--scope', 'project', '--gbrain-bin', b.bin, '--json']);
+    expect(existsSync(ran)).toBe(false);
+    expect(r.exitCode).toBe(0);
+    expect(r.doc.turn_hook).toMatchObject({ action: 'write' });
+    expect(readFileSync(join(b.project, '.claude', 'settings.local.json'), 'utf8')).toContain(TURN_RULE_LANE_TOKEN);
+  });
+
+  test('--no-hooks and GBRAIN_HOOKS=0 write no per-turn hook and pass', async () => {
+    const b = box();
+    const flagged = await setup(b, ['codex', '--instructions-only', '--no-hooks', '--gbrain-bin', b.bin, '--json']);
+    expect(flagged.exitCode).toBe(0);
+    expect(existsSync(join(b.home, '.codex', 'hooks.json')) ? readFileSync(join(b.home, '.codex', 'hooks.json'), 'utf8') : '').not.toContain(TURN_RULE_LANE_TOKEN);
+    const env = await runCli(['setup', 'codex', '--instructions-only', '--gbrain-bin', b.bin, '--json'], { env: { ...b.env, GBRAIN_HOOKS: '0' }, cwd: b.project });
+    expect(env.exitCode).toBe(0);
+    expect(existsSync(join(b.home, '.codex', 'hooks.json')) ? readFileSync(join(b.home, '.codex', 'hooks.json'), 'utf8') : '').not.toContain(TURN_RULE_LANE_TOKEN);
+    await withEnv({ ...b.env, GBRAIN_HOOKS: '0' }, async () => {
+      expect(installerTurnHook({ harness: 'codex', accepted: true, gbrainBin: b.bin, rerun: '' })).toMatchObject({ outcome: { action: 'skip' }, verdict: null });
+    });
+  });
+
+  test('hermes without a SOUL.md: no block, so no hook, no allowlist lock file, nothing written beside it', async () => {
+    const b = box();
+    const hermesHome = join(b.home, '.hermes');
+    mkdirSync(hermesHome, { recursive: true });
+    const r = await runCli(['setup', 'hermes', '--instructions-only', '--json'], { env: b.env, cwd: b.project });
+    expect(r.exitCode).toBe(0);
+    expect(readdirSync(hermesHome)).toEqual([]);
   });
 });
 

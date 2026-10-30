@@ -754,14 +754,16 @@ async function runInstructionsOnly(flags: SetupFlags, out: Out): Promise<number>
   }
   const off = flags.remove || instructions?.decision.value === 'declined';
   const rerun = ['gbrain', 'setup', harness, '--instructions-only', ...(flags.name !== 'gbrain' ? ['--name', flags.name] : []), ...(flags.workspace ? ['--workspace', flags.workspace] : []), ...(projectDir && harness === 'claude-code' ? ['--scope', 'project'] : [])];
-  const turnHook = harness === 'hermes'
+  // The hook carries the block's rule, so it follows the block: none while no block could be placed (Hermes without a SOUL.md).
+  const placed = instructions?.action === 'write' || instructions?.action === 'keep';
+  const turnHook = !off && !placed ? null : harness === 'hermes'
     ? (off ? removeHermesTurnHook({ hermesHome: dirname(target.path), dryRun: flags.dryRun }) : syncHermesTurnHook({ hermesHome: dirname(target.path), access, dryRun: flags.dryRun }))
     : harness === 'openclaw'
       ? (off ? removeOpenclawTurnPlugin({ dryRun: flags.dryRun }) : syncOpenclawTurnPlugin({ access, dryRun: flags.dryRun }))
       : isTurnRuleHarness(harness) ? turnRuleHookFor(harness, off, flags, projectDir, rerun.join(' ')) : null;
   // Loud failure: an accepted install whose per-turn hook does not load exits non-zero and names the harness's own check.
   // A 'print' outcome installed nothing and already names the step that does, so it is reported, not verified.
-  const check = !off && !flags.dryRun && instructions?.decision.value === 'accepted' && turnHook && turnHook.action !== 'print' ? verifyTurnHook(harness, { projectDir }) : null;
+  const check = !off && !flags.dryRun && instructions?.decision.value === 'accepted' && !flags.noHooks && process.env.GBRAIN_HOOKS !== '0' && turnHook && turnHook.action !== 'print' && turnHook.action !== 'remove' ? verifyTurnHook(harness, { projectDir }) : null;
   const code = instructions?.action === 'preserve' || (check && !check.ok) ? 1 : 0;
   if (out.json) {
     await writeJsonDocument(`${JSON.stringify({ harness, dry_run: flags.dryRun, remove: flags.remove, instructions_only: true, instructions, ...(turnHook ? { turn_hook: turnHook } : {}), ...(check ? { turn_hook_check: check } : {}), mcp }, null, 2)}\n`, (t) => process.stdout.write(t));
@@ -769,7 +771,7 @@ async function runInstructionsOnly(flags: SetupFlags, out: Out): Promise<number>
   }
   if (instructions) say(out, flags.remove ? describeBrainFirstOutcome(instructions, flags.dryRun) : describeInstructions(instructions, flags.dryRun));
   if (turnHook) say(out, `  ${(flags.dryRun && (turnHook.action === 'write' || turnHook.action === 'remove') ? `would ${turnHook.action}` : turnHook.action).padEnd(8)} ${'turn hook'.padEnd(7)} ${turnHook.detail}${'snippet' in turnHook && turnHook.snippet ? `:\n${turnHook.snippet.replace(/^/gm, '    ')}` : ''}${'commands' in turnHook && turnHook.commands ? `:\n${turnHook.commands.map((c) => `    ${c}`).join('\n')}` : ''}${'next' in turnHook && turnHook.next ? `; wire it with: ${turnHook.next}` : ''}`);
-  else if (!off) say(out, `  note     ${'turn hook'.padEnd(7)} ${adapter.label} has no per-turn hook gbrain can install; the rule reaches it through ${target.path} only.`);
+  else if (!off && placed) say(out, `  note     ${'turn hook'.padEnd(7)} ${adapter.label} has no per-turn hook gbrain can install; the rule reaches it through ${target.path} only.`);
   if (check?.ok) say(out, `  verify   ${'turn hook'.padEnd(7)} ${check.message}`);
   if (mcp.setup === 'manual' && !flags.remove) say(out, `MCP: setup does not register ${adapter.label}'s MCP server. Follow ${adapter.guide} (one command), then start a new session.`);
   if (!flags.remove && instructions?.decision.value === 'accepted') say(out, 'Next: start a new session; the harness reads its instruction file at session start.');
@@ -784,7 +786,8 @@ async function runInstructionsOnly(flags: SetupFlags, out: Out): Promise<number>
  */
 function turnRuleHookFor(harness: TurnRuleHarness, off: boolean, flags: SetupFlags, projectDir: string | undefined, rerun: string): TurnHookOutcome {
   const paths = projectDir ? { claudeSettings: join(projectDir, '.claude', 'settings.local.json') } : {};
-  if (off) return removeTurnRuleHook({ harness, paths, dryRun: flags.dryRun });
+  if (off || flags.noHooks) return removeTurnRuleHook({ harness, paths, dryRun: flags.dryRun });
+  if (process.env.GBRAIN_HOOKS === '0') return { harness, action: 'skip', path: '', detail: 'GBRAIN_HOOKS=0 is set: no per-turn hook installed' };
   const carried = inspectTurnHook(harness, { projectDir });
   if (carried.state !== 'missing' && carried.via !== 'turn-rule') return { harness, action: 'skip', path: '', detail: `per-turn rule already carried: ${carried.detail}` };
   return syncTurnRuleHook({ harness, gbrainBin: flags.gbrainBin ?? resolveGbrainBin(), gbrainHome: process.env.GBRAIN_HOME?.trim() || undefined, paths, dryRun: flags.dryRun, rerun });

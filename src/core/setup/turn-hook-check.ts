@@ -15,7 +15,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Action } from '../agent-output.ts';
 import { bunSpawnSync } from '../spawn.ts';
-import { codexHookCensus, codexHookTrustHash } from '../bootstrap/codex-hooks.ts';
+import { codexHookCensus, codexHookGroupRuns, codexHookTrustHash } from '../bootstrap/codex-hooks.ts';
 import { readCodexTomlTable } from '../bootstrap/codex-toml.ts';
 import { classifyHarnessHook } from '../bootstrap/hooks.ts';
 import { GBRAIN_HOOK_MARKER_KEY, claudeUserSettingsPath, codexConfigPath, codexHooksPath } from '../bootstrap/host-specs.ts';
@@ -23,7 +23,7 @@ import { enabledPluginLanes } from '../bootstrap/plugin-lanes.ts';
 import { brainFirstTarget, openclawConfigPath, parseJson5ish } from './brain-first.ts';
 import { inspectHermesTurnHook } from './hermes-turn-hook.ts';
 import { OPENCLAW_TURN_PLUGIN_ID, openclawTurnPluginDir } from './openclaw-turn-plugin.ts';
-import { isTurnRuleEntry, isTurnRuleHarness, removeTurnRuleHook, syncTurnRuleHook, type TurnHookOutcome, type TurnHookPaths } from './turn-hook.ts';
+import { isOtherGbrainEntry, isTurnRuleEntry, isTurnRuleHarness, removeTurnRuleHook, syncTurnRuleHook, type TurnHookOutcome, type TurnHookPaths } from './turn-hook.ts';
 
 export const TURN_HOOK_NATIVE_INSPECT: Record<string, string> = {
   'claude-code': '/hooks (inside a Claude Code session)',
@@ -41,6 +41,8 @@ export interface TurnHookState {
   detail: string;
   /** The hook command gbrain can run to prove it (Claude Code and Codex, not plugin lanes). */
   command?: string;
+  /** The file the command came from. */
+  source?: string;
   native_inspect?: string;
 }
 
@@ -66,9 +68,10 @@ export function inspectTurnHook(harness: string, opts: { projectDir?: string } =
   if (harness === 'claude-code') {
     const files = [claudeUserSettingsPath(), ...(opts.projectDir ? [join(opts.projectDir, '.claude', 'settings.local.json'), join(opts.projectDir, '.claude', 'settings.json')] : [])];
     for (const path of files) {
-      const entries = claudeEntries(path).filter(isGbrainPromptEntry);
+      const committed = !!opts.projectDir && path === join(opts.projectDir, '.claude', 'settings.json');
+      const entries = claudeEntries(path).filter((e) => isTurnRuleEntry(e) || isOtherGbrainEntry(e, committed));
       const effective = entries.find((e) => !isTurnRuleEntry(e)) ?? entries[0];
-      if (effective) return { harness, state: 'wired', via: isTurnRuleEntry(effective) ? 'turn-rule' : effective[GBRAIN_HOOK_MARKER_KEY] === 'setup-v1' ? 'setup' : 'bootstrap', detail: `UserPromptSubmit hook in ${path}`, command: String(effective.command), native_inspect };
+      if (effective) return { harness, state: 'wired', via: isTurnRuleEntry(effective) ? 'turn-rule' : effective[GBRAIN_HOOK_MARKER_KEY] === 'setup-v1' ? 'setup' : 'bootstrap', detail: `UserPromptSubmit hook in ${path}`, command: String(effective.command), source: path, native_inspect };
     }
     if (plugin) return { harness, state: 'wired', via: 'plugin', detail: `the '${plugin.plugin}' plugin declares the UserPromptSubmit hook`, native_inspect };
     return { harness, state: 'missing', detail: `no gbrain UserPromptSubmit hook in ${files.join(' or ')}`, native_inspect };
@@ -82,7 +85,7 @@ export function inspectTurnHook(harness: string, opts: { projectDir?: string } =
       const key = `${codexHooksPath()}:user_prompt_submit:${g.index}:0`;
       let table: { trusted_hash?: unknown } | undefined;
       try { table = readCodexTomlTable(codexConfigPath(), ['hooks', 'state', key]) as typeof table; } catch { table = undefined; }
-      const trusted = table?.trusted_hash === codexHookTrustHash('user_prompt_submit', command, 15);
+      const trusted = table?.trusted_hash === codexHookTrustHash('user_prompt_submit', command, 15) && (g.lane === 'turn-rule' || codexHookGroupRuns(codexHooksPath(), codexConfigPath(), g));
       return { harness, state: trusted ? 'wired' : 'untrusted', via: g.lane as TurnHookState['via'], command, native_inspect,
         detail: trusted ? `UserPromptSubmit hook in ${codexHooksPath()}, trusted in ${codexConfigPath()}` : `UserPromptSubmit hook in ${codexHooksPath()} has no matching trust entry in ${codexConfigPath()}, so Codex does not run it` };
     }
@@ -110,9 +113,14 @@ export function inspectTurnHook(harness: string, opts: { projectDir?: string } =
 }
 
 type Run = (argv: string[], stdin?: string) => { ok: boolean; output: string };
+/** Only what a hook needs to find the brain and the rule; never provider keys. */
+function hookEnv(): Record<string, string> {
+  return Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined && /^(HOME|PATH|USER|LANG|TMPDIR|XDG_CONFIG_HOME|CLAUDE_CONFIG_DIR|CODEX_HOME|GBRAIN_HOME|GBRAIN_AGENT_INSTRUCTIONS|GBRAIN_HOOKS)$/.test(e[0])));
+}
 const defaultRun: Run = (argv, stdin) => {
   try {
-    const r = bunSpawnSync(argv, { stdin: stdin === undefined ? 'ignore' : Buffer.from(stdin), stdout: 'pipe', stderr: 'pipe', env: process.env, timeout: 60_000 });
+    // From the home directory: a project's own gbrain hook would make the turn-rule lane yield there.
+    const r = bunSpawnSync(argv, { stdin: stdin === undefined ? 'ignore' : Buffer.from(stdin), stdout: 'pipe', stderr: 'pipe', env: hookEnv(), cwd: process.env.HOME || undefined, timeout: 60_000 });
     return { ok: r.exitCode === 0, output: `${r.stdout.toString()}${r.stderr.toString()}` };
   } catch (e) { return { ok: false, output: (e as Error).message }; }
 };
@@ -136,6 +144,8 @@ export function verifyTurnHook(harness: string, opts: { projectDir?: string; run
   if (state.state === 'untrusted') return fail('untrusted', state.detail);
   if (state.via === 'plugin') return { ok: true, state, reason: 'plugin_lane', message: `${state.detail}; check it with ${state.native_inspect}` };
   if ((harness === 'claude-code' || harness === 'codex') && state.command) {
+    // A command from a project's settings file is the repo's, not the user's: never run it.
+    if (harness === 'claude-code' && state.source !== claudeUserSettingsPath()) return { ok: true, state, reason: 'project_unverified', message: `${state.detail}; a project hook is not run here, so check it with ${state.native_inspect}` };
     const r = run(['sh', '-c', state.command], JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: '', session_id: 'gbrain-install-check' }));
     if (!r.ok) return fail('hook_failed', `the UserPromptSubmit hook exited non-zero (${r.output.trim().split('\n').at(-1) || 'no output'})`);
     if (!r.output.includes('GBrain: before answering')) return fail('no_rule', 'the UserPromptSubmit hook ran but did not add the brain-first rule (is the brain-first block installed for this harness?)');
@@ -188,6 +198,7 @@ export function installerTurnHook(opts: { harness: string; accepted: boolean; gb
     return { outcome: { harness, action: 'skip', path: '', detail: `${harness} has no per-turn hook gbrain can install; the rule reaches it through its instruction file only` }, verdict: null };
   }
   if (!opts.accepted) return { outcome: removeTurnRuleHook({ harness, paths: opts.paths }), verdict: null };
+  if (process.env.GBRAIN_HOOKS === '0') return { outcome: { harness, action: 'skip', path: '', detail: 'GBRAIN_HOOKS=0 is set: no per-turn hook installed' }, verdict: null };
   const carried = opts.paths ? null : inspectTurnHook(harness);
   const outcome = carried && carried.state !== 'missing' && carried.via !== 'turn-rule'
     ? { harness, action: 'skip' as const, path: '', detail: `per-turn rule already carried: ${carried.detail}` }

@@ -1130,10 +1130,10 @@ async function hookUserPrompt(io: HookIo): Promise<number> {
     // Push failure wins the single banner slot; the monthly backup notice
     // rides the same rail (systemMessage + additionalContext) when no push
     // failure is pending. Both are cache/file readers, budgeted by the race.
-    banner = io.disablePushBanner ? null : (pendingPushFailureBanner() ?? pendingBackupBanner());
     turnRule = io.turnRule !== undefined ? io.turnRule : brainFirstTurnRule(io.harness ?? 'claude-code', io.cwd ?? process.cwd());
-    // The turn-rule lane's connection may reach another brain, so it never reads this machine's context.
+    // The turn-rule lane's connection may reach another brain, so it never reads this machine's context or banners.
     if (process.env.GBRAIN_HOOK_LANE === TURN_RULE_LANE) return { outcome: 'ok', reason: 'rule_only' };
+    banner = io.disablePushBanner ? null : (pendingPushFailureBanner() ?? pendingBackupBanner());
     const j = await readStdinJson(io, 300);
     if (!j) return { outcome: 'degraded', reason: 'no_stdin' };
 

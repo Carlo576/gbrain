@@ -42,7 +42,7 @@ export function removeHarnessBrainFirst(server: string, log: (line: string) => v
 /**
  * The per-turn rule for hosts whose hooks this lane does not otherwise wire:
  * Codex always (the bootstrap Codex lane wires only SessionEnd capture), Claude
- * Code when its lifecycle hooks are off here (registrar mode). Opted out
+ * Code when its lifecycle hooks are off here. Registrar mode wires none. Opted out
  * (block declined) removes it. Returns false when a hook could not be wired or
  * does not load, so the install fails loudly.
  */

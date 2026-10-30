@@ -2,7 +2,7 @@
  * turn-hook.ts — the per-turn brain-first rule on install paths that do not
  * run `gbrain setup`'s own hooks: `gbrain connect --install` (a remote brain),
  * `gbrain connect --harness … --install` (a hosted grant),
- * `gbrain bootstrap harness` (Codex, and Claude Code in registrar mode) and
+ * `gbrain bootstrap harness` (Codex, and Claude Code when its own hooks are off) and
  * `gbrain setup <claude-code|codex> --instructions-only` (a bare `mcp add`
  * registration gbrain did not write).
  *
@@ -32,7 +32,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { bunSpawnSync } from '../spawn.ts';
 import { ownedEntryFingerprint } from '../bootstrap/adopted-connections.ts';
-import { codexHookCensus, codexHookTrustHash, codexSetupHookGroup, codexSetupTrustEntry, writeCodexSetupHooks, type CodexHookGroup } from '../bootstrap/codex-hooks.ts';
+import { codexHookCensus, codexHookGroupRuns, codexHookTrustHash, codexSetupHookGroup, codexSetupTrustEntry, writeCodexSetupHooks, type CodexHookGroup } from '../bootstrap/codex-hooks.ts';
 import { appendCodexTomlTable, readCodexTomlTable, removeCodexTomlTable } from '../bootstrap/codex-toml.ts';
 import { buildClaudeHookCommand, classifyHarnessHook, hookEntryHash, removeClaudeHooksAt, writeClaudeHooksAt } from '../bootstrap/hooks.ts';
 import { CLAUDE_HOOK_DEFAULT_TIMEOUT_SECS, GBRAIN_HOOK_MARKER_KEY, claudeUserSettingsPath, codexConfigPath, codexHooksPath } from '../bootstrap/host-specs.ts';
@@ -99,10 +99,10 @@ function claudePromptEntries(path: string): Array<Record<string, unknown>> {
     .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object');
 }
 
-/** An entry another gbrain lane owns (setup, workspace bootstrap, bootstrap harness). */
-function isOtherGbrainEntry(e: Record<string, unknown>): boolean {
+/** An entry another gbrain lane owns (setup, workspace bootstrap, bootstrap harness). A repo's committed settings.json counts only a command that parses as gbrain's hook, never a bare marker. */
+export function isOtherGbrainEntry(e: Record<string, unknown>, committed = false): boolean {
   if (isTurnRuleEntry(e)) return false;
-  return typeof e[GBRAIN_HOOK_MARKER_KEY] === 'string' || !!classifyHarnessHook(e, EVENT, 'any');
+  return (!committed && typeof e[GBRAIN_HOOK_MARKER_KEY] === 'string') || !!classifyHarnessHook(e, EVENT, 'any');
 }
 
 /**
@@ -112,10 +112,12 @@ function isOtherGbrainEntry(e: Record<string, unknown>): boolean {
  */
 export function turnRuleHookYields(harness: string, cwd: string): boolean {
   if (harness === 'codex') {
-    try { return codexHookCensus(codexHooksPath()).some((g) => g.event === EVENT && (g.lane === 'setup' || g.lane === 'bootstrap')); } catch { return false; }
+    // Only a group Codex actually runs (trusted, enabled) carries the rule.
+    try { return codexHookCensus(codexHooksPath()).some((g) => g.event === EVENT && (g.lane === 'setup' || g.lane === 'bootstrap') && codexHookGroupRuns(codexHooksPath(), codexConfigPath(), g)); } catch { return false; }
   }
-  return [claudeUserSettingsPath(), join(cwd, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.local.json')]
-    .some((p) => claudePromptEntries(p).some(isOtherGbrainEntry));
+  return claudePromptEntries(claudeUserSettingsPath()).some((e) => isOtherGbrainEntry(e))
+    || claudePromptEntries(join(cwd, '.claude', 'settings.local.json')).some((e) => isOtherGbrainEntry(e))
+    || claudePromptEntries(join(cwd, '.claude', 'settings.json')).some((e) => isOtherGbrainEntry(e, true));
 }
 
 /** Install or refresh the turn-rule hook. Never throws; anything it cannot write safely comes back as `print` with the command that wires it. */
@@ -196,7 +198,8 @@ export function removeTurnRuleHook(opts: { harness: TurnRuleHarness; paths?: Tur
       if (!opts.dryRun) {
         const commands = ours.flatMap((g) => g.commands);
         for (const g of ours) dropOurTrust(p.config, trustKey(p.hooks, g.index), commands);
-        writeCodexSetupHooks(p.hooks, { want: {}, owned: new Set(ours.map((g) => g.hash)), preserve: new Set() });
+        const w = writeCodexSetupHooks(p.hooks, { want: {}, owned: new Set(ours.map((g) => g.hash)), preserve: new Set() });
+        if (w.notes.length) return { harness: 'codex', action: 'remove', path: p.hooks, detail: `per-turn rule hook removed from ${p.hooks}; ${w.notes.join(' ')}` };
       }
       return { harness: 'codex', action: 'remove', path: p.hooks, detail: `per-turn rule hook removed from ${p.hooks}` };
     }
