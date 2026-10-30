@@ -390,6 +390,33 @@ segmented chunk (`test/e2e/segmented-switch-off-write-role.test.ts`). With the
 policies above it creates segmented pages and sees only its sources' rows
 (`test/e2e/segmented-rls-scope.test.ts`).
 
+**Purge and withdrawal guards.** The guards that refuse purged content and keep withdrawn
+facts withdrawn run as the writing role (`SECURITY INVOKER`) and read their ledgers
+(`fact_purges`, `fact_withdrawals`, `take_purges`, `page_purges` and the derivation purge
+tables) under that role's RLS. Every gbrain function that pins a search_path ends it with
+`pg_temp` (migration v277, #7632), so a session's temp table or view named like a ledger
+cannot hide it from a guard; before, any session, the owner included, could store purged
+content that way. A write role with no policy on a ledger still reads it empty, so its
+purged or withdrawn writes still go through: give a scoped write role a `SELECT` policy on
+the ledgers of the sources it writes (gbrain#7659 tracks the fix). Where the migrating role
+does not own a function, v277 names it on stderr and leaves it; `gbrain doctor`
+(`function_search_path`) prints the `ALTER FUNCTION` to run as its owner
+(`test/e2e/function-search-path-postgres.test.ts`).
+
+**Writer-protocol fences.** The managed-writer guard, the persistence protocol floor, protocol
+activation and the Git-canonical source counter also run as the writing role and read their state
+under its RLS. Since migration v278 (#7636) they fail closed: a role that cannot see the
+`persistence_brain` row is refused with `writer_coordinator_required` (relationship
+`unreadable_state`) on every guarded write, managed brain or not, instead of being treated as
+unmanaged. On a managed brain the same refusal covers a hidden `git_canonical_brain` row or
+Git-canonical source row (for a writer without the git protocol) and a hidden page row behind a tag,
+timeline entry or take. Protocol activation (row-level security on `sources`, `persistence_requests`,
+`persistence_effects`, `persistence_worktrees` or `persistence_source_bindings`) and a change to
+which sources are Git-canonical (row-level security on `sources`) refuse any role it applies to,
+whatever its policies; only the table owner (without `FORCE ROW LEVEL SECURITY`) or a role that
+bypasses RLS passes them ([write refusals](guides/write-refusals.md#writer-coordinator-required);
+`test/writer-fence-fail-closed-7636.test.ts`).
+
 **In engine-sql.** A read in a migrated domain takes a `ScopedRead` when it
 runs through this helper and a `LegacyUnscopedRead` when it runs on the pool
 (`src/core/engine-sql/brands.ts`); the engine obtains the branded executor, so
@@ -684,8 +711,13 @@ Worked examples:
    migrations run. If the blob gains an index, FK, trigger or view that references a column an
    older brain may lack, add that column's probe and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
    to the forward-reference bootstrap both engines run (`src/core/engine-sql/bootstrap.ts`:
-   probe, gap, DDL). A column only defined in a
+   probe, gap, DDL). A partial index's `WHERE` predicate and `INCLUDE` list count as references (an
+   index filtering on a column a later migration adds wedges the replay). A column only defined in a
    `CREATE TABLE` needs no bootstrap entry. `test/schema-bootstrap-coverage.test.ts` names any gap.
+   The schema-history upgrade tests (`test/schema-history-upgrade.slow.test.ts` on PGLite,
+   `test/e2e/schema-history-upgrade.test.ts` on Postgres) upgrade a stored fresh brain of each release
+   from schema v260 on (`test/fixtures/schema-history/`, written by
+   `scripts/capture-schema-history-fixture.ts`) and compare the result with a fresh install.
 
 ## Engine detection and access repair
 

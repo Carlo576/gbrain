@@ -150,6 +150,7 @@ Every hold and error has three fields, from one table
 | `settle_mismatch` | page | none | yes | always: the pass cannot tell why the path does not settle |
 | `page_write_failed` | page | upgrade | yes | always: the writer cannot place the failure |
 | `file_unreadable` | page | none | yes | always: only a change to the checkout makes the file readable |
+| `visibility_noncanonical` | page | none | yes | always: only an edit to the file clears it |
 | `content_null_bytes` | page | none | yes | always: only an edit to the file or its removal clears it |
 | `git_object_missing` | page | none | yes | always: only restoring the Git object clears it |
 | `path_not_utf8` | page | none | yes | always: only renaming the file clears it |
@@ -429,7 +430,8 @@ it, and a `--full` continues until every path it covers is settled.
 - `owner`, sync finishes it by itself: `in_flight` (admitted, not yet
   published), `import`, `reparse` (an unchanged file whose page is imported
   again because its parser or schema pack changed, its origin moved, or an
-  open episode covers it), `delete`, `keep_db` and `keep_db_pending` (at most 200
+  open episode covers it and the page is not already current: same blob and
+  revision, chunks and text projection current, no hold), `delete`, `keep_db` and `keep_db_pending` (at most 200
   DB-wins writes per pass; the rest wait for the next pass),
   `legacy_unverified` (the legacy sweep checks it), and `paused_keep_db`
   (which waits for the owner's `sync.admission` change, as paused deletes
