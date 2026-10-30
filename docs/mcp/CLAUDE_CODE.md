@@ -193,8 +193,16 @@ re-run upgrades the block in place, `--dry-run` previews it,
 `gbrain setup claude-code` and `gbrain connect --install` write it for you.
 While the block is installed, setup's UserPromptSubmit hook also leads every turn
 with the same rule, beside the user's message, whether or not `gbrain serve` has
-context to add (`--no-hooks` installs no hook).
-`gbrain doctor` warns when the block is missing or out of date.
+context to add (`--no-hooks` installs no hook). After a plain `claude mcp add`,
+`--instructions-only` adds that hook on its own (a `turn-rule-v1` entry in
+`~/.claude/settings.json` that prints only the rule and reads no brain data),
+unless setup, bootstrap or a gbrain plugin already carries it. It runs the hook
+once to prove it loads and exits non-zero with `turn_hook_not_loaded` when it
+does not ([repair](../guides/repair.md#turn-hook-not-loaded)); `/hooks` inside a
+session lists it. With no absolute gbrain binary to put in the hook, it prints
+the step instead.
+`gbrain doctor` warns when the block is missing or out of date, or its per-turn
+hook is missing or untrusted.
 
 ## Verify
 

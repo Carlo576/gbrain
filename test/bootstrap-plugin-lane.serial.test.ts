@@ -34,7 +34,7 @@ import {
 } from '../src/core/bootstrap/harness.ts';
 import { initState, setAnswer, readBackHash, confirm } from '../src/core/bootstrap/interview.ts';
 import { readReceipt } from '../src/core/bootstrap/format.ts';
-import { REGISTRATION_SURFACE } from '../src/core/mcp-registration.ts';
+import { REGISTRATION_ADVERTISE, REGISTRATION_SURFACE } from '../src/core/mcp-registration.ts';
 
 const REQUIRED_ANSWERS: Record<string, string> = {
   AGENT_NAME: 'Lanekeeper',
@@ -284,7 +284,7 @@ describe('runHooks plugin-lane skip (serial: env fixtures)', () => {
 
   test('hooks --help names the real default surface (#7962)', async () => {
     const r = await capture(() => runBootstrap(['hooks', '--help']));
-    expect(r.out + r.err).toContain(`--surface ${REGISTRATION_SURFACE} unless given`);
+    expect(r.out + r.err).toContain(`--surface ${REGISTRATION_SURFACE} --advertise ${REGISTRATION_ADVERTISE} unless given; a replaced entry keeps its surface, full when unreadable`);
   });
 
   test('codex + plugin + --mcp-even-if-plugin → registration forced through', async () => {

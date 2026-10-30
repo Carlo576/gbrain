@@ -97,6 +97,22 @@ describe('per-turn rule: Claude Code and Codex user-prompt hook', () => {
   });
 });
 
+describe('per-turn rule names the tools where tool_search hides them', () => {
+  test('OpenClaw: names the gbrain tools and the tool_search / tool_call route; Hermes: names mcp_<server>_<tool>', () => {
+    const starter = { kind: 'mcp', server: 'gbrain', surface: 'starter' } as const;
+    const openclaw = renderBrainFirstTurnRule(starter, 'openclaw');
+    expect(openclaw).toContain('find them with `tool_search` (search "gbrain recall") and run them with `tool_call`');
+    expect(openclaw).toContain('`recall`, `entity`, `search`, `query` on the `gbrain` MCP server');
+    expect(openclaw).toContain('tool_search shows them as external data');
+    const hermes = renderBrainFirstTurnRule({ kind: 'mcp', server: 'brain', surface: 'verbs' }, 'hermes');
+    expect(hermes).toContain('find them with `tool_search` (they register as `mcp_brain_recall`, `mcp_brain_entity`, `mcp_brain_remember`)');
+    // Claude Code and Codex list MCP tools directly; a CLI launcher needs no discovery.
+    expect(renderBrainFirstTurnRule(starter, 'claude-code')).not.toContain('tool_search');
+    expect(renderBrainFirstTurnRule(starter)).not.toContain('tool_search');
+    expect(renderBrainFirstTurnRule({ kind: 'cli', launcher: '/opt/gbrain' }, 'openclaw')).not.toContain('tool_search');
+  });
+});
+
 describe('per-turn rule: Hermes pre_llm_call hook in config.yaml', () => {
   const access: BrainFirstAccess = { kind: 'mcp', server: 'gbrain' };
   const cmd = hermesTurnHookCommand(access);
@@ -117,8 +133,8 @@ describe('per-turn rule: Hermes pre_llm_call hook in config.yaml', () => {
     expect(c.endsWith("'")).toBe(true);
     const inner = c.slice("/bin/echo '".length, -1);
     expect(inner).not.toContain("'");
-    expect(JSON.parse(inner)).toEqual({ context: renderBrainFirstTurnRule(quoted) });
-    expect(JSON.parse(cmd.slice("/bin/echo '".length, -1))).toEqual({ context: renderBrainFirstTurnRule(access) });
+    expect(JSON.parse(inner)).toEqual({ context: renderBrainFirstTurnRule(quoted, 'hermes') });
+    expect(JSON.parse(cmd.slice("/bin/echo '".length, -1))).toEqual({ context: renderBrainFirstTurnRule(access, 'hermes') });
   });
 
   test('a flow-style config.yaml, or an allowlist gbrain cannot read, gets the entry printed and both files left as they are', () => {
@@ -264,7 +280,7 @@ describe('per-turn rule: OpenClaw before_prompt_build plugin', () => {
       const handlers: Record<string, () => unknown> = {};
       mod.default.register({ on: (event: string, fn: () => unknown) => { handlers[event] = fn; } });
       expect(Object.keys(handlers)).toEqual(['before_prompt_build']);
-      expect(handlers.before_prompt_build()).toEqual({ prependContext: renderBrainFirstTurnRule(access) });
+      expect(handlers.before_prompt_build()).toEqual({ prependContext: renderBrainFirstTurnRule(access, 'openclaw') });
       expect(syncOpenclawTurnPlugin({ access, dryRun: false, openclawBin: '/bin/openclaw', run: recorder().run }).action).toBe('keep');
     });
   });

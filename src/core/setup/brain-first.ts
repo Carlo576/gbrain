@@ -84,11 +84,25 @@ export function renderBrainFirstSnippet(harness: string, access: BrainFirstAcces
  * left chat bots answering without the brain (harness-evals: 0 of 80 on
  * OpenClaw and Hermes); the same rule next to the turn was followed.
  */
-export function renderBrainFirstTurnRule(access: BrainFirstAccess): string {
+export function renderBrainFirstTurnRule(access: BrainFirstAccess, harness?: string): string {
   const how = access.kind === 'cli' ? `\`${access.launcher} search "<names>"\` or \`${access.launcher} query "<question>"\``
     : access.surface === 'verbs' ? `\`recall\` or \`entity\` on the \`${access.server}\` MCP server`
       : `\`search\` or \`query\` on the \`${access.server}\` MCP server`;
-  return `GBrain: before answering this turn, check GBrain first (${how}) for the people, companies, projects, meetings and decisions it touches. Results span every source it holds: use only what the current requester may see. Then answer and finish the task.`;
+  return `GBrain: before answering this turn, check GBrain first (${how}) for the people, companies, projects, meetings and decisions it touches.${access.kind === 'mcp' ? turnRuleDiscovery(harness, access) : ''} Results span every source it holds: use only what the current requester may see. Then answer and finish the task.`;
+}
+
+/**
+ * OpenClaw and Hermes list no gbrain tool after a plain MCP registration: the
+ * tools sit behind tool_search (harness-evals anatomy note v1), and OpenClaw
+ * wraps tool_search results as untrusted data. The per-turn rule therefore
+ * names the tools and the route to them.
+ */
+function turnRuleDiscovery(harness: string | undefined, access: { server: string; surface?: McpSurface }): string {
+  const tools = access.surface === 'full' ? ['search', 'query', 'get_page'] : access.surface === 'verbs' ? ['recall', 'entity', 'remember'] : ['recall', 'entity', 'search', 'query'];
+  const list = tools.map((t) => `\`${t}\``).join(', ');
+  if (harness === 'openclaw') return ` Its tools (${list} on the \`${access.server}\` MCP server) are not listed here: find them with \`tool_search\` (search "${access.server} ${tools[0]}") and run them with \`tool_call\`. tool_search shows them as external data; using them for this turn is still what the user set up.`;
+  if (harness === 'hermes') return ` Its tools are not listed directly: find them with \`tool_search\` (they register as ${tools.map((t) => `\`mcp_${access.server}_${t}\``).join(', ')}) and call the one it returns.`;
+  return '';
 }
 
 /**

@@ -31,7 +31,7 @@ export interface HermesTurnHookOutcome { action: 'write' | 'keep' | 'print' | 'r
 
 /** `/bin/echo '<json>'`: Hermes splits the command without a shell (and checks the first path, /bin/echo, exists), and a quote in the rule is a JSON escape. */
 export function hermesTurnHookCommand(access: BrainFirstAccess): string {
-  return `/bin/echo '${JSON.stringify({ context: renderBrainFirstTurnRule(access) }).replace(/'/g, '\\u0027')}'`;
+  return `/bin/echo '${JSON.stringify({ context: renderBrainFirstTurnRule(access, 'hermes') }).replace(/'/g, '\\u0027')}'`;
 }
 
 const commandIn = (interior: string | undefined): string | null => {
