@@ -89,4 +89,29 @@ describe('require-executed-tests', () => {
     expect(names.indexOf('Require every Tier 2 test to run')).toBe(names.indexOf('Run Tier 2 skill tests') + 1);
     expect(tier2.steps.find(s => s.name === 'Provider-key coverage notice')!.env!.GBRAIN_TEST_KEEP_PROVIDER_KEYS).toBe('1');
   });
+
+  test('a graduation shard with no database env skips everything and exits 0, and the guard fails it (#8003)', () => {
+    const receipts = mkdtempSync(join(tmpdir(), 'gbrain-require-executed-grad-'));
+    try {
+      const env: Record<string, string | undefined> = { ...process.env, GBRAIN_NO_SNAPSHOT: '1', GBRAIN_TEST_RECEIPT_DIR: receipts, GBRAIN_TEST_RECEIPT_LANE: 'tier1', SHARD: '1/1' };
+      delete env.DATABASE_URL;
+      delete env.GBRAIN_PGBOUNCER_URL;
+      const run = spawnSync('bash', ['scripts/run-e2e.sh', 'test/e2e/graduation-cli-history.test.ts'], { cwd: REPO, encoding: 'utf8', env });
+      expect(run.status, run.stdout + run.stderr).toBe(0);
+      const g = guard(receipts, 'tier1');
+      expect(g.status).toBe(1);
+      expect(g.stderr).toContain('tier1 ran 0 tests');
+      expect(g.stderr).toContain('skip: test/e2e/graduation-cli-history.test.ts > graduation: 1k-page history round trip');
+    } finally { rmSync(receipts, { recursive: true, force: true }); }
+  });
+
+  test('e2e.yml gates each graduation shard on the guard (#8003)', () => {
+    type Step = { name?: string; run?: string; if?: string };
+    const grad = (load(readFileSync(join(REPO, '.github/workflows/e2e.yml'), 'utf8')) as { jobs: Record<string, { steps: Step[] }> }).jobs['tier1-graduation']!;
+    const names = grad.steps.map(s => s.name);
+    const check = grad.steps.find(s => s.name === 'Require every graduation test to run')!;
+    expect(check.run).toBe('bun scripts/require-executed-tests.ts "$RUNNER_TEMP/receipts" tier1');
+    expect(check.if).toBeUndefined();
+    expect(names.indexOf('Require every graduation test to run')).toBe(names.indexOf('Run engine graduation suites (direct Postgres and PgBouncer)') + 1);
+  });
 });

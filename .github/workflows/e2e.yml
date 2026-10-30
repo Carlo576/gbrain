@@ -529,6 +529,11 @@ jobs:
           GBRAIN_TEST_RECEIPT_DIR: ${{ runner.temp }}/receipts
           GBRAIN_TEST_RECEIPT_LANE: tier1
           SHARD: ${{ matrix.shard }}/2
+      # #8003: the graduation files skip without DATABASE_URL and run-e2e.sh
+      # exits 0 on an all-skip run, so a shard with a broken database env
+      # fails here instead of passing with nothing executed.
+      - name: Require every graduation test to run
+        run: bun scripts/require-executed-tests.ts "$RUNNER_TEMP/receipts" tier1
       - name: Upload receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -798,22 +803,16 @@ jobs:
         # moments ago) gets up to 4 attempts 20/40/80 s apart. Step cap is a backstop.
         timeout-minutes: 8
         run: scripts/ci-install-openclaw.sh
+      # #8002: OpenClaw reads MCP servers from mcp.servers in
+      # ~/.openclaw/openclaw.json; the script saves gbrain there with
+      # `openclaw mcp set`, fails unless `openclaw mcp show` reads it back,
+      # and puts scripts/ci-mcp-tap.sh in front of the server so the test step
+      # can require a gbrain tool call.
       - name: Configure OpenClaw MCP
-        run: |
-          mkdir -p ~/.openclaw
-          cat > ~/.openclaw/config.json << 'EOF'
-          {
-            "mcpServers": {
-              "gbrain": {
-                "command": "bun",
-                "args": ["run", "src/cli.ts", "serve"],
-                "env": {
-                  "DATABASE_URL": "${{ env.DATABASE_URL }}"
-                }
-              }
-            }
-          }
-          EOF
+        run: bash scripts/ci-openclaw-mcp.sh
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
+          GBRAIN_TEST_TIER2_MCP_TAP_LOG: ${{ runner.temp }}/gbrain-mcp-tap.jsonl
       - name: Run Tier 2 skill tests
         run: bash scripts/run-with-receipt.sh tier2 skills -- bun test --timeout=60000 test/e2e/skills.test.ts
         env:
@@ -825,6 +824,8 @@ jobs:
           # Keyed by decision (GBRA-108: Tier 2 keyed nightly, about $2 a week).
           GBRAIN_TEST_KEEP_PROVIDER_KEYS: '1'
           GBRAIN_TEST_RECEIPT_DIR: ${{ runner.temp }}/receipts
+          # Each test requires a gbrain tool call in this log (#8002).
+          GBRAIN_TEST_TIER2_MCP_TAP_LOG: ${{ runner.temp }}/gbrain-mcp-tap.jsonl
       # bun test exits 0 when every test skips (an empty secret, a missing
       # openclaw agent), so a keyless or all-skip run fails here instead.
       - name: Require every Tier 2 test to run
