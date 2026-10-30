@@ -4,6 +4,9 @@
  * the parked groups (doctor \`parked_effects\`, \`sources writer status\`) give such effects their own group naming the
  * recorded worktree, the current one, the requests and the settle preview; doctor's per-effect command is that preview;
  * the exact retry refusal names both bindings and the settle preview; the bulk retry names the effects it leaves out.
+ * \`settle-effects --retire\` records that nothing current owes such an effect, only on evidence: its source was replaced,
+ * or each target's page is gone, deleted, replaced or past the revision the effect owed. It is preview-first, plan-bound,
+ * idempotent and reversible, never requeues, and the exact retry still refuses the effect.
  * PGLite always; Postgres too when DATABASE_URL is set.
  */
 import { describe, expect, test } from 'bun:test';
@@ -23,6 +26,7 @@ import { getWorktreeBinding } from '../src/core/persistence/ownership.ts';
 import { runManagedSourceLifecycle } from '../src/core/persistence/source-lifecycle.ts';
 import { isPhysicalRootMetadata } from '../src/core/persistence/physical-root.ts';
 import { checkParkedEffects } from '../src/commands/doctor/checks/parked-effects.ts';
+import { parsePersistenceAdminArgs } from '../src/commands/persistence-admin.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { durableGitRepo } from './helpers/git-publication.ts';
 
@@ -43,6 +47,17 @@ async function park(engine: BrainEngine, slug: string) {
     data=data||jsonb_build_object('parked',jsonb_build_array(jsonb_build_object('slug',$2::text,'error_code','git_unavailable'))) WHERE id=$1`, [effect!.id, slug]);
   return effect!;
 }
+
+async function moveToNewWorktree(engine: BrainEngine, root: string) {
+  const old = (await getWorktreeBinding(engine, 'default'))!;
+  const moved = join(dirname(root), 'moved');
+  cpSync(root, moved, { recursive: true, filter: path => !isPhysicalRootMetadata(basename(path)) });
+  await runManagedSourceLifecycle(engine, { operation: 'rebind', sourceId: 'default', path: moved });
+  return { old, current: (await getWorktreeBinding(engine, 'default'))! };
+}
+type History = { state: string; error_code: string | null; parked: unknown; worktree_id: string; settled: unknown; request_state: string };
+const history = async (engine: BrainEngine, id: number) => (await engine.executeRaw<History>(`SELECT e.state,e.error_code,e.data->'parked' AS parked,
+  e.worktree_id::text AS worktree_id,e.data->'settled' AS settled,r.state AS request_state FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id WHERE e.id=$1`, [id]))[0]!;
 
 describe.each(backends.map(url => [url ? 'postgres' : 'pglite', url] as const))('#7985 effects of a former binding (%s)', (_name, url) => {
   test('the diagnostics name a former-binding effect, its recorded binding and the settle preview, apart from the current binding', () => managedBrain(async ({ engine, ctx, root }) => {
@@ -96,7 +111,77 @@ describe.each(backends.map(url => [url ? 'postgres' : 'pglite', url] as const))(
 
     await sql(engine, 'UPDATE persistence_effects SET source_incarnation=$2::uuid WHERE id=$1', [orphan.id, randomUUID()]);
     const replaced = (await readParkedGroups(engine, ['default']))[1]!;
-    expect(replaced).toMatchObject({ command: settleCode, former_binding: { reason: 'source_replaced', requests: [orphan.request_id] } });
+    expect(replaced).toMatchObject({ command: [...settleCode.slice(0, -1), '--retire', '--dry-run'], former_binding: { reason: 'source_replaced', requests: [orphan.request_id] } });
     expect(replaced.next).toContain('earlier incarnation of the source');
   }, { databaseUrl: url, setup: ({ root }) => { writeFileSync(join(root, '.gitignore'), '\n'); durableGitRepo(root, ['.gitignore']); } }), 240_000);
+
+  test('--retire settles a former-binding effect only when its page moved on, was deleted or its source was replaced, and the exact retry still refuses it', () => managedBrain(async ({ engine, ctx, root }) => {
+    await put(ctx, 'aa/page', 'Parked under the old binding.');
+    const moved = await park(engine, 'aa/page');
+    await put(ctx, 'cc/page', 'Parked under the old binding.');
+    const deleted = await park(engine, 'cc/page');
+    await put(ctx, 'dd/page', 'Parked under the old binding, still current.');
+    const owed = await park(engine, 'dd/page');
+    const { old, current } = await moveToNewWorktree(engine, root);
+    await put(ctx, 'bb/page', 'Parked under the current binding.');
+    const live = await park(engine, 'bb/page');
+    const retire = (apply?: string) => settleEffects(engine, { sourceId: 'default', parkedCode: 'git_unavailable', retire: true, ...(apply ? { apply: true, expect: apply } : {}) });
+    const outcome = async () => Object.fromEntries(((await retire()).effects as Array<{ request_id: string; action: string; refusal?: { code: string } }>)
+      .map(entry => [{ [moved.request_id]: 'aa', [deleted.request_id]: 'cc', [owed.request_id]: 'dd', [live.request_id]: 'bb' }[entry.request_id], entry.refusal?.code ?? entry.action]));
+    expect(await outcome()).toEqual({ aa: 'page_not_moved', cc: 'page_not_moved', dd: 'page_not_moved', bb: 'not_former_binding' });
+
+    await put(ctx, 'aa/page', 'Second version, through the current binding.');
+    const snapshot = await engine.readPageSnapshot('cc/page', { sourceId: 'default' });
+    await submitPageMutation(ctx, { operation: 'delete_page', params: { slug: 'cc/page', expected_revision: snapshot!.revision, request_id: randomUUID() } });
+    await disposePersistenceConsumer(engine);
+    expect(await outcome()).toEqual({ aa: 'would_settle', cc: 'would_settle', dd: 'page_not_moved', bb: 'not_former_binding' });
+
+    const before = await Promise.all([moved, deleted, owed, live].map(effect => history(engine, effect.id)));
+    const preview = await retire();
+    expect(preview).toMatchObject({ mode: 'retire', dry_run: true, settleable: 2, refused: 2,
+      apply_command: ['gbrain', 'sources', 'writer', 'settle-effects', 'default', '--parked-code', 'git_unavailable', '--retire', '--apply', '--expect', preview.plan_hash],
+      fix: { ask_user: true, actor: 'user' } });
+    const proofs = Object.fromEntries((preview.effects as Array<{ request_id: string; proof?: Record<string, unknown> }>).filter(entry => entry.proof).map(entry => [entry.request_id, entry.proof]));
+    expect(proofs[moved.request_id]).toMatchObject({ kind: 'former_binding_retired', reason: 'page_moved', former_worktree_id: old.worktree_id, worktree_id: current.worktree_id,
+      targets: [{ slug: 'aa/page', page: 'moved', owed_revision: expect.any(String), current_revision: expect.any(String) }] });
+    expect(proofs[deleted.request_id]).toMatchObject({ reason: 'page_moved', targets: [{ slug: 'cc/page', page: 'deleted' }] });
+    expect(await Promise.all([moved, deleted, owed, live].map(effect => history(engine, effect.id)))).toEqual(before);
+
+    const plain = await settleEffects(engine, { sourceId: 'default', parkedCode: 'git_unavailable' });
+    await expect(retire(plain.plan_hash)).rejects.toMatchObject({ code: 'preview_changed' });
+    await expect(retire('ph_000000000000000000000000')).rejects.toMatchObject({ code: 'preview_changed' });
+    expect((await history(engine, moved.id)).settled).toBeNull();
+
+    expect(await retire(preview.plan_hash)).toMatchObject({ dry_run: false, settleable: 2 });
+    for (const [index, effect] of [moved, deleted].entries()) {
+      const { settled, ...after } = await history(engine, effect.id);
+      const { settled: was, ...kept } = before[index]!;
+      expect(was).toBeNull();
+      expect(after).toEqual(kept);
+      expect(settled).toMatchObject({ reason: 'former_binding_retired', plan_hash: preview.plan_hash, proof: { kind: 'former_binding_retired' } });
+    }
+    expect(await Promise.all([owed, live].map(effect => history(engine, effect.id)))).toEqual(before.slice(2));
+    await expect(retire(preview.plan_hash)).rejects.toMatchObject({ code: 'preview_changed' });
+    expect(await outcome()).toEqual({ dd: 'page_not_moved', bb: 'not_former_binding' });
+    expect((await readParkedGroups(engine, ['default'])).map(group => [group.effects, group.former_binding?.requests ?? null]))
+      .toEqual([[1, null], [1, [owed.request_id]]]);
+    await expect(retryParkedEffects(engine, 'default', moved.request_id, true)).rejects.toMatchObject({ code: 'source_changed' });
+
+    const undo = await settleEffects(engine, { sourceId: 'default', requestId: moved.request_id, unsettle: true });
+    expect(await settleEffects(engine, { sourceId: 'default', requestId: moved.request_id, unsettle: true, apply: true, expect: undo.plan_hash }))
+      .toMatchObject({ effects: [{ action: 'unsettled' }] });
+    expect((await history(engine, moved.id)).settled).toBeNull();
+
+    await sql(engine, 'UPDATE persistence_effects SET source_incarnation=$2::uuid WHERE id=$1', [owed.id, randomUUID()]);
+    expect(await settleEffects(engine, { sourceId: 'default', requestId: owed.request_id })).toMatchObject({ settleable: 0,
+      effects: [{ action: 'refused', refusal: { code: 'source_replaced', message: expect.stringContaining('--retire') } }] });
+    expect(await settleEffects(engine, { sourceId: 'default', requestId: owed.request_id, retire: true })).toMatchObject({ settleable: 1,
+      effects: [{ action: 'would_settle', proof: { kind: 'former_binding_retired', reason: 'source_replaced', targets: [{ slug: 'dd/page', page: 'source_replaced' }] } }] });
+    await expect(settleEffects(engine, { sourceId: 'default', requestId: owed.request_id, retire: true, unsettle: true })).rejects.toMatchObject({ code: 'invalid_params' });
+  }, { databaseUrl: url, setup: ({ root }) => { writeFileSync(join(root, '.gitignore'), '\n'); durableGitRepo(root, ['.gitignore']); } }), 300_000);
+});
+
+test('settle-effects --retire parses to the writer_settle_effects retire flag', () => {
+  expect(parsePersistenceAdminArgs('writer', ['settle-effects', 'source-a', '--parked-code', 'git_unavailable', '--retire', '--dry-run', '--json'])).toEqual({
+    operation: 'writer_settle_effects', json: true, brain: undefined, params: { source_id: 'source-a', parked_code: 'git_unavailable', retire: true, dry_run: true } });
 });

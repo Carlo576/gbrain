@@ -215,7 +215,12 @@ with its refusal: `retry_instead` (current binding: retry it),
 `remote_ref_missing` or `remote_ref_stale` (fetch in the checkout, then preview
 again), `content_changed`, `content_missing`, `unknown_target`, `withdrawal_effect`
 (never settled), `recovery_open`, `claimed`, `authority_changed`, `source_replaced` and
-`owner_unavailable`. A settlement is recorded on the effect (`data.settled`, every
+`owner_unavailable`. `--retire` (#7985) settles an effect of a former binding
+that nothing current owes, on evidence instead of a remote proof: its source was
+replaced, or each target's page moved to a later revision, was deleted or lost
+its slug to another page (proof `former_binding_retired`; refusals
+`page_not_moved` and `not_former_binding`; the apply asks the user,
+[disposition](repair.md#former-binding-effects)). A settlement is recorded on the effect (`data.settled`, every
 settle and unsettle appended to `data.settlements`); its failure, request, intent
 and target bytes are kept. Doctor `parked_effects`, writer status, the bulk retries
 and `sync status` skip settled effects. `--unsettle` with the same selector

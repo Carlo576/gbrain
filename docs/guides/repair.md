@@ -849,15 +849,30 @@ Disposition, with the user:
    Preview again, show the user the proof, and run the printed `apply_command`
    only after they agree. The settlement keeps the failure, request and bytes,
    and `--unsettle` reverses it.
-2. `reason: source_replaced` (the source was archived, removed or re-created
-   after the effect): it owes nothing to the current source, and neither retry
-   nor settle runs it (settle refuses `source_replaced`). There is no
-   supported command that retires it yet; leave it parked and tell the user
-   what it is.
+2. The page has since moved on (a later write committed a new revision), was
+   deleted, or another page took its slug: nothing current owes the old
+   bytes, so add `--retire` to the preview. Each target is listed with its
+   evidence (`moved`, `deleted`, `replaced` or `absent`, with the owed and
+   current revision). A page still at the owed revision is refused
+   `page_not_moved`: write it through gbrain first. An effect of the current
+   binding is refused `not_former_binding`.
+3. `reason: source_replaced` (the source was archived, removed or re-created
+   after the effect): it owes nothing to the current source, so retry never
+   runs it and plain settle refuses `source_replaced`. Preview
+   `settle-effects <source> --request-id <id> --retire --dry-run` (the group's
+   command); the source being replaced is the evidence.
+
+A retirement is a settlement with proof `former_binding_retired`: preview
+first, bound to the plan hash (a settle plan never applies as a retirement),
+asked of the user (`actor: user`), recorded in `data.settled` and
+`data.settlements`, never requeued or replayed against the current binding,
+idempotent (a second preview lists nothing) and reversed by `--unsettle`. The
+exact retry keeps refusing the effect `source_changed`.
 
 These do not apply to it: `gbrain repair stuck-recovery` resolves recovery
 records blocked on unexpected file bytes, and a parked Git effect without a
-recovery record gives it nothing to resolve; cancelling the request returns a committed request unchanged; receipt
+recovery record gives it nothing to resolve; cancelling the request returns a
+committed request unchanged; receipt
 compaction skips requests with uncommitted effects. A `write-request` read that
 returns `not_found` under another writer identity is a visibility limit, not
 proof the request is gone: writer status and the settle preview read the

@@ -22,7 +22,7 @@ export const CURRENT_BINDING_SQL = `(e.worktree_id IS NULL OR EXISTS (SELECT 1 F
  * group names the .gitignore rule and says the rule has to change first: a retry while it stands parks again. Other groups
  * also name the settle preview (#7423, #7378) for targets a retry can never move; settled effects are not counted.
  * #7985: effects of a former binding form their own group (`former_binding`) naming their recorded worktree, the current
- * one, up to five request ids and the settle preview, never the bulk retry that cannot select them.
+ * one, up to five request ids and the settle preview (`--retire` for a replaced source), never the bulk retry that cannot select them.
  */
 export async function readParkedGroups(engine: Pick<BrainEngine, 'executeRaw'>, sourceIds?: string[]): Promise<ParkedGroup[]> {
   const rows = await engine.executeRaw<{ source_id: string; code: string; former: FormerBinding['reason'] | null; effects: number; targets: number;
@@ -41,11 +41,11 @@ export async function readParkedGroups(engine: Pick<BrainEngine, 'executeRaw'>, 
        FROM parked GROUP BY source_id, code, former ORDER BY source_id, code, former NULLS FIRST`, [sourceIds ?? null]);
   return rows.map(({ rule, former, worktree_ids, current_worktree_id, requests, ...row }) => {
     if (former) {
-      const command = ['gbrain', 'sources', 'writer', 'settle-effects', row.source_id, '--parked-code', row.code, '--dry-run'];
+      const command = ['gbrain', 'sources', 'writer', 'settle-effects', row.source_id, '--parked-code', row.code, ...(former === 'source_replaced' ? ['--retire'] : []), '--dry-run'];
       const recorded = `${row.effects} parked Git effect(s) of source ${row.source_id} (requests ${requests.join(', ')}) were recorded under worktree ${worktree_ids.join(', ')}`;
       const next = former === 'binding_changed'
-        ? `${recorded}, a former canonical binding: the source is now bound to ${current_worktree_id ?? 'no worktree'}. retry-effects refuses them (source_changed) and the bulk retry selects none of them, so its zero is not a clearance. Preview settling them on proof: ${command.join(' ')}; an effect it refuses stays parked and its refusal names what is missing. Never claim or transfer the source to force them through.`
-        : `${recorded}, under an earlier incarnation of the source (archived, removed or re-created since), so they owe nothing to the current source: neither retry-effects nor settle-effects runs them (settle refuses source_replaced). They stay parked as history; never re-create, claim or transfer the source to force them through.`;
+        ? `${recorded}, a former canonical binding: the source is now bound to ${current_worktree_id ?? 'no worktree'}. retry-effects refuses them (source_changed) and the bulk retry selects none of them, so its zero is not a clearance. Preview settling them on proof: ${command.join(' ')}; an effect it refuses stays parked and its refusal names what is missing. One whose page has since moved on or been deleted can be retired instead (the same preview with --retire; ask the user before applying). Never claim or transfer the source to force them through.`
+        : `${recorded}, under an earlier incarnation of the source (archived, removed or re-created since), so they owe nothing to the current source and retry never runs them. Preview recording that: ${command.join(' ')}, and apply it only after the user agrees; never re-create, claim or transfer the source to force them through.`;
       return { ...row, command, next, former_binding: { reason: former, worktree_ids, current_worktree_id, requests } };
     }
     const push = (GIT_PUSH_CODES as readonly string[]).includes(row.code);
