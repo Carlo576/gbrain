@@ -40,6 +40,7 @@ import { ORIGIN_TWINS_AUTO_RESOLVE_KEY, originTwinsPreviewArgv, type OriginConfl
 import { FENCE_REASONS, type FenceMessageLocation } from '../fence-repair/reasons.ts';
 import type { FenceReason, FenceTier, GateLetter } from '../fence-repair/types.ts';
 import { FENCE_VERSION } from '../fence-repair/refusal.ts';
+import { QUOTE_SCREEN_VERSION } from '../fence-repair/quote-markers.ts';
 import { fenceHoldFix, fenceHoldLocation, fencePreviewArgv, readFenceAutoRepair, type FenceAutoRepair, type FenceHoldLocation } from '../fence-repair/hold-fix.ts';
 import { contentHoldDocs, contentHoldFix } from '../content-repair/hold-fix.ts';
 import { classicRenameHoldFix } from '../classic-rename-holds.ts';
@@ -136,6 +137,8 @@ export interface GitHoldMeta {
   fence?: FenceMessageLocation;
   /** #6188: the fence screen version that held it; an older one is re-screened by a newer gbrain. */
   fence_version?: number;
+  /** #8059: the quoted-marker screen version that held it (`QUOTE_SCREEN_VERSION`); an older one is re-screened once, without touching the parser version. */
+  quote_version?: number;
   /** Git-mode holds: the pinned blob, so discovery re-checks every hold with one `ls-tree`. */
   blob_oid?: string;
   /** The held bytes came from the working tree, not the pinned commit. */
@@ -610,6 +613,7 @@ export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, re
     || (record.code === 'managed_image_sync_unsupported' && isMultimodalEnabled())
     || record.meta.recovery_version < RECOVERY_VERSION
     || (record.code === 'invalid_fence' && (record.meta.fence_version ?? 0) < FENCE_VERSION)
+    || (record.code === 'invalid_fence' && (record.meta.quote_version ?? 0) < QUOTE_SCREEN_VERSION)
     // GBRA-133: an unknown-side drift held before #7340's baseline rule (a Git edit to a page with no import record) imports
     // now when the page still holds its file at the baseline commit, so it is screened once more.
     || (record.code === 'file_drift' && fileDriftSide(record.meta) === 'unknown' && (record.meta.drift_version ?? 0) < FILE_DRIFT_VERSION)

@@ -3023,7 +3023,7 @@ Each candidate gets the cheapest tier that repairs it exactly:
 
 | Tier | What it does | Cost |
 | --- | --- | --- |
-| `deterministic` | The lossless rules every write already runs (missing end marker, stray empty cells with one valid removal, row numbers, header aliases and order, enum and kind synonyms, assistant holders, percent confidences). | Free. |
+| `deterministic` | The lossless rules every write already runs (missing end marker, stray empty cells with one valid removal, row numbers, header aliases and order, enum and kind synonyms, assistant holders, percent confidences), plus one only the repair runs: a fence marker quoted in prose (`quoted_marker`) is wrapped in backticks, kept only when every fence row stays put and nothing hidden becomes visible. | Free. |
 | `resolver` | A holder written as a display name becomes the `people/` or `companies/` page it names, only on an exact match (slug, unique slug basename or alias; never a guess, never a private page on a world-visible page). | Free. |
 | `llm` | Rows only a rewrite can realign (no header, a header column with no canonical name, rows above the header, short rows). The repair model sees only the fence header and those rows, never valid rows of a row-level problem and never the rest of the page, with no tools, and answers HOLD instead of guessing when a row has two readings. | Paid, within `fences.repair.max_usd_per_page` ($0.30) and `fences.repair.max_usd_per_day` ($1.00). |
 | `manual` | Anything gbrain never guesses (a stray end marker, an unknown takes kind, a weight out of range, a holder no page matches, extra cells that removing empty cells cannot line up, a sentence in the facts `kind` column). The preview names the exact edit. | Your edit. |
