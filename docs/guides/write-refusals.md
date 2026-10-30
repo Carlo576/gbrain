@@ -193,7 +193,13 @@ retry parks it again; or the effect belongs to a former canonical worktree (the
 source was moved with set-path or a transfer), so `retry-effects --request-id`
 refuses it `source_changed` and `--parked-pushes`, which only reaches the current
 worktree, previews nothing (it now names those effects under `former_worktree`,
-and doctor's `git_push_holds` fix for them is the settle preview). Do not claim
+and doctor's `git_push_holds` fix for them is the settle preview). Doctor
+`parked_effects` and writer status give such effects their own parked group
+(`former_binding`: the recorded worktree, the current one, the request ids and
+the settle preview as `command`), and the exact retry's refusal names both
+bindings with `settle-effects --request-id <id> --dry-run` as its fix; the
+bulk retry's zero never covers them
+([disposition](repair.md#former-binding-effects)). Do not claim
 or transfer the source to force the old effect through. Settle it on proof
 instead: preview with `gbrain sources writer settle-effects <source> --parked-code
 <code> --dry-run` (or `--request-id <id>`), show the user each effect's proof, and

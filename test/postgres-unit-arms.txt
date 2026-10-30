@@ -274,6 +274,7 @@ test/oneshot-housekeeping-cli.test.ts
 test/origin-guard-6948.test.ts
 test/origin-twin-sequence-7150.test.ts
 test/origin-twins-6948.test.ts
+test/orphan-effect-diagnostics-7985.test.ts
 test/overwritten-edits-6712.test.ts
 test/owner-refusal.test.ts
 test/pack-relation-direction-engine.test.ts
