@@ -43,7 +43,7 @@ import type { PublicCategory } from './public-category.ts';
 import { readSyncFile, resolveManagedSyncContext } from './sync-discovery.ts';
 import { sha256 } from './digest.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
-import { passConvergence, passStatusNext, passStatusState } from './sync-pass-status.ts';
+import { openPassRowsStill, passConvergence, passStatusNext, passStatusState } from './sync-pass-status.ts';
 import { MANAGED_SYNC_PASS_OP, readPassRow, SYNC_DELETES_WITHHELD_OP, type PassRow } from './sync-pass-row.ts';
 import { SYNC_ADMISSION_SETTING_PARAMS, syncAdmissionEffectParams, syncAdmissionEffectSql, syncAdmissionSettingSql, syncAdmissionStatus } from './sync-admission.ts';
 import type { DeletesWithheld } from './sync-markers.ts';
@@ -413,7 +413,11 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   // A lease that could not be read decides nothing (undefined): the pass keeps the quiet-window rule.
   const lease = source.drain_lock ? await readDrainLease(engine, sourceId).catch(() => undefined) : null;
   const holder = lease?.live ? lease.holder : null;
-  const interrupted = lease === undefined || passRow?.value.telemetry.outcome !== 'open' ? undefined : !holder;
+  // #7614: a pass that ended and released its lease between the source read and the lease read is not interrupted: the open row must still be the one read above.
+  // A re-read that failed decides nothing either: the pass keeps the quiet-window rule.
+  const raced = source.drain_lock && lease !== undefined && !holder && passRow?.value.telemetry.outcome === 'open'
+    && !(await openPassRowsStill(engine, [{ source_id: sourceId, row: passRow }]).catch(() => undefined))?.has(sourceId);
+  const interrupted = lease === undefined || raced || passRow?.value.telemetry.outcome !== 'open' ? undefined : !holder;
   const passState = passRow ? passStatusState(passRow, withheld, source.writeback_failed, Date.now(), interrupted) : null;
   const resume = !header && passRow ? passResumeArgs(sourceId, passRow) : managedSyncResumeArgs({ sourceId, processingOptions: header?.processingOptions, syncOptions: header?.syncOptions });
   const human = holds.find(hold => hold.needs_human) ?? (liveError?.needs_human ? liveError : undefined);
