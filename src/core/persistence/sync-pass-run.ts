@@ -27,7 +27,7 @@ import { recordedStop, replaysUnchangedRefusal, resumableRowStop } from './sync-
 import { adoptLegacyPage, incomingId, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
 import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { recordPassFenceTrend, type PassStamp, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
-import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
+import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, transientEnding, writePassRow, type ManagedSyncPassValue, type PassEpisode,
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
 import { faultPoint } from './fault-points.ts';
@@ -413,7 +413,7 @@ async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNull
   const obligations: ManagedSyncPassValue['obligations'] = prior ? structuredClone(prior.value.obligations)
     : { baseline_commit: context.source.last_commit, mismatch: {}, not_converged_streak: 0, faults: {} };
   obligations.mismatch ??= {}; obligations.faults ??= {}; obligations.not_converged_streak ??= 0;
-  const abandoned = prior?.value.telemetry.outcome === 'open' ? (obligations.abandoned_streak ?? 0) + 1 : 0;
+  const abandoned = prior && (prior.value.telemetry.outcome === 'open' || transientEnding(prior.value.telemetry)) ? (obligations.abandoned_streak ?? 0) + 1 : 0;
   if (abandoned) obligations.abandoned_streak = abandoned; else delete obligations.abandoned_streak;
   if (handover.episode && !obligations.episode) obligations.episode = handover.episode;
   const passId = randomUUID();
