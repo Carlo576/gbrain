@@ -59,7 +59,7 @@ import {
   renderAmbientInstructionBlock,
   stripAmbientWritebackBlockAt,
 } from './instructions-block.ts';
-import { removeHarnessBrainFirst, removeHarnessTurnHooks, writeHarnessBrainFirst, writeHarnessTurnHooks } from './harness-brain-first.ts';
+import { harnessTurnRuleHosts, removeHarnessBrainFirst, removeHarnessTurnHooks, turnRuleConsentLine, writeHarnessBrainFirst, writeHarnessTurnHooks } from './harness-brain-first.ts';
 import { createEngine } from '../engine-factory.ts';
 import { isValidSourceId } from '../source-id.ts';
 import { ALL_SOURCES, isResolverUserError, localFederatedSourceIds, resolveSourceWithTier } from '../source-resolver.ts';
@@ -642,7 +642,7 @@ export function buildConsentBlock(p: {
     ...(p.wireOpencode ? ['opencode'] : []),
   ];
   const hosts = `EVERY ${hostNames.join(' and ')} session`;
-  const turnRule = p.turnRuleHosts?.length ? `The per-turn brain-first rule hook (UserPromptSubmit: one line telling the agent to check gbrain first; it reads no brain data) is wired for ${p.turnRuleHosts.join(' and ')}. ` : '';
+  const turnRule = turnRuleConsentLine(p.turnRuleHosts);
   const hookLine = turnRule + (!(p.wireClaude && p.hooks)
     ? (p.codexCapture ? 'One hook is wired: Codex SessionEnd transcript capture.' : turnRule ? 'No other hooks are wired by this invocation.' : 'No hooks are wired by this invocation.')
     : p.capture
@@ -1016,8 +1016,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     codexConfig: d.codexConfig,
     opencodeConfig: d.opencodeConfig,
     ...(instructionsPaths.length > 0 ? { instructionsPaths } : {}),
-    turnRuleHosts: flags.noHooks || registrarMode || flags.noInstructions || process.env.GBRAIN_AGENT_INSTRUCTIONS === '0' ? []
-      : [...(wireClaude && !wireHooks ? ['Claude Code'] : []), ...(wireCodex ? ['Codex'] : [])],
+    turnRuleHosts: harnessTurnRuleHosts({ off: flags.noHooks || registrarMode || flags.noInstructions, wireClaude, claudeHooksWired: wireHooks, wireCodex }),
   });
   d.log(consent);
   const harnesses = [wireClaude ? 'Claude Code' : null, wireCodex ? 'Codex' : null, wireOpencode ? 'opencode' : null].filter(Boolean).join(', ');
@@ -1987,12 +1986,10 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
   const cleanup = await convergeHarnessCleanup({ receipt, prior, current: currentSkills, wired: allConfirmed && smokeOk, skillsReady,
     memoryOnly: skillsPolicy === 'memory-only', leave: leaveHarnessSkills, save }, d);
 
-  // 10b. Brain-first instructions beside each confirmed MCP entry.
-  writeHarnessBrainFirst({ hosts: hosts.filter((h) => targets.some((t) => t.host === h && t.kind === 'mcp' && t.state === 'confirmed')),
-    server: flags.name, optOut: flags.noInstructions === true, paths: d, log: d.log });
-  // 10c. The same rule next to every turn where this lane wires no UserPromptSubmit hook of its own.
-  const turnHooks = writeHarnessTurnHooks({ hosts: hosts.filter((h) => targets.some((t) => t.host === h && t.kind === 'mcp' && t.state === 'confirmed')),
-    claudeHooksWired: wireHooks, noHooks: flags.noHooks || registrarMode, gbrainBin: d.gbrainBin, userSettingsPath: d.userSettingsPath, codexConfig: d.codexConfig, log: d.log, logError: d.logError });
+  // 10b. Brain-first instructions beside each confirmed MCP entry; 10c. the same rule next to every turn where this lane wires no UserPromptSubmit hook.
+  const mcpHosts = hosts.filter((h) => targets.some((t) => t.host === h && t.kind === 'mcp' && t.state === 'confirmed'));
+  writeHarnessBrainFirst({ hosts: mcpHosts, server: flags.name, optOut: flags.noInstructions === true, paths: d, log: d.log });
+  const turnHooks = writeHarnessTurnHooks({ hosts: mcpHosts, claudeHooksWired: wireHooks, noHooks: flags.noHooks || registrarMode, gbrainBin: d.gbrainBin, userSettingsPath: d.userSettingsPath, codexConfig: d.codexConfig, log: d.log, logError: d.logError });
 
   // 11. Degradation + skew honesty.
   if (health.engine === 'postgres') {

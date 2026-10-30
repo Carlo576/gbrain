@@ -79,3 +79,13 @@ export function removeHarnessTurnHooks(opts: { userSettingsPath: string; codexCo
     if (o.action === 'remove') opts.log(describeTurnHookOutcome(o).trim());
   }
 }
+
+/** The hosts bootstrap harness gives only the per-turn rule hook (consent block): Claude Code when its own hooks are off, Codex always; none when hooks, instructions or the lane are off. */
+export function harnessTurnRuleHosts(p: { off: boolean | undefined; wireClaude: boolean; claudeHooksWired: boolean; wireCodex: boolean }): string[] {
+  if (p.off || process.env.GBRAIN_AGENT_INSTRUCTIONS === '0') return [];
+  return [...(p.wireClaude && !p.claudeHooksWired ? ['Claude Code'] : []), ...(p.wireCodex ? ['Codex'] : [])];
+}
+
+export function turnRuleConsentLine(hosts: string[] | undefined): string {
+  return hosts?.length ? `The per-turn brain-first rule hook (UserPromptSubmit: one line telling the agent to check gbrain first; it reads no brain data) is wired for ${hosts.join(' and ')}. ` : '';
+}
