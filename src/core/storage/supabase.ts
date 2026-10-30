@@ -150,10 +150,17 @@ export class SupabaseStorage implements StorageBackend {
             }
           }
 
+          const end = Math.min(offset + TUS_CHUNK_SIZE, size);
           if (held && offset < held.start) throw new Error(`TUS server offset ${offset} is behind acknowledged offset ${held.start}`);
-          const retained: boolean = held !== null && offset < held.start + held.bytes.length;
-          const chunk: Buffer = retained ? held!.bytes.subarray(offset - held!.start) : await readChunk(offset, Math.min(offset + TUS_CHUNK_SIZE, size) - offset);
-          if (!retained) held = { start: offset, bytes: chunk };
+          const heldEnd = held ? held.start + held.bytes.length : 0;
+          let chunk: Buffer;
+          if (held && offset < heldEnd) {
+            const tail = Buffer.from(held.bytes.subarray(offset - held.start, Math.min(heldEnd, end) - held.start));
+            chunk = end > heldEnd ? Buffer.concat([tail, await readChunk(heldEnd, end - heldEnd)]) : tail;
+          } else {
+            chunk = await readChunk(offset, end - offset);
+          }
+          held = { start: offset, bytes: chunk };
 
           const patchRes = await this.fetchImpl(uploadUrl, {
             method: 'PATCH',
@@ -173,7 +180,7 @@ export class SupabaseStorage implements StorageBackend {
           }
 
           const newOffset = patchRes.headers.get('Upload-Offset');
-          offset = newOffset ? parseInt(newOffset, 10) : offset + chunk.length;
+          offset = newOffset ? parseInt(newOffset, 10) : end;
           break; // Success, move to next chunk
         } catch (err) {
           attempt++;
