@@ -91,7 +91,8 @@ ancestors are resolved through symlinks, including a not-yet-created target.
 Records are refreshed when an engine connects and remain usable before a second
 process opens local PGLite. Stale records conservatively refuse writes until a
 verified drain and explicit administration cleanup. A shared 0600 refusal marker
-inside git metadata (or `.gbrain-managed` for non-git roots) also protects supported
+inside git metadata (or `.gbrain-managed` for a root no checkout tracks, such as a
+connector clone a dotfiles home only encloses) also protects supported
 commands using another home. Marker existence never grants publication authority.
 
 The native worktree lock and database ownership rows grant authority. Registry

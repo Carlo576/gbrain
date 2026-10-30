@@ -239,6 +239,7 @@ test/managed-facts-withdrawn-skip-6506.test.ts
 test/managed-lint.test.ts
 test/managed-maintenance-links.test.ts
 test/managed-root-aliases-7203.test.ts
+test/managed-root-marker-enclosing-7988.test.ts
 test/managed-sweep-corpus-windows.test.ts
 test/managed-sweep-refused-window-retry.test.ts
 test/managed-sweep-timeline.test.ts
