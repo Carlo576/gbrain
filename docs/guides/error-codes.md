@@ -4263,9 +4263,9 @@ More: [docs/guides/troubleshooting.md#sync-freshness-no-successful-sync](../../d
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Sync does not apply to this source: its directory is not a Git checkout. | Sync imports changes between Git commits. A gbrain-owned content directory (created by init) holds files gbrain manages itself and is not a Git repository, so there is nothing to sync; gbrain never initializes Git on its own. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+| Sync does not apply to this source: its directory is not a Git checkout. | Sync imports changes between Git commits. A gbrain-owned content directory (created by init) holds files gbrain manages itself and is not a Git repository, so there is nothing to sync; gbrain never initializes Git on its own. `reason: plain_directory` (#7973): a plain directory registered with `sources add --force` is not a Git checkout, so the managed Git path refuses it; `gbrain sync --source <id>` imports its files without Git. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
-Reasons: `content_directory`.
+Reasons: `content_directory`, `plain_directory`.
 
 ### sync_parser_regression
 

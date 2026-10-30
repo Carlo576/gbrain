@@ -510,6 +510,7 @@ test/sync-pass-interrupted-7596.test.ts
 test/sync-pass-phase-lines-7243.serial.test.ts
 test/sync-pass-readers-7614.test.ts
 test/sync-pass-stop-in-level-gbra133.test.ts
+test/sync-plain-directory-7973.test.ts
 test/sync-prescreen-both-delta-6712.test.ts
 test/sync-prescreen-drift-6712.test.ts
 test/sync-slug-root-mode-6694.test.ts
