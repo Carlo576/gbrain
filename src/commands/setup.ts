@@ -453,7 +453,7 @@ export async function runSetup(args: string[]): Promise<number> {
         { step: 'hooks', action: found.hooksCurrent ? 'keep' : 'write', detail: plan.events.length ? `${plan.events.join(', ')} in ${found.settingsPath}` : `no hooks (${found.settingsPath})` },
         ...Object.entries(found.edited).map(([event]) => ({ step: 'hooks' as const, action: 'preserve' as const, detail: `${event} was edited after setup wrote it; kept` })),
       ];
-      const instructions = brainFirstFor('claude-code', flags, { kind: 'mcp', server: flags.name, surface }, { scope, projectDir });
+      const instructions = brainFirstFor('claude-code', flags, { kind: 'mcp', server: flags.name, surface: plan.advertise ?? surface }, { scope, projectDir });
       return finish(out, { dryRun: true, target, consent, steps, states: [], verify: null, notices: [], notes, instructions });
     }
 
@@ -463,7 +463,7 @@ export async function runSetup(args: string[]): Promise<number> {
       beforeMcp: brainCreate ? async () => { notices = runBrainInit(initArgv, out, 'claude-code'); } : undefined,
     });
     for (const s of result.steps) say(out, `  ${s.action.padEnd(8)} ${s.step.padEnd(7)} ${s.detail}`);
-    const instructions = brainFirstFor('claude-code', flags, { kind: 'mcp', server: flags.name, surface }, { scope, projectDir });
+    const instructions = brainFirstFor('claude-code', flags, { kind: 'mcp', server: flags.name, surface: plan.advertise ?? surface }, { scope, projectDir });
     if (!result.changed && !instructionsChanged(instructions)) say(out, 'Nothing changed: this install is already wired.');
 
     let verify: { ok: boolean; reason: string; message: string } | null;
@@ -603,7 +603,7 @@ async function runCodexSetup(flags: SetupFlags, launcher: string, cfg: GBrainCon
         { step: 'trust', action: found.trustCurrent ? 'keep' : 'write', detail: `trust entries for setup's groups in ${found.configPath}` },
         ...Object.keys(found.edited).map((event) => ({ step: 'hooks' as const, action: 'preserve' as const, detail: `${event} was edited after setup wrote it; kept` })),
       ];
-      const instructions = brainFirstFor('codex', flags, { kind: 'mcp', server: flags.name, surface }, {});
+      const instructions = brainFirstFor('codex', flags, { kind: 'mcp', server: flags.name, surface: plan.advertise ?? surface }, {});
       return finish(out, { harness: 'codex', dryRun: true, target, consent, steps, states: [], verify: null, notices: [], notes, instructions });
     }
 
@@ -614,7 +614,7 @@ async function runCodexSetup(flags: SetupFlags, launcher: string, cfg: GBrainCon
     });
     for (const s of result.steps) say(out, `  ${s.action.padEnd(8)} ${s.step.padEnd(7)} ${s.detail}`);
     for (const n of result.notes) say(out, `note: ${n}`);
-    const instructions = brainFirstFor('codex', flags, { kind: 'mcp', server: flags.name, surface }, {});
+    const instructions = brainFirstFor('codex', flags, { kind: 'mcp', server: flags.name, surface: plan.advertise ?? surface }, {});
     if (!result.changed && !instructionsChanged(instructions)) say(out, 'Nothing changed: this install is already wired.');
 
     let verify: { ok: boolean; reason: string; message: string };
