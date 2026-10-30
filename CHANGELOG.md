@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.502.0] - 2026-10-30
 
 **The secret scanner now catches OpenRouter, Groq, xAI, Perplexity and Replicate API keys.**
 
@@ -18,7 +18,7 @@ A raw OpenRouter key (`sk-or-v1-` plus 64 hex) slipped past every lane: the bare
 
 ### What to do after upgrading
 
-- A push that worked before can now stop with `rule [openrouter] blocks pushes since gbrain v0.60.500.0` (or groq, xai, perplexity, replicate). Rotate the key with the provider and remove it from the page. Don't allowlist a live key.
+- A push that worked before can now stop with `rule [openrouter] blocks pushes since gbrain v0.60.502.0` (or groq, xai, perplexity, replicate). Rotate the key with the provider and remove it from the page. Don't allowlist a live key.
 - `gbrain doctor` asks for a fresh transcript audit once, because the audit's detectors changed. Run `gbrain transcripts audit-secrets --json` to list conversation pages that still hold such a key (slugs and line numbers, never values).
 
 ### Itemized changes
