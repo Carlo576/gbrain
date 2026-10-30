@@ -110,9 +110,32 @@ describe.skipIf(!DATABASE_URL)('#7599 serve --access read-only on the session la
   }, 120_000);
 
   test('a read-write serve keeps its 3-connection resident direct pool and its notifier lease', async () => {
-    const s = await startServe('full');
+    // The pool opens a connection only when every open one is busy, so how many a serve holds depends on how its boot work
+    // overlaps. Holding the brain row blocks the boot transactions on their connections, so the pool has to open all 3.
+    const holder = new PostgresEngine();
+    await holder.connect({ database_url: directBase, poolSize: 1 });
+    let release!: () => void;
+    let held!: () => void;
+    const brainHeld = new Promise<void>(resolve => { held = resolve; });
+    const holding = holder.transaction(async tx => {
+      await tx.executeRaw('SELECT singleton FROM persistence_brain WHERE singleton=1 FOR UPDATE');
+      held();
+      await new Promise<void>(resolve => { release = resolve; });
+    });
+    await brainHeld;
     let n = 0;
-    for (let i = 0; i < 60 && n < 3; i++) { n = await directConnections(); if (n < 3) await Bun.sleep(500); }
+    let s: Awaited<ReturnType<typeof startServe>>;
+    try {
+      s = await startServe('full');
+      for (let i = 0; i < 60 && n < 3; i++) { n = await directConnections(); if (n < 3) await Bun.sleep(500); }
+      // gstack-timing-ok: the pool is full and its boot work is blocked; a pool above its cap would open a 4th within this window
+      await Bun.sleep(2_000);
+      n = await directConnections();
+    } finally {
+      release();
+      await holding;
+      await holder.disconnect();
+    }
     expect(n).toBe(3);
     for (let i = 0; i < 60 && !s.log().includes("owner of this host's notifier"); i++) await Bun.sleep(500);
     expect(s.log()).toContain("owner of this host's notifier");
