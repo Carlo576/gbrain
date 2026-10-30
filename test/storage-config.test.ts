@@ -180,10 +180,35 @@ describe('loadStorageConfig — real-disk loader', () => {
     }
   });
 
-test('#8007: a one-line flow list resolves its directories, quoted or not', () => {
+  test('#8007: a one-line flow list resolves its directories, quoted or not', () => {
     try {
       writeFileSync(join(tmp, 'gbrain.yml'), "storage:\n  db_only: [conversations/, 'media/x/', \"notes/\"]\n  db_tracked: [people/]\n");
       expect(loadStorageConfig(tmp)).toMatchObject({ db_only: ['conversations/', 'media/x/', 'notes/'], db_tracked: ['people/'] });
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('#8007: a comma inside a quoted flow value stays in that value; a nested list resolves nothing', () => {
+    try {
+      writeFileSync(join(tmp, 'gbrain.yml'), "storage:\n  db_only: ['a, b/', c/]\n");
+      expect(loadStorageConfig(tmp)!.db_only).toEqual(['a, b/', 'c/']);
+      writeFileSync(join(tmp, 'gbrain.yml'), 'storage:\n  db_only: [[a/]]\n');
+      expect(loadStorageConfig(tmp)?.db_only ?? []).toEqual([]);
+      expect(hasUnresolvedDbOnlyDeclaration(tmp, loadStorageConfig(tmp))).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('#8007: a deprecated supabase_only list ignored next to canonical keys is flagged, so delete decisions treat db_only as unknown', () => {
+    try {
+      writeFileSync(join(tmp, 'gbrain.yml'), 'storage:\n  db_only: [private/]\n  supabase_only:\n    - archive/\n');
+      expect(loadStorageConfig(tmp)).toEqual({ db_tracked: [], db_only: ['private/'], deprecated_db_only_ignored: true });
+      writeFileSync(join(tmp, 'gbrain.yml'), 'storage:\n  db_only: [private/]\n');
+      expect(loadStorageConfig(tmp)).toEqual({ db_tracked: [], db_only: ['private/'] });
+      writeFileSync(join(tmp, 'gbrain.yml'), 'storage:\n  supabase_only:\n    - archive/\n');
+      expect(loadStorageConfig(tmp)).toEqual({ db_tracked: [], db_only: ['archive/'] });
     } finally {
       cleanup();
     }

@@ -17,6 +17,11 @@ export interface StorageConfig {
    * the database copy by the trusted local maintenance worker on the canonical owner host (repair/keep-db-policy.ts).
    */
   keep_db?: string[];
+  /**
+   * #8007: a deprecated `supabase_only` list sat next to canonical keys and was ignored (canonical wins), so which pages
+   * are database-only is ambiguous; a caller deciding whether a missing file deletes its page holds it instead.
+   */
+  deprecated_db_only_ignored?: true;
 }
 
 export type StorageTier = 'db_tracked' | 'db_only' | 'unspecified';
@@ -107,8 +112,8 @@ function parseStorageYaml(content: string, unknown: string[] = []): RawStorage |
       currentList = key as keyof RawStorage;
       // Inline flow list on one line: `db_only: []` or `db_only: [dir/, 'other/']`.
       const flow = /^\[(.*)\]$/.exec(indented.slice(colon + 1).trim());
-      if (flow) {
-        const values = flow[1]!.split(',').map((value) => value.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+      if (flow && !/[[\]]/.test(flow[1]!)) {
+        const values = [...flow[1]!.matchAll(/\s*("[^"]*"|'[^']*'|[^,]*)\s*(?:,|$)/g)].map((m) => m[1]!.replace(/^["']|["']$/g, '').trim()).filter(Boolean);
         raw[currentList] = [...(raw[currentList] ?? []), ...values];
       }
       continue;
@@ -168,6 +173,7 @@ function normalizeStorageConfig(raw: RawStorage): StorageConfig {
       db_tracked: raw.db_tracked ?? [],
       db_only: raw.db_only ?? [],
       ...keep,
+      ...(raw.supabase_only?.length ? { deprecated_db_only_ignored: true as const } : {}),
     };
   }
 
@@ -348,7 +354,8 @@ export function normalizeAndValidateStorageConfig(input: StorageConfig): Storage
     }
   }
 
-  return { db_tracked: tracked.normalized, db_only: dbonly.normalized, ...(keep ? { keep_db: keep.normalized } : {}) };
+  return { db_tracked: tracked.normalized, db_only: dbonly.normalized, ...(keep ? { keep_db: keep.normalized } : {}),
+    ...(input.deprecated_db_only_ignored ? { deprecated_db_only_ignored: true as const } : {}) };
 }
 
 /**

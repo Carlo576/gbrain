@@ -810,7 +810,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && live && (record ? pages.fullEpisode[at!] : undefined) !== input.pass.episodeFullId
         : input.full === true && live,
       derivedCurrent: live && pages.derivedCurrent(at!), fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
-      keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes), dbOnly: row && (dbOnlyUnknown ? 'unknown' : isDeclaredDbOnlySlug(pages.slug[at!]!, storage)),
+      keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes), dbOnly: row && (isDeclaredDbOnlySlug(pages.slug[at!]!, storage) || (dbOnlyUnknown ? 'unknown' : false)),
       openWork: row && open.pageIds.has(Number(pages.id[at!])) || open.origins.has(origin),
     };
     return { state, ...(row ? { at } : {}), ...(legacyPageless ? { legacyPageless } : {}) };
@@ -968,7 +968,7 @@ async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContex
   return { slugMode: settled(slugModeRead), exclude: settled(excludeRead), pack: settled(packRead), mirror: settled(mirrorRead), workingConfig: settled(workingRead),
     metafilePages: settled(metafilePagesRead), strict: context.source.config?.canonical === 'git', strategy: input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown',
     includeHidden: [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))],
-    keepDbPrefixes: storage?.keep_db ?? [], storage, dbOnlyUnknown: storageInvalid || hasUnresolvedDbOnlyDeclaration(root, storage) };
+    keepDbPrefixes: storage?.keep_db ?? [], storage, dbOnlyUnknown: storageInvalid || storage?.deprecated_db_only_ignored === true || hasUnresolvedDbOnlyDeclaration(root, storage) };
 }
 
 /** A failed mark, proof or delta read: the round reads again without them (it aborted a Postgres snapshot). */

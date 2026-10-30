@@ -720,7 +720,7 @@ function deletedDriftFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'met
   const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
   if (state === 'file_gone' && record.meta.reason === 'storage_invalid') {
     return { argv: ['gbrain', 'storage', 'status'], consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/storage-tiering.md',
-      why: `${record.path} is gone, but gbrain.yml's storage section is invalid or declares db_only in a form that resolved no directory, so sync cannot tell whether page ${slug} is database-only and kept it instead of deleting it (#8007). This read-only check names the problem; fix gbrain.yml at the source root (list db_only directories in block style or as a one-line [a/, b/] list), commit it, then sync again.`,
+      why: `${record.path} is gone, but gbrain.yml's storage section is invalid or ambiguous about db_only (it does not load, declares db_only in a form that resolved no directory, or lists a deprecated supabase_only next to canonical keys), so sync cannot tell whether page ${slug} is database-only and kept it instead of deleting it (#8007). This read-only check names the problem; fix gbrain.yml at the source root (list db_only directories in block style or as a one-line [a/, b/] list), commit it, then sync again.`,
       then: { argv: ['gbrain', 'sync', '--source', source, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false, verify,
         why: `Decides ${record.path} again under the fixed gbrain.yml: a database-only page is kept, any other deletion follows its usual proof.` },
       verify };
