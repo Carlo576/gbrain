@@ -117,5 +117,14 @@
     ],
     "visibility": "public"
   },
-  "remote_gate": "bash scripts/pregate-remote-gate.sh"
+  "remote_gate": "bash scripts/pregate-remote-gate.sh",
+  "allowlist": [
+    {
+      "finding": "pii.phone.e164",
+      "paths": [
+        "scripts/*-weights.metadata.json"
+      ],
+      "reason": "shard-weight metadata records GitHub Actions run ids and commit counts, never phone numbers"
+    }
+  ]
 }
