@@ -6,6 +6,7 @@
  * archived source is not listed; a stop the run records nowhere (a lost connection, a lost lease) ends the row resumable, so
  * only a dead process leaves it open; and the notifier and watermark readers no longer stand a killed holder in for a live one.
  */
+import { OperationError } from '../src/core/ops/contract.ts';
 import { describe, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -202,5 +203,19 @@ for (const backend of testBackends()) {
       expect(await blocked()).toEqual([]);
     }
     expect((await sync()).status).toMatch(/^(up_to_date|synced)$/);
+  });
+
+  synced('#7614 review: a permission refusal is not a passing stop; the pass row stays open and reads interrupted, then abandoned', async ({ engine, root, sync, status, blocked }) => {
+    const [{ incarnation }] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation::text AS incarnation FROM sources WHERE id='default'");
+    for (const i of [0, 1]) {
+      commitFile(root, `denied-${i}.md`);
+      installFaultHook(async point => { if (point === 'sync:round_start') throw new OperationError('permission_denied', 'The writer grant for source default was revoked.'); });
+      try { await expect(sync()).rejects.toThrow('revoked'); } finally { installFaultHook(undefined); }
+      const stopped = (await readPassRow(engine, 'default', incarnation!))!;
+      expect(stopped.value.telemetry.outcome).not.toBe('resumable');
+      expect(stopped.value.telemetry.stop_reason ?? null).not.toBe('transient');
+    }
+    expect((await status()).reason).toBe('pass_abandoned');
+    expect((await blocked()).map(entry => entry.code)).toEqual(['pass_abandoned']);
   });
 }
