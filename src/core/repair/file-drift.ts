@@ -526,7 +526,7 @@ async function fileGonePage(engine: BrainEngine, sourceId: string, slug: string,
   const deletion = canonicalDeletionState(root, join(root, ...now.ghost.path.split('/')));
   if (deletion !== 'gone') return { skip: deletion === 'in_head' ? 'deletion_uncommitted' : 'unknown_deletion_state', detail: missingFileRoute(sourceId, slug, now.ghost.path, deletion) };
   if (opts.prefer === 'file' && sourceDbOnlyVerdict(root, slug) === 'unknown') return { skip: 'storage_invalid',
-    detail: `gbrain.yml's storage section is invalid or ambiguous about db_only, so whether ${slug} is database-only is unknown and --prefer file would delete it (#8007): run gbrain storage status, fix gbrain.yml, commit it, then gbrain sync --source ${sourceId} --no-pull` };
+    detail: `gbrain.yml's storage section is invalid or ambiguous about db_only, so whether ${slug} is database-only is unknown and --prefer file would delete it (#8007): run gbrain storage status, fix gbrain.yml, commit it, then sync source ${sourceId} again` };
   if (opts.provenance === 'never_committed' && target?.provenance?.kind === 'never_committed') {
     return { page: { slug, prefer: 'database', exceptions: [], detach_page: { path: now.ghost.path, page_id: now.ghost.page_id, revision: now.ghost.revision, observed_at: target.hold.observed_at } },
       detail: `keeps the page database-only: no commit ever held ${now.ghost.path}, so the page holds the only copy; no file is written and the page forgets that path` };
