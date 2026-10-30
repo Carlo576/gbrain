@@ -68,7 +68,8 @@ export async function readBlockedManagedSyncs(engine: BrainEngine, sourceIds?: s
     return { source_id, row, interrupted, abandoned: abandonedPasses(row, now, interrupted) >= ABANDONED_REPORT_STREAK };
   }).filter(entry => entry.interrupted || entry.abandoned);
   // #7614: a pass that ended (releasing its lease) after the pass read changed its row, so it is not listed; nor is an archived source.
-  const still = candidates.length ? await openPassRowsStill(engine, candidates) : new Set<string>();
+  // A re-read that failed lists nothing new.
+  const still = candidates.length ? await openPassRowsStill(engine, candidates).catch(() => new Set<string>()) : new Set<string>();
   for (const { source_id, row, abandoned } of candidates) {
     if (still.has(source_id)) listed.push({ source_id, code: abandoned ? 'pass_abandoned' : 'pass_interrupted', run_id: row.value.telemetry.pass_id, blocked_since: abandoned ? passStuckSince(row) : row.updated_at });
   }

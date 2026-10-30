@@ -26,7 +26,7 @@ gbrain doctor --only managed_sync_blocked
 ### Itemized changes
 
 - Sync pass and lease readers (`sync-status`, doctor `managed_sync_blocked`): one observation per decision, database-clock lock liveness, `openPassRowsStill`, one `inspectLocks` query for every open-pass source (#7611, #7614).
-- `resumableRowStop`: transient and lease-lost stops end the pass row `resumable`, while a permission refusal keeps the row open so it still reads interrupted, then abandoned; a lost-lease row is written under its own lease token only (#7614).
+- `resumableRowStop`: transient and lease-lost stops end the pass row `resumable`, while a permission refusal keeps the row open so it still reads interrupted, then abandoned; a lost-lease row is written under its own lease token only, and a stop never rewrites a row its pass already ended (a folded stamp's `synced` row keeps its watermark) (#7614).
 - `readLiveDrainHolder`: the notifier block, the on-commit notifier and `sources status` `writer_heartbeat` read the drain holder only while it renews (#7614).
 - Lean read-only Postgres serve: a source-keyed read socket; hooks try source, then read, then legacy; delegated sync never targets the read socket (#7612).
 - `EffectWorkerOptions.lockWaitMs` (test seam, default unchanged) cuts the w5 contention scenario from 37 s to 2.5 s (#7782).

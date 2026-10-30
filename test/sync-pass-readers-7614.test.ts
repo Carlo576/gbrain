@@ -25,6 +25,7 @@ import { readAppliedWatermark } from '../src/core/persistence/applied-watermark.
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { readBlockedManagedSyncs } from '../src/core/persistence/sync-blocked.ts';
 import { readSourceMovement } from '../src/core/persistence/sync-movement.ts';
+import * as passStatus from '../src/core/persistence/sync-pass-status.ts';
 import { abandonedPasses, passStatusState } from '../src/core/persistence/sync-pass-status.ts';
 import { MANAGED_SYNC_PASS_OP, type PassRow, readPassRow } from '../src/core/persistence/sync-pass-row.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
@@ -131,6 +132,15 @@ for (const backend of testBackends()) {
       expect((await status()).reason).toBe('pass_unfinished');
       expect(await blocked()).toEqual([]);
     } finally { for (const spy of failed) spy.mockRestore(); }
+  });
+
+  synced('#7652 review: a failed re-read of the open pass row decides nothing in status and lists nothing in doctor', async ({ engine, status, blocked }) => {
+    await setPass(engine, 'open', 0); await dead(engine);
+    const failed = spyOn(passStatus, 'openPassRowsStill').mockRejectedValue(new Error('pass row read failed'));
+    try {
+      expect((await status()).reason).toBe('pass_unfinished');
+      expect(await blocked()).toEqual([]);
+    } finally { failed.mockRestore(); }
   });
 
   synced('#7614: doctor\'s message for killed passes only, the human INTERRUPTED line and the sync_blocked health band', async ({ engine }) => {

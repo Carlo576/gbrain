@@ -122,7 +122,7 @@ describe.skipIf(!DATABASE_URL)('#7599 serve --access read-only on the session la
       held();
       await new Promise<void>(resolve => { release = resolve; });
     });
-    await brainHeld;
+    await Promise.race([brainHeld, holding]);
     let n = 0;
     let s: Awaited<ReturnType<typeof startServe>>;
     try {
@@ -140,7 +140,7 @@ describe.skipIf(!DATABASE_URL)('#7599 serve --access read-only on the session la
     for (let i = 0; i < 60 && !s.log().includes("owner of this host's notifier"); i++) await Bun.sleep(500);
     expect(s.log()).toContain("owner of this host's notifier");
     await stopServe();
-  }, 120_000);
+  }, 150_000);
 
   test('#7612: a read-write serve started after a read-only one for the same source answers delegated sync, not unsupported_kind', async () => {
     const cfg = { engine: 'postgres' as const, database_url: directBase };

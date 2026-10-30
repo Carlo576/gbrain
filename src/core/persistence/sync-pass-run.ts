@@ -760,7 +760,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const stampFor = (level: ShadowLevel) => passStampFor(engine, { context, head, slugMode: levelSlugMode, episode, selection, configured, mode, leaseToken: lease.token, retry, level, selectionFp, parserFp,
     pack, full: kind === 'full', counts, extract: !processingOptions.noExtract, since: value.telemetry.started_at, rescreen: legacyWaived.size > 0, closures });
 
-  const save = async (outcome: PassOutcome, stopReason: string | null, pin = false, fenced = true) => {
+  const save = async (outcome: PassOutcome, stopReason: string | null, pin = false, fenced = true, onlyOpen = false) => {
     await beat.pending; const ended = outcome !== 'open';
     if (ended && outcome !== 'synced') {
       const open = await openPassRequests(engine, { sourceId, passId, carried: value.obligations.pending_requests ?? [] });
@@ -770,7 +770,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       classes: applied.classes, ...(applied.summary ? { summary: applied.summary } : {}),
       ...(ended ? { ended_at: new Date().toISOString(), duration_ms: Date.now() - started } : {}) };
     if (outcome === 'blocked' || stopReason === 'not_converged') value.obligations.stuck_since ??= new Date().toISOString();
-    await engine.transaction(async tx => { if (fenced) await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin }); });
+    await engine.transaction(async tx => { if (fenced) await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin, onlyOpen }); });
   };
   // GBRA-108: a committed legacy-sweep slice is progress the row and the drain's governor see; #7355: so is a level read still working (`levelBeat`).
   const onSwept = async () => { assertActive(); await save('open', null); opts.onProgress?.({ phase: 'managed_sync.legacy_swept', bankedFiles: sliceBase.pages }); }, beat = levelBeat(opts, sliceBase, () => save('open', null));
@@ -998,11 +998,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') {
       // A folded stamp with nothing since ended the pass: the abort stops nothing it owes.
       if (folded?.done === doneKey()) return synced(true);
-      await save('resumable', 'timeout').catch(() => undefined); return result('partial', 'timeout');
+      await save('resumable', 'timeout', false, true, true).catch(() => undefined); return result('partial', 'timeout');
     }
     // A Git listing that did not finish cleanly classifies nothing (design v3.2 §9): the pass stops blocked, having written nothing for that round.
     if (error instanceof SyncTreeReadIncomplete) { await save('blocked', 'reconcile_read_incomplete').catch(() => undefined); return result('blocked_by_failures', 'reconcile_read_incomplete'); }
-    const stop = resumableRowStop(error); if (stop) await save('resumable', stop, false, stop !== 'lease_lost').catch(() => undefined); throw error;
+    const stop = resumableRowStop(error); if (stop) await save('resumable', stop, false, stop !== 'lease_lost', true).catch(() => undefined); throw error;
   } finally {
     unregisterPassCost(passId);
   }

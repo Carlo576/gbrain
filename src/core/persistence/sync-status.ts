@@ -414,7 +414,9 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const lease = source.drain_lock ? await readDrainLease(engine, sourceId).catch(() => undefined) : null;
   const holder = lease?.live ? lease.holder : null;
   // #7614: a pass that ended and released its lease between the source read and the lease read is not interrupted: the open row must still be the one read above.
-  const raced = source.drain_lock && lease !== undefined && !holder && passRow?.value.telemetry.outcome === 'open' && !(await openPassRowsStill(engine, [{ source_id: sourceId, row: passRow }])).has(sourceId);
+  // A re-read that failed decides nothing either: the pass keeps the quiet-window rule.
+  const raced = source.drain_lock && lease !== undefined && !holder && passRow?.value.telemetry.outcome === 'open'
+    && !(await openPassRowsStill(engine, [{ source_id: sourceId, row: passRow }]).catch(() => undefined))?.has(sourceId);
   const interrupted = lease === undefined || raced || passRow?.value.telemetry.outcome !== 'open' ? undefined : !holder;
   const passState = passRow ? passStatusState(passRow, withheld, source.writeback_failed, Date.now(), interrupted) : null;
   const resume = !header && passRow ? passResumeArgs(sourceId, passRow) : managedSyncResumeArgs({ sourceId, processingOptions: header?.processingOptions, syncOptions: header?.syncOptions });
