@@ -6,10 +6,11 @@
 import { expect, test } from 'bun:test';
 import { parsePersistenceAdminArgs } from '../src/commands/persistence-admin.ts';
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
-import { dbOnlyTargetSettles, failedCurrentPushRetries, formerWorktreeEffectsSettle, withdrawalEffectRefuses } from './helpers/effect-settle-scenarios.ts';
+import { dbOnlyTargetSettles, failedCurrentPushRetries, formerWorktreeEffectsSettle, settledEffectIsNotRearmed, withdrawalEffectRefuses } from './helpers/effect-settle-scenarios.ts';
 
 test('#7423 a parked target declared db_only afterwards settles on proof, stays in history, and unsettles', () => dbOnlyTargetSettles(), 180_000);
 test('#7378 former-worktree Git effects settle only when the fetched remote holds the current bytes', () => formerWorktreeEffectsSettle(), 240_000);
+test('#7423 a settled effect is not re-armed when its request\'s withdrawal mirror commits', () => settledEffectIsNotRearmed(), 180_000);
 test('#7378 a withdrawal effect never settles', () => withdrawalEffectRefuses(), 120_000);
 test('#7378 a failed push of the current binding without parked targets is retried by --parked-pushes', () => failedCurrentPushRetries(), 120_000);
 

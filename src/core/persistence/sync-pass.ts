@@ -810,8 +810,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && live && (record ? pages.fullEpisode[at!] : undefined) !== input.pass.episodeFullId
         : input.full === true && live,
       derivedCurrent: live && pages.derivedCurrent(at!), fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
-      keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes),
-      dbOnly: row && isDeclaredDbOnlySlug(pages.slug[at!]!, storage),
+      keepDb: !mirror && keepDbPrefixes.length > 0 && row && isKeepDbSlug(pages.slug[at!]!, keepDbPrefixes), dbOnly: row && isDeclaredDbOnlySlug(pages.slug[at!]!, storage),
       openWork: row && open.pageIds.has(Number(pages.id[at!])) || open.origins.has(origin),
     };
     return { state, ...(row ? { at } : {}), ...(legacyPageless ? { legacyPageless } : {}) };

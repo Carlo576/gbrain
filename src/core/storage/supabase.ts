@@ -132,6 +132,7 @@ export class SupabaseStorage implements StorageBackend {
 
     // Step 2: Upload chunks
     let offset = 0;
+    let held: { start: number; bytes: Buffer } | null = null;
     while (offset < size) {
       let attempt = 0;
       const maxAttempts = 3;
@@ -149,8 +150,10 @@ export class SupabaseStorage implements StorageBackend {
             }
           }
 
-          const end = Math.min(offset + TUS_CHUNK_SIZE, size);
-          const chunk = await readChunk(offset, end - offset);
+          if (held && offset < held.start) throw new Error(`TUS server offset ${offset} is behind acknowledged offset ${held.start}`);
+          const retained: boolean = held !== null && offset < held.start + held.bytes.length;
+          const chunk: Buffer = retained ? held!.bytes.subarray(offset - held!.start) : await readChunk(offset, Math.min(offset + TUS_CHUNK_SIZE, size) - offset);
+          if (!retained) held = { start: offset, bytes: chunk };
 
           const patchRes = await this.fetchImpl(uploadUrl, {
             method: 'PATCH',
@@ -170,7 +173,7 @@ export class SupabaseStorage implements StorageBackend {
           }
 
           const newOffset = patchRes.headers.get('Upload-Offset');
-          offset = newOffset ? parseInt(newOffset, 10) : end;
+          offset = newOffset ? parseInt(newOffset, 10) : offset + chunk.length;
           break; // Success, move to next chunk
         } catch (err) {
           attempt++;

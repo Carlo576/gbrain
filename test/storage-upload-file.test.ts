@@ -468,5 +468,34 @@ describe('a refused upload never replaces stored bytes (#7427 review)', () => {
     await expect(storage.uploadFile('media/supabase-changing.bin', src, undefined, expected)).rejects.toThrow(/changed during the upload/);
     expect(patched).toBeLessThan(size);
   }, 30_000);
+
+  test('Supabase: a TUS chunk retried after a failed PATCH resends the bytes it read, never a rewrite of that range', async () => {
+    const src = join(workDir, 'supabase-retry.bin');
+    const size = 100 * MiB + 1 * MiB + 7;
+    writeFileSync(src, '');
+    truncateSync(src, size);
+    const expected = sha256Of(src);
+    const received = createHash('sha256');
+    let failed = false;
+    let acked = 0;
+    const fetchImpl = async (_url: string, init: RequestInit) => {
+      const headers = init.headers as Record<string, string>;
+      if (init.method === 'POST') return new Response(null, { status: 201, headers: { Location: 'https://example.test/tus/3' } });
+      if (init.method === 'HEAD') return new Response(null, { status: 200, headers: { 'Upload-Offset': String(acked) } });
+      const body = init.body as Uint8Array;
+      if (!failed) {
+        failed = true;
+        const fd = openSync(src, 'r+'); writeSync(fd, Buffer.from('edited'), 0, 6, 1024); closeSync(fd);
+        return new Response('try again', { status: 503 });
+      }
+      received.update(body);
+      acked = Number(headers['Upload-Offset']) + body.byteLength;
+      return new Response(null, { status: 204, headers: { 'Upload-Offset': String(acked) } });
+    };
+    const storage = new SupabaseStorage({ backend: 'supabase', bucket: 'b', projectUrl: 'https://example.test', serviceRoleKey: 'k' }, fetchImpl);
+    await storage.uploadFile('media/supabase-retry.bin', src, undefined, expected);
+    expect(acked).toBe(size);
+    expect(received.digest('hex')).toBe(expected);
+  }, 30_000);
 });
 

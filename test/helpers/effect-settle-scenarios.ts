@@ -19,6 +19,8 @@ import { runPersistenceEffects } from '../../src/core/persistence/effects.ts';
 import { retryParkedEffects } from '../../src/core/persistence/effect-retry.ts';
 import { retrySourceParkedCode, retrySourceParkedPushes } from '../../src/core/persistence/git-durability-administration.ts';
 import { settleEffects } from '../../src/core/persistence/effect-settle.ts';
+import { hasRearmableTargets, rearmWithheldTargets } from '../../src/core/persistence/effect-journal.ts';
+import { WITHHELD_BY_MIRROR } from '../../src/core/persistence/effect-model.ts';
 import { readParkedGroups } from '../../src/core/persistence/parked-groups.ts';
 import { readGitPushHolds } from '../../src/core/persistence/git-push-holds.ts';
 import { declarePersistenceProtocol } from '../../src/core/persistence/protocol.ts';
@@ -289,3 +291,28 @@ export async function failedCurrentPushRetries(databaseUrl?: string) {
     expect(await checkParkedEffects(engine)).toMatchObject({ status: 'ok', details: { git_push_holds: [] } });
   }, { databaseUrl, setup: ({ root }) => remoteRepo(root) }));
 }
+
+/** A settled effect stays settled when its request's withdrawal mirror commits: re-arming it would hide a live failure behind data.settled. */
+export async function settledEffectIsNotRearmed(databaseUrl?: string) {
+  await managedBrain(async ({ engine, ctx, root }) => {
+    await put(ctx, 'aa/page', 'Becomes database-only.');
+    const file = join(root, 'aa/page.md');
+    rmSync(file); mkdirSync(file);
+    const [effect] = await effects(engine, 'aa/page');
+    await resetEffect(engine, effect!.id, target(effect!));
+    await runOnly(engine, ctx, effect!.id, 5);
+    dbOnly(root, 'aa/');
+    const preview = await settleEffects(engine, { sourceId: 'default', parkedCode: 'git_target_unsafe' });
+    await settleEffects(engine, { sourceId: 'default', parkedCode: 'git_target_unsafe', apply: true, expect: preview.plan_hash });
+    await disposePersistenceConsumer(engine);
+    const columns = (await engine.executeRaw<{ column_name: string }>(`SELECT column_name FROM information_schema.columns
+      WHERE table_name='persistence_effects' AND column_name NOT IN ('id','kind','state') AND is_generated='NEVER' AND column_default IS NULL`, []))
+      .map(c => c.column_name).join(',');
+    await sql(engine, `UPDATE persistence_effects SET data=jsonb_set(data,'{parked,0,error_code}','"${WITHHELD_BY_MIRROR}"') WHERE id=$1`, [effect!.id]);
+    await sql(engine, `INSERT INTO persistence_effects (kind,state,${columns}) SELECT 'withdrawal-mirror','committed',${columns} FROM persistence_effects WHERE id=$1`, [effect!.id]);
+    expect(await hasRearmableTargets(engine, [effect!.internal_id])).toBe(false);
+    await engine.transaction(async tx => { await declarePersistenceProtocol(tx); expect(await rearmWithheldTargets(tx, [effect!.internal_id])).toBe(0); });
+    expect(await effectById(engine, effect!.id)).toMatchObject({ state: 'failed', data: { settled: { reason: 'db_only' } } });
+  }, { databaseUrl, setup: ({ root }) => gitRepo(root) });
+}
+
