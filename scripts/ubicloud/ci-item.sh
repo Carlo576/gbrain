@@ -21,6 +21,7 @@
 #   __ubi_item_begin__ <lane> <file>
 #   __ubi_item__ rc=<exit> ms=<duration> lane=<lane> file=<file>
 #   __ubi_load__ load1=<1-minute load average> vcpus=<nproc>   (the VM's load as the item ended)
+# The script exits with the highest item exit code, so a one-item run (.gstack/ubicloud.json's verify) carries its result.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -78,6 +79,7 @@ run_item() {
   esac
 }
 
+worst=0
 items=("$@")
 [ "${#items[@]}" -gt 0 ] || items=("-")
 for item in "${items[@]}"; do
@@ -85,6 +87,8 @@ for item in "${items[@]}"; do
   start=$(date +%s%3N)
   run_item "$item" 2>&1
   rc=$?
+  [ "$rc" -gt "$worst" ] && worst=$rc
   echo "__ubi_item__ rc=$rc ms=$(( $(date +%s%3N) - start )) lane=$lane file=$item"
   echo "__ubi_load__ load1=$(cut -d' ' -f1 /proc/loadavg) vcpus=$(nproc)"
 done
+exit "$worst"

@@ -46,6 +46,7 @@ const FAKE_SSH = [
   "  *\"cat > ~/.ubirun-setup.sh\"*) cat > \"$root/ubirun-setup.sh\" ;;",
   "  *\"tar -xzf -\"*) cat > /dev/null ;;",
   "  *\"tar -czf -\"*) base=${cmd##* }; tar -czf - -C \"$root/remote-fs\" \"$base\" ;;",
+  "  *\"ls -d -- \"*) g=${cmd#*ls -d -- }; g=${g%% *}; ls -d -- \"$root/remote-fs/\"$g >/dev/null 2>&1 ;;",
   "  *\"bash -l ~/.ubirun-setup.sh\"*) echo \"setup start\"; if [ -f \"$root/setup-mode\" ]; then bash -c \"$(cat \"$root/setup-mode\")\"; fi; echo \"setup done\" ;;",
   "  *\"bash -lc \"*) if [ -f \"$root/command-mode\" ]; then bash -c \"$(cat \"$root/command-mode\")\"; else echo \"ran: $cmd\"; fi ;;",
   "  *) : ;;",
@@ -267,7 +268,8 @@ describe("watchdog", () => {
 
   it("times each command on its own clock: a silent command dies while another on the same VM keeps printing", async () => {
     knownVm();
-    writeFileSync(join(dir, "command-mode"), 'if [ -f "$UBI_FAKE_ROOT/chatty" ]; then rm -f "$UBI_FAKE_ROOT/chatty"; for i in $(seq 1 16); do echo "chat $i"; sleep 0.5; done; else sleep 12; fi');
+    // The chatty command prints until the test says the silent one has returned, so the order is fixed, not raced on timing.
+    writeFileSync(join(dir, "command-mode"), 'if [ -f "$UBI_FAKE_ROOT/chatty" ]; then rm -f "$UBI_FAKE_ROOT/chatty"; i=0; while [ ! -f "$UBI_FAKE_ROOT/silent-done" ] && [ $i -lt 100 ]; do i=$((i + 1)); echo "chat $i"; sleep 0.5; done; echo "chat end"; else sleep 12; fi');
     writeFileSync(join(dir, "chatty"), "");
     let chattyDone = false;
     const chatty = run(["ssh", "vm-a", "chatty"], { UBI_IDLE_TIMEOUT: "3" }).then((r) => ((chattyDone = true), r));
@@ -275,9 +277,10 @@ describe("watchdog", () => {
     const silent = await run(["ssh", "vm-a", "silent"], { UBI_IDLE_TIMEOUT: "3" });
     expect(silent.code).toBe(124);
     expect(chattyDone).toBe(false);
+    writeFileSync(join(dir, "silent-done"), "");
     const c = await chatty;
     expect(c.code).toBe(0);
-    expect(c.stdout).toContain("chat 16");
+    expect(c.stdout).toContain("chat end");
   }, 60_000);
 
   it("ssh NAME COMMAND hands the caller's stdin to the remote command", async () => {
@@ -440,6 +443,15 @@ describe("verify", () => {
     expect(lstatSync(join(src, "escape")).isSymbolicLink()).toBe(true);
     expect(readdirSync(victim)).toEqual([]);
     expect(api.vms.size).toBe(0);
+  }, 60_000);
+
+  it("a pull whose remote glob matches nothing is reported and skipped, not a failure", async () => {
+    serve();
+    knownVm();
+    const r = await run(["pull", "vm-a", "heavy-logs", join(dir, "out")]);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("pull: nothing matches heavy-logs");
+    expect(read("ssh.log")).not.toContain("tar -czf - heavy-logs");
   }, 60_000);
 
   it("the committed .gstack/ubicloud.json is accepted: its setup is inside the checkout and it forwards nothing", async () => {

@@ -257,7 +257,6 @@ async function main() {
     if (classification === "DOC_ONLY") {
       log("--diff: doc-only diff — running the doc checks locally, then gitleaks (ci:local doc-only fast-path)");
       if (spawnSync("bash", ["scripts/ci-doc-checks.sh"], { cwd: ROOT, stdio: "inherit" }).status !== 0) {
-        await leftover(owner, [], false);
         process.exit(1);
       }
       opts.lanes = new Set(["gitleaks"]);

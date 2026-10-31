@@ -309,7 +309,8 @@ async function main(): Promise<void> {
     mined = [{ run: null, commit: null, jobs: [], raw, measured: mineWeights(raw, lane, { e2eProfile }) }];
   }
   const { run, commit, attempt, jobs: fullJobs, expectedFiles, raw } = mined[0]!;
-  const measured = medianWeights(mined.map(m => m.measured));
+  // The newest run (the first --run) names the current files; one only older runs measured was deleted or renamed since.
+  const measured = new Map([...medianWeights(mined.map(m => m.measured))].filter(([file]) => mined[0]!.measured.has(file)));
   // Downloaded artifacts/stdin may cover only one shard. Only an authoritative
   // complete GitHub unit/serial/full-E2E run replaces the full map; selected E2E always
   // merges because its executed corpus depends on the diff.

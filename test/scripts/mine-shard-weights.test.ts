@@ -493,9 +493,10 @@ it('a refresh from several GitHub runs takes each file\'s median, so one fast or
       writeFileSync(join(fixtures, `${id}-timings-unit-1.log`), shard('test (1)', files.slice(0, 1)));
       writeFileSync(join(fixtures, `${id}-timings-unit-2.log`), shard('test (2)', files.slice(1)));
     };
-    run('101', 'commit-a', [['test/one.test.ts', 1000], ['test/two.test.ts', 9000]]);
+    run('101', 'commit-a', [['test/one.test.ts', 1000], ['test/two.test.ts', 9000], ['test/new.test.ts', 500]]);
     run('102', 'commit-b', [['test/one.test.ts', 2000], ['test/two.test.ts', 6000]]);
-    run('103', 'commit-c', [['test/one.test.ts', 4000], ['test/two.test.ts', 3000], ['test/new.test.ts', 500]]);
+    // test/gone.test.ts was deleted before the newest run (101), so it must not stay in the weights.
+    run('103', 'commit-c', [['test/one.test.ts', 4000], ['test/two.test.ts', 3000], ['test/gone.test.ts', 700]]);
     run('104', 'commit-d', [['test/one.test.ts', 1], ['test/two.test.ts', 1]], 'failure');
     const out = join(dir, 'weights.json');
     const meta = join(dir, 'weights.metadata.json');
