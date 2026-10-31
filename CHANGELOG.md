@@ -12,6 +12,25 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [Unreleased]
 
+**Sync-lane wave 2: a transcript that quotes a fence marker is repaired instead of held for a person, held files that already agree with their pages can be released, a plain directory added with `--force` syncs, and a parked effect left behind by a replaced binding has a guarded way out.**
+
+A page that quotes a facts or takes marker in prose was held `invalid_fence` as `repeated_marker` for a person to fix. It is now held as `quoted_marker`, and `gbrain repair fences`, `gbrain repair content`, `gbrain sync unblock --apply` and the maintenance run fix it by wrapping each mention in backticks, with a receipt per file. No reader counts fence lines any differently (#8059). Older `file_drift` holds on pages with no import record are checked once more against the file's earlier versions (#7199, re-port of #7228). A held file that agrees with its page apart from formatting is released (#7931, #7950). A refused `repair file-drift --apply` no longer reserves its request id (#7931).
+
+### Itemized changes
+
+- **#8059 quoted fence markers.** The new `src/core/fence-repair/quote-markers.ts` wraps prose mentions: an exact marker outside code and table lines, with text after it on its line or on a blockquote line, that doesn't close a fence holding rows and isn't directly above a table. The edit is kept only when every row of every fence keeps its line and kind, and when nothing `protectedRegions` hid becomes visible. Only the repair makes the edit; write paths just name the reason `quoted_marker`. Existing `invalid_fence` holds get one more screen through a hold-only `quote_version`, and the parser version stays the same. `forget` now finds the facts fence with the parser's code-aware locator.
+- **markerCarry.** A segmented read carries only a marker that a cut splits, not a whole one.
+- **#7199 (re-port of #7228).** A record-less page that equals the file at the last synced commit, or one of its three earlier committed versions, imports without a hold. Side-unknown hold text now says what was compared. A pass that holds files for a person reports `held_needs_human`. Git tree listings are memoized by object id (GBRA-135).
+- **#7931 parts 2 and 3.** A held file whose page agrees apart from formatting is released. The request id of a `repair file-drift` apply now includes the approved artifact digest, so an apply refused before publishing doesn't block the next preview.
+- **#7950.** An agreeing held page found through `--slug` is listed `release_hold`, bound to the hold's `observed_at`. An empty preview applies nothing. Contributed by @Masashi-Ono0611 (supersedes #7953).
+- **#7974.** The stale-mirror drift read no longer throws on an ambiguous slug path, and it compares contents. `slugPathFile` uses the source's slug-root mode and doesn't follow symlinks. `release_hold` needs the held path and a file hash. The `keep_file_bytes` and file-wins docs are corrected.
+- **#7973.** `gbrain sync` on a plain directory added with `sources add --force` runs the import path instead of failing on `git rev-parse`. The managed Git path refuses with a typed `sync_not_applicable`.
+- **#7988.** Activation marks a non-git root in its own directory, never in the metadata of the repository that contains it, such as a dotfiles `$HOME`.
+- **#7985.** Parked effects of a former binding get their own group, with `settle-effects` as the next step. The exact retry names both bindings. `settle-effects --retire` (proof `former_binding_retired`) settles one only when its source was replaced or its page moved past the owed revision. The settlement is preview-first, bound to a hash, reversible with `--unsettle`, and never replays anything.
+- **#7982.** Repeated transient pass stops build the abandoned-pass streak. An unfenced `lease_lost` stop never inserts a row. The pass-row and drain-holder readers compare against the database clock.
+- **#8009.** The `repair provenance-stamps` preview and apply share one held-page filter, so the preview's count equals what the apply writes.
+- **#7998 flake.** The page-embedding-lease harness pushes other queued effects out of the way before it drains the one under test.
+
 **A managed checkout that gets local commits while a sibling checkout pushes the same branch can now stay current without a person in the loop. Turn on `sources.refresh_publish_diverged` and a diverged `gbrain sources refresh` publishes the local commits merged with the upstream, then fast-forwards.**
 
 Before, such a refresh always refused `refresh_diverged`, and the database lagged the upstream until someone ran the keep-checkout publish by hand or a scheduled publish caught up. That repeated every interval. The setting is the user's standing consent to push those local commits. It defaults to off, so nothing changes for existing brains.
