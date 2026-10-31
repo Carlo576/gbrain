@@ -57,12 +57,13 @@ test('7d. #7679 state matrix: an interrupted refresh that the unattended paths c
   type Kind = 'draining' | 'fenced_old' | 'fenced_target' | 'merged_target' | 'syncing_lagging' | 'syncing_at_target' | 'recovery_required';
   type Action = 'plain_head_unreadable' | 'scan_head_unreadable' | 'plain_recovery_pending' | 'plain_worktree_inactive' | 'live_holder' | 'other_host_holder';
   const kinds: Kind[] = ['draining', 'fenced_old', 'fenced_target', 'merged_target', 'syncing_lagging', 'syncing_at_target', 'recovery_required'];
-  const actions: Action[] = ['plain_head_unreadable', 'scan_head_unreadable', 'plain_recovery_pending', 'plain_worktree_inactive', 'live_holder', 'other_host_holder'];
+  // The scan aborts a dead drain, so scan_head_unreadable runs last.
+  const actions: Action[] = ['plain_head_unreadable', 'plain_recovery_pending', 'plain_worktree_inactive', 'live_holder', 'other_host_holder', 'scan_head_unreadable'];
   const stateOf = (kind: Kind) => kind === 'recovery_required' ? 'recovery_required' : kind.split('_')[0];
   const crashAt = (kind: Kind) => kind === 'draining' ? 'drained' : kind.startsWith('syncing') ? 'syncing' : 'fenced';
-  const cells = kinds.flatMap(kind => actions.map(action => [kind, action] as [Kind, Action]));
-  for (const engine of engines) for (const [kind, action] of cells) await withRefreshFixture(engine, async f => {
-    const label = `${kind} x ${action}`;
+  // Test cost (#7782): each kind builds one brain and one interrupted refresh, and every action runs on it in turn. No action but the last may move
+  // the refresh, so each one undoes its seam and hands the next action the journal, HEAD and worktree it started with.
+  for (const engine of engines) for (const kind of kinds) await withRefreshFixture(engine, async f => {
     const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
     await expect(refreshWorktree(f.engine, f.alpha, { hooks: { boundary: point => { if (point === crashAt(kind)) throw new Error(`simulated crash at ${point}`); } } }))
       .rejects.toThrow('simulated crash');
@@ -78,46 +79,60 @@ test('7d. #7679 state matrix: an interrupted refresh that the unattended paths c
     const before = await settled();
     const plainCode = kind === 'recovery_required' ? 'refresh_recovery_required' : 'refresh_in_progress';
     const writerStatus = async () => (await runPersistenceAdministration(f.engine, 'writer_status', { source_id: f.alpha }) as { worktree_refreshes: Array<Record<string, any>> }).worktree_refreshes[0];
-    if (action === 'plain_recovery_pending' || action === 'plain_worktree_inactive') {
-      if (action === 'plain_recovery_pending') await f.engine.executeRaw(`INSERT INTO persistence_topology_changes(principal_id,request_id,digest,operation,source_id,worktree_ids,state,recovery)
-        VALUES($1::uuid,$2::uuid,'example','reclone',$3,ARRAY[$4::uuid],'recovering',$5::text::jsonb)`,
-        [randomUUID(), randomUUID(), f.alpha, f.worktreeId, JSON.stringify({ worktreeId: f.worktreeId })]);
-      else await f.engine.executeRaw(`UPDATE persistence_worktrees SET state='recovering' WHERE id=$1::uuid`, [f.worktreeId]);
-      await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_recovery_required');
-      // Status does not promise that the next refresh finishes an orphan the recovery gate holds back.
-      if (kind !== 'recovery_required') expect(await writerStatus(), label).toMatchObject({ liveness: 'orphaned', auto_recovery: 'none',
-        fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', f.alpha, '--json'] } });
-    } else if (action === 'live_holder') {
-      const lock = await tryAcquireNativeLock(refreshLockPath(f.worktreeId));
-      expect(lock, label).not.toBeNull();
-      try {
-        expect(await resumeWorktreeRefreshes(f.engine), label).toBe(0);
+    const journal = async () => JSON.stringify(await f.refreshRows());
+    const worktree = async () => (await f.engine.executeRaw<{ state: string; topology: number }>(`SELECT state,(SELECT count(*)::int FROM persistence_topology_changes
+      WHERE $1::uuid = ANY(worktree_ids)) AS topology FROM persistence_worktrees WHERE id=$1::uuid`, [f.worktreeId]))[0];
+    const pristine = { journal: await journal(), worktree: await worktree() };
+    for (const action of actions) {
+      const label = `${kind} x ${action}`;
+      if (action === 'plain_recovery_pending' || action === 'plain_worktree_inactive') {
+        const topologyRequest = randomUUID();
+        if (action === 'plain_recovery_pending') await f.engine.executeRaw(`INSERT INTO persistence_topology_changes(principal_id,request_id,digest,operation,source_id,worktree_ids,state,recovery)
+          VALUES($1::uuid,$2::uuid,'example','reclone',$3,ARRAY[$4::uuid],'recovering',$5::text::jsonb)`,
+          [randomUUID(), topologyRequest, f.alpha, f.worktreeId, JSON.stringify({ worktreeId: f.worktreeId })]);
+        else await f.engine.executeRaw(`UPDATE persistence_worktrees SET state='recovering' WHERE id=$1::uuid`, [f.worktreeId]);
+        await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_recovery_required');
+        // Status does not promise that the next refresh finishes an orphan the recovery gate holds back.
+        if (kind !== 'recovery_required') expect(await writerStatus(), label).toMatchObject({ liveness: 'orphaned', auto_recovery: 'none',
+          fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', f.alpha, '--json'] } });
+        if (action === 'plain_recovery_pending') await f.engine.executeRaw('DELETE FROM persistence_topology_changes WHERE request_id=$1::uuid', [topologyRequest]);
+        else await f.engine.executeRaw('UPDATE persistence_worktrees SET state=$2 WHERE id=$1::uuid', [f.worktreeId, pristine.worktree.state]);
+      } else if (action === 'live_holder') {
+        const lock = await tryAcquireNativeLock(refreshLockPath(f.worktreeId));
+        expect(lock, label).not.toBeNull();
+        try {
+          expect(await resumeWorktreeRefreshes(f.engine), label).toBe(0);
+          await refusedWith(refreshWorktree(f.engine, f.alpha), plainCode);
+          await refusedWith(refreshWorktree(f.engine, f.alpha, { resume: true }), 'refresh_in_progress');
+          expect(await writerStatus(), label).toMatchObject({ liveness: 'live', auto_recovery: 'none' });
+        } finally { await lock!.release(); }
+      } else if (action === 'other_host_holder') {
+        const [{ outcome }] = await f.refreshRows();
+        await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET outcome=jsonb_set(outcome,'{holder,host_id}',to_jsonb($2::text)) WHERE id=$1::uuid`, [orphan.id, randomUUID()]);
         await refusedWith(refreshWorktree(f.engine, f.alpha), plainCode);
-        await refusedWith(refreshWorktree(f.engine, f.alpha, { resume: true }), 'refresh_in_progress');
-        expect(await writerStatus(), label).toMatchObject({ liveness: 'live', auto_recovery: 'none' });
-      } finally { await lock!.release(); }
-    } else if (action === 'other_host_holder') {
-      await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET outcome=jsonb_set(outcome,'{holder,host_id}',to_jsonb($2::text)) WHERE id=$1::uuid`, [orphan.id, randomUUID()]);
-      await refusedWith(refreshWorktree(f.engine, f.alpha), plainCode);
-      if (kind !== 'recovery_required') expect(await writerStatus(), label).toMatchObject({ liveness: 'unknown', auto_recovery: 'unknown', fix: { actor: 'host_admin' },
-        next: `gbrain sources writer status --source ${f.alpha} --json` });
-    } else {
-      const headFile = join(f.root, '.git', 'HEAD');
-      const saved = readFileSync(headFile, 'utf8');
-      writeFileSync(headFile, 'not a ref\n');
-      try {
-        if (action === 'plain_head_unreadable') {
-          const refused = await refusedWith(refreshWorktree(f.engine, f.alpha), plainCode);
-          if (kind !== 'recovery_required') expect(refused.suggestion, label).toContain(`gbrain sources writer status --source ${f.alpha} --json`);
-        } else {
-          // The scan aborts a dead drain (it does not depend on HEAD) and leaves every other kind for a scan that can read HEAD.
-          expect(await resumeWorktreeRefreshes(f.engine), label).toBe(kind === 'draining' ? 1 : 0);
-          expect((await f.refreshRows()).map(r => r.state), label).toEqual([kind === 'draining' ? 'aborted' : state]);
-        }
-      } finally { writeFileSync(headFile, saved); }
-      if (action === 'scan_head_unreadable') { expect(f.head(), label).toBe(head); return; }
+        if (kind !== 'recovery_required') expect(await writerStatus(), label).toMatchObject({ liveness: 'unknown', auto_recovery: 'unknown', fix: { actor: 'host_admin' },
+          next: `gbrain sources writer status --source ${f.alpha} --json` });
+        await f.engine.executeRaw('UPDATE persistence_worktree_refreshes SET outcome=$2::text::jsonb WHERE id=$1::uuid', [orphan.id, JSON.stringify(outcome)]);
+      } else {
+        const headFile = join(f.root, '.git', 'HEAD');
+        const saved = readFileSync(headFile, 'utf8');
+        writeFileSync(headFile, 'not a ref\n');
+        try {
+          if (action === 'plain_head_unreadable') {
+            const refused = await refusedWith(refreshWorktree(f.engine, f.alpha), plainCode);
+            if (kind !== 'recovery_required') expect(refused.suggestion, label).toContain(`gbrain sources writer status --source ${f.alpha} --json`);
+          } else {
+            // The scan aborts a dead drain (it does not depend on HEAD) and leaves every other kind for a scan that can read HEAD.
+            expect(await resumeWorktreeRefreshes(f.engine), label).toBe(kind === 'draining' ? 1 : 0);
+            expect((await f.refreshRows()).map(r => r.state), label).toEqual([kind === 'draining' ? 'aborted' : state]);
+          }
+        } finally { writeFileSync(headFile, saved); }
+        if (action === 'scan_head_unreadable') { expect(f.head(), label).toBe(head); continue; }
+      }
+      expect(await settled(), label).toEqual(before);
+      expect(f.head(), label).toBe(head);
+      await disposePersistenceConsumer(f.engine);
+      expect({ journal: await journal(), worktree: await worktree() }, `${label}: handoff`).toEqual(pristine);
     }
-    expect(await settled(), label).toEqual(before);
-    expect(f.head(), label).toBe(head);
   });
 }, 900_000);

@@ -58,14 +58,28 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
   const scanned: Record<Kind, [string, number]> = { draining: ['aborted', 1], fenced_old: ['aborted', 1], fenced_target: ['syncing', 1], fenced_unrelated: ['recovery_required', 1],
     merged_target: ['syncing', 1], merged_unrelated: ['recovery_required', 1], syncing_at_target: ['completed', 1], syncing_descendant: ['syncing', 0], syncing_unrelated: ['syncing', 0], syncing_unrelated_synced: ['syncing', 0] };
   const cells = kinds.flatMap(kind => (['owner_scan', 'plain', 'resume'] as Action[]).map(action => [kind, action] as [Kind, Action]));
-  for (const engine of engines) for (const [kind, action] of cells) await withRefreshFixture(engine, async f => {
+  // Test cost (#7782): a cell that leaves the checkout settled (no unfinished refresh, a HEAD the upstream contains, every member synced to it) hands
+  // its fixture to the next cell instead of building a brain per cell, so each chain is at most one settled cell and then one unsettled cell.
+  const endsSettled = ([kind, action]: [Kind, Action]) => !kind.includes('_unrelated') && kind !== 'syncing_descendant'
+    && !(action === 'owner_scan' && (kind === 'fenced_target' || kind === 'merged_target'));
+  const settledCells = cells.filter(endsSettled), unsettledCells = cells.filter(cell => !endsSettled(cell));
+  const chains = [...unsettledCells.map((cell, i) => settledCells[i] ? [settledCells[i], cell] : [cell]), ...settledCells.slice(unsettledCells.length).map(cell => [cell])];
+  expect(chains.flat()).toHaveLength(cells.length);
+  for (const engine of engines) for (const chain of chains) await withRefreshFixture(engine, async f => { for (const [kind, action] of chain) {
     const label = `${kind} x ${action}`;
-    const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
+    const earlier = await f.refreshRows();
+    if (earlier.length) {
+      expect(earlier.map(r => r.state).filter(state => state !== 'aborted' && state !== 'completed'), `${label}: handoff`).toEqual([]);
+      expect(git(f.root, 'merge-base', 'HEAD', 'origin/main'), `${label}: handoff`).toBe(f.head());
+      expect([await f.lastCommit(f.alpha), await f.lastCommit(f.beta)], `${label}: handoff`).toEqual([f.head(), f.head()]);
+    }
+    const cellRows = async () => (await f.refreshRows()).filter(r => !earlier.some(e => e.id === r.id));
+    const target = f.push('alpha/two.md', page('Alpha two', `Upstream for ${label}.`));
     const old = f.head();
     await expect(refreshWorktree(f.engine, f.alpha, { hooks: { boundary: point => { if (point === crashAt[stateOf(kind)]) throw new Error(`simulated crash at ${point}`); } } }))
       .rejects.toThrow('simulated crash');
     await disposePersistenceConsumer(f.engine);
-    const [orphan] = await f.refreshRows();
+    const [orphan] = await cellRows();
     // The resident consumer's owner scan may already have settled it; restore what the crash left.
     await f.engine.executeRaw(`UPDATE persistence_worktree_refreshes SET state=$2,completed_at=NULL WHERE id=$1::uuid`, [orphan.id, stateOf(kind)]);
     if (kind === 'fenced_target' || kind === 'merged_target') git(f.root, 'merge', '-q', '--ff-only', target);
@@ -74,7 +88,7 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
     if (kind === 'syncing_at_target' || kind === 'syncing_unrelated_synced') for (const member of [f.alpha, f.beta]) await f.engine.transaction(tx => withCoordinatedWrite(tx, [member],
       () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [member, target]), TEST_WRITE_ATTRIBUTION));
     const head = f.head();
-    const rows = async () => (await f.refreshRows()).map(r => r.state);
+    const rows = async () => (await cellRows()).map(r => r.state);
     if (kind === 'draining') {
       // Ship audit (Step 7). Value: protects=writer status tells an orphaned draining refresh's writers to --resume it, never to retry (only a live
       // drain finishes on its own); fails_when=the draining branch of next stops checking liveness (master's wording); why_new=test 10 reads a live
@@ -88,14 +102,14 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
       expect(await resumeWorktreeRefreshes(f.engine), label).toBe(moved);
       expect(await rows(), label).toEqual([state]);
       expect(f.head(), label).toBe(head);
-      return;
+      continue;
     }
     const run = refreshWorktree(f.engine, f.alpha, action === 'resume' ? { resume: true } : {});
     if (kind.includes('_unrelated')) {
       await refusedWith(run, 'refresh_recovery_required');
       expect(await rows(), label).toEqual(['recovery_required']);
       expect(f.head(), label).toBe(head);
-      return;
+      continue;
     }
     if (kind === 'syncing_descendant' && action === 'plain') {
       // The adoption completes the orphan at the descendant HEAD; the refresh itself then refuses the unpushed local commit.
@@ -104,7 +118,7 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
       expect(f.head(), label).toBe(head);
       expect(await f.lastCommit(f.alpha), label).toBe(head);
       expect(await f.lastCommit(f.beta), label).toBe(head);
-      return;
+      continue;
     }
     const result = await run;
     const rolledBack = kind === 'draining' || kind === 'fenced_old';
@@ -112,7 +126,7 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
       expect(result, label).toMatchObject({ status: rolledBack ? 'abandoned' : 'completed', refresh_id: orphan.id });
       expect(await rows(), label).toEqual([rolledBack ? 'aborted' : 'completed']);
       expect(f.head(), label).toBe(head);
-      return;
+      continue;
     }
     if (rolledBack) {
       expect(result, label).toMatchObject({ status: 'completed', target_head: target, recovered: { refresh_id: orphan.id, state: 'aborted', status: 'abandoned' } });
@@ -125,6 +139,6 @@ test('7c. #7679 state matrix: an interrupted refresh of each kind, settled by th
     expect(f.head(), label).toBe(synced);
     expect(await f.lastCommit(f.alpha), label).toBe(synced);
     expect(await f.lastCommit(f.beta), label).toBe(synced);
-  });
+  } });
 }, 900_000);
 
