@@ -158,10 +158,10 @@ inventory:
   openclaw, so every test in it would skip.
 - gstack accepts only `push` and `workflow_dispatch` runs whose newest attempt
   succeeded. **A flaky job means re-running the whole workflow.** "Re-run failed
-  jobs" keeps every job that passed at its older attempt, so the new attempt's
-  manifest is incomplete and its `tree.json` has no `files`
-  (`inventory_uncovered`); a `tree.json` left from an older attempt is refused
-  too (`artifact_mismatch`).
+  jobs" carries every job that passed, the ledger job that writes the manifest
+  included, over from the older attempt, so the new attempt has no manifest of
+  its own and its `tree.json` has no `files` (`inventory_uncovered`); a
+  `tree.json` left from an older attempt is refused too (`artifact_mismatch`).
 - The profiles live in the base branch's `.gstack/pregate.json` (`run_profiles`
   for `test.yml` / `full-suite` and `e2e.yml` / `e2e-full-suite`, and
   `remote_gate_runs` with this inventory command). gstack reads them only from
