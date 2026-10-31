@@ -62,7 +62,13 @@
     ],
     "test/grandfather-capacity.test.ts": [
       "test/grandfather-managed.test.ts"
-    ]
+    ],
+    "scripts/ubicloud/*.sh": [
+      "test/scripts/awk-portability.test.ts"
+    ],
+    "scripts/bench/**": [],
+    "docs/eval/system-one/runners/**": [],
+    "docs/eval/system-one/generators/**": []
   },
   "guards": [
     {
