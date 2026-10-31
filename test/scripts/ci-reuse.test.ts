@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
-import { apiDeps, attemptJobs, checkRecord, decide, decideGate, GATE_NONE_GRACE_MS, gateDeps, PROFILES, runGate, writeDecision, type Commit, type ExecutedCounts, type GateDeps, type JobRow, type FullRun, type ReuseDeps } from '../../scripts/ci-reuse.ts';
+import { apiDeps, attemptJobs, checkRecord, decide, decideGate, gateDeps, LEDGER_JOB, PROFILES, runGate, writeDecision, type Commit, type ExecutedCounts, type GateDeps, type JobRow, type FullRun, type ReuseDeps } from '../../scripts/ci-reuse.ts';
 import { GET_RETRY_DELAYS_MS, restClient, type GitHubClient } from '../../scripts/lib/gh-issue.ts';
 
 const REPO = 'owner-example/repo-example';
@@ -454,6 +454,8 @@ describe('ci-reuse remote-gate decision', () => {
       const doc = JSON.parse(readFileSync(out, 'utf8'));
       const rerun = run('test.yml', { run_attempt: 2 });
       expect(await gateDeps(identitiesClient(doc)).executed(rerun)).toEqual({ tests: 5, failed: 0 });
+      // Read for a later attempt (one that did not re-run the ledger job, or did and uploaded nothing), it names its attempt.
+      expect(await gateDeps(identitiesClient(doc)).executed(run('test.yml', { run_attempt: 3 }))).toEqual({ tests: 5, failed: 0, ledgerAttempt: 2 });
       // The ledger names its run and attempt: one written for another run, or for a later attempt, is refused.
       expect(await gateDeps(identitiesClient(doc)).executed(run('test.yml', { id: 601, run_attempt: 2 }))).toMatchObject({ reason: expect.stringContaining('written by run 600 attempt 2') });
       expect(await gateDeps(identitiesClient(doc)).executed(run('test.yml'))).toMatchObject({ reason: expect.stringContaining('written by run 600 attempt 2') });
@@ -471,12 +473,25 @@ describe('ci-reuse remote-gate decision', () => {
     expect(r.last).toBe('GBRAIN_REUSE_RESULT tests=1191 failed=0');
   });
 
-  test('a workflow with no full run on the tree holds the gate only for a short grace, not the whole wait (#7927)', async () => {
-    const r = await go(gate({ runs: [run('test.yml', { status: 'in_progress', conclusion: null })] }), A, T, 90 * 60_000);
-    expect(r.code).toBe(4);
-    const waits = r.lines.filter(l => l.includes('waiting for')).length;
-    expect(waits).toBe(GATE_NONE_GRACE_MS / 60_000);
-    // The second dispatch of full-ci shows up a poll late: the grace covers it and the gate reuses.
+  test('a workflow with no full run on the tree waits for the other\'s run in progress: a failure refuses, a pass runs the gate (#8096)', async () => {
+    for (const [conclusion, code] of [['failure', 3], ['success', 4]] as const) {
+      const live = run('test.yml', { status: 'in_progress', conclusion: null });
+      let polls = 0;
+      const deps = gate({ runs: [live] });
+      const finishing = { ...deps, async runsForHead(file: string, sha: string) {
+        if (file === 'test.yml' && ++polls >= 12) Object.assign(live, { status: 'completed', conclusion });
+        return deps.runsForHead(file, sha);
+      } };
+      const r = await go(finishing, A, T, 90 * 60_000);
+      expect(r.code).toBe(code);
+      expect(r.lines.filter(l => l.includes('waiting for')).length).toBe(11);
+      expect(r.lines[0]).toContain('no full run to reuse yet');
+    }
+    // A run that never settles holds the gate only to the wait bound.
+    const stuck = await go(gate({ runs: [run('test.yml', { status: 'in_progress', conclusion: null })] }), A, T, 90 * 60_000);
+    expect(stuck.code).toBe(4);
+    expect(stuck.lines.filter(l => l.includes('waiting for')).length).toBe(90);
+    // The second dispatch of full-ci shows up a poll late: the wait covers it and the gate reuses (#7927).
     const live = run('test.yml', { status: 'in_progress', conclusion: null });
     let polls = 0;
     const deps = gate({ runs: [live, run('e2e.yml')] });
@@ -487,6 +502,24 @@ describe('ci-reuse remote-gate decision', () => {
     const ok = await go(lagging, A, T, 90 * 60_000);
     expect(ok.code).toBe(0);
     expect(ok.lines.filter(l => l.includes('waiting for')).length).toBe(3);
+  });
+
+  test('a ledger an earlier attempt wrote counts only while its ledger job was not re-run since (#8096)', async () => {
+    const fullJob: JobRow = { name: PROFILES.test.job, status: 'completed', conclusion: 'success' };
+    const ledgerJob = (started_at: string): JobRow => ({ name: LEDGER_JOB, status: 'completed', conclusion: 'success', started_at });
+    const runs = [run('test.yml', { run_attempt: 2 }), run('e2e.yml')];
+    const executed = { 600: { tests: 600, failed: 0, ledgerAttempt: 1 } };
+    // Re-running only full-suite carries the ledger job into attempt 2 with its attempt-1 start, so its ledger still counts.
+    const carried = gate({ runs, executed, jobs: { '600/1': [fullJob, ledgerJob('2026-10-30T17:46:56Z')], '600/2': [fullJob, ledgerJob('2026-10-30T17:46:56Z')] } });
+    expect(await decideGate(carried, PROFILES.test, A, T, REPO)).toEqual({ state: 'reuse', detail: expect.any(String), url: expect.any(String), tests: 600, failed: 0 });
+    // The ledger job ran again in attempt 2 but uploaded nothing: attempt 1's ledger is stale and never the receipt.
+    const stale = gate({ runs, executed, jobs: { '600/1': [fullJob, ledgerJob('2026-10-30T17:46:56Z')], '600/2': [fullJob, ledgerJob('2026-10-30T18:20:00Z')] } });
+    expect(await decideGate(stale, PROFILES.test, A, T, REPO)).toMatchObject({ state: 'none', detail: expect.stringContaining('is from attempt 1, but its executed-receipts job ran again by attempt 2') });
+    const r = await go(stale);
+    expect(r.code).toBe(4);
+    expect(r.lines.join('\n')).not.toContain('GBRAIN_REUSE_RESULT');
+    // A listing without the ledger job proves nothing either.
+    expect(await decideGate(gate({ runs, executed }), PROFILES.test, A, T, REPO)).toMatchObject({ state: 'none' });
   });
 
   test('a same-tree other head whose newest run skipped the full job, or was cancelled, looks further back (#7927)', async () => {

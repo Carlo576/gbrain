@@ -111,11 +111,13 @@ both did, the receipt comes from them: the same `PREGATE_REMOTE: tree= tests=
 failed=` line, with the runs' executed test identities as the counts, and no VM
 starts. The counts take each job at its newest attempt, so a run whose failed
 jobs were re-run counts its whole suite; a ledger that cannot show that is
-labelled `attempt N, partial count` on the `[ci-reuse] gate:` line. A full run
+labelled `attempt N, partial count` on the `[ci-reuse] gate:` line. A ledger an
+earlier attempt wrote counts only while its `executed-receipts` job was not re-run
+since. A full run
 on the tree still in progress is waited for (90 minutes at most, a progress
-line every minute), but while the other workflow has no full run on the tree
-the wait lasts five minutes, long enough for full-ci's second dispatch to
-appear. The newest full run on the tree decides,
+line every minute), also while the other workflow has no full run on the tree:
+full-ci's second dispatch can still appear, and a failure of the run in
+progress refuses instead of starting VMs. The newest full run on the tree decides,
 across the head and every recent head with the same tree, so neither an empty
 commit nor an older pass elsewhere skips a newer failure; a failed one refuses
 with no receipt. A run that did not run the full job (a diagnostic dispatch, a
