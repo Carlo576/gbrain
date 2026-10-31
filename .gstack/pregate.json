@@ -135,8 +135,8 @@
       "paths": [
         ".github/workflows/*.yml"
       ],
-      "pattern": "pglite-snapshot-(default-)?",
-      "reason": "GitHub Actions cache keys (pglite-snapshot-*) built from hashFiles(); the value is a cache key expression, never a credential"
+      "pattern": "pglite-snapshot-(?:default-)?\\$\\{\\{ runner\\.os \\}\\}-\\$\\{\\{ hashFiles\\('[\\w./*-]+'(?:, '[\\w./*-]+')*\\) \\}\\}$",
+      "reason": "GitHub Actions cache keys: the whole value is pglite-snapshot-[default-]${{ runner.os }}-${{ hashFiles('<path globs>') }}, never a credential"
     }
   ]
 }
