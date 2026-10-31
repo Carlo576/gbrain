@@ -930,8 +930,9 @@ export const renderCardLine = (c: EntityCard, home?: string): string =>
   `- **${c.entity.title}** → \`${c.entity.slug}\`${sourceNote(c, home)}${c.summary ? ` — ${cardSummary(c, c.summary)}` : c.trust_tier ? ` — ${cardSummary(c, '')}` : ''}${c.relationship_note ? ` [${c.relationship_note}]` : ''} (use get_page/entity before relying on details)`;
 export const renderThreadLine = (t: EntityOpenThread): string =>
   `- [${t.kind}] ${labeled(t, t.text)}${t.date ? ` (${t.date})` : ''}`;
+/** A quoted fact's fence closes on its own line (GST-687): its label rides the marker line and the slug and confidence follow the fence. */
 export const renderFactLine = (f: TurnContextFact): string =>
-  `- ${f.attributed_to === 'assistant' ? '(assistant said) ' : ''}${labeled(f, neutralizeForPrompt(f.fact).text)}${f.entity_slug ? ` [${f.entity_slug}]` : ''} (${f.confidence.toFixed(2)})`;
+  `- ${f.attributed_to === 'assistant' ? '(assistant said) ' : ''}${labeled(f, f.quoted ? `${neutralizeForPrompt(f.fact).text}\n` : neutralizeForPrompt(f.fact).text)}${f.entity_slug ? ` [${f.entity_slug}]` : ''} (${f.confidence.toFixed(2)})`;
 /** #7023: the substrings that mark a fact as already injected: its rendered line, then its unlabeled form, each without the "- " bullet and the confidence. */
 const factDedupeKeys = (f: TurnContextFact): string[] =>
   [f, { ...f, trust_tier: undefined }].map((g) => renderFactLine(g).slice(2).replace(/ \([0-9.]+\)$/, ' ('));
