@@ -91,7 +91,7 @@ test('a host identity file that cannot be read still yields a typed internal_err
 /**
  * Another connection holds one source row until `release` (a stuck transaction on the brain host): `FOR UPDATE` by
  * default, or a plain read (AccessShareLock only, which cannot block the fence) with `plainRead`. Its last statement
- * carries a connection string, which the refusal must never echo.
+ * carries a marker literal, which the refusal must never echo.
  */
 async function holdSourceRow(sourceId: string, plainRead = false): Promise<{ pid: number; release: () => Promise<void> }> {
   const sql = postgres(databaseUrl, { max: 1, prepare: false });
@@ -103,7 +103,7 @@ async function holdSourceRow(sourceId: string, plainRead = false): Promise<{ pid
     const [row] = plainRead
       ? await t`SELECT pg_backend_pid() AS pid FROM sources WHERE id=${sourceId}`
       : await t`SELECT pg_backend_pid() AS pid FROM sources WHERE id=${sourceId} FOR UPDATE`;
-    await t.unsafe("SELECT 'postgres://alice-example:hunter2@db.example/brain' AS note");
+    await t.unsafe("SELECT 'holder-sql-marker' AS note");
     locked(Number(row!.pid));
     await released;
   });
@@ -163,6 +163,6 @@ test.skipIf(!process.env.DATABASE_URL)('the lock-timeout why names only row-lock
   expect(failure!.code).toBe('refresh_lock_timeout');
   expect(failure!.why).toContain(`pid ${held.pid} `);
   expect(failure!.why).not.toContain(`pid ${reader.pid} `);
-  expect(failure!.why).not.toContain('hunter2');
+  expect(failure!.why).not.toContain('holder-sql-marker');
   expect(failure!.why).not.toContain('SELECT');
 }), 120_000);
