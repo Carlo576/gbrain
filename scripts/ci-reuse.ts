@@ -146,9 +146,10 @@ function accept(run: FullRun, tree: string, rejected: Rejection[], where: string
  * the identical tree reuses; a stamp-only difference goes through gstack-pregate's stamp rule, never through here.
  * The newest full run on the tree decides, across `head` and every other recent head with the same tree: in progress
  * waits, a failure refuses (no receipt, no VMs), cancelled or not a full run (its full job skipped or absent: a
- * diagnostic dispatch, a push that reused) looks further back; anything else is `none` and the caller runs the VM gate.
+ * diagnostic dispatch, a push that reused) looks further back; a passed run whose executed-test receipt is refused is
+ * `rejected`, which no later run on the tree changes; anything else is `none` and the caller runs the VM gate.
  */
-export type GateState = 'reuse' | 'pending' | 'failed' | 'none';
+export type GateState = 'reuse' | 'pending' | 'failed' | 'rejected' | 'none';
 /**
  * Executed test counts; `partial` names the attempt when they cover only the jobs that attempt re-ran, and
  * `ledgerAttempt` the earlier attempt that wrote the ledger when it is older than the run's latest attempt.
@@ -200,7 +201,7 @@ const runUrl = (repo: string, run: FullRun) => `https://github.com/${repo}/actio
 
 async function gateAccept(deps: GateDeps, p: Profile, run: FullRun, tree: string, repo: string): Promise<GateDecision> {
   const got = await deps.executed(run);
-  if ('reason' in got) return { state: 'none', detail: `${p.workflow}: ${got.reason}` };
+  if ('reason' in got) return { state: 'rejected', detail: `${p.workflow}: ${got.reason}` };
   const { ledgerAttempt, ...counts } = got;
   // A re-run that leaves the ledger job alone carries it into the new attempt with its original start; a ledger job
   // that ran again but uploaded nothing leaves the older attempt's ledger behind, now stale.
@@ -208,10 +209,10 @@ async function gateAccept(deps: GateDeps, p: Profile, run: FullRun, tree: string
     const started = async (attempt: number) => (await deps.jobs(run.id, attempt)).filter(j => j.name === LEDGER_JOB).map(j => j.started_at);
     const [wrote, latest] = await Promise.all([started(ledgerAttempt), started(run.run_attempt)]);
     if (wrote.length !== 1 || latest.length !== 1 || !wrote[0] || wrote[0] !== latest[0]) {
-      return { state: 'none', detail: `${p.workflow}: run ${run.id}'s executed-identities.json is from attempt ${ledgerAttempt}, but its ${LEDGER_JOB} job ran again by attempt ${run.run_attempt} without replacing it` };
+      return { state: 'rejected', detail: `${p.workflow}: run ${run.id}'s executed-identities.json is from attempt ${ledgerAttempt}, but its ${LEDGER_JOB} job ran again by attempt ${run.run_attempt} without replacing it` };
     }
   }
-  if (counts.tests <= 0) return { state: 'none', detail: `${p.workflow}: run ${run.id}'s executed-identities artifact lists no executed test` };
+  if (counts.tests <= 0) return { state: 'rejected', detail: `${p.workflow}: run ${run.id}'s executed-identities artifact lists no executed test` };
   return { state: 'reuse', detail: `${p.workflow} run ${runUrl(repo, run)} passed the complete full suite on tree ${tree}`, url: runUrl(repo, run), ...counts };
 }
 
@@ -222,7 +223,7 @@ export const GATE_POLL_SECONDS = 60;
  * The gate's decision over Test and E2E, waiting while a full run on the tree is still in progress, up to the wait
  * bound. A workflow with no full run on the tree does not end the wait: full-ci dispatches Test and E2E separately, so
  * its run can still appear, and a failure of the run in progress refuses (exit 3) instead of starting VMs on a tree
- * GitHub already failed (#8096). Prints progress
+ * GitHub already failed (#8096). A `rejected` workflow ends the wait at once: reuse needs both. Prints progress
  * at least every poll (gstack's stall timeout kills a silent gate) and, on reuse, a last line
  * `GBRAIN_REUSE_RESULT tests=<n> failed=<n>`. Exit codes: 0 reuse, 3 a full run on this tree failed, 4 no reuse.
  */
@@ -242,7 +243,7 @@ export async function runGate(deps: GateDeps, o: { head: string; tree: string; r
       return 0;
     }
     const pending = ds.filter(d => d.state === 'pending');
-    if (!pending.length || now() >= deadline) {
+    if (!pending.length || ds.some(d => d.state === 'rejected') || now() >= deadline) {
       for (const d of ds.filter(x => x.state !== 'reuse')) o.log(`[ci-reuse] gate: no reuse: ${inert(d.detail, 600)}`);
       return 4;
     }

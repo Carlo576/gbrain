@@ -514,12 +514,24 @@ describe('ci-reuse remote-gate decision', () => {
     expect(await decideGate(carried, PROFILES.test, A, T, REPO)).toEqual({ state: 'reuse', detail: expect.any(String), url: expect.any(String), tests: 600, failed: 0 });
     // The ledger job ran again in attempt 2 but uploaded nothing: attempt 1's ledger is stale and never the receipt.
     const stale = gate({ runs, executed, jobs: { '600/1': [fullJob, ledgerJob('2026-10-30T17:46:56Z')], '600/2': [fullJob, ledgerJob('2026-10-30T18:20:00Z')] } });
-    expect(await decideGate(stale, PROFILES.test, A, T, REPO)).toMatchObject({ state: 'none', detail: expect.stringContaining('is from attempt 1, but its executed-receipts job ran again by attempt 2') });
+    expect(await decideGate(stale, PROFILES.test, A, T, REPO)).toMatchObject({ state: 'rejected', detail: expect.stringContaining('is from attempt 1, but its executed-receipts job ran again by attempt 2') });
     const r = await go(stale);
     expect(r.code).toBe(4);
     expect(r.lines.join('\n')).not.toContain('GBRAIN_REUSE_RESULT');
     // A listing without the ledger job proves nothing either.
-    expect(await decideGate(gate({ runs, executed }), PROFILES.test, A, T, REPO)).toMatchObject({ state: 'none' });
+    expect(await decideGate(gate({ runs, executed }), PROFILES.test, A, T, REPO)).toMatchObject({ state: 'rejected' });
+  });
+
+  test('a completed run on the tree whose receipt is refused ends the wait at once: the other run cannot make reuse possible', async () => {
+    const live = run('e2e.yml', { status: 'in_progress', conclusion: null });
+    for (const executed of [{ 600: { reason: 'no executed-identities artifact' } }, { 600: { tests: 0, failed: 0 } }]) {
+      const deps = gate({ runs: [run('test.yml'), live], executed });
+      expect(await decideGate(deps, PROFILES.test, A, T, REPO)).toMatchObject({ state: 'rejected' });
+      const r = await go(deps, A, T, 90 * 60_000);
+      expect(r.code).toBe(4);
+      expect(r.lines.some(l => l.includes('waiting for'))).toBe(false);
+      expect(r.lines.join('\n')).toContain('[ci-reuse] gate: no reuse: Test');
+    }
   });
 
   test('a same-tree other head whose newest run skipped the full job, or was cancelled, looks further back (#7927)', async () => {
