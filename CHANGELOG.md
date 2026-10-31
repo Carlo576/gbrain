@@ -10,6 +10,16 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.526.0] - 2026-10-31
+
+**The #7679 refresh state-matrix tests (7c and 7d) now run in about half the time, with every assertion kept (#7782).**
+
+These two tests built a fresh brain for each cell, and on a 2-CPU machine that cost added up to minutes per run. Now 7c hands a cell that ends settled to the next cell instead of building a new brain, and 7d builds one brain per kind of interrupted refresh and runs every action on it in turn, with each action undoing its seam. Nothing changes for users.
+
+### Itemized changes
+
+- Tests: 7c and 7d in `test/persistence-worktree-refresh.test.ts` share fixtures across their cells, and every assertion is kept (#7782).
+
 ## [0.60.525.0] - 2026-10-31
 
 **Sync no longer moves its checkpoint past a file it never imported (#8071), a source refresh can no longer hold its lock for over an hour (#8072), and dream-cycle pages written into a Git checkout are now committed instead of left untracked (#8073).**
