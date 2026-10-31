@@ -152,6 +152,7 @@ test('#8072: a refresh whose member sync never settles ends refresh_sync_timeout
   try {
     const started = performance.now();
     const stalled = await refreshWorktree(f.engine, f.alpha);
+    // gstack-timing-ok: ending within refresh_sync_budget_ms is the #8072 contract; the bound carries 30 s of grace
     expect(performance.now() - started).toBeLessThan(STALL_BUDGET_MS + DEADLINE_PASS_GRACE_MS + 30_000);
     expect(stalls).toBeGreaterThan(0);
     expect(stalled).toMatchObject({ status: 'sync_blocked', target_head: target });

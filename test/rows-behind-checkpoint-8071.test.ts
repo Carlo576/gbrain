@@ -259,6 +259,7 @@ for (const backend of testBackends()) describe(`[${backend}] #8071: rows behind 
     expect(warned).toMatchObject({ status: 'warn', details: { count: 4, unproven: 1 } });
     expect(warned.message).toContain('replaces any database-only edit');
 
+    // gstack-timing-ok: a 1 ms scan deadline forces the time-bounded path; no elapsed time is asserted
     const partial = await withEnv({ GBRAIN_DOCTOR_ROWS_BEHIND_TIMEOUT_MS: '1' }, async () => { await new Promise(resolve => setTimeout(resolve, 5)); return doctor(engine); });
     expect(partial).toMatchObject({ status: 'ok', details: { sources: [{ complete: false }] } });
     expect(partial.message).toMatch(/stopped after \d+ page\(s\)/);
