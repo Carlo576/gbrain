@@ -1196,9 +1196,11 @@ export function scanFiles(paths: string[], opts: ScanOpts = {}): SecretFinding[]
 // needs ECHO_MIN_CHARS_LABELED = 8 and must not be a stoplisted word, so
 // `pwd: 1234` never scrubs every later "1234"), must be at most
 // ECHO_MAX_VALUE_CHARS long,
-// and only the first ECHO_MAX_UNIQUE unique values in claim order — ONE cap
-// across every pattern — join. A value past either cap is still redacted at
-// its claimed span; only its echoes are the accepted miss.
+// and only the first ECHO_MAX_UNIQUE unique bearer, assignment and labeled
+// values plus the first ECHO_MAX_UNIQUE_VENDOR unique vendor or jwt values, in
+// claim order, join (two caps, so planted vendor strings never crowd out a
+// bearer token's echo). A value past a cap is still redacted at its claimed
+// span; only its echoes are the accepted miss.
 //
 // The pass is a streaming merge over the ORIGINAL text: per value, the
 // position of its next occurrence at or beyond the emit cursor (found by
@@ -1225,7 +1227,7 @@ export function scanFiles(paths: string[], opts: ScanOpts = {}): SecretFinding[]
 // message bodies, speaker labels, title, metadata values) must scrub an echo
 // in one field of a value claimed in ANOTHER. `planRedaction` scans one
 // field and adds its eligible values to a caller-supplied shared map under
-// the same floors and the same single cap; `applyRedaction` splices later and
+// the same floors and the same caps; `applyRedaction` splices later and
 // reads the map as it stands THEN — so a caller plans every field first and
 // applies afterwards, and a value claimed in the last field is scrubbed from
 // the first. `redactFindings` is the one-shot composition for a single text.
@@ -1260,12 +1262,20 @@ const VENDOR_ECHO_PATTERNS = new Set(CORE_PATTERNS.map((p) => p.name).filter((na
 export const ECHO_MAX_VALUE_CHARS = 512;
 
 /**
- * Cap on the unique values (bearer + high_entropy_assignment together, claim
- * order, first N) the echo pass will look for. Keeps the pass a bounded
- * number of linear sweeps; an echo of a value past the cap is the
- * documented, accepted miss.
+ * Cap on the unique bearer, high_entropy_assignment and labeled_credential
+ * values (together, claim order, first N) the echo pass will look for. Keeps
+ * the pass a bounded number of linear sweeps; an echo of a value past the cap
+ * is the documented, accepted miss.
  */
 export const ECHO_MAX_UNIQUE = 64;
+
+/**
+ * Separate cap on the unique vendor-shape and `jwt` values (claim order, first
+ * N) in the echo dictionary. Planted vendor-shaped strings fill only this cap,
+ * never ECHO_MAX_UNIQUE, so they cannot crowd out a later bearer token or
+ * assignment value whose bare echo only the dictionary scrubs (#7978).
+ */
+export const ECHO_MAX_UNIQUE_VENDOR = 32;
 
 /** Echo dictionary: claimed value → the pattern that claimed it first. */
 export type EchoDictionary = Map<string, string>;
@@ -1273,7 +1283,7 @@ export type EchoDictionary = Map<string, string>;
 export interface RedactOpts extends ScanOpts {
   /**
    * Shared echo dictionary. `planRedaction` ADDS the eligible values it
-   * claims (shared floors, one cap, claim order); `applyRedaction` reads the
+   * claims (shared floors and caps, claim order); `applyRedaction` reads the
    * map at apply time. Pass one map across every field of a document for
    * session-wide echo coverage. Default: a fresh map per `planRedaction`.
    */
@@ -1304,8 +1314,11 @@ function addEchoValue(into: EchoDictionary, pattern: string, value: string): voi
         : pattern === 'labeled_credential'
           ? ECHO_MIN_CHARS_LABELED
           : VENDOR_ECHO_PATTERNS.has(pattern) ? ECHO_MIN_CHARS_VENDOR : Infinity;
-  if (value.length < floor || value.length > ECHO_MAX_VALUE_CHARS) return;
-  if (into.has(value) || into.size >= ECHO_MAX_UNIQUE) return;
+  if (value.length < floor || value.length > ECHO_MAX_VALUE_CHARS || into.has(value)) return;
+  const vendor = VENDOR_ECHO_PATTERNS.has(pattern);
+  let used = 0;
+  for (const claimedBy of into.values()) if (VENDOR_ECHO_PATTERNS.has(claimedBy) === vendor) used++;
+  if (used >= (vendor ? ECHO_MAX_UNIQUE_VENDOR : ECHO_MAX_UNIQUE)) return;
   into.set(value, pattern);
 }
 

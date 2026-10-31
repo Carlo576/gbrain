@@ -12,7 +12,7 @@
  * Every key is assembled at runtime from random parts (gitleaks, CEO-10).
  */
 import { describe, expect, test } from 'bun:test';
-import { redactFindings, scanText } from '../src/core/secret-scan.ts';
+import { ECHO_MAX_UNIQUE, ECHO_MAX_UNIQUE_VENDOR, redactFindings, scanText } from '../src/core/secret-scan.ts';
 import { PROVIDER_KEY_SHAPES, alnum, hex } from './helpers/provider-keys.ts';
 
 const j = (sep: string, ...parts: string[]) => parts.join(sep);
@@ -142,3 +142,26 @@ describe('#7978 no new false positives', () => {
     expect(redactFindings(`a%22${k}%22`).text).toBe('a%22<REDACTED:npm_token>%22');
   });
 });
+
+describe('#7978 vendor values cannot crowd the echo dictionary', () => {
+  test('64 planted vendor keys ahead of a bearer token and an assignment still leave room for their bare echoes', () => {
+    const planted = Array.from({ length: 64 }, () => `k=${j('_', 'ghp', alnum(36))}`);
+    const tok = alnum(40);
+    const pw = `Xk9${alnum(16)}7q`;
+    const text = [...planted, `Authorization: Bearer ${tok}`, `PASSWORD=${pw}`, `your token is ${tok} and the password is ${pw}`].join('\n');
+    const out = redactFindings(text, { highEntropy: true });
+    expect(out.text.includes(tok)).toBe(false);
+    expect(out.text.includes(pw)).toBe(false);
+    expect(out.text.split('\n').at(-1)).toBe('your token is <REDACTED:bearer> and the password is <REDACTED:high_entropy_assignment>');
+  });
+
+  test('vendor values stop joining at ECHO_MAX_UNIQUE_VENDOR; the other families keep all ECHO_MAX_UNIQUE slots', () => {
+    const vendor = Array.from({ length: ECHO_MAX_UNIQUE_VENDOR + 8 }, () => j('_', 'ghp', alnum(36)));
+    const bearer = Array.from({ length: ECHO_MAX_UNIQUE }, () => alnum(40));
+    const text = [...vendor.map((k) => `k=${k}`), ...bearer.map((t) => `Authorization: Bearer ${t}`)].join('\n');
+    const echo = redactFindings(text).echoValues;
+    expect([...echo.values()].filter((p) => p === 'github_token').length).toBe(ECHO_MAX_UNIQUE_VENDOR);
+    expect([...echo.values()].filter((p) => p === 'bearer').length).toBe(ECHO_MAX_UNIQUE);
+  });
+});
+
