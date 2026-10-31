@@ -588,10 +588,32 @@ async function fenceDraining(engine: BrainEngine, sourceId: string, plan: Plan, 
     [plan.binding.worktree_id, plan.members, principal, String(current.owner_epoch), String(current.topology_generation),
       plan.oldHead, plan.targetHead, plan.upstreamRef, plan.preserved, JSON.stringify({ holder: refreshHolder() })]);
     return row;
-  })).catch(error => {
+  })).catch(async error => {
     if ((error as { code?: string }).code === '23505' && !classifyOriginUniqueViolation(error)) throw inProgress('Another refresh of this worktree started first.', sourceId);
+    if ((error as { code?: string }).code === LOCK_NOT_AVAILABLE) throw await lockTimeoutRefusal(engine, sourceId);
     throw error;
   });
+}
+
+const LOCK_NOT_AVAILABLE = '55P03';
+/**
+ * GBRA-250: a fence transaction that waited past its lock_timeout for a row another transaction holds (Postgres 55P03) is a
+ * typed refusal naming the open transactions that hold locks on the fenced tables, instead of an untyped internal_error.
+ */
+async function lockTimeoutRefusal(engine: BrainEngine, sourceId: string, refreshId?: string): Promise<OperationError> {
+  const holders = engine.kind !== 'postgres' ? [] : await engine.executeRaw<{ pid: number; application_name: string; state: string | null; open_seconds: number; query: string | null }>(
+    `SELECT a.pid, a.application_name, a.state, extract(epoch FROM now() - a.xact_start)::int AS open_seconds, left(a.query, 160) AS query
+       FROM pg_stat_activity a
+      WHERE a.pid <> pg_backend_pid() AND a.xact_start IS NOT NULL
+        AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.granted
+          AND l.relation IN ('persistence_brain'::regclass, 'persistence_worktrees'::regclass, 'sources'::regclass))
+      ORDER BY a.xact_start LIMIT 5`).catch(() => []);
+  const error = refusal('refresh_lock_timeout', `The refresh fence of source ${sourceId} waited past its 5 s lock timeout for a brain, worktree or source row another database transaction holds; nothing moved.`,
+    `Retry gbrain sources refresh ${sourceId}. If it repeats, the transaction named in why is stuck: find out what it is on the brain host before ending it.`, refreshId);
+  error.why = holders.length
+    ? `Open transactions holding locks on those tables: ${holders.map(h => `pid ${h.pid} (${h.application_name || 'no application name'}, ${h.state ?? 'unknown state'}, open ${h.open_seconds} s): ${(h.query ?? '').replace(/\s+/g, ' ').trim()}`).join('; ')}`
+    : 'No open transaction holding a lock on those tables was visible to this database role.';
+  return error;
 }
 
 /** Steps 3-5 under the worktree native lock: recheck drained, fence, verify HEAD, ff-only merge, bookkeeping. */
@@ -612,7 +634,7 @@ async function fenceAndMerge(engine: BrainEngine, git: Git, sourceId: string, pl
           `Work reached the worktree after the drain check (${counts.requests} request(s), ${counts.effects} checkout effect(s), ${counts.recovery} recovery record(s)); nothing moved.`,
           `Retry gbrain sources refresh ${sourceId}`, row.id);
         if (!await transition(tx, row, ['draining'], 'fenced')) throw refusal('refresh_source_changed', 'The refresh record was moved by recovery while draining.', `gbrain sources refresh ${sourceId} --resume`, row.id);
-      });
+      }).catch(async error => { throw (error as { code?: string }).code === LOCK_NOT_AVAILABLE ? await lockTimeoutRefusal(engine, sourceId, row.id) : error; });
       const current = await readRefresh(engine, row.id);
       await hooks?.boundary?.('fenced', current);
       const head = await headOf(git, plan.root);

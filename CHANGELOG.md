@@ -12,13 +12,16 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [Unreleased]
 
-**When `gbrain sources refresh` hits an unexpected error (a database statement error, a code fault), it now prints a typed `internal_error` refusal with the error's stack in `why` and the refresh row it left, instead of a bare `internal_error` with neither. One failure leaves enough to diagnose it, and the next run resumes the row as before.**
+**`gbrain sources refresh` no longer exits with a bare `internal_error` when another database transaction holds a row its fence needs. A fence that waits past its 5 s lock timeout now refuses as `refresh_lock_timeout`, and `why` names the open transactions holding those tables. Nothing moves, and a later run completes once the holder is gone. Any other unexpected error now prints a typed `internal_error` refusal with its stack in `why` and the refresh row it left, which the next run resumes.**
+
+Before, a stuck transaction holding a source, worktree or brain row (a long-running job, for example) made an upstream-moved refresh fail after about 5 s with `canceling statement due to lock timeout`. That surfaced as a top-level `internal_error` with no `status`, no stack and no holder. If it happened after the drain, it also left a `draining` row for the next run to clean up.
 
 ### Itemized changes
 
-- `src/core/persistence/worktree-refresh.ts`: `refreshWorktree` turns any non-`OperationError` throw into `internal_error` with the error name, SQLSTATE and message (connection details and URLs redacted), the stack in `why`, and a fix naming the active refresh row and its state. The row is not changed. The already-current path no longer throws a `TypeError` of its own when a member sync rejects with a non-object.
+- `src/core/persistence/worktree-refresh.ts`: Postgres `55P03` in either fence transaction (`fenceDraining`, `fenceAndMerge`) is the new `refresh_lock_timeout` refusal (registry, catalogue, `docs/guides/write-refusals.md`, `docs/guides/error-codes.md`). Its `why` lists up to five open transactions holding locks on `persistence_brain`, `persistence_worktrees` or `sources` (pid, application, state, seconds open, the start of the query). A refusal after the drain aborts the draining row as other fence refusals do.
+- `src/core/persistence/worktree-refresh.ts`: `refreshWorktree` turns any other non-`OperationError` throw into `internal_error` with the error name, SQLSTATE and message (connection details and URLs redacted), the stack in `why`, and a fix naming the active refresh row and its state. The row is not changed. The already-current path no longer throws a `TypeError` of its own when a member sync rejects with a non-object.
 - `src/commands/sources-refresh.ts`: refusals print `why` (a `why` key under `--json`, a `Why:` line otherwise).
-- Test: `test/worktree-refresh-unexpected-throw.test.ts` (PGLite, and Postgres under `DATABASE_URL`).
+- Test: `test/worktree-refresh-unexpected-throw.test.ts` (PGLite, and Postgres under `DATABASE_URL`; the lock-timeout cases hold a source row from a second connection, before the fence and after the drain).
 
 ## [0.60.528.0] - 2026-10-31
 
