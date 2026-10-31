@@ -250,6 +250,32 @@ test('setting on, reflog off and no completed refresh: the refusal\'s own fetch 
   expect(remoteHead(f)).toBe(rewritten);
 }), 120_000);
 
+for (const first of ['setting off', 'dry run'] as const) {
+  test(`reflog off: a ${first} refresh that refuses after a force-push logs its own fetch, so a later setting-on refresh never publishes the removed commit`, () => each(async f => {
+    const reflog = git(f.root, 'rev-parse', '--path-format=absolute', '--git-path', 'logs/refs/remotes/origin/main').trim();
+    git(f.root, 'config', 'core.logAllRefUpdates', 'false');
+    rmSync(reflog, { force: true });
+    const before = f.push('alpha/one.md', page('Alpha one', 'Upstream before the local push.'));
+    expect(await refreshWorktree(f.engine, f.alpha)).toMatchObject({ status: 'completed' });
+    writeFileSync(join(f.root, 'beta/pushed.md'), page('Pushed', 'Pushed from this checkout, then rewritten away.'));
+    git(f.root, 'add', 'beta/pushed.md'); git(f.root, 'commit', '-qm', 'pushed then removed');
+    const removed = f.head();
+    git(f.root, 'push', '-q', 'origin', 'HEAD:main');
+    git(f.upstream, 'fetch', '-q', 'origin');
+    git(f.upstream, 'reset', '-q', '--hard', before);
+    commitFile(f.upstream, 'alpha/two.md', page('Alpha two', 'Rewritten upstream.'));
+    git(f.upstream, 'push', '-q', '--force', 'origin', 'main');
+    const rewritten = remoteHead(f);
+    if (first === 'dry run') await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+    await refusedWith(refreshWorktree(f.engine, f.alpha, { dryRun: first === 'dry run' }), 'refresh_diverged');
+    await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+    expect((await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_diverged')).message).toContain(`no longer contains ${removed}`);
+    expect(remoteHead(f)).toBe(rewritten);
+    expect(() => git(f.root, 'cat-file', '-e', 'origin/main:beta/pushed.md')).toThrow();
+    expect(f.head()).toBe(removed);
+  }), 120_000);
+}
+
 test('setting on: a local commit the upstream held inside a merge, then dropped by a force-push, is never published', () => each(async f => {
   const before = remoteHead(f);
   writeFileSync(join(f.root, 'beta/local.md'), page('Local', 'Merged upstream from this checkout, then rewritten away.'));

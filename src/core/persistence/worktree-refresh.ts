@@ -300,7 +300,7 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
     for (const sha of [preFetch, ...recorded]) if (isSha(sha)) heldUpstream.add(sha);
   }
   if (remote && remote !== '.') {
-    const fetched = await git(['-C', root, ...(publishDiverged ? ['-c', 'core.logAllRefUpdates=true'] : []), 'fetch', '--no-tags', '--quiet', remote, merge || branch], fetchTimeoutMs);
+    const fetched = await git(['-C', root, '-c', 'core.logAllRefUpdates=true', 'fetch', '--no-tags', '--quiet', remote, merge || branch], fetchTimeoutMs);
     if (fetched.code !== 0) throw refusal('fetch_failed',
       fetched.timedOut ? `git fetch ${remote} did not finish within ${fetchTimeoutMs} ms; nothing changed.`
         : `git fetch ${remote} failed (${fetched.stderr.trim().split('\n')[0] || `exit ${fetched.code}`}); nothing changed.`,
