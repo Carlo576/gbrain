@@ -28,14 +28,19 @@ gbrain config set sources.refresh_publish_diverged true
 |---|---|---|
 | Diverged checkout, setting on | refused `refresh_diverged` | pushes HEAD merged with the upstream in memory (the `gbrain git commit-push --push-only --keep-checkout` publish), fast-forwards to the merge and reports `published` (sha, local commits, upstream commits merged) |
 | Diverged checkout, setting off (the default) | refused `refresh_diverged` | unchanged; the refusal now also names the setting |
-| A file both sides changed, setting on | n/a | refuses `integrate_conflict` naming the file; nothing is pushed, fenced or moved |
+| A file both sides changed, setting on | n/a | refuses `integrate_conflict` naming the file; nothing is pushed, fenced or moved. With `gbrain.quarantine` on, the remote's version is published instead and the refresh names the ref that keeps this machine's version |
+| An uncommitted edit to a file the upstream changed, setting on | n/a | refuses `refresh_dirty` before anything is pushed |
+| A refusal after the publish landed | n/a | the refusal says the remote already holds the local commits |
 | `--dry-run` | refused `refresh_diverged` | unchanged: a dry run never publishes |
 | `gbrain config set sources.refresh_fetch_timeout_ms` / `sources.refresh_drain_wait_ms` | refused as an unknown key, although the refresh reads both | accepted |
 
 ### Things to watch after you upgrade
 
 - The publish needs a Git identity in the checkout for the merge commit, the same as the manual keep-checkout publish.
-- It never uses a `--pull` that moves the checkout: the merge is built in memory and pushed, and the checkout moves only through the refresh's usual fast-forward.
+- It never uses a `--pull` that moves the checkout. The merge is built in memory and pushed, and the checkout moves only through the refresh's usual fast-forward.
+- The push skips the checkout's pre-push hook, as the manual keep-checkout publish does. If you rely on a pre-push secret scanner, leave the setting off.
+- The setting covers every managed checkout in the brain.
+- If another publish of the same checkout is running, the refresh refuses at once instead of waiting; run it again.
 
 ### Itemized changes
 
@@ -43,7 +48,7 @@ gbrain config set sources.refresh_publish_diverged true
 - `src/commands/sources-refresh.ts`: a text line for the publish.
 - `src/core/config-runtime-keys.ts`: registers `sources.refresh_publish_diverged`, `sources.refresh_fetch_timeout_ms` and `sources.refresh_drain_wait_ms`.
 - Docs: `docs/guides/live-sync.md`, `docs/guides/write-refusals.md`, `docs/architecture/canonical-writers.md` and its census.
-- Tests: `test/refresh-publish-diverged-7686.test.ts` (setting on, off, a conflict and a dry run, on PGLite and on Postgres through `test/e2e/worktree-refresh-postgres.test.ts`).
+- Tests: `test/refresh-publish-diverged-7686.test.ts` (setting on and off, a conflict, quarantine, a dirty overlap, a refusal after the publish, a publish child that fails, and a dry run, on PGLite and on Postgres through `test/e2e/worktree-refresh-postgres.test.ts`). Tests 7c and 7d in `test/persistence-worktree-refresh.test.ts` share one fixture across their cells and run in about half the time, with every assertion kept (#7782).
 
 ## [0.60.523.0] - 2026-10-31
 
