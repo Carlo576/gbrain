@@ -20,7 +20,7 @@
  * so status can say who holds it, and a row whose lock is free is orphaned: the
  * next plain refresh finishes it through the `--resume` path before refreshing.
  */
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
@@ -273,6 +273,17 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
   const upstreamRef = upstream.stdout.trim();
   const remote = (await read(['config', '--get', `branch.${branch}.remote`], 1)).stdout.trim();
   const merge = (await read(['config', '--get', `branch.${branch}.merge`], 1)).stdout.trim();
+  const heldUpstream = new Set<string>();
+  if (publishDiverged) {
+    const upstreamFull = (await read(['rev-parse', '--symbolic-full-name', '@{upstream}'])).stdout.trim();
+    let reflog = '';
+    try { reflog = readFileSync((await read(['rev-parse', '--path-format=absolute', '--git-path', `logs/${upstreamFull}`])).stdout.trim(), 'utf8'); } catch { /* no reflog */ }
+    const rows = await engine.executeRaw<{ target_head: string }>(`SELECT target_head FROM persistence_worktree_refreshes WHERE worktree_id=$1::uuid AND upstream_ref=$2 AND state='completed' ORDER BY created_at DESC LIMIT 100`, [binding.worktree_id, upstreamRef]);
+    for (const sha of [(await read(['rev-parse', '--verify', '-q', '@{upstream}^{commit}'], 1)).stdout.trim(),
+      ...reflog.split('\n').slice(-1000).flatMap(line => line.split(' ').slice(0, 2)), ...rows.map(r => r.target_head)]) {
+      if (/^[0-9a-f]{40,64}$/.test(sha) && !/^0+$/.test(sha)) heldUpstream.add(sha);
+    }
+  }
   if (remote && remote !== '.') {
     const fetched = await git(['-C', root, 'fetch', '--no-tags', '--quiet', remote, merge || branch], fetchTimeoutMs);
     if (fetched.code !== 0) throw refusal('fetch_failed',
@@ -286,10 +297,6 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
     `git -C ${q(root)} fetch ${remote || 'origin'}, then gbrain sources refresh ${sourceId}`);
   if (oldHead !== targetHead && !await isAncestor(git, root, oldHead, targetHead)) {
     if (!publishDiverged) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead);
-    const upstreamFull = (await read(['rev-parse', '--symbolic-full-name', '@{upstream}'])).stdout.trim();
-    const heldUpstream = new Set([...(await read(['log', '-g', '-n', '1000', '--format=%H', upstreamFull, '--'], 128)).stdout.split('\n'),
-      ...(await engine.executeRaw<{ target_head: string }>(`SELECT target_head FROM persistence_worktree_refreshes WHERE worktree_id=$1::uuid AND state='completed' ORDER BY created_at DESC LIMIT 100`, [binding.worktree_id])).map(r => r.target_head)]
-      .map(sha => sha.trim()).filter(Boolean));
     const removed = (await read(['rev-list', `${targetHead}..${oldHead}`])).stdout.split('\n').map(sha => sha.trim()).find(sha => heldUpstream.has(sha));
     if (!heldUpstream.size || removed) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead, removed
       ? `${upstreamRef} no longer contains ${removed}, which it held before: its history was rewritten (a force-push), and publishing would merge back the commits the rewrite removed.`
@@ -349,7 +356,7 @@ async function divergedRefusal(git: Git, root: string, sourceId: string, upstrea
     `Publish ${local} merged with ${upstreamRef}: ${argv.map(q).join(' ')} (it merges in memory, refuses on a conflict and never moves the checkout), then retry gbrain sources refresh ${sourceId}. Ask the user first, because it pushes those commits (git -C ${q(root)} log --stat ${upstreamRef}..HEAD lists them). gbrain sources reclone ${sourceId} replaces the checkout instead and drops them.${rewrite ? '' : ` To let every refresh publish a diverged checkout this way on its own, the user can run gbrain config set ${REFRESH_PUBLISH_DIVERGED_KEY} true.`}`);
   error.fix = { argv, consent: [], actor: 'user', ask_user: true, requires_exclusive: false,
     why: `HEAD has ${local} that ${upstreamRef} lacks while ${upstreamRef} moved on; pushing HEAD merged with it makes HEAD an ancestor of the upstream, so the refresh can fast-forward.`,
-    user_message: rewrite ? `The remote of source ${sourceId} was rewritten (${rewrite}) Push this checkout's history merged with it anyway, or replace the checkout with gbrain sources reclone ${sourceId}?`
+    user_message: rewrite ? `The checkout of source ${sourceId} cannot be published on its own: ${rewrite} Push this checkout's history merged with the remote anyway, or replace the checkout with gbrain sources reclone ${sourceId}?`
       : `The checkout of source ${sourceId} has ${local} that were never pushed while its remote moved on. Push them, merged with the remote, so gbrain can bring the checkout up to date? Conflicting files stop the push and change nothing.`,
     docs: 'docs/guides/write-refusals.md#refresh_diverged' };
   return error;
