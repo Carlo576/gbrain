@@ -297,11 +297,6 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
   if (dirt.overlap.length) throw dirtyRefusal(sourceId, dirt.overlap);
   return { binding, root, members, upstreamRef, oldHead, targetHead, ...dirt };
 }
-/**
- * Q1: a diverged checkout is reconciled without moving it: `gbrain git commit-push --push-only --keep-checkout` merges the
- * upstream into HEAD in memory and pushes the merge (refusing on a conflict, never touching the checkout), after which HEAD
- * is an ancestor of the upstream and the refresh fast-forwards. It publishes the local commits, so the user decides.
- */
 /** #7686: the bound on the keep-checkout publish child (a fetch, an in-memory merge and a push, repeated while the remote keeps moving). */
 const PUBLISH_TIMEOUT_MS = 600_000;
 
@@ -329,6 +324,11 @@ async function publishInChild(root: string, sourceId: string): Promise<{ sha: st
   throw opError('push_unconfirmed', `The publish of the diverged checkout ${root} did not report a push (${child.error ? `exit ${String(child.error.code ?? child.error.signal ?? 'unknown')}` : `outcome ${String(doc?.outcome ?? 'unreadable')}`}: ${child.stderr.trim().slice(0, 300) || 'no detail'}); the refresh stopped before fencing anything, and the remote may already hold the merge.`,
     `Check gbrain sources writer status --source ${sourceId} --json, then retry gbrain sources refresh ${sourceId}.`, { retryable: true });
 }
+/**
+ * Q1: a diverged checkout is reconciled without moving it: `gbrain git commit-push --push-only --keep-checkout` merges the
+ * upstream into HEAD in memory and pushes the merge (refusing on a conflict, never touching the checkout), after which HEAD
+ * is an ancestor of the upstream and the refresh fast-forwards. It publishes the local commits, so the user decides.
+ */
 async function divergedRefusal(git: Git, root: string, sourceId: string, upstreamRef: string, oldHead: string, targetHead: string): Promise<OperationError> {
   const count = Number((await git(['-C', root, 'rev-list', '--count', `${targetHead}..${oldHead}`])).stdout.trim()) || 0;
   const local = count ? `${count} local commit(s)` : 'the local commits';
