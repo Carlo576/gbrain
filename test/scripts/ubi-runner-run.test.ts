@@ -180,7 +180,7 @@ describe("owner and reap", () => {
   it("reap reports a failed list and a failed destroy; bad UBI_TTL_HOURS refuses creates and bad UBI_LEGACY_HOURS refuses reap, never read-only commands", async () => {
     const api = serve({ seed: [{ name: "ubirun-other-1000000000-bbbb-t1" }] });
     api.faults.destroy = true;
-    const destroyFails = await run(["reap"]);
+    const destroyFails = await run(["reap"], { UBI_REAP_DOWN_TIMEOUT: "2" });
     expect(destroyFails.code).toBe(1);
     expect(destroyFails.stderr).toContain("failed to reap eu-central-h1/ubirun-other-1000000000-bbbb-t1");
     expect(destroyFails.stderr).toContain("reap: 1 of 1 expired VMs could not be destroyed");
@@ -223,6 +223,51 @@ describe("owner and reap", () => {
       expect(destroyed()).toEqual(["ubirun-other-1000000000-bbbb-t1"]);
     }
   }, 90_000);
+});
+
+// #8103 item 3: down gave up on the first destroy request that was not HTTP 200,
+// so one API timeout or 5xx left the VM up until its TTL and read as left=1.
+describe("down retries a failed destroy request", () => {
+  it("a destroy that timed out (000) or got a 5xx is retried inside the poll loop until the VM is gone", async () => {
+    const api = serve({ seed: [{ name: "vm-a" }], destroyFaults: [503, "hang", 502] });
+    const r = await run(["down", "vm-a"], { UBI_API_TIMEOUT: "1", UBI_DOWN_TIMEOUT: "60" });
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("destroy request for eu-central-h1/vm-a got HTTP 503; retrying until 60s have passed");
+    expect(r.stderr).toContain("destroy request for eu-central-h1/vm-a got HTTP 000; retrying until 60s have passed");
+    expect(r.stderr).toContain("destroy request for eu-central-h1/vm-a got HTTP 502; retrying until 60s have passed");
+    expect(r.stderr).toContain("destroyed eu-central-h1/vm-a");
+    expect(r.stderr).not.toContain("FAILED");
+    expect(destroyed()).toEqual(["vm-a"]);
+    expect(api.vms.size).toBe(0);
+  }, 60_000);
+
+  it("a definite 4xx other than 404 fails at once; a destroy that keeps failing gives up at UBI_DOWN_TIMEOUT naming the last status", async () => {
+    const api = serve({ seed: [{ name: "vm-a" }], destroyFaults: [403] });
+    const started = Date.now();
+    const refused = await run(["down", "vm-a"], { UBI_DOWN_TIMEOUT: "60" });
+    expect(refused.code).toBe(1);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(refused.stderr).toContain("FAILED to destroy eu-central-h1/vm-a (HTTP 403); retry:");
+    expect(api.vms.has("vm-a")).toBe(true);
+    api.faults.destroy = true;
+    const stuck = await run(["down", "vm-a"], { UBI_DOWN_TIMEOUT: "2" });
+    expect(stuck.code).toBe(1);
+    expect(stuck.stderr).toContain("could not confirm eu-central-h1/vm-a is gone after 2s (last destroy request: HTTP 500); rerun:");
+    expect(stuck.stderr.match(/got HTTP 500; retrying/g)).toHaveLength(1);
+    expect(api.vms.has("vm-a")).toBe(true);
+  }, 60_000);
+
+  it("reap waits at most UBI_REAP_DOWN_TIMEOUT per VM, not UBI_DOWN_TIMEOUT", async () => {
+    const api = serve({ seed: [{ name: "ubirun-other-1000000000-bbbb-t1" }, { name: "ubirun-peer-1000000000-cccc-t1" }] });
+    api.faults.destroy = true;
+    const started = Date.now();
+    const r = await run(["reap"], { UBI_DOWN_TIMEOUT: "600", UBI_REAP_DOWN_TIMEOUT: "2" });
+    expect(r.code).toBe(1);
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(r.stderr).toContain("could not confirm eu-central-h1/ubirun-other-1000000000-bbbb-t1 is gone after 2s (last destroy request: HTTP 500)");
+    expect(r.stderr).toContain("reap: 2 of 2 expired VMs could not be destroyed");
+    for (const bad of ["0", "x"]) expect((await run(["reap"], { UBI_REAP_DOWN_TIMEOUT: bad })).stderr).toContain("UBI_REAP_DOWN_TIMEOUT must be a whole number of seconds from 1");
+  }, 60_000);
 });
 
 describe("run leftover line", () => {

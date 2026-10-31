@@ -22,6 +22,10 @@
 #   - Bash 5.2 lost-signal-trap guard (set -E, FAILED, finish).
 #   - UBI_REAP takes the usual false spellings (0/false/no/off) and refuses
 #     anything it cannot read, instead of treating every value but 0 as on.
+#   - down retries a destroy request that timed out or got a 5xx (also 408,
+#     429 and 404) inside its poll loop until UBI_DOWN_TIMEOUT, and gives up
+#     early only on another 4xx; reap bounds each VM's wait with
+#     UBI_REAP_DOWN_TIMEOUT. Both are pending upstream (GSTA-36).
 #
 # Scratch record: every VM this machine creates is appended to a VM-id file
 # (UBI_VM_RECORD; default ~/.capy/work/ubi-runner/vms.tsv when ~/.capy/work
@@ -102,6 +106,7 @@ GC_HOURS="${UBI_GC_HOURS:-0}"
 API_TIMEOUT="${UBI_API_TIMEOUT:-120}"
 CREATE_GRACE="${UBI_CREATE_GRACE:-180}"
 DOWN_TIMEOUT="${UBI_DOWN_TIMEOUT:-900}"
+REAP_DOWN_TIMEOUT="${UBI_REAP_DOWN_TIMEOUT:-180}"
 POLL="${UBI_POLL_SECONDS:-5}"
 ALLOWED_STORAGE="${UBI_ALLOWED_STORAGE:-320 640}"
 TTL_HOURS="${UBI_TTL_HOURS:-3}"
@@ -150,6 +155,9 @@ for v in IDLE_TIMEOUT RUN_TIMEOUT HEARTBEAT QUOTA_WAIT; do
   [[ "${!v}" =~ ^[0-9]+$ ]] || die "UBI_$v must be a whole number of seconds (0 disables it)"
 done
 [ -z "$QUOTA_VCPUS" ] || [[ "$QUOTA_VCPUS" =~ ^[0-9]+$ ]] || die "UBI_QUOTA_VCPUS must be a whole number of vCPUs"
+for v in DOWN_TIMEOUT REAP_DOWN_TIMEOUT; do
+  [[ "${!v}" =~ ^[1-9][0-9]*$ ]] || die "UBI_$v must be a whole number of seconds from 1"
+done
 # gbrain: UBI_REAP=false (or no/off) must not turn reaping on.
 case $(printf %s "$REAP" | tr '[:upper:]' '[:lower:]') in
   0|false|no|off) REAP=0 ;;
@@ -385,6 +393,8 @@ mine_rows() {
 # outside the prefix are never touched: only a TTL lets reap judge another lane's VM.
 cmd_reap() {
   local now rows loc name owner expires created n=0 failed=0
+  # cmd_down reads DOWN_TIMEOUT; a reap waits at most REAP_DOWN_TIMEOUT per VM.
+  local DOWN_TIMEOUT=$REAP_DOWN_TIMEOUT
   [[ "$LEGACY_HOURS" =~ ^[1-9][0-9]{0,3}$ ]] || die "UBI_LEGACY_HOURS must be a whole number of hours from 1 to 9999 with no leading zero (how old a TTL-less ubirun-* VM must be before reap destroys it)"
   now=$(date +%s)
   rows=$(vm_rows) || { log "reap: could not list the project's VMs; nothing destroyed"; return 1; }
@@ -672,7 +682,7 @@ cmd_down() {
     fi
   fi
 
-  local deadline=$(( $(date +%s) + DOWN_TIMEOUT )) seen=0 asked=0 out code now
+  local deadline=$(( $(date +%s) + DOWN_TIMEOUT )) seen=0 asked=0 out code now failed=""
   out=$(mktemp)
   while :; do
     now=$(date +%s)
@@ -687,14 +697,19 @@ cmd_down() {
       seen=1
       if [ $(( now - asked )) -ge 60 ]; then
         code=$(api "$out" vm "$loc/$name" destroy -f)
-        if [ "$code" != 200 ]; then
+        if [ "$code" = 200 ]; then
+          asked=$now
+          failed=""
+          log "destroy requested: $loc/$name"
+        elif [[ "$code" =~ ^4[0-9][0-9]$ ]] && [ "$code" != 404 ] && [ "$code" != 408 ] && [ "$code" != 429 ]; then
           cat "$out" >&2
           rm -f "$out"
           log "FAILED to destroy $loc/$name (HTTP $code); retry: $0 down $name"
           return 1
+        else
+          [ "$code" = "$failed" ] || log "destroy request for $loc/$name got HTTP $code; retrying until ${DOWN_TIMEOUT}s have passed"
+          failed=$code
         fi
-        asked=$now
-        log "destroy requested: $loc/$name"
       fi
     elif [ "$code" = 404 ]; then
       if [ "$seen" = 1 ] || [ "$CREATED" != unknown ] || { [ $(( now - CREATE_AT )) -ge "$CREATE_GRACE" ] \
@@ -709,7 +724,7 @@ cmd_down() {
     fi
     if [ "$now" -ge "$deadline" ]; then
       rm -f "$out"
-      log "WARNING: could not confirm ${loc:-?}/$name is gone after ${DOWN_TIMEOUT}s; rerun: $0 down $name"
+      log "WARNING: could not confirm ${loc:-?}/$name is gone after ${DOWN_TIMEOUT}s${failed:+ (last destroy request: HTTP $failed)}; rerun: $0 down $name"
       return 1
     fi
     sleep "$POLL"
@@ -1076,7 +1091,7 @@ env: UBI_TTL_HOURS (${TTL_HOURS}h in the name, 1-999), UBI_REAP (default 0 in gb
      UBI_QUOTA_VCPUS (project vCPU ceiling for the preflight; else the last refusal's maximum),
      UBI_QUOTA_WAIT (${QUOTA_WAIT}s to wait for quota room instead of refusing),
      UBI_GC_HOURS (unset/0: no sweep on up), UBI_CREATE_GRACE (${CREATE_GRACE}s),
-     UBI_DOWN_TIMEOUT (${DOWN_TIMEOUT}s), UBI_API_TIMEOUT (${API_TIMEOUT}s), UBI_VM_RECORD (scratch VM-id file),
+     UBI_DOWN_TIMEOUT (${DOWN_TIMEOUT}s), UBI_REAP_DOWN_TIMEOUT (${REAP_DOWN_TIMEOUT}s per VM in reap), UBI_API_TIMEOUT (${API_TIMEOUT}s), UBI_VM_RECORD (scratch VM-id file),
      UBI_ALLOWED_STORAGE (the -S sizes Ubicloud accepts; default "320 640")
 EOF
 }
