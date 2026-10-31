@@ -15,11 +15,13 @@
  * setting, one that moves the checkout or drops the local commits while
  * publishing, and one that pushes or fences anything when the merge conflicts or
  * the refresh is about to refuse a dirty overlap.
- * Seams: the `hooks.boundary` callback for the refusal after a publish; otherwise
+ * Seams: the `hooks.boundary` callback for the refusal after a publish, and
+ * GBRAIN_JOB_CHILD_CLI naming the child gbrain that publishes; otherwise
  * a real bare remote, a pushing clone and the managed checkout.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -29,13 +31,19 @@ import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import { REFRESH_PUBLISH_DIVERGED_KEY, refreshWorktree } from '../src/core/persistence/worktree-refresh.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { git, page, withRefreshFixture, type RefreshFixture } from './helpers/worktree-refresh-fixture.ts';
 
 const backends = testBackends();
 const engines: BrainEngine[] = [];
 let closePostgres: (() => Promise<void>) | undefined;
+/** The publish runs in a child `gbrain`; under bun test that is this checkout's CLI through a wrapper. */
+const bin = mkdtempSync(join(tmpdir(), 'gbrain-7686-bin-'));
+const childCli = join(bin, 'gbrain');
 
 beforeAll(async () => {
+  writeFileSync(childCli, `#!/bin/sh\nexec '${process.execPath}' '${join(import.meta.dir, '..', 'src', 'cli.ts')}' "$@"\n`);
+  chmodSync(childCli, 0o755);
   if (backends.includes('pglite')) {
     const engine = new PGLiteEngine();
     await engine.connect({}); await engine.initSchema(); engines.push(engine);
@@ -48,13 +56,14 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const engine of engines) if (engine.kind === 'pglite') await engine.disconnect();
   await closePostgres?.();
+  rmSync(bin, { recursive: true, force: true });
 });
 
-const each = async (fn: (f: RefreshFixture) => Promise<void>) => {
+const each = async (fn: (f: RefreshFixture) => Promise<void>, cli = childCli) => {
   for (const engine of engines) {
-    await withRefreshFixture(engine, async f => {
+    await withEnv({ GBRAIN_JOB_CHILD_CLI: cli }, () => withRefreshFixture(engine, async f => {
       try { await fn(f); } finally { await engine.unsetConfig(REFRESH_PUBLISH_DIVERGED_KEY); }
-    });
+    }));
   }
 };
 const refusedWith = async (promise: Promise<unknown>, code: string) => {
@@ -173,6 +182,17 @@ test('setting on: a refusal after the publish says the local commits were alread
   } } }), 'refresh_source_changed');
   expect(error.message).toContain(`already published the checkout's 1 local commit(s) merged with the upstream as ${remoteHead(f)}`);
 }), 120_000);
+
+test('setting on: the publish runs in a child gbrain, never in this process, so an unusable child refuses and nothing is pushed or fenced', () => each(async f => {
+  const local = diverge(f);
+  const remote = remoteHead(f);
+  await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+  const error = await refusedWith(refreshWorktree(f.engine, f.alpha), 'push_unconfirmed');
+  expect(error.message).toContain('did not report a push');
+  expect(remoteHead(f)).toBe(remote);
+  expect(f.head()).toBe(local);
+  expect(await f.refreshRows()).toEqual([]);
+}, '/bin/false'), 120_000);
 
 test('setting on: a dry run publishes nothing and still refuses refresh_diverged', () => each(async f => {
   const local = diverge(f);

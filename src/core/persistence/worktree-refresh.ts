@@ -42,7 +42,7 @@ import { startPersistenceConsumer } from './service.ts';
 import { lockTopologyPrincipal, lockTopologyRows, topologyPrincipal, withTopologyLocks } from './topology-locks.ts';
 import { ACTIVE_REFRESH_STATES_SQL, CHECKOUT_EFFECT_KINDS_SQL, type WorktreeRefreshState } from './worktree-refresh-schema.ts';
 import { gitChildEnv } from '../git-env.ts';
-import { commitAndPush, type QuarantineEntry } from '../git/commit-push.ts';
+import type { QuarantineEntry } from '../git/commit-push.ts';
 import { isTruthy } from '../connectors/config-keys.ts';
 import { classifyOriginUniqueViolation } from './origin-guard.ts';
 
@@ -287,7 +287,7 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
     const incoming = await dirtyOverlap(git, root, base, targetHead);
     if (incoming.overlap.length) throw dirtyRefusal(sourceId, incoming.overlap);
     const localCommits = Number((await read(['rev-list', '--count', `${targetHead}..${oldHead}`])).stdout.trim()) || 0;
-    const pushed = commitAndPush({ repo: root, pushOnly: true, keepCheckout: true });
+    const pushed = await publishInChild(root, sourceId);
     const published = { sha: pushed.sha ?? targetHead, local_commits: localCommits, integrated: pushed.integrated,
       ...(pushed.quarantined ? { quarantined: pushed.quarantined } : {}), ...(pushed.superseded_remote_paths ? { superseded_remote_paths: pushed.superseded_remote_paths } : {}) };
     const plan = await precheck(engine, git, sourceId, fetchTimeoutMs).catch(error => { throw notePublished(error, published); });
@@ -302,6 +302,33 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
  * upstream into HEAD in memory and pushes the merge (refusing on a conflict, never touching the checkout), after which HEAD
  * is an ancestor of the upstream and the refresh fast-forwards. It publishes the local commits, so the user decides.
  */
+/** #7686: the bound on the keep-checkout publish child (a fetch, an in-memory merge and a push, repeated while the remote keeps moving). */
+const PUBLISH_TIMEOUT_MS = 600_000;
+
+/**
+ * #7686 (#7010's rule): run the keep-checkout publish in a bounded child `gbrain git commit-push --push-only --keep-checkout`.
+ * The shared publish is synchronous (fetches, pushes and lock waits block for minutes), and a refresh delegated to a
+ * PGLite owner runs inside the owner, where blocking would stall lease renewals; a busy publish lock fails at once.
+ */
+async function publishInChild(root: string, sourceId: string): Promise<{ sha: string | null; integrated: number; quarantined?: QuarantineEntry; superseded_remote_paths?: string[] }> {
+  const { CHILD_ENV, resolveChildCliInvocation } = await import('../minions/job-isolation.ts');
+  const cli = resolveChildCliInvocation(process.env, process.execPath, process.argv[1], () => null);
+  if (!cli) throw opError('git_push_unavailable', `This process could not locate its own gbrain executable to publish the diverged checkout ${root}; nothing was pushed.`,
+    `Set ${CHILD_ENV.childCliOverride} to the gbrain executable and retry gbrain sources refresh ${sourceId}, or publish by hand: gbrain git commit-push --push-only --keep-checkout --path ${q(root)}.`);
+  const child = await execFileBounded(cli.cmd, [...cli.argsPrefix, 'git', 'commit-push', '--push-only', '--keep-checkout', '--path', root, '--json'], {
+    timeout: PUBLISH_TIMEOUT_MS, termGraceMs: 10_000, maxBuffer: 1024 * 1024,
+    env: { ...process.env, GBRAIN_PUBLISH_LOCK_WAIT_SECONDS: '0', GBRAIN_PUSH_LOCK_WAIT_SECONDS: '0' },
+  });
+  let doc: Record<string, unknown> | null = null;
+  try { doc = JSON.parse(child.stdout.trim()); } catch { /* reported below */ }
+  if (!child.error && doc?.outcome === 'pushed') return doc as { sha: string | null; integrated: number; quarantined?: QuarantineEntry; superseded_remote_paths?: string[] };
+  if (doc && typeof doc.code === 'string' && typeof doc.message === 'string') {
+    throw opError(doc.code as Parameters<typeof opError>[0], doc.message, typeof doc.suggestion === 'string' ? doc.suggestion : '',
+      { ...(typeof doc.detail === 'string' ? { detail: doc.detail } : {}), ...(doc.fix ? { fix: doc.fix as Action } : {}), retryable: doc.retryable === true });
+  }
+  throw opError('push_unconfirmed', `The publish of the diverged checkout ${root} did not report a push (${child.error ? `exit ${String(child.error.code ?? child.error.signal ?? 'unknown')}` : `outcome ${String(doc?.outcome ?? 'unreadable')}`}: ${child.stderr.trim().slice(0, 300) || 'no detail'}); the refresh stopped before fencing anything, and the remote may already hold the merge.`,
+    `Check gbrain sources writer status --source ${sourceId} --json, then retry gbrain sources refresh ${sourceId}.`, { retryable: true });
+}
 async function divergedRefusal(git: Git, root: string, sourceId: string, upstreamRef: string, oldHead: string, targetHead: string): Promise<OperationError> {
   const count = Number((await git(['-C', root, 'rev-list', '--count', `${targetHead}..${oldHead}`])).stdout.trim()) || 0;
   const local = count ? `${count} local commit(s)` : 'the local commits';
