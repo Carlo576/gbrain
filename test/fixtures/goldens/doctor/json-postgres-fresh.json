@@ -1779,6 +1779,21 @@
         {
           "category": "brain",
           "details": {
+            "ambiguous": 0,
+            "docs": "docs/guides/repair.md#agent-session-facts",
+            "evidenced": 0,
+            "excluded": 0,
+            "repair": "agent-session-facts",
+            "unclassifiable": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No active owner-attributed fact from an agent-launched session remains.",
+          "name": "agent_session_facts",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "affected": 0,
             "docs": "docs/guides/repair.md#redacted-facts",
             "repair": "redacted-facts"

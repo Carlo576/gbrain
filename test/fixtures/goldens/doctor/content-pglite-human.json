@@ -134,6 +134,7 @@
       "  [OK] conversation_label_facts: No conversation fact carries the pre-fix meeting-label signature (a 1970-01-01 segment on a label page).",
       "  [OK] conversation_outcomes_stale: No conversation extraction outcome predates extractor version 1.",
       "  [OK] captured_facts_active: No active fact from a gbrain self-capture or paste candidate remains. This counts facts in the database; the self_capture check counts corpus files.",
+      "  [OK] agent_session_facts: No active owner-attributed fact from an agent-launched session remains.",
       "  [OK] facts_redaction_marker: No active fact holds a redaction marker.",
       "  [OK] fact_bulk_dates: No calendar day holds a bulk-loaded share of any source's facts.",
       "  [OK] loop_facts_drift: Every closed commitment loop has its fact retired.",

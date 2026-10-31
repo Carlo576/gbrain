@@ -10,6 +10,72 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.523.0] - 2026-10-31
+
+**A launcher can now tell gbrain that a session's user turns are an agent's, not yours, so orchestrator worker briefs stop landing in your brain as your own preferences (#8064). Codex sessions that open and close with no prompt no longer raise a week-long parser_drift alert (#8016), and task notifications and agent-team messages no longer get brain context injected as if you typed them (#8028).**
+
+Set `GBRAIN_SESSION_AGENT=<label>` on a worker's process and the capture hooks still save the session, but every claim from its user turns is saved as `attributed_to: other` with the context note `speaker: agent <label>, not the owner`, and the extractor is told the agent wrote them. `GBRAIN_SESSION_AGENT=off` saves nothing from the session; `owner` declares the turns yours. With the variable unset, a headless `claude -p` or `codex exec` session whose ancestors include another claude or codex process is detected and saved as agent `agent-launched`'s. The marker is a `<session>.speaker.json` sidecar written before any corpus file; if it can't be written, nothing is saved. Agent claims are never consolidated into your own takes. The marker covers the Claude Code and Codex hook lanes; the OpenClaw context-engine lane and dream synthesis don't read it yet.
+
+For facts already saved as yours, `gbrain repair agent-session-facts` previews a re-attribution: facts from sessions with a speaker marker, sessions you name (`--session`), or sessions whose working directory sits under a path you name (`--cwd`, for an orchestrator's worktree root). Sessions whose first turn opens with the same 160 characters as at least 3 other sessions (a template brief) are listed as ambiguous and change only with `--include-ambiguous`. `--apply --expect <hash> --yes` sets exactly the previewed facts to `attributed_to: other` with the speaker note and retires the self takes consolidate built only from them. It deletes nothing, keeps a claim you also made in another session, and works on repo-less brains. `gbrain doctor` (`agent_session_facts`) counts the candidates, and `doctor --remediation-plan` lists the preview command.
+
+### Itemized changes
+
+- `src/core/context/session-speaker.ts` (new): the env contract, ancestry detection, the speaker sidecar.
+- `src/commands/hook.ts`: compact, stop and session-end record the speaker before banking and skip banking on `off`; user-prompt skips `<task-notification` and `<teammate-message` prompts (`harness_prompt`); a session-end that saves turns clears its own lane's `parser_drift` status file, which now records the lane.
+- `src/core/facts/backstop.ts`, `src/core/facts/extract.ts`, `src/core/facts/speaker-context.ts`, `src/core/persistence/facts-maintenance.ts`: the `speaker` pipeline option.
+- `src/core/context/checkpoint-harvest.ts`, `src/core/sweep.ts`: the capture lanes pass the corpus file's speaker.
+- `src/core/transcripts/codex-hook-lane.ts`: `event_msg` / `thread_settings_applied` counts as a recognized record.
+- `src/core/repair/agent-session-facts.ts` (new), `src/commands/doctor/checks/agent-session-facts.ts` (new): the explicit-only repair kind, its `managed_maintenance_agent_session_facts` request and the `agent_session_facts` doctor check; registry, preview-approval and doctor goldens updated.
+- `docs/guides/ambient-writeback.md`: "Sessions an agent launches"; `docs/guides/repair.md`: the new kind.
+
+## [0.60.522.0] - 2026-10-31
+
+**`recall` and `list_pages` now honour `source_ids`, the per-request source narrowing `search` and `query` already had. Before, both ops ignored the list, so an agent narrowing each call to the asking member's sources still got other sources' facts and pages from these two tools.** A harness-evals run measured it: under per-request narrowing, `recall` returned a page from outside the requester's sources twice and `list_pages` 57 pages over three calls. Each id is checked like an explicit `source_id`, so the list can only narrow what the token's grant allows; an id outside a remote grant refuses the whole request, and an empty intersection with `source_id` returns nothing with an `empty_retrieval` notice. A call that names its own sources also no longer gets `_meta.brain_hot_memory`, which reads the connection's source.
+
+### Itemized changes
+
+- `src/core/ops/facts.ts`: `recall` takes `source_ids` and reads every fact arm and its page-search arm inside the narrowed scope.
+- `src/core/ops/pages.ts`: `list_pages` takes `source_ids`.
+- `src/core/ops/search-source-scope.ts`: the shared parser and resolver serve all four ops.
+- `src/mcp/dispatch.ts`: the hot-memory hook is skipped when a call names `source_ids` or a `source_id` other than the connection's.
+- `docs/protocol/MCP_META_CHANNELS.md`: says when `brain_hot_memory` is left out.
+- `docs/guides/multi-source-brains.md`: "Narrow one request with `source_ids`" names all four ops.
+- `test/recall-list-pages-source-ids.test.ts` (PGLite and Postgres): each recall arm and list_pages under narrowing, the grant refusal, the empty intersection, and starter-surface dispatch with the hot-memory hook; red on the old code.
+
+## [0.60.521.0] - 2026-10-30
+
+**Text from other people's messages is now quoted on every read that hands it to an agent, not only in `search` results for imported conversations: Slack, iMessage, email and meeting pages, facts saved from them, and `get_page`, `fetch`, `recall`, `delta`, hot memory and `think` all mark it as source material.**
+
+Since the previous release, `search`, `query` and `assemble_evidence` returned a `conversation` page's text inside a quote fence, a line naming the page as source material, not instructions, then a code fence the text cannot close, with tool calls in it summarized. Other chat page types and the facts extracted from them came back unmarked, and so did every other read. Now one rule decides what is quoted: a page of type `conversation`, `meeting`, `slack`, `slack-dm-day`, `slack-thread`, `email`, `email-digest`, `imessage`, `imessage-daily`, `transcript` or `chat`, and a fact taken from one: saved by the conversation-facts extractor (`cli:extract-conversation-facts`), extracted by the facts backstop or `extract_facts` from such a page (a synced or written Slack, email or meeting page), or held in such a page's facts fence. Which facts count is decided when they are read, from what each fact already records about its source page: the page holding it, the derivation edge the backstop has written since it started recording them, or, for older backstop facts and brains rebuilt from git, the page its `source_session` names (`sync:<slug>`, `put_page:<slug>`). This release adds no new write and changes nothing stored. Each comes back with `quoted: "transcript"` and its text fenced; a fact's marker names it as `fact <id>`.
+
+- `search`, `query` and `assemble_evidence` quote these rows for every caller, as they already did for `conversation` pages, including fact rows and `saved_facts`. If the lookup that decides which facts to quote fails, `saved_facts` is left out with the degraded stage `saved_facts_withheld` (and remote `recall` returns no facts, with `facts_degraded.reason: "saved_facts_withheld"`) rather than returning them unquoted.
+- Over MCP, `recall` quotes its `results` and the `fact` of each quoted fact, and `delta` facts and `_meta.brain_hot_memory` do the same.
+- Over MCP, `get_page` on such a page fences `compiled_truth`, `timeline`, `content` and every window's text, and `fetch` fences `text` (`metadata.quoted`). Tool calls are not summarized there, so the text inside the fence is the stored text: `edit_page` with `old_text` copied from inside still matches, and `put_page` given the fenced `content` back removes exactly those fences before it writes, so a read, edit and write round trip keeps the page as it was apart from your edit. Only a page whose stored or new type is quoted loses a fence naming it on such a write; a note whose own text looks like one keeps it, and a retried write that changes the type replays as the same request.
+- Over MCP, `get_page` with `known_as_of` and `get_versions` with `include_body` (and the `known_as_of` `diff`) fence the same pages' recorded bodies and mark them `quoted`.
+- `think` quotes these pages in the evidence it gives the model, on every run.
+- The local CLI (`gbrain get`, `gbrain put`, `gbrain recall`, `gbrain delta`) reads and writes as before. A thin-client `gbrain get` (and `--json`) prints the fences the host returns, except when it pages a large chat page window by window: it removes them and checks the page against the host's size and checksum. Stored pages, facts, ranking and scores are unchanged. `search_exact` and `get_chunks` still return text as stored.
+
+### What changes for you
+
+- An agent connected over MCP sees chat and email text, and facts saved from it, as quoted source material wherever it reads them.
+- A script reading `get_page` or `recall` over MCP sees the marker line and fence around such text; read `quoted` to tell. Writing `content` back with `put_page` needs no change.
+- Upgrade thin clients with the host: a thin client older than this release cannot page a large chat page from a host on it, because the fenced windows no longer match the reported checksum.
+- Not covered yet: `get_timeline` rows and `get_page include_timeline_entries` rows, the `context_pack` and `delta` text renderers, `search_exact` and `get_chunks`.
+
+## [0.60.520.0] - 2026-10-30
+
+**The Heavy nightly's Codex plugin door test checks the plugin's MCP surface against `PLUGIN_SURFACE`, the surface the plugin's `mcp.json` actually serves, instead of `REGISTRATION_SURFACE`. A unit-shard listing that dies on a signal now names the signal instead of an empty error.**
+
+The plugin ships `serve --surface PLUGIN_SURFACE --source-guard`, so the door test's launcher-args check and its `tools/list` oracle compared against the wrong surface and failed every Heavy nightly (#6049).
+
+`unitShards()` in `scripts/sharding.ts` threw `scripts/test-shard.sh --dry-run-list 26 28 failed: ` with nothing after it when a plain `bun test test/scripts/unit-shard-budget.test.ts` hit Bun's 5 s default test timeout. Bun ignores bunfig's `timeout`, the 28 listings take about 5.5 s, and the timeout kills the child, so the status is null and stderr is empty. The error now reads `killed by SIGTERM`. CI was never affected: `scripts/test-shard.sh` passes `--timeout=60000`.
+
+### Itemized changes
+
+- `test/e2e/codex-plugin-install-real.serial.test.ts`: assert `PLUGIN_SURFACE`.
+- `scripts/sharding.ts`: `unitShards()` names the signal that killed a listing.
+- `test/scripts/sharding.test.ts`: a listing killed by SIGTERM reports it.
+
 ## [0.60.519.0] - 2026-10-30
 
 **The unit lane now runs 28 shards instead of 22, on shard weights refreshed from the Oct 30 nightly. With the fresh weights, every one of 22 shards would be planned at 624.4 s against the 600 s per-shard budget; at 28 shards the largest is 490.6 s.**
