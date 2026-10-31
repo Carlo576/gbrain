@@ -9,7 +9,7 @@
  * projections a managed sync import uses, bound to the page revision and the previewed result; the file on disk already
  * holds those bytes, so no file is written, and the import record is rewritten). `hold:<code>`: the import of the
  * checkpoint file is refused (or it is over the sync read bound), so the apply opens the hold sync would have opened, with
- * the refusal's code and message. Left out of the set and listed: rows with no import record (`excluded:unproven`, joined
+ * the code and message of the refusal the apply recomputes (not the one saved with the preview). Left out of the set and listed: rows with no import record (`excluded:unproven`, joined
  * by --include-ambiguous), rows whose working-tree file differs from the checkpoint blob (`excluded:worktree_differs`: an
  * uncommitted edit; commit it and sync), and rows whose import would keep page data the file does not carry
  * (`excluded:import_overlay`). `--apply --expect <hash>` applies exactly that set; a row whose page, checkpoint or file
@@ -27,7 +27,7 @@ import { acceptedPendingReceipt } from '../persistence/accepted-pending.ts';
 import { prepareRepairPublication, repairScreenConfig, submitManagedFileRepair } from '../persistence/file-repair.ts';
 import { readBlobs } from '../persistence/git-gap.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
-import { ROWS_BEHIND_DOCS, scanRowsBehind, type RowBehind } from '../persistence/rows-behind.ts';
+import { ROWS_BEHIND_DOCS, rowRefusal, scanRowsBehind, type RowBehind } from '../persistence/rows-behind.ts';
 import { SYNC_READ_BOUND } from '../persistence/sync-blobs.ts';
 import { readGitHold, writeGitHold, type GitHoldRecord } from '../persistence/sync-holds.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
@@ -159,7 +159,7 @@ async function applyRow(ctx: OperationContext, row: ApprovedRow, embed: boolean)
     : await prepareRepairPublication(engine, { sourceId: row.source_id, slug: row.slug, sourcePath: row.source_path, path: row.path, root: context.root, content, snapshot, base: snapshot, ...screen });
   if (row.action === 'hold') {
     if (publication && publication.status !== 'refused') return changed('import_no_longer_refused');
-    const refusal = row.refusal!;
+    const refusal = publication?.status === 'refused' ? rowRefusal(publication.refusal) : row.refusal!;
     const held: Omit<GitHoldRecord, 'version' | 'held_at' | 'updated_at'> = { source_id: row.source_id, incarnation: row.owner.source_incarnation, path: row.path, source_path: row.source_path,
       slug: row.slug, page_id: row.page_id, code: refusal.code as GitHoldRecord['code'], message: refusal.message, upstream_version: bytes ? sha256(bytes) : null,
       observed_at: new Date().toISOString(), run_id: null, mode: 'managed',

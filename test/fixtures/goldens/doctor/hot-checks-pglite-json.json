@@ -3770,6 +3770,7 @@
                   "samples": [],
                   "source_id": "default",
                   "status": "not_applicable",
+                  "stopped_at": null,
                   "unproven": 0,
                   "unproven_samples": []
                 },
@@ -3785,6 +3786,7 @@
                   "samples": [],
                   "source_id": "notes",
                   "status": "known",
+                  "stopped_at": null,
                   "unproven": 0,
                   "unproven_samples": []
                 },
@@ -3798,6 +3800,7 @@
                   "samples": [],
                   "source_id": "plain",
                   "status": "not_applicable",
+                  "stopped_at": null,
                   "unproven": 0,
                   "unproven_samples": []
                 }
@@ -8607,6 +8610,7 @@
                   "samples": [],
                   "source_id": "default",
                   "status": "not_applicable",
+                  "stopped_at": null,
                   "unproven": 0,
                   "unproven_samples": []
                 },
@@ -8622,6 +8626,7 @@
                   "samples": [],
                   "source_id": "notes",
                   "status": "known",
+                  "stopped_at": null,
                   "unproven": 0,
                   "unproven_samples": []
                 },
@@ -8635,6 +8640,7 @@
                   "samples": [],
                   "source_id": "plain",
                   "status": "not_applicable",
+                  "stopped_at": null,
                   "unproven": 0,
                   "unproven_samples": []
                 }

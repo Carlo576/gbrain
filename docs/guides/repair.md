@@ -1420,13 +1420,14 @@ importer itself, so a row that importing the committed file would leave
 unchanged is current. A row is reported only when its revision is the one its
 last sync import wrote. A row the database changed since that import belongs
 to [file drift](#file-drift) and is not reported here. A row with no import
-record is counted as `unproven` and does not warn. Held paths, paths a later
+record is counted as `unproven` from the content comparison alone and does not warn. Held paths, paths a later
 commit changed (the next sync imports them) and declared database-only pages
 are skipped. A file over the sync read bound is never read; its row is
 reported with the `file_too_large` refusal sync would hold it with. The scan
-is bounded by `GBRAIN_DOCTOR_ROWS_BEHIND_TIMEOUT_MS` (default 10 s); a scan
-the budget stopped, or a checkout Git cannot read, is `unknown`, never a
-clean `ok`. Off the owner host, on a source without a checkout or a
+is bounded by `GBRAIN_DOCTOR_ROWS_BEHIND_TIMEOUT_MS` (default 10 s), checked before
+each row's comparison; a scan the budget stopped (doctor names the pages it
+decided and the page id it stopped at), or a checkout Git cannot read, is
+`unknown`, never a clean `ok`. Off the owner host, on a source without a checkout or a
 checkpoint, and on a repo-less brain (the database is the record there) the
 check is `ok` and not applicable.
 
@@ -1446,11 +1447,12 @@ The preview writes nothing. Each row in the set has one action:
 - `hold:<code>`: importing the committed file is refused (for example a
   malformed fence), or the file is over the read bound
   (`hold:file_too_large`). The apply opens the hold sync would have opened,
-  with the refusal's code and message, and the usual
+  with the code and message of the refusal the apply computes again, and the usual
   [held files](#held-files) steps clear it.
 
 Listed but left out of the set: rows with no import record
-(`excluded:unproven`, joined with `--include-ambiguous`), rows whose
+(`excluded:unproven`, joined with `--include-ambiguous`, which replaces any
+database-only edit those rows hold), rows whose
 working-tree file differs from the committed one (`excluded:worktree_differs`:
 commit the edit and sync), and rows whose import would keep page data the
 file does not carry (`excluded:import_overlay`; resolve them with

@@ -16,6 +16,8 @@
  * - a database edit made since the last import, a held path and a path changed after the checkpoint are not behind; a
  *   row with no import record is listed apart and joins the set only with --include-ambiguous;
  * - a checkpoint file the import refuses is held with the refusal's code instead of imported;
+ * - the scan checks its deadline inside a batch and reports how far it got; doctor counts unproven rows without the
+ *   importer's confirmation; a hold row applies the refusal the apply computes;
  * - repo-less: a brain with no checkout reports not_applicable (ok) and the preview lists nothing.
  *
  * PGLite always; Postgres too when DATABASE_URL is set (test/e2e wrapper).
@@ -37,6 +39,7 @@ import { rowsBehindEntry } from '../src/commands/doctor/checks/rows-behind.ts';
 import { categorizeCheck } from '../src/core/doctor-categories.ts';
 import { RECOVERY_VERSION } from '../src/core/markdown.ts';
 import { SYNC_READ_BOUND } from '../src/core/persistence/sync-blobs.ts';
+import { PREVIEW_APPROVAL_OP } from '../src/core/persistence/preview-approval.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -229,6 +232,51 @@ for (const backend of testBackends()) describe(`[${backend}] #8071: rows behind 
     expect(await live('Redacted line 0 of')).toBeGreaterThan(0);
     expect((await scanRowsBehind(engine, 'default')).behind).toEqual([]);
     expect(await doctor(engine)).toMatchObject({ status: 'ok', details: { count: 0 } });
+  }, { databaseUrl, setup }), 240_000);
+
+  test('the scan checks its deadline inside a batch and says how far it got; doctor counts unproven rows without confirming them', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await seedBehind(engine, root, Object.fromEntries(SLUGS.map(slug => [slug, { content: note(slug, `The redacted body of ${slug}.`), record: slug === 'notes/e' ? 'none' as const : 'checkpoint' as const }])));
+    const full = await scanRowsBehind(engine, 'default');
+    expect(full).toMatchObject({ complete: true, pages: 5, behind_count: 4, unproven_count: 1 });
+    expect(full.unproven[0]!.digest).toBeDefined();
+
+    // A clock that passes the deadline on its eighth read (one before the batch, five before the comparisons, one before
+    // the first confirmation): the one batch of five rows must stop part way through, after one confirmed row.
+    let reads = 0;
+    const stopped = await scanRowsBehind(engine, 'default', { deadlineAt: 1, now: () => (reads++ < 7 ? 0 : 1) });
+    expect(stopped.complete).toBe(false);
+    expect(stopped.pages).toBeGreaterThan(0);
+    expect(stopped.pages).toBeLessThan(5);
+    expect(typeof stopped.stopped_at).toBe('number');
+    expect(stopped.behind_count + stopped.unproven_count).toBeLessThan(5);
+    expect(Object.values(stopped.counts).reduce((sum, n) => sum + n, 0) + stopped.behind_count + stopped.unproven_count).toBe(stopped.pages);
+
+    const counted = await scanRowsBehind(engine, 'default', { confirmUnproven: false });
+    expect(counted).toMatchObject({ complete: true, behind_count: 4, unproven_count: 1 });
+    expect(counted.unproven[0]!.digest).toBeUndefined();
+    const warned = await doctor(engine);
+    expect(warned).toMatchObject({ status: 'warn', details: { count: 4, unproven: 1 } });
+    expect(warned.message).toContain('replaces any database-only edit');
+
+    const partial = await withEnv({ GBRAIN_DOCTOR_ROWS_BEHIND_TIMEOUT_MS: '1' }, async () => { await new Promise(resolve => setTimeout(resolve, 5)); return doctor(engine); });
+    expect(partial).toMatchObject({ status: 'ok', details: { sources: [{ complete: false }] } });
+    expect(partial.message).toMatch(/stopped after \d+ page\(s\)/);
+  }, { databaseUrl, setup }), 240_000);
+
+  test('a hold row applies the refusal the apply computes, not the one saved with the preview', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await seedBehind(engine, root, { 'notes/a': { content: '---\ntype: concept\ntitle: [unclosed\n---\n\nThe redacted body of notes/a.\n', record: 'checkpoint' } });
+    const preview = await repair(engine);
+    expect(listing(preview)).toEqual([['default:notes/a', 'hold:invalid_frontmatter']]);
+    // Age the saved set: its refusal no longer matches what the import of the committed file says.
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys = jsonb_set(completed_keys, '{0,items,0,refusal}', '{"code":"invalid_fence","message":"saved with an older preview"}'::jsonb)
+      WHERE op=$1 AND completed_keys->0->>'hash'=$2`, [PREVIEW_APPROVAL_OP, preview.preview_hash]);
+    const applied = await repair(engine, { apply: true, expect: preview.preview_hash });
+    expect(applied.outcome_items?.map(item => [item.item, item.outcome])).toEqual([['default:notes/a', 'held']]);
+    const hold = await readGitHold(engine, 'default', await incarnationOf(engine), 'notes/a.md');
+    expect(hold?.code).toBe('invalid_frontmatter');
+    expect(hold?.message).not.toContain('saved with an older preview');
   }, { databaseUrl, setup }), 240_000);
 
   test('repo-less: a brain with no checkout is not applicable and the preview lists nothing', async () => {
