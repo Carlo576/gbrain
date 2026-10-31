@@ -3298,6 +3298,7 @@
                 "samples": [],
                 "source_id": "default",
                 "status": "not_applicable",
+                "stopped_at": null,
                 "unproven": 0,
                 "unproven_samples": []
               }

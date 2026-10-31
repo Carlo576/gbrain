@@ -18,7 +18,10 @@
  * Bounded: the checkpoint tree is listed once (and HEAD's only when it differs), pages are read in id batches of
  * ROWS_BEHIND_BATCH in read-only transactions, committed blobs are read in bounded `cat-file --batch` calls, and a blob
  * over the sync read bound (SYNC_READ_BOUND, the page ceiling) is never read: its row is reported with the
- * `file_too_large` refusal sync would hold it with. A deadline stops the scan between batches (`complete: false`).
+ * `file_too_large` refusal sync would hold it with. The deadline is checked before each batch and before each row's
+ * content comparison and confirmation (`complete: false`; `pages` and `counts` cover the rows decided before
+ * `stopped_at`, the page id the scan stopped at). `confirmUnproven: false` (doctor) counts rows with no import record
+ * from the content comparison alone, without running the importer's confirmation.
  * Applies only on the owner host of a managed source with a checkout and a checkpoint; everything else, a repo-less
  * brain included, is `not_applicable` with its reason. Read-only. Readers: doctor `sync_rows_behind_checkpoint` and
  * `gbrain repair rows-behind`.
@@ -74,9 +77,11 @@ export interface RowsBehindScan {
   reason?: string;
   checkpoint: string | null;
   head: string | null;
-  /** False when the deadline stopped the scan; the counts cover the pages read. */
+  /** False when the deadline stopped the scan; the counts cover the pages decided before `stopped_at`. */
   complete: boolean;
-  /** Live file-backed pages read. */
+  /** The page id the deadline stopped the scan at (not compared), or null. */
+  stopped_at: number | null;
+  /** Live file-backed pages decided. */
   pages: number;
   behind: RowBehind[];
   unproven: RowBehind[];
@@ -91,11 +96,12 @@ type Key = { id: string; slug: string; source_id: string; source_path: string; s
   frontmatter: unknown; database_only_reason: string | null; segmented: boolean; lineage_private: boolean; revision: string };
 
 const empty = (sourceId: string, status: RowsBehindScan['status'], reason?: string): RowsBehindScan => ({ source_id: sourceId, status, ...(reason ? { reason } : {}),
-  checkpoint: null, head: null, complete: status !== 'unknown', pages: 0, behind: [], unproven: [], truncated: false, behind_count: 0, unproven_count: 0, counts: {} });
+  checkpoint: null, head: null, complete: status !== 'unknown', stopped_at: null, pages: 0, behind: [], unproven: [], truncated: false, behind_count: 0, unproven_count: 0, counts: {} });
 
 const isMarkdown = (path: string) => /\.mdx?$/i.test(path);
 
-export async function scanRowsBehind(engine: BrainEngine, sourceId: string, opts: { deadlineAt?: number; listLimit?: number } = {}): Promise<RowsBehindScan> {
+export async function scanRowsBehind(engine: BrainEngine, sourceId: string,
+  opts: { deadlineAt?: number; listLimit?: number; confirmUnproven?: boolean; now?: () => number } = {}): Promise<RowsBehindScan> {
   if (!(await managedPersistenceEnabled(engine))) return empty(sourceId, 'not_applicable', 'not_managed');
   const context = await sourceContext(engine, sourceId);
   if (!context.ok) return empty(sourceId, context.status, context.reason);
@@ -115,11 +121,17 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string, opts
   const scan: RowsBehindScan = { ...empty(sourceId, 'known'), checkpoint: checkpoint.commit, head: head.commit };
   const limit = opts.listLimit ?? ROWS_BEHIND_LIST_LIMIT;
   const count = (why: RowsBehindSkip) => { scan.counts[why] = (scan.counts[why] ?? 0) + 1; };
+  const now = opts.now ?? Date.now;
+  const late = () => opts.deadlineAt !== undefined && now() >= opts.deadlineAt;
   const screen = await repairScreenConfig(engine, sourceId);
   const withdrawals: ExportWithdrawal[] = await readExportWithdrawals(engine, sourceId);
   const incarnation = context.owner.source_incarnation;
   for (let cursor = '0'; ;) {
-    if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) { scan.complete = false; break; }
+    if (late()) { scan.complete = false; break; }
+    let stop: number | null = null;
+    const skipped: Array<[number, RowsBehindSkip]> = [];
+    const skip = (id: string, why: RowsBehindSkip) => { skipped.push([Number(id), why]); };
+    let ids: number[] = [];
     const candidates: Array<{ key: Key; rel: string; blob: TreeBlob; record: RowBehind['record']; content: Buffer | null; compared: ExportFileComparison | null }> = [];
     const done = await engine.transaction(async tx => {
       await tx.executeRaw('SET TRANSACTION READ ONLY');
@@ -128,19 +140,19 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string, opts
         FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND source_path IS NOT NULL AND pages.id > $2::bigint ORDER BY pages.id LIMIT ${ROWS_BEHIND_BATCH}`, [sourceId, cursor]);
       if (!batch.length) return true;
       cursor = batch[batch.length - 1]!.id;
+      ids = batch.map(key => Number(key.id));
       const rows: Array<{ key: Key; rel: string; blob: TreeBlob }> = [];
       for (const key of batch) {
-        scan.pages++;
         const path = canonicalPath(context, key);
-        if (!path) { count('unsafe_path'); continue; }
+        if (!path) { skip(key.id, 'unsafe_path'); continue; }
         const rel = relative(root, path).split(sep).join('/');
-        if (rel.startsWith('../') || rel === '..') { count('unsafe_path'); continue; }
-        if (!isMarkdown(rel)) { count('not_markdown'); continue; }
+        if (rel.startsWith('../') || rel === '..') { skip(key.id, 'unsafe_path'); continue; }
+        if (!isMarkdown(rel)) { skip(key.id, 'not_markdown'); continue; }
         const frontmatter = typeof key.frontmatter === 'string' ? JSON.parse(key.frontmatter) : key.frontmatter;
-        if (declaredDatabaseOnly({ ...key, frontmatter }, rel, policy)) { count('declared_database_only'); continue; }
+        if (declaredDatabaseOnly({ ...key, frontmatter }, rel, policy)) { skip(key.id, 'declared_database_only'); continue; }
         const blob = checkpoint.blobs.get(gitPath(rel));
-        if (!blob) { count('no_file_at_checkpoint'); continue; }
-        if (blob.mode !== '100644' && blob.mode !== '100755') { count('not_regular_file'); continue; }
+        if (!blob) { skip(key.id, 'no_file_at_checkpoint'); continue; }
+        if (blob.mode !== '100644' && blob.mode !== '100755') { skip(key.id, 'not_regular_file'); continue; }
         rows.push({ key, rel, blob });
       }
       if (!rows.length) return batch.length < ROWS_BEHIND_BATCH;
@@ -148,10 +160,10 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string, opts
       const records = await readSyncImportProvenances(tx, sourceId, incarnation, rows.map(row => Number(row.key.id)));
       const compare: typeof rows = [];
       for (const row of rows) {
-        if (held.has(row.rel)) { count('held'); continue; }
+        if (held.has(row.rel)) { skip(row.key.id, 'held'); continue; }
         const record = records.get(Number(row.key.id));
-        if (record?.revision != null && String(record.revision) !== row.key.revision) { count('database_moved'); continue; }
-        if (head !== checkpoint && head.blobs.get(gitPath(row.rel))?.oid !== row.blob.oid) { count('changed_after_checkpoint'); continue; }
+        if (record?.revision != null && String(record.revision) !== row.key.revision) { skip(row.key.id, 'database_moved'); continue; }
+        if (head !== checkpoint && head.blobs.get(gitPath(row.rel))?.oid !== row.blob.oid) { skip(row.key.id, 'changed_after_checkpoint'); continue; }
         compare.push(row);
       }
       const readable = compare.filter(row => row.blob.size <= SYNC_READ_BOUND);
@@ -160,28 +172,51 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string, opts
       const snapshots = await readExportPages(tx, readable.map(row => row.key), withdrawals);
       const byId = new Map(snapshots.map(snapshot => [String(snapshot.page.id), snapshot]));
       for (const row of compare) {
+        if (late()) { stop = Number(row.key.id); break; }
         const recordState: RowBehind['record'] = records.get(Number(row.key.id))?.revision != null ? 'recorded' : 'none';
         if (row.blob.size > SYNC_READ_BOUND) { candidates.push({ ...row, record: recordState, content: null, compared: null }); continue; }
         const snapshot = byId.get(row.key.id);
         if (!snapshot) continue;
         const compared = row.key.segmented ? await compareSegmentedExportBlob(tx, snapshot, withdrawals, row.blob, checkpoint.format)
           : compareInlineExportFile(bytes.get(row.blob.oid)!, scannerSourcePath(root, `${root}/${row.rel}`, context.mode), snapshot);
-        if (compared.state === 'equal') { count('current'); continue; }
+        if (compared.state === 'equal') { skip(row.key.id, 'current'); continue; }
         candidates.push({ ...row, record: recordState, content: bytes.get(row.blob.oid) ?? null, compared });
       }
       return batch.length < ROWS_BEHIND_BATCH;
     });
     for (const candidate of candidates) {
-      const row = await confirm(engine, sourceId, root, screen, candidate);
+      if (stop !== null && Number(candidate.key.id) >= stop) break;
+      if (late()) { stop = Number(candidate.key.id); break; }
+      const row = candidate.record === 'none' && opts.confirmUnproven === false ? unconfirmedRow(candidate) : await confirm(engine, sourceId, root, screen, candidate);
       if (typeof row === 'string') { count(row); continue; }
       const list = row.record === 'recorded' ? scan.behind : scan.unproven;
       if (row.record === 'recorded') scan.behind_count++; else scan.unproven_count++;
       if (list.length < limit) list.push(row); else scan.truncated = true;
     }
+    for (const [id, why] of skipped) if (stop === null || id < stop) count(why);
+    scan.pages += stop === null ? ids.length : ids.filter(id => id < stop!).length;
+    if (stop !== null) { scan.complete = false; scan.stopped_at = stop; break; }
     if (done) break;
   }
   return scan;
 }
+
+/** The hold fields of an import refusal (`prepareRepairPublication`'s `refused` status). */
+export function rowRefusal(refusal: { code: string; message: string }): NonNullable<RowBehind['refusal']> {
+  const { code, message } = refusal;
+  const reason = 'reason' in refusal ? refusal.reason : undefined;
+  const where = refusal as { key?: string; line?: number };
+  return { code, message, ...(reason ? { reason: String(reason) } : {}), ...(where.key ? { key: where.key } : {}), ...(where.line !== undefined ? { line: where.line } : {}) };
+}
+
+/** A row with no import record, counted from the content comparison alone (doctor: no importer confirmation). */
+function unconfirmedRow(candidate: { key: Key; rel: string; blob: TreeBlob; record: RowBehind['record'] }): RowBehind {
+  const { key, rel, blob, record } = candidate;
+  return { slug: key.slug, page_id: Number(key.id), revision: key.revision, path: rel, source_path: key.source_path, blob: blob.oid, size: blob.size, record,
+    ...(blob.size > SYNC_READ_BOUND ? { refusal: tooLarge(blob.size) } : {}) };
+}
+
+const tooLarge = (size: number) => ({ code: 'file_too_large', message: `File too large (${size} bytes; the sync read bound is the ${SYNC_READ_BOUND}-byte page ceiling), so it was not read.` });
 
 /**
  * A differing row confirmed by the importer: what the import of the checkpoint bytes would do to it. `current` when the
@@ -193,7 +228,7 @@ async function confirm(engine: BrainEngine, sourceId: string, root: string, scre
   const { key, rel, blob, record } = candidate;
   const base: RowBehind = { slug: key.slug, page_id: Number(key.id), revision: key.revision, path: rel, source_path: key.source_path, blob: blob.oid, size: blob.size, record };
   if (candidate.content === null && blob.size > SYNC_READ_BOUND) {
-    return { ...base, refusal: { code: 'file_too_large', message: `File too large (${blob.size} bytes; the sync read bound is the ${SYNC_READ_BOUND}-byte page ceiling), so it was not read.` } };
+    return { ...base, refusal: tooLarge(blob.size) };
   }
   const bytes = candidate.content ?? (await readBlobs(root, [{ oid: blob.oid, size: blob.size, mode: blob.mode }]))?.get(blob.oid) ?? null;
   const content = bytes?.toString('utf8') ?? null;
@@ -202,12 +237,7 @@ async function confirm(engine: BrainEngine, sourceId: string, root: string, scre
     const snapshot = await engine.readPageSnapshot(key.slug, { sourceId, includeDeleted: true });
     if (!snapshot || String(snapshot.page.id) !== key.id || snapshot.revision !== key.revision) return 'unconfirmed';
     const publication = await prepareRepairPublication(engine, { sourceId, slug: key.slug, sourcePath: key.source_path, path: rel, root, content, snapshot, base: snapshot, ...screen });
-    if (publication.status === 'refused') {
-      const { code, message } = publication.refusal;
-      const reason = 'reason' in publication.refusal ? publication.refusal.reason : undefined;
-      const where = publication.refusal as { key?: string; line?: number };
-      return { ...base, refusal: { code, message, ...(reason ? { reason: String(reason) } : {}), ...(where.key ? { key: where.key } : {}), ...(where.line !== undefined ? { line: where.line } : {}) } };
-    }
+    if (publication.status === 'refused') return { ...base, refusal: rowRefusal(publication.refusal) };
     if (publication.status === 'overlay') return publication.noop ? 'current' : { ...base, overlay: true };
     return publication.ready.noop ? 'current' : { ...base, digest: publication.digest };
   } catch {

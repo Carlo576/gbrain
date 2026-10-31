@@ -5,7 +5,8 @@
  * at the checkpoint commit and confirms the difference with the importer.
  *
  * warn when any source has a `behind` row: per-source counts, the first slugs and the read-only preview
- * `gbrain repair rows-behind --source <id>`. Rows with no import record (`unproven`) are counted and never warn. ok when
+ * `gbrain repair rows-behind --source <id>`. Rows with no import record (`unproven`) are counted from the content comparison
+ * alone (no importer confirmation) and never warn. ok when
  * every source read completely and none is behind; a scan the budget stopped, or a checkout Git cannot read, is info
  * `unknown` (never a clean ok). Not applicable (ok, info) on a brain without managed sync, a source without a checkout or
  * checkpoint (a repo-less brain) and off the owner host. Bounded by `GBRAIN_DOCTOR_ROWS_BEHIND_TIMEOUT_MS` (default 10 s)
@@ -32,17 +33,17 @@ async function runRowsBehind(ctx: DoctorContext): Promise<Check[]> {
     const deadlineAt = scanDeadline(ctx, rowsBehindScanTimeoutMs());
     const ids = doctorSourceIds(ctx) ?? (await engine.executeRaw<{ id: string }>('SELECT id FROM sources WHERE archived IS NOT TRUE ORDER BY id')).map(row => row.id);
     const scans: RowsBehindScan[] = [];
-    for (const id of ids) scans.push(await scanRowsBehind(engine, id, { deadlineAt }));
+    for (const id of ids) scans.push(await scanRowsBehind(engine, id, { deadlineAt, confirmUnproven: false }));
     const known = scans.filter(scan => scan.status === 'known');
     const count = known.reduce((sum, scan) => sum + scan.behind_count, 0);
     const unproven = known.reduce((sum, scan) => sum + scan.unproven_count, 0);
     const partial = known.filter(scan => !scan.complete);
     const unknown = scans.filter(scan => scan.status === 'unknown');
     const details = { count, unproven, docs: ROWS_BEHIND_DOCS, timeout_ms: rowsBehindScanTimeoutMs(),
-      sources: scans.map(scan => ({ source_id: scan.source_id, status: scan.status, ...(scan.reason ? { reason: scan.reason } : {}), checkpoint: scan.checkpoint, complete: scan.complete,
+      sources: scans.map(scan => ({ source_id: scan.source_id, status: scan.status, ...(scan.reason ? { reason: scan.reason } : {}), checkpoint: scan.checkpoint, complete: scan.complete, stopped_at: scan.stopped_at,
         pages: scan.pages, behind: scan.behind_count, unproven: scan.unproven_count, counts: scan.counts,
         samples: (ctx.remote ? [] : scan.behind).slice(0, SAMPLES).map(row => row.slug), unproven_samples: (ctx.remote ? [] : scan.unproven).slice(0, SAMPLES).map(row => row.slug) })) };
-    const unprovenNote = unproven ? ` ${unproven} more row(s) differ from their checkpoint file but have no import record, so the side that moved is unknown; gbrain repair rows-behind --source <id> --include-ambiguous lists and re-imports them.` : '';
+    const unprovenNote = unproven ? ` ${unproven} more row(s) differ from their checkpoint file but have no import record, so the side that moved is unknown; gbrain repair rows-behind --source <id> --include-ambiguous lists and re-imports them, which replaces any database-only edit those rows hold.` : '';
     if (count) {
       const found = known.filter(scan => scan.behind_count);
       checks.push({ name: 'sync_rows_behind_checkpoint', status: 'warn', details,
@@ -56,7 +57,7 @@ async function runRowsBehind(ctx: DoctorContext): Promise<Check[]> {
     }
     if (unknown.length || partial.length) {
       checks.push(infoCheck('sync_rows_behind_checkpoint', `Rows behind the sync checkpoint are unknown for ${[...unknown.map(scan => `${scan.source_id} (${scan.reason})`),
-        ...partial.map(scan => `${scan.source_id} (stopped after ${scan.pages} page(s) at the ${details.timeout_ms / 1000} s budget)`)].join(', ')}; this is not a clean result. `
+        ...partial.map(scan => `${scan.source_id} (stopped after ${scan.pages} page(s)${scan.stopped_at !== null ? ` at page id ${scan.stopped_at}` : ''} at the ${details.timeout_ms / 1000} s budget)`)].join(', ')}; this is not a clean result. `
         + `The full read: gbrain repair rows-behind --source <id> (writes nothing).${unprovenNote}`, 'unknown', undefined, details));
       return checks;
     }
