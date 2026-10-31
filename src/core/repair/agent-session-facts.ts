@@ -56,6 +56,7 @@ import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
+import { CONTEXT_NOTE_SEPARATOR } from '../facts/subject-infer.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { corpusFileSessionId, corpusSpoolDir, parseWbFileName, speakerFileName } from '../context/corpus-segments.ts';
 import { readSessionSource } from '../context/corpus-source.ts';
@@ -76,7 +77,7 @@ const OPENING_CHARS = 160;
 const OPENING_MIN_CHARS = 40;
 const OPENING_MIN_OTHERS = 3;
 const HEAD_BYTES = 64 * 1024;
-const NOTE_SEPARATOR = '; ';
+const NOTE_SEPARATOR = CONTEXT_NOTE_SEPARATOR;
 const NOTE_MARK = 'speaker: agent ';
 
 export type AgentSessionFactClass = 'evidenced' | 'ambiguous' | 'excluded';
@@ -294,6 +295,7 @@ export async function agentSessionTakes(db: BrainEngine, sourceIds: string[], re
       FROM takes t JOIN pages p ON p.id=t.page_id
      WHERE p.source_id=ANY($1::text[]) AND t.kind='fact' AND t.holder='self' AND t.active AND t.resolved_at IS NULL
        AND ($2::bigint[] IS NULL OR t.id=ANY($2::bigint[])) AND EXISTS (SELECT 1 FROM facts f WHERE f.consolidated_into=t.id)
+       AND t.created_at >= (SELECT min(f.consolidated_at) FROM facts f WHERE f.consolidated_into=t.id) - interval '1 second'
      ORDER BY p.source_id, p.slug, t.id`, [sourceIds, ids ?? null, NOTE_MARK]);
   return rows.filter(row => row.user_fact_ids.every(id => reattributed.has(Number(id))) && (row.noted || row.user_fact_ids.length > 0))
     .map(row => {
@@ -434,6 +436,7 @@ export async function applyAgentSessionWrite(tx: BrainEngine, sourceId: string, 
   const retired = write.take_ids?.length ? (await tx.executeRaw<{ id: number | string }>(`UPDATE takes t SET active=false, updated_at=now()
      FROM pages p
     WHERE p.id=t.page_id AND p.source_id=$1 AND t.id=ANY($2::bigint[]) AND t.active AND t.resolved_at IS NULL AND t.kind='fact' AND t.holder='self'
+      AND t.created_at >= (SELECT min(f.consolidated_at) FROM facts f WHERE f.consolidated_into=t.id) - interval '1 second'
       AND NOT EXISTS (SELECT 1 FROM facts f WHERE f.consolidated_into=t.id AND (f.attributed_to IS NULL OR f.attributed_to='user'))
     RETURNING t.id`, [sourceId, write.take_ids])).map(row => Number(row.id)) : [];
   return { reattributed, retired };
@@ -516,7 +519,7 @@ async function retireTakes(ctx: Parameters<RepairHandler['apply']>[0], item: Rep
   const fence = parseTakesFence(body);
   const fenced = takes.filter(t => fence.takes.some(row => row.rowNum === t.row_num && row.claim.trim() === t.claim.trim() && row.active));
   const retired: number[] = [];
-  const databaseOnly = takes.filter(t => !fenced.includes(t));
+  const databaseOnly = fence.takes.length ? [] : takes.filter(t => !fenced.includes(t)); // a fenced page's unmatched take stays: the file is the parent
   if (databaseOnly.length) retired.push(...await databaseWrite(engine, page, hash, { take_ids: databaseOnly.map(t => t.id) }));
   if (fenced.length && snapshot) {
     const rows = new Set(fenced.map(t => t.row_num));

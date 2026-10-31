@@ -25,7 +25,7 @@
  */
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../spawn.ts';
 import { basename, dirname, join } from 'node:path';
 import { corpusFileSessionId, speakerFileName } from './corpus-segments.ts';
 
@@ -93,7 +93,7 @@ function linuxParent(pid: number): AncestorProcess & { ppid: number } | null {
 }
 
 function psParent(pid: number, timeout: number): AncestorProcess & { ppid: number } | null {
-  const r = spawnSync('ps', ['-o', 'ppid=,args=', '-p', String(pid)], { encoding: 'utf8', timeout });
+  const r = spawnSync('ps', ['-ww', '-o', 'ppid=,args=', '-p', String(pid)], { encoding: 'utf8', timeout });
   const m = /^\s*(\d+)\s+(.*)$/.exec((r.stdout ?? '').trim());
   return m ? { pid, ppid: Number(m[1]), args: m[2].split(/\s+/) } : null;
 }

@@ -110,11 +110,11 @@ describe('gbrain repair agent-session-facts, unmanaged repo-less brain', () => {
     `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source, source_session, attributed_to)
       VALUES ('default', $1, $2, 'preference', 'private', $3, $4, $5) RETURNING id`,
     [opts.entity ?? ALICE, fact, opts.source ?? 'hook:writeback', session, opts.attributed === undefined ? 'user' : opts.attributed]))[0]!.id);
-  const take = async (claim: string, factIds: number[]) => {
+  const take = async (claim: string, factIds: number[], createdBefore = '0 seconds') => {
     const [page] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE slug=$1 AND source_id='default'", [ALICE]);
-    const [row] = await engine.executeRaw<{ id: number }>(`INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, source, active)
-      VALUES ($1, (SELECT COALESCE(MAX(row_num), 0) + 1 FROM takes WHERE page_id=$1), $2, 'fact', 'self', 0.8, '2026-10-01', 'hook:writeback', true) RETURNING id`,
-    [page!.id, claim]);
+    const [row] = await engine.executeRaw<{ id: number }>(`INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, source, active, created_at)
+      VALUES ($1, (SELECT COALESCE(MAX(row_num), 0) + 1 FROM takes WHERE page_id=$1), $2, 'fact', 'self', 0.8, '2026-10-01', 'hook:writeback', true, now() - $3::interval) RETURNING id`,
+    [page!.id, claim, createdBefore]);
     await engine.executeRaw('UPDATE facts SET consolidated_into=$1, consolidated_at=now() WHERE id=ANY($2::bigint[])', [row!.id, factIds]);
     return Number(row!.id);
   };
@@ -200,6 +200,17 @@ describe('gbrain repair agent-session-facts, unmanaged repo-less brain', () => {
     expect(await counts(engine)).toEqual(before);
     expect((await agentSessionFactsCheck(engine)).status).toBe('ok');
   }, 120_000);
+
+  test('an owner take that consolidate later attached agent facts to is kept', async () => {
+    await engine.putPage(ALICE, { type: 'person', title: 'Alice Example', compiled_truth: '# Alice Example' }, { sourceId: 'default' });
+    const agentFact = await insert('Prefers written decisions over meetings', 'sess-sidecar');
+    const ownerTake = await take('Prefers written decisions', [agentFact], '1 day');
+    const preview = await repair(engine, ['--cwd', agents]);
+    expect(preview.results[0].listing!.filter(l => l.class === 'take_to_retire').map(l => l.item)).not.toContain(`default:${ALICE}@take:${ownerTake}`);
+    await repair(engine, applyArgs(preview));
+    expect((await attribution(engine, agentFact)).attributed_to).toBe('other');
+    expect(await takeActive(engine, ownerTake)).toBe(true);
+  });
 
   test('a fact edited after the preview reports changed_since_preview and keeps its attribution', async () => {
     const id = await insert('Prefers tea', 'sess-sidecar');

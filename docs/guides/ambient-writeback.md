@@ -311,8 +311,13 @@ as agent-launched when its harness process runs headless (`claude -p` or
 `--print`, `codex exec`) and another `claude` or `codex` process is one of
 its ancestors. Its claims are saved as agent `agent-launched`'s. A headless
 session you start yourself from a terminal is still yours. Detection reads the
-process table and can miss a launcher that detaches its workers, so set the
-variable in any launcher you control.
+process table and can miss a launcher that detaches its workers, and it never
+fires for a launcher that is not itself claude or codex (a cron job, a script
+or a daemon running `claude -p`). For those the variable is the only signal,
+so set it in any launcher you control.
+
+The marker covers the Claude Code and Codex hook lanes and the facts they
+save. The OpenClaw context-engine lane and dream synthesis do not read it yet.
 
 The marker is a `<session>.speaker.json` file beside the session's corpus
 files, written before any of them. If it cannot be written, nothing from the
