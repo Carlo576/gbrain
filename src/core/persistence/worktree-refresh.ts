@@ -387,8 +387,8 @@ async function syncMembers(engine: BrainEngine, git: Git, row: WorktreeRefreshRo
     for (let pass = 0; pass < MAX_MEMBER_SYNC_PASSES; pass++) {
       if (await reachedTarget(git, root, row, await lastCommit(engine, sourceId))) break;
       if (sync.spent()) { status = 'deferred'; break; }
-      let result: SyncResult;
-      try { result = await sync.run(engine, sourceId); }
+      let result: MemberSync;
+      try { result = await sync.member(engine, sourceId); }
       catch (error) {
         const failure = error instanceof OperationError ? error : opError('storage_error', error instanceof Error ? error.message : String(error),
           `The managed sync of source ${sourceId} failed during refresh ${row.id}. Check its writer status, fix the cause, then resume with gbrain sync --source ${sourceId} --no-pull.`);
@@ -397,12 +397,9 @@ async function syncMembers(engine: BrainEngine, git: Git, row: WorktreeRefreshRo
         break;
       }
       status = result.status;
-      if (result.status === 'blocked_by_failures') {
-        blocked.push({ source_id: sourceId, code: result.managedWrite?.write_error ?? result.failureCodes?.[0]?.code ?? 'sync_blocked',
-          message: result.managedWrite?.message ?? 'The managed sync is blocked by a failed write.', resume: `gbrain sync --source ${sourceId} --no-pull` });
-        break;
-      }
-      if (result.status === 'partial') await new Promise(resolve => setTimeout(resolve, DRAIN_POLL_MS));
+      if (result.blocked) { blocked.push(result.blocked); break; }
+      if (status === 'deferred') break;
+      if (status === 'partial') await new Promise(resolve => setTimeout(resolve, DRAIN_POLL_MS));
     }
     await recordUpstreamObservation(engine, sourceId);
     synced.push({ source_id: sourceId, status, last_commit: await lastCommit(engine, sourceId) });
@@ -413,19 +410,51 @@ async function syncMembers(engine: BrainEngine, git: Git, row: WorktreeRefreshRo
     { synced, ...(blocked.length ? { sync_blocked: blocked } : {}) }));
   return { synced, blocked, atTarget };
 }
+type MemberSync = { status: string; blocked?: RefreshSyncBlocked };
 /**
- * #8072: the member syncs of one refresh share one wall-clock budget, so a run never holds the refresh lock for longer than
- * that plus one entry: each pass is a managed-sync slice that yields `partial` (`writer_yield`) at an entry boundary once the
- * budget ran, and no pass starts after it. A member left behind reports `deferred`; the refresh stays `syncing` and the next
- * plain refresh (or `--resume`) continues it.
+ * #8072: the member syncs of one refresh share one deadline and run through the governed drain (sync-drain.ts) under the
+ * source's drain lease, as `gbrain sync` and a conversion's strict pass do, so no pass outlives the deadline by more than the
+ * drain's grace. A drain the deadline stopped after the member moved reports `deferred` (the refresh stays `syncing` and the
+ * next plain refresh or `--resume` continues it); one that moved nothing in the whole budget is blocked `refresh_sync_timeout`,
+ * naming the write it waited on, as is a drain its own rules blocked (`drain_stalled` and the rest), so the refresh completes
+ * with that member behind its target and releases the refresh lock instead of re-entering bare passes under it.
  */
 async function boundedMemberSync(budgetMs: number) {
-  const { performManagedSync } = await import('./sync-run.ts');
-  const deadline = performance.now() + budgetMs;
+  const [{ drainManagedSync, engineStallProbe }, { headBlockerText }, { withDrainLease, leaseHeldResult, readDrainHolder }, { withSyncTail }, { LockUnavailableError, syncLockId }] = await Promise.all([
+    import('./sync-drain.ts'), import('./head-blocker.ts'), import('./sync-lease.ts'), import('./sync-tail.ts'), import('../db-lock.ts')]);
+  const deadlineAtMs = Date.now() + budgetMs;
+  const drain = async (engine: BrainEngine, sourceId: string): Promise<SyncResult> => {
+    const opts = { sourceId, noPull: true, deadlineAtMs };
+    try {
+      const drained = await withDrainLease(engine, sourceId, { holder: { kind: 'refresh', id: null }, remote: false },
+        signal => drainManagedSync(engine, signal ? { ...opts, signal } : opts, false));
+      return await withSyncTail(engine, sourceId, drained, { deadlineAtMs });
+    } catch (error) {
+      if (!(error instanceof LockUnavailableError) || error.lockId !== syncLockId(sourceId)) throw error;
+      return leaseHeldResult(sourceId, await readDrainHolder(engine, sourceId).catch(() => null));
+    }
+  };
   return {
-    spent: () => performance.now() >= deadline,
-    run: (engine: BrainEngine, sourceId: string) => performManagedSync(engine, { sourceId, noPull: true, drainHolder: { kind: 'cli', id: null } },
-      { maxPages: Number.MAX_SAFE_INTEGER, maxMs: Math.max(0, deadline - performance.now()) }),
+    spent: () => Date.now() >= deadlineAtMs,
+    member: async (engine: BrainEngine, sourceId: string): Promise<MemberSync> => {
+      const resume = `gbrain sync --source ${sourceId} --no-pull`;
+      const before = await lastCommit(engine, sourceId);
+      const result = await drain(engine, sourceId);
+      if (result.status === 'blocked_by_failures') return { status: result.status, blocked: { source_id: sourceId, resume,
+        code: result.managedWrite?.write_error ?? result.failureCodes?.[0]?.code ?? 'sync_blocked', message: result.managedWrite?.message ?? 'The managed sync is blocked by a failed write.' } };
+      const report = result.drain;
+      if (report?.outcome === 'blocked') {
+        const stall = report.stall;
+        return { status: 'blocked', blocked: { source_id: sourceId, resume, code: report.stop_reason ?? 'sync_blocked',
+          message: `The managed sync stopped ${report.stop_reason ?? 'blocked'}${stall ? ` on write request ${stall.request_id} (${stall.state}${stall.cause ? `, ${stall.cause}` : ''}, ${stall.stalled_seconds}s without progress)` : ''}; the refresh completed with this source behind its target.` } };
+      }
+      if (report?.outcome !== 'resumable' || report.stop_reason !== 'deadline') return { status: result.status };
+      if (report.passes === 0 || report.processed > 0 || await lastCommit(engine, sourceId) !== before) return { status: 'deferred' };
+      const head = await engineStallProbe(engine, sourceId).head?.().catch(() => null) ?? null;
+      const waiting = head ? `; its oldest unfinished write request ${head.write_request_id ?? head.request_id ?? 'unknown'} is ${head.head_state}${head.blocked_by ? `, blocked by ${headBlockerText(head.blocked_by)}` : ''}${head.consumer ? `, consumer ${head.consumer}` : ''}` : '';
+      return { status: 'blocked', blocked: { source_id: sourceId, resume, code: 'refresh_sync_timeout',
+        message: `The managed sync committed nothing within the refresh's sync budget of ${budgetMs} ms${waiting}. The refresh completed with this source behind its target; its next sync continues it.` } };
+    },
   };
 }
 async function lastCommit(engine: BrainEngine, sourceId: string): Promise<string | null> {
@@ -472,9 +501,8 @@ async function refreshOnce(engine: BrainEngine, sourceId: string, opts: RefreshO
         if (commit === plan.oldHead) { synced.push({ source_id: member, status: 'up_to_date', last_commit: plan.oldHead }); continue; }
         if (sync.spent()) { synced.push({ source_id: member, status: 'deferred', last_commit: commit }); continue; }
         try {
-          const result = await sync.run(engine, member);
-          if (result.status === 'blocked_by_failures') blocked.push({ source_id: member, code: result.managedWrite?.write_error ?? 'sync_blocked',
-            message: result.managedWrite?.message ?? 'The managed sync is blocked by a failed write.', resume: `gbrain sync --source ${member} --no-pull` });
+          const result = await sync.member(engine, member);
+          if (result.blocked) blocked.push(result.blocked);
           synced.push({ source_id: member, status: result.status, last_commit: await lastCommit(engine, member) });
         } catch (error) {
           blocked.push({ source_id: member, code: (error as OperationError).code ?? 'storage_error', message: (error as Error).message, resume: `gbrain sync --source ${member} --no-pull` });

@@ -6,20 +6,29 @@
  *    block read, the hold's attempt count unchanged. `gbrain sources retry-held` (and a gbrain upgrade) still
  *    re-screens it; a hold decided from the size alone keeps re-screening every sync (one lstat).
  *    The member syncs of one refresh are bounded by `sources.refresh_sync_budget_ms`: past it the refresh stays
- *    `syncing` and the next plain refresh finishes it.
+ *    `syncing` and the next plain refresh finishes it. A member whose sync commits nothing in the whole budget (its write
+ *    is never claimed: the `consumer:claiming` fault point holds the consumer) is reported `refresh_sync_timeout`, the
+ *    refresh completes and its lock is free, with hundreds of preserved uncommitted paths in the checkout.
  * 2. Fails when: every tick re-hashes and re-streams the unchanged held file (the hold re-screened on every sync), or a
- *    refresh tick keeps syncing past its budget under the refresh lock.
- * Counts, not wall-clock time: write requests, `streamedImportWork` bytes and the hold's attempts.
+ *    refresh tick keeps syncing past its budget under the refresh lock (on master the stalled refresh re-entered bare
+ *    passes for about 300 s and did not return within the test's timeout).
+ * Counts, not wall-clock time: write requests, `streamedImportWork` bytes and the hold's attempts; the one time
+ * assertion is the stalled refresh's upper bound (budget + the drain's deadline grace + 30 s of slack).
  * Repo-less brains have no managed sync or refresh (both need Git), so nothing here runs there.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 import { streamedImportWork } from '../src/core/page-body/streamed-import.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { holdRescreenDue, readGitSourceHolds, type GitHoldRecord } from '../src/core/persistence/sync-holds.ts';
-import { refreshWorktree } from '../src/core/persistence/worktree-refresh.ts';
+import { refreshLiveness, refreshWorktree } from '../src/core/persistence/worktree-refresh.ts';
+import { installFaultHook } from '../src/core/persistence/fault-points.ts';
+import { localHostId } from '../src/core/persistence/identity.ts';
+import { DEADLINE_PASS_GRACE_MS } from '../src/core/persistence/sync-drain.ts';
 import { retryHeld } from '../src/commands/sources-retry-held.ts';
 import { VERSION } from '../src/version.ts';
 import { conversationPage } from './helpers/conversation-page.ts';
@@ -42,6 +51,8 @@ afterAll(async () => {
   await closePostgres?.();
 });
 
+/** Hundreds of uncommitted paths outside the incoming diff, like the checkout that hit the hang; and a short budget for the stalled sync. */
+const PRESERVED = 300, STALL_BUDGET_MS = 20_000;
 const each = (fn: (f: RefreshFixture) => Promise<void>) => withEnv(keyless, async () => { for (const engine of engines) await withRefreshFixture(engine, fn); });
 /** Over the page ceiling, under the segmented ceiling, with a facts fence the streamed import refuses after reading the whole file. */
 const fenced = `${conversationPage(PAGE_MAX_BYTES + 1024 * 1024, { seed: 8072 }).trimEnd()}\n\n## Facts\n\n<!--- gbrain:facts:begin -->\n| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |\n|---|---|---|---|---|---|---|---|---|---|\n| 1 | Example fact | fact | 1.0 | world | high | | | test | |\n<!--- gbrain:facts:end -->\n`;
@@ -104,4 +115,32 @@ test('#8072: a refresh past its sync budget stays syncing and the next plain ref
   expect(await f.lastCommit(f.alpha)).toBe(target);
   expect(await f.lastCommit(f.beta)).toBe(target);
   expect((await f.refreshRows()).map(row => row.state)).toEqual(['completed']);
+}), 300_000);
+
+test('#8072: a refresh whose member sync never settles ends refresh_sync_timeout within its budget, completes and releases the refresh lock', () => each(async f => {
+  for (let i = 0; i < PRESERVED; i++) writeFileSync(join(f.root, i % 2 ? 'alpha' : 'beta', `local-${i}.md`), page(`Local ${i}`, 'An uncommitted local note.'));
+  const target = f.push('alpha/two.md', page('Alpha two', 'An upstream observation.'));
+  await f.engine.setConfig('sources.refresh_sync_budget_ms', String(STALL_BUDGET_MS));
+  let stalls = 0, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  installFaultHook(async point => { if (point === 'consumer:claiming') { stalls++; await gate; } });
+  try {
+    const started = performance.now();
+    const stalled = await refreshWorktree(f.engine, f.alpha);
+    expect(performance.now() - started).toBeLessThan(STALL_BUDGET_MS + DEADLINE_PASS_GRACE_MS + 30_000);
+    expect(stalls).toBeGreaterThan(0);
+    expect(stalled).toMatchObject({ status: 'sync_blocked', target_head: target });
+    expect(stalled.preserved_uncommitted).toHaveLength(PRESERVED);
+    expect(stalled.sync_blocked?.[0]).toMatchObject({ source_id: f.alpha, code: 'refresh_sync_timeout', resume: `gbrain sync --source ${f.alpha} --no-pull` });
+    expect(stalled.sync_blocked?.[0]?.message).toContain('is queued');
+    expect(f.head()).toBe(target);
+    expect(await f.lastCommit(f.alpha)).not.toBe(target);
+    expect((await f.refreshRows()).map(row => row.state)).toEqual(['completed']);
+    expect(await refreshLiveness(f.worktreeId, localHostId())).toBe('orphaned');
+  } finally { installFaultHook(undefined); release(); }
+
+  await f.engine.setConfig('sources.refresh_sync_budget_ms', '600000');
+  expect((await refreshWorktree(f.engine, f.alpha)).status).toBe('already_current');
+  expect(await f.lastCommit(f.alpha)).toBe(target);
+  expect(await f.lastCommit(f.beta)).toBe(target);
 }), 300_000);
