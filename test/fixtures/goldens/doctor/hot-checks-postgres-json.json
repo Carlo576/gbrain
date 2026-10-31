@@ -3773,6 +3773,65 @@
             "status": "ok"
           },
           {
+            "category": "brain",
+            "details": {
+              "count": 0,
+              "docs": "docs/guides/repair.md#rows-behind",
+              "sources": [
+                {
+                  "behind": 0,
+                  "checkpoint": null,
+                  "complete": true,
+                  "counts": {},
+                  "pages": 0,
+                  "reason": "no_checkpoint",
+                  "samples": [],
+                  "source_id": "default",
+                  "status": "not_applicable",
+                  "stopped_at": null,
+                  "unproven": 0,
+                  "unproven_samples": []
+                },
+                {
+                  "behind": 0,
+                  "checkpoint": "<fixture-head>",
+                  "complete": true,
+                  "counts": {
+                    "current": 18,
+                    "database_moved": 1
+                  },
+                  "pages": 19,
+                  "samples": [],
+                  "source_id": "notes",
+                  "status": "known",
+                  "stopped_at": null,
+                  "unproven": 0,
+                  "unproven_samples": []
+                },
+                {
+                  "behind": 0,
+                  "checkpoint": null,
+                  "complete": true,
+                  "counts": {},
+                  "pages": 0,
+                  "reason": "no_checkpoint",
+                  "samples": [],
+                  "source_id": "plain",
+                  "status": "not_applicable",
+                  "stopped_at": null,
+                  "unproven": 0,
+                  "unproven_samples": []
+                }
+              ],
+              "timeout_ms": "<volatile>",
+              "unproven": 0
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "Every file-backed page holds its file as of the sync checkpoint (19 page(s) read).",
+            "name": "sync_rows_behind_checkpoint",
+            "status": "ok"
+          },
+          {
             "category": "meta",
             "details": {
               "rollback": [],
@@ -8593,6 +8652,65 @@
             "elapsed_ms": "<volatile>",
             "message": "No page shows a database edit that a sync import overwrote.",
             "name": "sync_overwritten_db_edits",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "count": 0,
+              "docs": "docs/guides/repair.md#rows-behind",
+              "sources": [
+                {
+                  "behind": 0,
+                  "checkpoint": null,
+                  "complete": true,
+                  "counts": {},
+                  "pages": 0,
+                  "reason": "no_checkpoint",
+                  "samples": [],
+                  "source_id": "default",
+                  "status": "not_applicable",
+                  "stopped_at": null,
+                  "unproven": 0,
+                  "unproven_samples": []
+                },
+                {
+                  "behind": 0,
+                  "checkpoint": "<fixture-head>",
+                  "complete": true,
+                  "counts": {
+                    "current": 18,
+                    "database_moved": 1
+                  },
+                  "pages": 19,
+                  "samples": [],
+                  "source_id": "notes",
+                  "status": "known",
+                  "stopped_at": null,
+                  "unproven": 0,
+                  "unproven_samples": []
+                },
+                {
+                  "behind": 0,
+                  "checkpoint": null,
+                  "complete": true,
+                  "counts": {},
+                  "pages": 0,
+                  "reason": "no_checkpoint",
+                  "samples": [],
+                  "source_id": "plain",
+                  "status": "not_applicable",
+                  "stopped_at": null,
+                  "unproven": 0,
+                  "unproven_samples": []
+                }
+              ],
+              "timeout_ms": "<volatile>",
+              "unproven": 0
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "Every file-backed page holds its file as of the sync checkpoint (19 page(s) read).",
+            "name": "sync_rows_behind_checkpoint",
             "status": "ok"
           },
           {
