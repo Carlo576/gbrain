@@ -87,30 +87,32 @@ export function privateReadableSources(): readonly string[] {
 }
 
 /**
- * `visiblePredicate`, widened to rows whose source (`sourceIdSql`, a
- * code-provided column reference) is in the current private-readable set.
- * The ids are embedded as literals: each passed isValidSourceId, whose
- * alphabet has no quote or backslash.
+ * `visiblePredicate`, widened to pages (`pageAlias`, a code-provided alias)
+ * whose source is in the current private-readable set. A page carrying the
+ * `pinned_question` marker never widens: pinned questions stay owner-private
+ * (src/core/questions/pages.ts). The ids are embedded as literals: each passed
+ * isValidSourceId, whose alphabet has no quote or backslash.
  */
-export function orPrivateReadableSource(sourceIdSql: string, visiblePredicate: string): string {
+export function orPrivateReadableSource(pageAlias: string, visiblePredicate: string): string {
   const ids = privateReadableSources();
   if (ids.length === 0) return visiblePredicate;
-  return `(${sourceIdSql} IN (${ids.map(id => `'${id}'`).join(', ')}) OR ${visiblePredicate})`;
+  return `((${pageAlias}.source_id IN (${ids.map(id => `'${id}'`).join(', ')}) AND NOT COALESCE(${pageAlias}.frontmatter ? 'pinned_question', false)) OR ${visiblePredicate})`;
 }
 
 /** privatePagesFilterFragment for a remote read: a page in a private-readable source passes. Read sites only; derived-visibility decisions keep the plain fragment. */
 export function privatePagesFilterForCaller(pageAlias: string): string {
-  return orPrivateReadableSource(`${pageAlias}.source_id`, privatePagesFilterFragment(pageAlias));
+  return orPrivateReadableSource(pageAlias, privatePagesFilterFragment(pageAlias));
 }
 
 /** privatePagesFilterFragmentFast for a remote read. */
 export function privatePagesFilterFastForCaller(pageAlias: string): string {
-  return orPrivateReadableSource(`${pageAlias}.source_id`, privatePagesFilterFragmentFast(pageAlias));
+  return orPrivateReadableSource(pageAlias, privatePagesFilterFragmentFast(pageAlias));
 }
 
-/** isPrivatePage for a remote read: false for a page whose `source_id` is private-readable; a row without `source_id` keeps the plain rule. */
+/** isPrivatePage for a remote read: false for a page whose `source_id` is private-readable, unless it carries the `pinned_question` marker; a row without `source_id` keeps the plain rule. */
 export function isPrivatePageForCaller(page: { type?: string | null; frontmatter?: unknown; source_id?: string | null }): boolean {
   if (!isPrivatePage(page)) return false;
+  if (typeof page.frontmatter === 'object' && page.frontmatter !== null && (page.frontmatter as Record<string, unknown>).pinned_question != null) return true;
   return !(typeof page.source_id === 'string' && privateReadableSources().includes(page.source_id));
 }
 

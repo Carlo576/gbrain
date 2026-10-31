@@ -268,6 +268,30 @@ for (const kind of testBackends()) {
       }
     });
 
+    test('in a granted source the grant opens privacy-alias pages and derived atoms, never a pinned question', async () => {
+      const extra: Array<[string, string, string]> = [
+        ['drafts/harbor-memo', 'canaryaliaspriv', ['---', 'type: note', 'title: Harbor memo', 'confidentiality: secret', '---', '# Harbor memo', '', 'Harbor memo canaryaliaspriv.'].join('\n')],
+        ['atoms/harbor-atom', 'canaryatompriv', ['---', 'type: atom', 'title: Harbor atom', '---', '# Harbor atom', '', 'Harbor atom canaryatompriv.'].join('\n')],
+        ['questions/harbor-pin', 'canarypinpriv', ['---', 'type: question', 'title: Harbor pin', 'visibility: private', 'pinned_question: pin-example', '---', '# Harbor pin', '', 'Owner note canarypinpriv.'].join('\n')],
+      ];
+      for (const [slug, , body] of extra) await importFromContent(engine, slug, body, { sourceId: ALICE });
+      for (const [slug, canary] of extra) expect({ slug, seen: (await local('get_page', { slug })).includes(canary) }).toEqual({ slug, seen: true });
+      for (const owner of ['alice-example', 'client-alice']) {
+        for (const [slug, canary] of extra) {
+          const out = await call(tokens[owner], 'get_page', { slug });
+          expect({ owner, slug, seen: out.text.includes(canary) }).toEqual({ owner, slug, seen: !slug.startsWith('questions/') });
+        }
+        const listed = await call(tokens[owner], 'list_pages', { slug_prefix: 'questions/' });
+        expect({ owner, listed: listed.text.includes('questions/harbor-pin') }).toEqual({ owner, listed: false });
+      }
+      for (const other of ['bob-example', 'floor', 'alice-none']) {
+        for (const [slug, canary] of extra) {
+          const out = await call(tokens[other], 'get_page', { slug, source_id: ALICE });
+          expect({ other, slug, leaked: out.text.includes(canary) }).toEqual({ other, slug, leaked: false });
+        }
+      }
+    });
+
     test('a rescope back to none hides the pages on the next call (token and client)', async () => {
       expect((await call(tokens['alice-example'], 'get_page', { slug: PRIVATE_SLUG })).text).toContain(SECRET[ALICE]);
       await rescopeToken('alice-example', '--private-pages', 'none');
