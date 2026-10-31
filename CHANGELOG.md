@@ -23,6 +23,12 @@ Before, a stuck transaction holding a source, worktree or brain row (a long-runn
 - `src/commands/sources-refresh.ts`: refusals print `why` (a `why` key under `--json`, a `Why:` line otherwise).
 - Test: `test/worktree-refresh-unexpected-throw.test.ts` (PGLite, and Postgres under `DATABASE_URL`; the lock-timeout cases hold a source row from a second connection, before the fence and after the drain).
 
+## [0.60.529.0] - 2026-10-31
+
+**A pull request that adds a file to the PGLite snapshot inputs no longer gets stopped at gstack's pregate secrets check by its own workflow cache keys (#8107).**
+
+Pregate read every `key: pglite-snapshot-${{ runner.os }}-${{ hashFiles(...) }}` line in the workflow files as a possible secret (`env.kv`), and a branch can't allowlist findings on its own lines. `.gstack/pregate.json` now allowlists that one finding on those cache-key lines, and only when every `hashFiles` argument is a lowercase path or glob under `src/`, `test/` or `scripts/`. An argument with digits, capitals or a `./` prefix still gets flagged, and so does any recognized credential on the line. A new test checks that every cache-key line in the workflows is covered and that secret-shaped values are not. Nothing changes for users of the gbrain CLI.
+
 ## [0.60.528.0] - 2026-10-31
 
 **The test-isolation scan is about 25 times faster on Linux and 12 times faster on macOS, so `bun run verify` and the macOS validation job no longer come close to their per-check caps (#8053, #8099).**
