@@ -239,6 +239,8 @@
       "  [OK] db_ahead_of_git: Informational, nothing to do: the database compared with the commit at HEAD, per source with a Git checkout. notes: 5 equal. Page detail: gbrain sources git-gap <source-id>.",
       "  [OK] git_index_lag: No source is strict (git-canonical), so no index trails a commit.",
       "  [OK] outside_content_fences: No fact, take or link is indexed from a fence on an imported email, calendar, GitHub or transcript page.",
+      "  [OK] owner_host_stale: No managed write is waiting on an owner host.",
+      "  [OK] embedding_plane_disagreement: The config file disables embeddings and the database holds no vectors.",
       "  [OK] fence_integrity: No malformed facts or takes fence is held, stored or waiting in a checkout (2 source(s) scanned).",
       "  [OK] search_mode: Mode: conservative (no per-key overrides — mode bundle is canonical).",
       "  [OK] hidden_by_search_policy: No pages hidden by search-exclude policy.",

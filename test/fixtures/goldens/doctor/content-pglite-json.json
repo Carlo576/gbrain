@@ -3692,6 +3692,32 @@
           "status": "ok"
         },
         {
+          "category": "ops",
+          "details": {
+            "count": 0,
+            "docs": "docs/guides/troubleshooting.md#owner-host-stale",
+            "stale": [],
+            "stale_after_ms": "<volatile>"
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No managed write is waiting on an owner host.",
+          "name": "owner_host_stale",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "database_disabled": false,
+            "docs": "docs/guides/troubleshooting.md#embedding-plane-disagreement",
+            "file_disabled": true,
+            "vector_tables": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "The config file disables embeddings and the database holds no vectors.",
+          "name": "embedding_plane_disagreement",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "details": {
             "docs": "docs/guides/write-refusals.md#invalid_fence",
