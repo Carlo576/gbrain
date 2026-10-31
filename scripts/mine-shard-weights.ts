@@ -309,12 +309,14 @@ async function main(): Promise<void> {
     mined = [{ run: null, commit: null, jobs: [], raw, measured: mineWeights(raw, lane, { e2eProfile }) }];
   }
   const { run, commit, attempt, jobs: fullJobs, expectedFiles, raw } = mined[0]!;
-  // The newest run (the first --run) names the current files; one only older runs measured was deleted or renamed since.
-  const measured = new Map([...medianWeights(mined.map(m => m.measured))].filter(([file]) => mined[0]!.measured.has(file)));
   // Downloaded artifacts/stdin may cover only one shard. Only an authoritative
   // complete GitHub unit/serial/full-E2E run replaces the full map; selected E2E always
   // merges because its executed corpus depends on the diff.
   const mergeExisting = !full && (!run || lane === "e2e");
+  // A complete newest run (the first --run) names the current files, so one only older runs measured was deleted or
+  // renamed since. A merging run's corpus is partial, so every run's median stands.
+  const median = medianWeights(mined.map(m => m.measured));
+  const measured = mergeExisting ? median : new Map([...median].filter(([file]) => mined[0]!.measured.has(file)));
   const weights = mergeExisting && existsSync(out) ? loadWeights(out) : new Map<string, number>();
   for (const [file, duration] of measured) weights.set(file, duration);
   const metadata = { lane, unit: lane === "serial" ? "seconds" : "milliseconds", run: run ?? null, commit, source: run ? "github" : input ? "file" : "stdin",

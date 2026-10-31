@@ -518,6 +518,32 @@ it('a refresh from several GitHub runs takes each file\'s median, so one fast or
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+it('selected E2E from several runs keeps the median of a file only an older run selected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-mine-e2e-runs-'));
+  try {
+    const bin = join(dir, 'bin');
+    const fixtures = join(dir, 'fixtures');
+    mkdirSync(bin);
+    mkdirSync(fixtures);
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\ncase "$*" in\n  "run view "*" --json conclusion,headSha,jobs") cat "$FIXTURE_GH/$3.json" ;;\n  "run view "*" --log") cat "$FIXTURE_GH/$3.log" ;;\n  *) exit 2 ;;\nesac\n', { mode: 0o755 });
+    const job = 'Selected E2E (diff-relevant) 1';
+    const line = (text: string) => job + '\tstep\t2026-10-30T12:00:00.000Z ' + text + '\n';
+    const run = (id: string, files: [string, number][]) => {
+      writeFileSync(join(fixtures, id + '.json'), JSON.stringify({ conclusion: 'success', headSha: 'commit-' + id, jobs: [{ name: job, conclusion: 'success' }] }));
+      writeFileSync(join(fixtures, id + '.log'), files.map(([name, ms]) => line('=== ' + name + ' ===') + line(' 0 fail') + line('Ran 1 test across 1 file. [' + ms + '.00ms]')).join('')
+        + line('Files: ' + files.length + ' total, ' + files.length + ' passed, 0 failed'));
+    };
+    run('201', [['alpha.test.ts', 1000]]);
+    run('202', [['alpha.test.ts', 3000], ['beta.test.ts', 800]]);
+    const out = join(dir, 'e2e-weights.json');
+    writeFileSync(out, '{"test/e2e/beta.test.ts":42}\n');
+    const result = spawnSync(process.execPath, [join(import.meta.dir, '../../scripts/mine-shard-weights.ts'), '--lane', 'e2e', '--run', '201', '--run', '202', '--out', out],
+      { env: { ...process.env, PATH: bin + ':' + process.env.PATH, FIXTURE_GH: fixtures }, encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({ 'test/e2e/alpha.test.ts': 2000, 'test/e2e/beta.test.ts': 800 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 describe('medianWeights', () => {
   it('takes each file\'s median over the runs that measured it, averaging the middle two of an even count', () => {
     const runs = [new Map([['a', 1], ['b', 10]]), new Map([['a', 9], ['b', 30], ['c', 7]]), new Map([['a', 3]]), new Map([['a', 5], ['b', 20]])];
