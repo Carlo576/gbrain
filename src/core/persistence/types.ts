@@ -27,7 +27,7 @@ export type WriteErrorCode = typeof WRITE_ERROR_CODES[number];
 
 export const WRITE_HEALTH_REASONS = ['pending', 'waiting_on_earlier_write', 'database_contention', 'writer_busy',
   'revision_changed_repreparing', 'recovery_required', 'writer_pool_capacity', 'owner_unavailable',
-  'writer_lock_unavailable', 'consumer_stopping', 'cause_unknown'] as const;
+  'writer_lock_unavailable', 'consumer_stopping', 'cause_unknown', 'owner_stale'] as const;
 export const WRITE_HEALTH_ASSESSMENTS = ['pending', 'blocked', 'stalled'] as const;
 export const WRITE_HEALTH_ACTIONS = ['poll', 'inspect_owner'] as const;
 export interface WriteDiagnostic {
@@ -36,6 +36,8 @@ export interface WriteDiagnostic {
   assessment: typeof WRITE_HEALTH_ASSESSMENTS[number];
   reason: typeof WRITE_HEALTH_REASONS[number];
   next_action: typeof WRITE_HEALTH_ACTIONS[number];
+  /** GBRA-248: the worktree owner when it runs no consumer: its host id and last recorded activity (null when none). */
+  owner?: { host_id: string; live: boolean; last_active: string | null };
 }
 
 export interface WriteReceipt {
@@ -97,6 +99,11 @@ export function isWriteDiagnostic(value: unknown): value is WriteDiagnostic {
     const utc = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?Z$/.exec(value.observed_at);
     if (!utc || !Number.isFinite(Date.parse(value.observed_at))
       || new Date(value.observed_at).toISOString() !== `${utc[1]}.${(utc[2] ?? '').padEnd(3, '0')}Z`) return false;
+  }
+  if (value.owner !== undefined) {
+    const owner = value.owner;
+    if (!isRecord(owner) || typeof owner.host_id !== 'string' || !owner.host_id || typeof owner.live !== 'boolean'
+      || (owner.last_active !== null && (typeof owner.last_active !== 'string' || !Number.isFinite(Date.parse(owner.last_active))))) return false;
   }
   return true;
 }
@@ -160,6 +167,8 @@ export function publicWriteReceipt(receipt: WriteReceipt): WriteReceipt {
       age_ms: receipt.diagnostic.age_ms, assessment: receipt.diagnostic.assessment,
       reason: receipt.diagnostic.reason, next_action: receipt.diagnostic.next_action,
       ...(receipt.diagnostic.observed_at !== undefined ? { observed_at: receipt.diagnostic.observed_at } : {}),
+      ...(receipt.diagnostic.owner !== undefined ? { owner: { host_id: receipt.diagnostic.owner.host_id, live: receipt.diagnostic.owner.live,
+        last_active: receipt.diagnostic.owner.last_active } } : {}),
     } } : {}),
   };
 }

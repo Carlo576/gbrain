@@ -10,7 +10,8 @@ import { claimOwnerKind, isOneShotCommand } from './claim-phase.ts';
 import { noteDirectPoolLease } from '../direct-pool-profile.ts';
 import { preparePageMutation } from './page-prepare.ts';
 import { prepareSemanticPageMutation } from './semantic-pages.ts';
-import { getWriteRequestById, getWriteRequestProgress, receiptFor, type WriteRequestProgress } from './journal.ts';
+import { boundedOwnerActivity, getWriteRequestById, getWriteRequestProgress, receiptFor, type WriteRequestProgress } from './journal.ts';
+import type { OwnerActivity } from './owner-activity.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { isWriteErrorCode, type WriteReceipt } from './types.ts';
 import { registerPgliteReopen } from '../pglite-lifecycle.ts';
@@ -313,7 +314,11 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
       ...(diagnosis.sqlstate ? { sqlstate: diagnosis.sqlstate } : {}), attempts: failure.attempts, message: diagnosis.message, why: diagnosis.remediation };
   }
   const cause = BLOCKED_WRITE_REASONS.find(reason => reason === row.blocked_reason);
-  return cause ? { kind: 'blocked', row, request_id: row.request_id, cause, command: `gbrain sources writer status ${row.source_id} --json` } : { kind: 'pending', row };
+  if (cause) return { kind: 'blocked', row, request_id: row.request_id, cause, command: `gbrain sources writer status ${row.source_id} --json` };
+  // GBRA-248: a write left pending names its owner when that host runs no consumer, so the receipt (and --accept-pending) can tell a stale owner from a slow commit.
+  const owner = row.worktree_id ? (await boundedOwnerActivity(engine, [row.worktree_id])).get(row.worktree_id) : undefined;
+  if (owner) observedOwners.set(row, owner);
+  return { kind: 'pending', row };
 }
 /** At most four progress reads per engine; concurrent waiters on one request share a read. */
 async function readProgress(engine: BrainEngine, id: string, remaining: number): Promise<ProgressRead> {
@@ -356,8 +361,11 @@ function terminalReceiptHint(row: WriteRequest, reason: string): string {
     ? `${what} Submit again only if the change is still wanted, with a new request_id.`
     : `${what} Read the receipt and the current state before deciding to submit again; a new attempt needs a new request_id.`;
 }
+/** GBRA-248: owner facts awaitWrite observed for a row it left pending (by identity; the row object travels to writeResponse unchanged). */
+const observedOwners = new WeakMap<WriteRequest, OwnerActivity>();
 export function writeResponse(row: WriteRequest, hints: { retryAfterMs?: number | null; waiterOnlyOwner?: ElectedOwner | null } = {}): Record<string, unknown> {
-  const receipt = receiptFor(row);
+  const owner = isTerminal(row) ? undefined : observedOwners.get(row);
+  const receipt = receiptFor(row, owner ? { owner } : undefined);
   // #6007: an in-process estimate beats the fixed fallback, never an owner-inspection hold.
   if (!isTerminal(row) && hints.retryAfterMs != null && receipt.diagnostic?.next_action !== 'inspect_owner') receipt.retry_after_ms = hints.retryAfterMs;
   if (row.state === 'committed') return { ...receipt, write_request: receipt };

@@ -10,6 +10,25 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A brain moved or restored under a new host identity no longer leaves writes pending forever behind an `--accept-pending` exit 0, and a keyless re-init from a cold `GBRAIN_HOME` no longer switches an embedded brain to keyword-only (GBRA-248 W0).**
+
+A managed source publishes only through the host that owns its checkout. When a brain moved to another machine, was restored from a backup, or ran in a container that restarted with a fresh `GBRAIN_HOME`, the new process got a new host identity, its writes queued for the old owner, and nothing said that owner was gone: the receipt read as an ordinary pending write and `--accept-pending` (or `GBRAIN_ACCEPT_PENDING=1`) exited 0, so hooks and cron treated writes that would never publish as saved. A pending receipt now carries the owner's liveness and last recorded activity, and names `owner_stale` when the owner runs no live consumer and has been quiet for more than 24 hours, or at once on PGLite when this process holds the database file under another identity. `--accept-pending` does not cover an `owner_stale` write: `gbrain put`, `gbrain call`, brainstorm saves and `gbrain trust accept --all` exit 10 and say why. A consumer's clean stop now stamps the worktrees its host owns, so a stopped owner is not mistaken for a gone one. The owner host never sees `owner_stale`, a repo-less (database-only) write never names an owner, and nothing claims or transfers ownership. New doctor check `owner_host_stale` lists the waiting writes with the owner and the read-only next step.
+
+`gbrain init` with no provider key in reach falls back to keyless. Run from a cold home against a database that already had an embedding model and vectors, it wrote `embedding_disabled: true` into the new config file, and the brain stopped embedding. When that fallback was implicit and the database is not fresh, init now keeps the database's stored model and width in the config file instead and prints the key to set and `gbrain embed --stale`. A fresh keyless install, an explicit `--no-embedding` and a database that already disables embeddings behave as before. New doctor check `embedding_plane_disagreement` finds brains the old behavior left in that state and prints the `gbrain init --force --embedding-model …` enable for the same model.
+
+### Itemized changes
+
+- `src/core/persistence/owner-activity.ts` (new): owner liveness, last activity and the stale rule; `journal.ts` attaches it to receipt facts within the 500 ms budget; `health.ts`, `types.ts`, `params.ts`: the `owner_stale` reason and the optional `diagnostic.owner` receipt field.
+- `src/core/persistence/service.ts`: a write left pending carries its owner facts into the receipt.
+- `src/core/persistence/write-wait.ts`: `acceptPendingCovers`; `writeErrorExitCode` keeps exit 10 for `owner_stale`; `persistence-delegate.ts`, `brainstorm.ts`, `trust.ts` follow it.
+- `src/core/persistence/consumer-heartbeat.ts`: a clean stop stamps `persistence_worktrees.heartbeat_at` for the host's worktrees.
+- `src/commands/init-embedding-plane.ts` (new), `src/commands/init.ts`: the implicit-keyless marker and the kept database identity on both engines.
+- Doctor: `owner_host_stale` (`checks/owner-host-stale.ts`) and `embedding_plane_disagreement` (`checks/embedding-plane.ts`); `core/readiness.ts` exports `enableArgv`.
+- Docs: troubleshooting entries `#owner-host-stale` (with the stable `GBRAIN_HOME` guidance for servers and containers) and `#embedding-plane-disagreement`; the exit-status tables.
+- Tests: `test/owner-stale-moved-brain.test.ts` (real CLI, PGLite), `test/persistence-owner-activity.test.ts` (PGLite and Postgres), `test/init-cold-home-embedding.test.ts` (PGLite and Postgres), `test/doctor-owner-host-stale.test.ts`, `test/doctor-embedding-plane-disagreement.test.ts`; doctor goldens.
+
 ## [0.60.519.0] - 2026-10-30
 
 **The unit lane now runs 28 shards instead of 22, on shard weights refreshed from the Oct 30 nightly. With the fresh weights, every one of 22 shards would be planned at 624.4 s against the 600 s per-shard budget; at 28 shards the largest is 490.6 s.**

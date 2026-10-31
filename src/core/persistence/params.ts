@@ -121,6 +121,14 @@ export const WRITE_RECEIPT_SCHEMA = {
         assessment: { type: 'string', enum: [...WRITE_HEALTH_ASSESSMENTS] },
         reason: { type: 'string', enum: [...WRITE_HEALTH_REASONS] },
         next_action: { type: 'string', enum: [...WRITE_HEALTH_ACTIONS] },
+        owner: {
+          type: 'object', required: ['host_id', 'live', 'last_active'],
+          properties: {
+            host_id: { type: 'string' },
+            live: { type: 'boolean' },
+            last_active: { type: ['string', 'null'] },
+          },
+        },
       },
     },
   },

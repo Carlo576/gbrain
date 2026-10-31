@@ -283,6 +283,10 @@ export function startConsumerHeartbeat(engine: DirectEngine, hostId: string, opt
       clearInterval(cadence);
       await inFlight;
       const cancel = new AbortController();
+      // GBRA-248: the worktrees this host owns keep the time it stopped, so owner-activity.ts can tell a stopped owner from one long gone.
+      const stamp = new AbortController();
+      try { await bounded(execute('UPDATE persistence_worktrees SET heartbeat_at=now() WHERE owner_host_id=$1::uuid', [hostId], stamp.signal), stamp, 1_000); }
+      catch { /* best effort: owner activity falls back to publications and the last renewal */ }
       try { await bounded(execute('DELETE FROM persistence_consumers WHERE host_id=$1::uuid AND pid=$2::integer AND nonce=$3', [hostId, self.pid, self.nonce], cancel.signal), cancel, 1_000); }
       catch { /* the row lapses on its own; the next renewal on this host purges it */ }
     },

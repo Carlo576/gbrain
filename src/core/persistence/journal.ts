@@ -15,6 +15,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { backgroundPaused, backgroundWorktreeInactive, declaredBackground, readBackgroundPauseShare, resolveAdmissionOrigin, type AdmissionOrigin } from './admission-origin.ts';
 import { EFFECT_BYTES_SQL, RECEIPT_RESERVATION_FLOOR, receiptReservation, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
 import { writeHealth, type WriteHealthFacts } from './health.ts';
+import { ownerActivity, type OwnerActivity } from './owner-activity.ts';
 import { assertBackgroundOwner } from './owner-verification.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
@@ -1251,16 +1252,27 @@ export async function writeHealthFacts(engine: BrainEngine, rows: WriteRequest[]
     timer = setTimeout(() => { abort.abort(); resolve(null); }, 500);
   })]).finally(() => { if (timer) clearTimeout(timer); });
   if (!facts) return result;
+  const owners = await boundedOwnerActivity(engine, pending.flatMap(row => row.worktree_id ? [row.worktree_id] : []));
   const byRoot = new Map(facts.map(fact => [fact.root, fact]));
   for (const row of pending) {
     const fact = byRoot.get(row.worktree_id ?? `db:${row.source_incarnation}`);
     if (!fact) continue;
     // #5984 Phase 4.5: a foreground write publishing beside running lane groups (claimed sync jobs) is not waiting on them.
     const head = row.state === 'queued' ? fact.sequence : row.worktree_id && row.operation !== 'submit_job' ? fact.started_unlaned : fact.started_sequence;
+    const owner = row.worktree_id ? owners.get(row.worktree_id) : undefined;
     result.set(row.id, { observed_at, recovery_required: fact.recovery_required,
       owner_unavailable: fact.owner_unavailable,
       inspect_owner: fact.inspect_owner,
-      earlier_write: head != null && BigInt(head) < BigInt(row.sequence) });
+      earlier_write: head != null && BigInt(head) < BigInt(row.sequence),
+      ...(owner ? { owner } : {}) });
   }
   return result;
+}
+/** GBRA-248: the owners of these worktrees, within the receipt read's 500 ms budget; a slow or failed read adds no owner facts. */
+export async function boundedOwnerActivity(engine: BrainEngine, worktreeIds: readonly string[]): Promise<Map<string, OwnerActivity>> {
+  if (!worktreeIds.length) return new Map();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([ownerActivity(engine, worktreeIds).catch(() => new Map<string, OwnerActivity>()),
+    new Promise<Map<string, OwnerActivity>>(resolve => { timer = setTimeout(() => resolve(new Map()), 500); })])
+    .finally(() => { if (timer) clearTimeout(timer); });
 }

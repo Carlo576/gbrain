@@ -1018,6 +1018,14 @@
         "name": "outside_content_fences"
       },
       {
+        "category": "ops",
+        "name": "owner_host_stale"
+      },
+      {
+        "category": "brain",
+        "name": "embedding_plane_disagreement"
+      },
+      {
         "category": "brain",
         "name": "fence_integrity"
       },
