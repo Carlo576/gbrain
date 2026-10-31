@@ -524,3 +524,16 @@ describe('medianWeights', () => {
     expect(medianWeights([]).size).toBe(0);
   });
 });
+
+describe('committed shard weights', () => {
+  it.each([
+    ['scripts/test-weights.json', 'scripts/test-weights.metadata.json', 'unit', 'milliseconds'],
+    ['scripts/serial-weights.json', 'scripts/serial-weights.metadata.json', 'serial', 'seconds'],
+  ])('%s matches the metadata the miner wrote beside it', (weightsPath, metadataPath, lane, unit) => {
+    const root = join(import.meta.dir, '..', '..');
+    const weights = JSON.parse(readFileSync(join(root, weightsPath), 'utf8')) as Record<string, number>;
+    const metadata = JSON.parse(readFileSync(join(root, metadataPath), 'utf8'));
+    expect(metadata).toMatchObject({ lane, unit, totalFiles: Object.keys(weights).length });
+    expect(metadata.runs?.length ?? 1).toBe(metadata.commits?.length ?? 1);
+  });
+});

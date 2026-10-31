@@ -743,6 +743,7 @@ describe('every robot run covers a fixed schedule list (reuse of a passed run is
       expect(error?.message).toBe('worker crashed');
       // The other lane's run finishes after the failure; it must not start the next job.
       release();
+      // gstack-timing-ok: an absence check (the released lane must not start a job); there is no event to await
       await Bun.sleep(100);
       expect(spawned).toEqual([`${first}:count`, `${second}:count`]);
     } finally { rmSync(scratch, { recursive: true, force: true }); }

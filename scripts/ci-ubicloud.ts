@@ -105,6 +105,7 @@ const COMMITTED_WEIGHTS = join(ROOT, "scripts/ubicloud/weights.json");
 const LOCAL_WEIGHTS = join(ROOT, ".context/ci-ubicloud/weights.json");
 const ALL_LANES = ["gitleaks", "verify", "serial", "slow", "unit", "pg-arms", "e2e"] as const;
 const BATCH_TIMEOUT_MS = 20 * 60 * 1000;
+const VM_LIST_TIMEOUT_MS = 120_000;
 // Test timeouts and the mined shard weights are calibrated on this location's VMs.
 const GATE_LOCATION = "eu-central-h1";
 // Items this heavy are the run's long poles: spread them one per VM so two of
@@ -678,7 +679,7 @@ async function main() {
  * is 0; a --keep run reports its live VMs as left=<n> kept=1.
  */
 async function leftover(owner: string, names: string[], kept: boolean): Promise<boolean> {
-  const list = await runner(["cli", "vm", "list", "-N", "-f", "location,name"], { timeoutMs: 120_000 });
+  const list = await runner(["cli", "vm", "list", "-N", "-f", "location,name"], { timeoutMs: VM_LIST_TIMEOUT_MS });
   const listed = list.code === 0 ? new Set(list.stdout.split("\n").map((line) => line.trim().split(/\s+/)[1]).filter(Boolean)) : null;
   const left = listed ? names.filter((name) => listed.has(name)).length : "unknown";
   const others = listed ? [...listed].filter((name) => name!.startsWith(`ubirun-${owner}-`) && !names.includes(name!)).length : "unknown";

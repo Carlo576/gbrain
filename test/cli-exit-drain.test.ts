@@ -82,6 +82,7 @@ describe('exit seam waits for delivery, not a fixed grace (real Bun pipes)', () 
     const run = await runHarness({ HARNESS_STDOUT_BYTES: '100', HARNESS_STDERR_BYTES: '100', HARNESS_EXIT_CODE: '3' }, 500);
     expect(run.code).toBe(3);
     expect({ stdout: run.stdout, stderr: run.stderr, streams: run.streams }).toEqual({ stdout: 100, stderr: 100, streams: run.streams });
+    // gstack-timing-ok: the contract is that a read after exit never waits for the drain grace; half the grace is the headroom
     expect(run.durationMs).toBeLessThan(GRACE_MS / 2 + 500);
   }, 40_000);
 
