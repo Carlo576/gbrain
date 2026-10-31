@@ -98,6 +98,14 @@ test('an unexpected throw whose refresh row cannot be read says so, with credent
   expect(failure.why).toContain('~/brain-checkout/src/x.ts');
 });
 
+test('an unexpected throw under --abandon repeats --abandon in its fix, never a plain refresh that would finish the refresh', async () => {
+  const statement = Object.assign(new Error('canceling statement due to user request'), { code: '57014' });
+  const fake = { kind: 'postgres', getConfig: async () => { throw statement; }, executeRaw: async () => { throw statement; } } as unknown as BrainEngine;
+  const failure = await withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a', { abandon: true }).then(() => null, error => error));
+  expect(failure.code).toBe('internal_error');
+  expect(failure.suggestion).toContain('Run gbrain sources refresh source-a --abandon again');
+});
+
 test('a host identity file that cannot be read still yields a typed internal_error refusal', () => withRefreshFixture(engine, async f => {
   const hostFile = join(persistenceHome(), 'host.json');
   const original = readFileSync(hostFile, 'utf8');
@@ -113,10 +121,11 @@ test('a host identity file that cannot be read still yields a typed internal_err
 
 /**
  * Another connection holds one source row until `release` (a stuck transaction on the brain host): `FOR UPDATE` by
- * default, or a plain read (AccessShareLock only, which cannot block the fence) with `plainRead`. Its last statement
+ * default, or a plain read (AccessShareLock only, which cannot block the fence) with `plainRead`; with `refreshId` it also
+ * holds that refresh row. Its last statement
  * carries a marker literal, which the refusal must never echo.
  */
-async function holdSourceRow(sourceId: string, plainRead = false): Promise<{ pid: number; release: () => Promise<void> }> {
+async function holdSourceRow(sourceId: string, plainRead = false, refreshId?: string): Promise<{ pid: number; release: () => Promise<void> }> {
   const sql = postgres(databaseUrl, { max: 1, prepare: false });
   let release!: () => void;
   const released = new Promise<void>(resolve => { release = resolve; });
@@ -126,6 +135,7 @@ async function holdSourceRow(sourceId: string, plainRead = false): Promise<{ pid
     const [row] = plainRead
       ? await t`SELECT pg_backend_pid() AS pid FROM sources WHERE id=${sourceId}`
       : await t`SELECT pg_backend_pid() AS pid FROM sources WHERE id=${sourceId} FOR UPDATE`;
+    if (refreshId) await t`SELECT id FROM persistence_worktree_refreshes WHERE id=${refreshId}::uuid FOR UPDATE`;
     await t.unsafe("SELECT 'holder-sql-marker' AS note");
     locked(Number(row!.pid));
     await released;
@@ -189,3 +199,18 @@ test.skipIf(!process.env.DATABASE_URL)('the lock-timeout why names only row-lock
   expect(failure!.why).not.toContain('holder-sql-marker');
   expect(failure!.why).not.toContain('SELECT');
 }), 120_000);
+
+test.skipIf(!process.env.DATABASE_URL)('a lock timeout after the drain whose holder also holds the refresh row still refuses, leaving the row draining for the next run', () => withRefreshFixture(engine, async f => {
+  const before = f.head();
+  const target = f.push('alpha/two.md', page('Alpha two', 'Upstream side.'));
+  let held: Awaited<ReturnType<typeof holdSourceRow>> | undefined;
+  const failure = await refreshWorktree(f.engine, f.alpha, { hooks: { boundary: async (point, row) => { if (point === 'drained') held = await holdSourceRow(f.alpha, false, row.id); } } })
+    .then(() => null, error => error).finally(() => held?.release());
+  expect(failure).toBeInstanceOf(OperationError);
+  expect(failure.code).toBe('refresh_lock_timeout');
+  const [row] = await f.refreshRows();
+  expect(row!.state).toBe('draining');
+  expect(f.head()).toBe(before);
+  expect((await refreshWorktree(f.engine, f.alpha)).status).toBe('completed');
+  expect(await f.lastCommit(f.alpha)).toBe(target);
+}), 60_000);

@@ -488,7 +488,7 @@ export async function refreshWorktree(engine: BrainEngine, sourceId: string, opt
   try { return await runRefresh(engine, sourceId, opts); }
   catch (error) {
     if (error instanceof OperationError || classifyPgAccessError(error).reason !== 'unknown') throw error;
-    throw await unexpectedRefreshFailure(engine, sourceId, error);
+    throw await unexpectedRefreshFailure(engine, sourceId, opts, error);
   }
 }
 
@@ -503,17 +503,18 @@ const redact = (text: string) => {
  * A database access error the classifier recognizes (connection refused, a missing table) is rethrown unchanged, so the CLI
  * keeps its own repair fix for it.
  */
-async function unexpectedRefreshFailure(engine: BrainEngine, sourceId: string, error: unknown): Promise<OperationError> {
+async function unexpectedRefreshFailure(engine: BrainEngine, sourceId: string, opts: RefreshOptions, error: unknown): Promise<OperationError> {
   const thrown = error instanceof Error ? error : new Error(String(error));
   const sqlstate = typeof (error as { code?: unknown } | null)?.code === 'string' ? ` (${(error as { code: string }).code})` : '';
   const lookup = await Promise.resolve().then(async () => {
     const binding = await getWorktreeBinding(engine, sourceId, existingLocalHostId());
     return { active: binding ? await readActiveRefresh(engine, binding.worktree_id) : null };
   }).catch(() => null);
+  const command = `gbrain sources refresh ${sourceId}${opts.abandon ? ' --abandon' : opts.resume ? ' --resume' : ''}`;
   const left = !lookup ? 'The refresh row could not be read, so a fenced or syncing refresh may still be active.'
-    : lookup.active ? `Refresh ${lookup.active.id} stays ${lookup.active.state}, and the next gbrain sources refresh ${sourceId} resumes it.` : 'No refresh row was left active.';
+    : lookup.active ? `Refresh ${lookup.active.id} stays ${lookup.active.state}${opts.abandon ? '.' : `, and the next gbrain sources refresh ${sourceId} resumes it.`}` : 'No refresh row was left active.';
   return opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${sqlstate}: ${thrown.message}`),
-    `${left} Run gbrain sources refresh ${sourceId} again; if it fails the same way, report this output (why holds the stack) with gbrain doctor --json.`,
+    `${left} Run ${command} again; if it fails the same way, report this output (why holds the stack) with gbrain doctor --json.`,
     { why: redact(thrown.stack ?? `${thrown.name}: ${thrown.message}`) });
 }
 
@@ -674,7 +675,10 @@ async function fenceAndMerge(engine: BrainEngine, git: Git, sourceId: string, pl
   } catch (error) {
     const stored = await readRefresh(engine, row.id);
     if (stored.state === 'draining' && error instanceof OperationError) {
-      await engine.transaction(tx => transition(tx, stored, ['draining'], 'aborted', refusalOutcome(error)));
+      await engine.transaction(async tx => {
+        await tx.executeRaw("SELECT set_config('lock_timeout','5s',true)");
+        await transition(tx, stored, ['draining'], 'aborted', refusalOutcome(error));
+      }).catch(abortError => { if ((abortError as { code?: string }).code !== LOCK_NOT_AVAILABLE) throw abortError; });
       error.detail ??= `refresh_id=${row.id}`;
     }
     throw error;
