@@ -18,8 +18,9 @@
  * reports nothing; a local_path that is not a Git checkout keeps its files.
  * Fails when: the hook writes files and leaves them uncommitted (the pre-fix
  * path), commits one file at a time, or leaves files behind after a refused
- * commit.
- * Seams: the phases' `_transcripts` / `_chat` / `_atoms` test inputs (no paid
+ * commit. A crash between a batch's file writes and its commit (the `derivedWriteSeams.beforeCommit` fault point)
+ * leaves the files on disk, and the next run's batch commit sweeps them in through the door's pending ledger.
+ * Seams: `derivedWriteSeams.beforeCommit` (a throw there stands in for a process crash: no rollback runs), the phases' `_transcripts` / `_chat` / `_atoms` test inputs (no paid
  * call). PGLite always, Postgres when DATABASE_URL is set.
  */
 import { describe, expect, test } from 'bun:test';
@@ -28,6 +29,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChatOpts, ChatResult } from '../../src/core/ai/gateway.ts';
+import { derivedWriteSeams } from '../../src/core/cycle/derived-write-through.ts';
 import { runPhaseExtractAtoms } from '../../src/core/cycle/extract-atoms.ts';
 import { runPhaseSynthesizeConcepts } from '../../src/core/cycle/synthesize-concepts.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -45,7 +47,7 @@ interface Brain {
   git(...args: string[]): string;
   path(slug: string): string;
   atoms(live?: boolean): Promise<Array<{ slug: string; source_path: string | null }>>;
-  extract(titles: string[], hash: string | null): Promise<{ status: string; failed: Array<{ code: string; paths: string[] }> }>;
+  extract(titles: string[], hash: string | null, filePath?: string): Promise<{ status: string; failed: Array<{ code: string; paths: string[] }> }>;
 }
 
 const chat = (titles: string[]) => async (_o: ChatOpts): Promise<ChatResult> => {
@@ -83,9 +85,9 @@ async function withBrain(databaseUrl: string | undefined, layout: Layout, run: (
           path: slug => join(root, `${slug}.md`),
           atoms: async (live = true) => engine.executeRaw<{ slug: string; source_path: string | null }>(
             "SELECT slug, source_path FROM pages WHERE type = 'atom' AND (deleted_at IS NULL) = $1 ORDER BY slug", [live]),
-          async extract(titles, hash) {
+          async extract(titles, hash, filePath = '/fake/2026-09-07-meeting.txt') {
             const result = await runPhaseExtractAtoms(engine, {
-              _transcripts: hash ? [{ filePath: '/fake/2026-09-07-meeting.txt', content: 'content', contentHash: hash }] : [], _pages: [], _chat: chat(titles),
+              _transcripts: hash ? [{ filePath, content: 'content', contentHash: hash }] : [], _pages: [], _chat: chat(titles),
             });
             const failed = (result.details as { write_through_failed?: Array<{ code: string; paths: string[] }> }).write_through_failed ?? [];
             return { status: result.status, failed };
@@ -177,6 +179,23 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const retry = await b.extract([], null);
         expect({ failed: retry.failed, paths: lastCommitPaths(b), dirty: dirty(b) })
           .toEqual({ failed: [], paths: atoms.map(a => relOf(a.slug)).sort(), dirty: '' });
+      });
+    }, 180_000);
+
+    test('a crash between the file writes and the commit: the next run\'s batch commit sweeps the files it left', async () => {
+      await withBrain(databaseUrl, 'git', async b => {
+        derivedWriteSeams.beforeCommit = () => { throw new Error('simulated crash before the batch commit'); };
+        try {
+          await b.extract(['Renders vs proof'], 'hash-one').catch(() => undefined);
+        } finally {
+          delete derivedWriteSeams.beforeCommit;
+        }
+        const [crashed] = (await b.atoms()).map(a => a.slug);
+        expect({ file: existsSync(b.path(crashed!)), dirty: dirty(b) }).toEqual({ file: true, dirty: `?? ${relOf(crashed!)}` });
+        await b.extract(['Founder lesson'], 'hash-two', '/fake/2026-09-08-meeting.txt');
+        const slugs = (await b.atoms()).map(a => a.slug);
+        expect(slugs).toContain(crashed!);
+        expect({ dirty: dirty(b), paths: lastCommitPaths(b) }).toEqual({ dirty: '', paths: slugs.map(relOf).sort() });
       });
     }, 180_000);
 

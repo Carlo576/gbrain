@@ -91,6 +91,9 @@ interface DerivedFileChange { slug: string; sourceId: string; filePath: string; 
 /** A batch commit the checkout refused: the door's code and message, the batch's files (root-relative) and those left as they were. */
 export interface DerivedCommitFailure { code: string; message: string; paths: string[]; kept: string[] }
 
+/** Test seam: runs after a batch's files are written and before its commit; a throw stands in for a crash (no rollback). */
+export const derivedWriteSeams: { beforeCommit?: (root: string) => void } = {};
+
 /** How long a batch waits for the checkout's commit lock before it rolls back. */
 const DERIVED_COMMIT_LOCK_WAIT_MS = 30_000;
 
@@ -162,6 +165,7 @@ async function commitDerivedChanges(engine: BrainEngine, phase: keyof typeof DER
   for (const root of new Set(changes.map(c => c.writeRoot))) {
     const batch = changes.filter(c => c.writeRoot === root);
     if (classifyGitCheckout(root) === 'not_git') continue;
+    derivedWriteSeams.beforeCommit?.(root);
     try {
       await withSourceFilesystemLock(engine, root, async () => {
         const rels = batch.map(c => relative(root, c.filePath));
