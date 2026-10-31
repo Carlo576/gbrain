@@ -517,7 +517,7 @@ async function boundedLookup<T>(engine: BrainEngine, read: (engine: BrainEngine)
   const timedOut = new Promise<null>(resolve => { timer = setTimeout(() => { controller.abort(); resolve(null); }, LOOKUP_MS); });
   return Promise.race([Promise.resolve().then(() => read(bounded)), timedOut]).catch(() => null).finally(() => clearTimeout(timer));
 }
-const TRANSIENT_SQLSTATES = new Set(['40P01', '40001', '57014']);
+const TRANSIENT_SQLSTATES = new Set(['40P01', '40001', '57014', '55P03']);
 
 /**
  * GBRA-250: an untyped throw (a statement error, a TypeError) leaves the refresh where it stood, so a fenced or syncing row
@@ -532,7 +532,8 @@ async function unexpectedRefreshFailure(engine: BrainEngine, sourceId: string, o
     const binding = await getWorktreeBinding(reads, sourceId, existingLocalHostId());
     return { active: binding ? await readActiveRefresh(reads, binding.worktree_id) : null };
   });
-  const command = `gbrain sources refresh ${sourceId}${opts.dryRun ? ' --dry-run' : ''}${opts.abandon ? ' --abandon' : opts.resume ? ' --resume' : ''}`;
+  const command = `gbrain sources refresh ${sourceId}${opts.dryRun ? ' --dry-run' : ''}${opts.abandon ? ' --abandon' : opts.resume ? ' --resume' : ''}`
+    + `${opts.waitDrainMs !== undefined ? ` --wait-drain ${opts.waitDrainMs / 1000}` : ''}${opts.fetchTimeoutMs !== undefined ? ` --fetch-timeout-ms ${opts.fetchTimeoutMs}` : ''}`;
   const left = !lookup ? 'The refresh row could not be read, so a fenced or syncing refresh may still be active.'
     : lookup.active ? `Refresh ${lookup.active.id} stays ${lookup.active.state}${opts.abandon ? '.' : `, and the next gbrain sources refresh ${sourceId} resumes it.`}` : 'No refresh row was left active.';
   const failure = opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${code ? ` (${code})` : ''}: ${thrown.message}`),
@@ -656,6 +657,9 @@ async function lockTimeoutRefusal(engine: BrainEngine, sourceId: string, refresh
   return error;
 }
 
+/** A fence transaction past its lock timeout; fenceAndMerge builds the refusal after the native locks are released. */
+class FenceLockTimeout extends Error {}
+
 /** Steps 3-5 under the worktree native lock: recheck drained, fence, verify HEAD, ff-only merge, bookkeeping. */
 async function fenceAndMerge(engine: BrainEngine, git: Git, sourceId: string, plan: Plan, row: WorktreeRefreshRow, hooks?: RefreshHooks): Promise<WorktreeRefreshRow> {
   let fenced: WorktreeRefreshRow;
@@ -674,7 +678,7 @@ async function fenceAndMerge(engine: BrainEngine, git: Git, sourceId: string, pl
           `Work reached the worktree after the drain check (${counts.requests} request(s), ${counts.effects} checkout effect(s), ${counts.recovery} recovery record(s)); nothing moved.`,
           `Retry gbrain sources refresh ${sourceId}`, row.id);
         if (!await transition(tx, row, ['draining'], 'fenced')) throw refusal('refresh_source_changed', 'The refresh record was moved by recovery while draining.', `gbrain sources refresh ${sourceId} --resume`, row.id);
-      }).catch(async error => { throw (error as { code?: string }).code === LOCK_NOT_AVAILABLE ? await lockTimeoutRefusal(engine, sourceId, row.id) : error; });
+      }).catch(error => { throw (error as { code?: string }).code === LOCK_NOT_AVAILABLE ? new FenceLockTimeout() : error; });
       const current = await readRefresh(engine, row.id);
       await hooks?.boundary?.('fenced', current);
       const head = await headOf(git, plan.root);
@@ -697,7 +701,8 @@ async function fenceAndMerge(engine: BrainEngine, git: Git, sourceId: string, pl
       await bookkeeping(engine, current);
       return readRefresh(engine, row.id);
     }, undefined, 30_000);
-  } catch (error) {
+  } catch (thrown) {
+    const error = thrown instanceof FenceLockTimeout ? await lockTimeoutRefusal(engine, sourceId, row.id) : thrown;
     const stored = await readRefresh(engine, row.id);
     if (stored.state === 'draining' && error instanceof OperationError) {
       await engine.transaction(async tx => {

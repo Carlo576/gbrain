@@ -21,6 +21,7 @@ import { runSourcesRefresh } from '../src/commands/sources-refresh.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { refreshWorktree } from '../src/core/persistence/worktree-refresh.ts';
 import { persistenceHome } from '../src/core/persistence/identity.ts';
+import { tryAcquireNativeLock } from '../src/core/persistence/native-lock.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { page, withRefreshFixture } from './helpers/worktree-refresh-fixture.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -114,6 +115,13 @@ test('an unexpected throw under --dry-run repeats --dry-run in its fix, never a 
   expect(failure.suggestion).toContain('Run gbrain sources refresh source-a --dry-run again');
 });
 
+test('an unexpected throw repeats --wait-drain and --fetch-timeout-ms in its fix', async () => {
+  const statement = Object.assign(new Error('canceling statement due to user request'), { code: '57014' });
+  const fake = { kind: 'postgres', getConfig: async () => { throw statement; }, executeRaw: async () => { throw statement; } } as unknown as BrainEngine;
+  const failure = await withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a', { waitDrainMs: 120_000, fetchTimeoutMs: 5_000 }).then(() => null, error => error));
+  expect(failure.suggestion).toContain('Run gbrain sources refresh source-a --wait-drain 120 --fetch-timeout-ms 5000 again');
+});
+
 test('a refresh-row lookup that never answers still yields the refusal, and the stalled read is bounded and cancelled', async () => {
   const statement = Object.assign(new Error('canceling statement due to user request'), { code: '57014' });
   const reads: Array<{ signal?: AbortSignal; timeoutMs?: number }> = [];
@@ -135,6 +143,7 @@ test('a deadlock or serialization failure is a retryable internal_error; an ordi
   };
   expect((await refuse('40P01')).retryable).toBe(true);
   expect((await refuse('40001')).retryable).toBe(true);
+  expect((await refuse('55P03')).retryable).toBe(true);
   expect((await refuse('42883')).retryable).toBeUndefined();
 });
 
@@ -262,6 +271,27 @@ test.skipIf(!process.env.DATABASE_URL)('a lock-holder lookup that never answers 
   expect(failure!.why).toBe('The lookup of open transactions holding those rows failed or took longer than 3 s.');
   expect(stalled?.aborted).toBe(true);
 }), 60_000);
+
+test.skipIf(!process.env.DATABASE_URL)('a lock timeout after the drain looks up the holders only after the topology lock is released', () => withRefreshFixture(engine, async f => {
+  f.push('alpha/two.md', page('Alpha two', 'Upstream side.'));
+  const target = f.engine as unknown as { executeRaw: (this: unknown, sql: string, params?: unknown[], opts?: object) => Promise<Array<Record<string, string>>> };
+  const original = target.executeRaw;
+  const [brain] = await original.call(f.engine, 'SELECT brain_id FROM persistence_brain WHERE singleton=1');
+  let topologyFree: boolean | undefined;
+  target.executeRaw = async function (sql, params, opts) {
+    if (sql.includes('a.xact_start IS NOT NULL') && topologyFree === undefined) {
+      const handle = await tryAcquireNativeLock(join(persistenceHome(), 'locks', `topology-${brain!.brain_id}.lock`));
+      topologyFree = handle !== null;
+      await handle?.release();
+    }
+    return original.call(this, sql, params, opts);
+  };
+  let held: Awaited<ReturnType<typeof holdSourceRow>> | undefined;
+  const failure = await refreshWorktree(f.engine, f.alpha, { hooks: { boundary: async point => { if (point === 'drained') held = await holdSourceRow(f.alpha); } } })
+    .then(() => null, error => error).finally(async () => { target.executeRaw = original; await held?.release(); });
+  expect(failure.code).toBe('refresh_lock_timeout');
+  expect(topologyFree).toBe(true);
+}), 120_000);
 
 test.skipIf(!process.env.DATABASE_URL)('a lock timeout after the drain whose holder also holds the refresh row still refuses, leaving the row draining for the next run', () => withRefreshFixture(engine, async f => {
   const before = f.head();
