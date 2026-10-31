@@ -9,6 +9,8 @@
  * refresh_lock_timeout naming the open transactions instead.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import postgres from '#postgres';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -17,6 +19,7 @@ import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-f
 import { runSourcesRefresh } from '../src/commands/sources-refresh.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { refreshWorktree } from '../src/core/persistence/worktree-refresh.ts';
+import { persistenceHome } from '../src/core/persistence/identity.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { page, withRefreshFixture } from './helpers/worktree-refresh-fixture.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -72,15 +75,35 @@ test('sources refresh prints an untyped throw as a refused document carrying the
   expect(doc.fix).toContain('gbrain sources refresh source-a');
 });
 
-/** Another connection holds `SELECT … FOR UPDATE` on one source row until `release` (a stuck transaction on the brain host). */
-async function holdSourceRow(sourceId: string): Promise<{ pid: number; release: () => Promise<void> }> {
+test('a host identity file that cannot be read still yields a typed internal_error refusal', () => withRefreshFixture(engine, async f => {
+  const hostFile = join(persistenceHome(), 'host.json');
+  const original = readFileSync(hostFile, 'utf8');
+  writeFileSync(hostFile, '{');
+  let failure: unknown;
+  try { failure = await refreshWorktree(f.engine, f.alpha).then(() => null, error => error); }
+  finally { writeFileSync(hostFile, original); }
+  expect(failure).toBeInstanceOf(OperationError);
+  expect((failure as OperationError).code).toBe('internal_error');
+  expect((failure as OperationError).message).toContain('SyntaxError');
+  expect((failure as OperationError).suggestion).toContain('No refresh row was left active.');
+}), 120_000);
+
+/**
+ * Another connection holds one source row until `release` (a stuck transaction on the brain host): `FOR UPDATE` by
+ * default, or a plain read (AccessShareLock only, which cannot block the fence) with `plainRead`. Its last statement
+ * carries a connection string, which the refusal must never echo.
+ */
+async function holdSourceRow(sourceId: string, plainRead = false): Promise<{ pid: number; release: () => Promise<void> }> {
   const sql = postgres(databaseUrl, { max: 1, prepare: false });
   let release!: () => void;
   const released = new Promise<void>(resolve => { release = resolve; });
   let locked!: (pid: number) => void;
   const pid = new Promise<number>(resolve => { locked = resolve; });
   const tx = sql.begin(async t => {
-    const [row] = await t`SELECT pg_backend_pid() AS pid FROM sources WHERE id=${sourceId} FOR UPDATE`;
+    const [row] = plainRead
+      ? await t`SELECT pg_backend_pid() AS pid FROM sources WHERE id=${sourceId}`
+      : await t`SELECT pg_backend_pid() AS pid FROM sources WHERE id=${sourceId} FOR UPDATE`;
+    await t.unsafe("SELECT 'postgres://alice-example:hunter2@db.example/brain' AS note");
     locked(Number(row!.pid));
     await released;
   });
@@ -128,4 +151,18 @@ test.skipIf(!process.env.DATABASE_URL)('a source row taken after the drain abort
   expect(f.head()).toBe(before);
   expect((await refreshWorktree(f.engine, f.alpha)).status).toBe('completed');
   expect(await f.lastCommit(f.alpha)).toBe(target);
+}), 120_000);
+
+test.skipIf(!process.env.DATABASE_URL)('the lock-timeout why names only row-lock holders in this database and never echoes their SQL', () => withRefreshFixture(engine, async f => {
+  f.push('alpha/two.md', page('Alpha two', 'Upstream side.'));
+  const reader = await holdSourceRow(f.alpha, true);
+  const held = await holdSourceRow(f.alpha);
+  let failure: OperationError | null;
+  try { failure = await refreshWorktree(f.engine, f.alpha).then(() => null, error => error); }
+  finally { await held.release(); await reader.release(); }
+  expect(failure!.code).toBe('refresh_lock_timeout');
+  expect(failure!.why).toContain(`pid ${held.pid} `);
+  expect(failure!.why).not.toContain(`pid ${reader.pid} `);
+  expect(failure!.why).not.toContain('hunter2');
+  expect(failure!.why).not.toContain('SELECT');
 }), 120_000);

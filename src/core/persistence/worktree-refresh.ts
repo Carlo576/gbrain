@@ -488,6 +488,8 @@ export async function refreshWorktree(engine: BrainEngine, sourceId: string, opt
   catch (error) { throw error instanceof OperationError ? error : await unexpectedRefreshFailure(engine, sourceId, error); }
 }
 
+const redact = (text: string) => redactUrlsInText(redactConnectionInfo(text));
+
 /**
  * GBRA-250: an untyped throw (a statement error, a TypeError) leaves the refresh where it stood, so a fenced or syncing row
  * resumes on the next run. The refusal names that row and carries the stack in `why`, so a failure seen once leaves a trace.
@@ -495,8 +497,7 @@ export async function refreshWorktree(engine: BrainEngine, sourceId: string, opt
 async function unexpectedRefreshFailure(engine: BrainEngine, sourceId: string, error: unknown): Promise<OperationError> {
   const thrown = error instanceof Error ? error : new Error(String(error));
   const sqlstate = typeof (error as { code?: unknown } | null)?.code === 'string' ? ` (${(error as { code: string }).code})` : '';
-  const redact = (text: string) => redactUrlsInText(redactConnectionInfo(text));
-  const binding = await getWorktreeBinding(engine, sourceId, existingLocalHostId()).catch(() => null);
+  const binding = await Promise.resolve().then(() => getWorktreeBinding(engine, sourceId, existingLocalHostId())).catch(() => null);
   const active = binding ? await readActiveRefresh(engine, binding.worktree_id).catch(() => null) : null;
   const left = active ? `Refresh ${active.id} stays ${active.state}, and the next gbrain sources refresh ${sourceId} resumes it.` : 'No refresh row was left active.';
   return opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${sqlstate}: ${thrown.message}`),
@@ -601,17 +602,18 @@ const LOCK_NOT_AVAILABLE = '55P03';
  * typed refusal naming the open transactions that hold locks on the fenced tables, instead of an untyped internal_error.
  */
 async function lockTimeoutRefusal(engine: BrainEngine, sourceId: string, refreshId?: string): Promise<OperationError> {
-  const holders = engine.kind !== 'postgres' ? [] : await engine.executeRaw<{ pid: number; application_name: string; state: string | null; open_seconds: number; query: string | null }>(
-    `SELECT a.pid, a.application_name, a.state, extract(epoch FROM now() - a.xact_start)::int AS open_seconds, left(a.query, 160) AS query
+  const holders = engine.kind !== 'postgres' ? [] : await engine.executeRaw<{ pid: number; application_name: string; state: string | null; open_seconds: number }>(
+    `SELECT a.pid, a.application_name, a.state, extract(epoch FROM now() - a.xact_start)::int AS open_seconds
        FROM pg_stat_activity a
-      WHERE a.pid <> pg_backend_pid() AND a.xact_start IS NOT NULL
-        AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.granted
+      WHERE a.pid <> pg_backend_pid() AND a.xact_start IS NOT NULL AND a.datname = current_database()
+        AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.granted AND l.mode <> 'AccessShareLock'
+          AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
           AND l.relation IN ('persistence_brain'::regclass, 'persistence_worktrees'::regclass, 'sources'::regclass))
       ORDER BY a.xact_start LIMIT 5`).catch(() => []);
   const error = refusal('refresh_lock_timeout', `The refresh fence of source ${sourceId} waited past its 5 s lock timeout for a brain, worktree or source row another database transaction holds; nothing moved.`,
     `Retry gbrain sources refresh ${sourceId}. If it repeats, the transaction named in why is stuck: find out what it is on the brain host before ending it.`, refreshId);
   error.why = holders.length
-    ? `Open transactions holding locks on those tables: ${holders.map(h => `pid ${h.pid} (${h.application_name || 'no application name'}, ${h.state ?? 'unknown state'}, open ${h.open_seconds} s): ${(h.query ?? '').replace(/\s+/g, ' ').trim()}`).join('; ')}`
+    ? redact(`Open transactions holding row locks on those tables: ${holders.map(h => `pid ${h.pid} (${h.application_name || 'no application name'}, ${h.state ?? 'unknown state'}, open ${h.open_seconds} s)`).join('; ')}`)
     : 'No open transaction holding a lock on those tables was visible to this database role.';
   return error;
 }
