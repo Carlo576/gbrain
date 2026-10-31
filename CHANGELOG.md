@@ -20,6 +20,7 @@ identifiers and attribution are available in the pre-removal Git revision
 |---|---|---|
 | A member's agent reads a private page in its own granted source | hidden from every remote caller unless the operator set `search.remote_private_pages`, which shows private pages to every remote caller | still hidden by default; after `--private-pages granted-sources` it is visible to that token or client in `search`, `query`, `recall`, `entity`, `get_page`, `list_pages`, `get_chunks`, `get_versions`, `get_timeline`, links, backlinks, the graph and `resolve_slugs` |
 | Which sources count | | a token's `--sources` list, or a client's write source plus its read sources. A token with no source grant (the `default` floor), federated sources the grant does not name, a client's bound source and a request's `source_id` / `source_ids` never add one |
+| What the grant opens in a named source | | `visibility: private` pages, pages with a privacy alias (`access`, `confidentiality`), and atoms, concepts and events derived from private or unknown origins. Pinned questions stay owner-only |
 | Another member's private page, or a bot token granted every source without the setting | hidden | hidden |
 | `context_pack`, `delta` and writes | world-only | world-only, for every caller |
 | `--private-pages none` | | hides them again on the next request |
