@@ -37,7 +37,7 @@ import { isDbOnly, loadStorageConfig } from '../storage-config.ts';
 import { deletePageThrough, isWriteThroughDisabled, resolvePageWriteTarget, writePageThrough, type PageWriteTarget } from '../write-through.ts';
 import { urlCloneReadOnly } from '../url-clone.ts';
 import { gitChildEnv, literalPathspecs } from '../git-env.ts';
-import { classifyGitCheckout } from '../git-checkout.ts';
+import { classifyGitCheckout, type GitCheckoutClass } from '../git-checkout.ts';
 import { checkoutRoot, commitAndPush, commitPathsLocked, notePending, scopePaths } from '../git/commit-push.ts';
 import { managedFilesystemRootFor, refreshManagedFilesystemRoots } from '../persistence/filesystem-guard.ts';
 import { withSourceFilesystemLock } from '../minions/source-filesystem.ts';
@@ -91,8 +91,16 @@ interface DerivedFileChange { slug: string; sourceId: string; filePath: string; 
 /** A batch commit the checkout refused: the door's code and message, the batch's files (root-relative) and those left as they were. */
 export interface DerivedCommitFailure { code: string; message: string; paths: string[]; kept: string[] }
 
-/** Test seam: runs after a batch's files are written and before its commit; a throw stands in for a crash (no rollback). */
-export const derivedWriteSeams: { beforeCommit?: (root: string) => void } = {};
+/**
+ * Test seams. `beforeCommit` runs after a batch's files are written and before its commit; a throw stands in for a crash
+ * (no rollback). `checkoutClass` replaces `classifyGitCheckout` for a write root (an `unknown` answer needs a failed lookup).
+ */
+export const derivedWriteSeams: { beforeCommit?: (root: string) => void; checkoutClass?: (root: string) => GitCheckoutClass } = {};
+
+/** Whether `root` sits in a Git checkout this module commits into (`classifyGitCheckout`, or the test seam). */
+function checkoutClassOf(root: string): GitCheckoutClass {
+  return (derivedWriteSeams.checkoutClass ?? classifyGitCheckout)(root);
+}
 
 /** How long a batch waits for the checkout's commit lock before it rolls back. */
 const DERIVED_COMMIT_LOCK_WAIT_MS = 30_000;
@@ -125,7 +133,7 @@ async function writeDerivedFile(engine: BrainEngine, slug: string, sourceId: str
  */
 function noteWritten(root: string, filePath: string): void {
   try {
-    if (classifyGitCheckout(root) !== 'git') return;
+    if (checkoutClassOf(root) !== 'git') return;
     const top = checkoutRoot(root);
     notePending(top, scopePaths(top, [filePath], top));
   } catch { /* best-effort: the batch commit right after is the primary path */ }
@@ -178,7 +186,7 @@ async function commitDerivedChanges(engine: BrainEngine, label: string, changes:
   const failures: DerivedCommitFailure[] = [];
   for (const root of new Set(changes.map(c => c.writeRoot))) {
     const batch = changes.filter(c => c.writeRoot === root);
-    if (classifyGitCheckout(root) === 'not_git') continue;
+    if (checkoutClassOf(root) === 'not_git') continue;
     derivedWriteSeams.beforeCommit?.(root);
     try {
       await refreshManagedFilesystemRoots(engine);
