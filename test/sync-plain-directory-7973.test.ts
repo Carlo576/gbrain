@@ -2,7 +2,8 @@
  * #7973: a plain directory registered with `sources add --path <dir> --force` (no Git checkout at or above it)
  * syncs without Git: the run imports its files into the source the way `gbrain import` does on a repo-less brain.
  * Fails when: sync dies with a raw `git rev-parse` internal_error, a dry run writes, a removed file deletes its
- * page, or `sources add` and sync disagree about what a forced plain directory does.
+ * page, `sources add` and sync disagree about what a forced plain directory does, or a Git-synced source whose
+ * checkout is gone is imported as plain (its database-only edits would be overwritten and deletions stop propagating).
  * PGLite always; Postgres too when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -92,6 +93,22 @@ describe('classic brain', () => {
         expect((await engine.getPage('people/alice-example', { sourceId: 'source-a' }))?.compiled_truth).toContain('Works at acme-example.');
         const [row] = await engine.executeRaw<{ last_sync_at: unknown }>("SELECT last_sync_at FROM sources WHERE id='source-a'");
         expect(row?.last_sync_at).not.toBeNull();
+      });
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }, 120_000);
+
+  test('a Git-synced source whose checkout is gone refuses instead of importing over the database', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-plain-lost-'));
+    try {
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        const dir = join(home, 'lost-checkout'); mkdirSync(join(dir, 'people'), { recursive: true });
+        writeFileSync(join(dir, 'people', 'bob-example.md'), person('Bob Example', 'Works at acme-example.'));
+        await engine.executeRaw("INSERT INTO sources(id,name,local_path,config,last_commit) VALUES('source-b','source-b',$1,'{}','0123456789abcdef0123456789abcdef01234567')", [dir]);
+        await expect(performSync(engine, { sourceId: 'source-b', noPull: true, noEmbed: true })).rejects.toMatchObject({
+          code: 'sync_not_applicable', reason: 'checkout_missing', fix: { actor: 'user', ask_user: true } });
+        expect(await engine.getPage('people/bob-example', { sourceId: 'source-b' })).toBeNull();
+        const [row] = await engine.executeRaw<{ last_sync_at: unknown }>("SELECT last_sync_at FROM sources WHERE id='source-b'");
+        expect(row?.last_sync_at).toBeNull();
       });
     } finally { rmSync(home, { recursive: true, force: true }); }
   }, 120_000);

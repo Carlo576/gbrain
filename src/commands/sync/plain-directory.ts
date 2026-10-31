@@ -14,6 +14,7 @@ import { isAnchorOwnedSyncPath } from '../../core/sync-anchor.ts';
 import { syncExcludePatterns } from '../../core/persistence/sync-discovery.ts';
 import { maintenanceAttribution } from '../../core/persistence/attribution.ts';
 import { withCoordinatedWrite } from '../../core/persistence/context.ts';
+import { opError } from '../../core/ops/contract.ts';
 import type { SyncOpts, SyncResult } from '../sync.ts';
 
 /** Whether `dir` or any directory above it has a `.git` entry (read from the filesystem, no Git process). */
@@ -27,13 +28,15 @@ function underGitCheckout(dir: string): boolean {
 /**
  * The registered root of a plain-directory source, or null when sync's Git path applies: a connector, a path override
  * other than the registered root, a root inside any Git checkout, or the classic default brain repo, whose sync keeps
- * its own self-heal (#2964).
+ * its own self-heal (#2964). A source that has synced from Git (`last_commit` set) and lost its checkout refuses
+ * `sync_not_applicable` (`checkout_missing`): importing it as plain would overwrite database-only edits and stop
+ * deletions from propagating.
  */
 export async function plainDirectorySyncRoot(engine: BrainEngine, opts: SyncOpts, managed: boolean): Promise<string | null> {
   if (opts.githubItem || opts.srcSubpath) return null;
   const sourceId = opts.sourceId ?? 'default';
-  const [source] = await engine.executeRaw<{ local_path: string | null; config: { kind?: unknown } | null }>(
-    'SELECT local_path,config FROM sources WHERE id=$1 AND NOT archived', [sourceId]);
+  const [source] = await engine.executeRaw<{ local_path: string | null; last_commit: string | null; config: { kind?: unknown } | null }>(
+    'SELECT local_path,last_commit,config FROM sources WHERE id=$1 AND NOT archived', [sourceId]);
   const registered = source?.local_path;
   if (!registered || !isAbsolute(registered) || source.config?.kind != null) return null;
   let root: string;
@@ -44,6 +47,13 @@ export async function plainDirectorySyncRoot(engine: BrainEngine, opts: SyncOpts
   } catch { return null; }
   if (underGitCheckout(root)) return null;
   if (!managed && await isAnchorOwnedSyncPath(engine, opts, root)) return null;
+  if (source.last_commit) throw opError('sync_not_applicable',
+    `Sync refused for source ${sourceId}: it last synced from Git commit ${source.last_commit.slice(0, 12)}, but ${root} is no longer inside a Git checkout.`,
+    `Ask the user whether the checkout was moved or deleted. Restore the Git checkout at ${root} (or point the source at where it now lives) and sync again. Nothing was synced.`,
+    { reason: 'checkout_missing', why: 'Importing a former Git checkout as a plain directory would overwrite pages edited since the last commit and stop deletions from propagating.',
+      fix: { argv: ['gbrain', 'sources', 'status', sourceId], consent: [], actor: 'user', ask_user: true, requires_exclusive: false,
+        user_message: `Source ${sourceId} used to sync from a Git checkout at ${root}, but that folder is no longer a Git checkout. Was it moved or deleted? Restore it (or tell me where it lives now) and I will sync again.`,
+        why: 'Shows the source and its registered path; nothing changes until the checkout is back.' } });
   return root;
 }
 
