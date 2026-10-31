@@ -19,6 +19,7 @@
  * - the scan checks its deadline inside a batch and reports how far it got; doctor counts unproven rows without the
  *   importer's confirmation; a hold row applies the refusal the apply computes;
  * - a path sync does not read (`sync.exclude`) is not behind; an unreadable checkpoint commit is unknown, never clean;
+ *   nested typed index pages are screened from the batch's checkpoint blobs, without a Git lookup per page;
  * - the apply refuses a reimport row whose page moved since the preview and a hold row whose import is no longer refused;
  * - repo-less: a brain with no checkout reports not_applicable (ok) and the preview lists nothing.
  *
@@ -27,7 +28,8 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
@@ -297,6 +299,19 @@ for (const backend of testBackends()) describe(`[${backend}] #8071: rows behind 
     await unguarded(engine, () => engine.executeRaw("UPDATE sources SET last_commit=$1 WHERE id='default'", ['f'.repeat(40)]).then(() => {}));
     expect(await scanRowsBehind(engine, 'default')).toMatchObject({ status: 'unknown', reason: 'checkpoint_unreadable', complete: false });
     expect(await doctor(engine)).toMatchObject({ name: CHECK, status: 'ok', readiness_state: 'unknown' });
+  }, { databaseUrl, setup }), 240_000);
+
+  test('nested typed index pages are screened with one batched head read per batch, not a Git read per page', () => managedBrain(async ({ engine, root }) => {
+    for (const dir of ['notes/s1', 'notes/s2', 'notes/s3']) { mkdirSync(join(root, dir), { recursive: true }); writeFileSync(join(root, dir, 'index.md'), note(dir, `The index of ${dir}.`)); }
+    commit(root, 'indexes');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const trace = join(tmpdir(), `gbrain-rows-behind-trace-${randomUUID()}.log`);
+    try {
+      const scan = await withEnv({ GIT_TRACE: trace }, () => scanRowsBehind(engine, 'default'));
+      expect(scan).toMatchObject({ status: 'known', complete: true, behind: [], pages: 8 });
+      // The eligibility screen reads the index pages' heads from the batch's checkpoint blobs, never one lookup per page.
+      expect(readFileSync(trace, 'utf8').split('\n').filter(line => line.includes('cat-file') && line.includes('--batch-check'))).toEqual([]);
+    } finally { rmSync(trace, { force: true }); }
   }, { databaseUrl, setup }), 240_000);
 
   test('the apply refuses a reimport row whose page moved since the preview and a hold row whose import is no longer refused', () => managedBrain(async ({ engine, ctx, root }) => {

@@ -118,7 +118,7 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string,
   await readHonorAliases(engine);
   const scope = relative(checkpoint.gitRoot, realpathSync(root)).split(sep).join('/');
   const gitPath = (rel: string) => scope ? `${scope}/${rel}` : rel;
-  const { eligible } = await loadSyncEligibility(engine, { root, gitRoot: checkpoint.gitRoot, sourceId, source: { last_commit: source.last_commit, config: source.config ?? {} } });
+  const { eligible, metafileHeads } = await loadSyncEligibility(engine, { root, gitRoot: checkpoint.gitRoot, sourceId, source: { last_commit: source.last_commit, config: source.config ?? {} } });
   const policy = { mirror: false, databaseOnlySource: false, dbOnly: (slug: string) => isSourceDbOnlySlug(root, slug, 'refuse'), ignored: new Set<string>() };
   const scan: RowsBehindScan = { ...empty(sourceId, 'known'), checkpoint: checkpoint.commit, head: head.commit };
   const count = (why: RowsBehindSkip) => { scan.counts[why] = (scan.counts[why] ?? 0) + 1; };
@@ -142,21 +142,26 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string,
       if (!batch.length) return true;
       cursor = batch[batch.length - 1]!.id;
       ids = batch.map(key => Number(key.id));
-      const rows: Array<{ key: Key; rel: string; blob: TreeBlob }> = [];
+      const listed: Array<{ key: Key; rel: string; blob: TreeBlob }> = [];
       for (const key of batch) {
         const path = canonicalPath(context, key);
         if (!path) { skip(key.id, 'unsafe_path'); continue; }
         const rel = relative(root, path).split(sep).join('/');
         if (rel.startsWith('../') || rel === '..') { skip(key.id, 'unsafe_path'); continue; }
         if (!isMarkdown(rel)) { skip(key.id, 'not_markdown'); continue; }
-        if (!eligible(gitPath(rel))) { skip(key.id, 'not_eligible'); continue; }
         const frontmatter = typeof key.frontmatter === 'string' ? JSON.parse(key.frontmatter) : key.frontmatter;
         if (declaredDatabaseOnly({ ...key, frontmatter }, rel, policy)) { skip(key.id, 'declared_database_only'); continue; }
         const blob = checkpoint.blobs.get(gitPath(rel));
         if (!blob) { skip(key.id, 'no_file_at_checkpoint'); continue; }
         if (blob.mode !== '100644' && blob.mode !== '100755') { skip(key.id, 'not_regular_file'); continue; }
-        rows.push({ key, rel, blob });
+        listed.push({ key, rel, blob });
       }
+      metafileHeads.prime(listed.map(row => ({ path: gitPath(row.rel), oid: row.blob.oid, size: row.blob.size })));
+      const rows = listed.filter(row => {
+        if (eligible(gitPath(row.rel))) return true;
+        skip(row.key.id, 'not_eligible');
+        return false;
+      });
       if (!rows.length) return batch.length < ROWS_BEHIND_BATCH;
       const held = await heldGitPaths(tx, sourceId, incarnation, rows.map(row => row.rel));
       const records = await readSyncImportProvenances(tx, sourceId, incarnation, rows.map(row => Number(row.key.id)));
