@@ -70,6 +70,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'connector_held_items',
   'git_held_files',
   'fence_integrity',
+  // GBRA-221: live fence rows on imported pages whose body is outside-authored text (doctor/checks/outside-content-fences.ts).
+  'outside_content_fences',
   // GBRA-161: derived items live generations retired in the restore window, and results held instead of published (doctor/checks/generations.ts).
   'generation_held',
   'generation_pending',
@@ -78,6 +80,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'trust_tiers',
   'trust_scan',
   'trust_sources_unclaimed',
+  // #7656: index-existing trust releases confirmed before their preview showed the fence row's fields (doctor/checks/trust-release-unpreviewed.ts).
+  'trust_release_unpreviewed_fields',
   'credential_projection_pending',
   'derived_visibility',
   'extractor_facts_expired',
@@ -246,6 +250,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'sync_landing_gaps',
   // #6712: live pages whose database-only edit an incremental sync overwrote without a hold (doctor/checks/overwritten-edits.ts).
   'sync_overwritten_db_edits',
+  // #7891: provenance stamps and trust markers a write removed before #7892 (doctor/checks/provenance-stamp-drift.ts).
+  'provenance_stamp_drift',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',

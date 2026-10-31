@@ -1547,6 +1547,16 @@ Reasons: `symlink_in_repo`, `symlink_outside_root`, `symlink_dangling`, `symlink
 
 More: [docs/guides/write-refusals.md#file_unreadable](../../docs/guides/write-refusals.md#file_unreadable)
 
+### file_wins_rewrite
+
+<a id="file_wins_rewrite"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair file-drift --prefer file refused a page because keeping its file would need a full re-render of the file, not only appended protected parts; nothing was written. | File wins keeps the canonical file's bytes and adds only what reconcile's protections keep from the database: protected frontmatter keys the file lacks and database-only timeline rows, appended. A result that also changes a value, a tag, the title or the body would re-render the whole file (keys reordered, lists re-emitted, rules and headings rewritten), which is not the file winning. | Show the user the page's exceptions in the preview. Commit the database-only differences into the file through the door (`gbrain git commit-push`) and preview again, or preview `--prefer database` if the database copy should win. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#file_wins_rewrite](../../docs/guides/write-refusals.md#file_wins_rewrite)
+
 ### fix_not_writable
 
 <a id="fix_not_writable"></a>
@@ -1685,9 +1695,9 @@ More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-page
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Converting a source to git-canonical would discard database content or cannot place it, so the apply wrote nothing. | gbrain sources canonical --to git applies only when every database row will be in Git or in a declared database-only class afterwards. The preview counts what would be lost or cannot be placed by category (detail lists them): both_moved and held_drift_both, a page Git and the database both changed; deleted_in_git, a page Git deleted that the database edited since; uncommitted_edit, a working-tree edit the adoption would overwrite; ignored_target, a page whose file Git ignores without a declared class; unparseable and unsafe_path, a committed file or path sync cannot read; segmented_page, a segmented page conversion does not adopt yet; export_mismatch, a page whose export does not read back equal; git_overwrites_database, a page version a strict pass would replace that nothing accepted. There is no override. | Relay the categories and their paths (the --dry-run preview lists them) and ask the user how each should be resolved; preview again afterwards. | user | `repeat the read that failed` | 1 | no |
+| Converting a source to git-canonical would discard database content or cannot place it, so the apply wrote nothing. | gbrain sources canonical --to git applies only when every database row will be in Git or in a declared database-only class afterwards. The preview counts what would be lost or cannot be placed by category (detail lists them): both_moved and held_drift_both, a page Git and the database both changed; deleted_in_git, a page Git deleted that the database edited since; uncommitted_edit, a working-tree edit the adoption would overwrite; ignored_target, a page whose file Git ignores without a declared class; unparseable and unsafe_path, a committed file or path sync cannot read; segmented_page, a segmented page conversion does not adopt yet; export_mismatch, a page whose export does not read back equal; git_overwrites_database, a page version a strict pass would replace that nothing accepted; ignore_status_unknown, a target whose ignore status Git cannot read (beyond a symlink, outside the checkout, a timed-out check). There is no override. | Relay the categories and their paths (the --dry-run preview lists them) and ask the user how each should be resolved; preview again afterwards. | user | `repeat the read that failed` | 1 | no |
 
-Reasons: `both_moved`, `held_drift_both`, `held_drift_unknown_differs`, `deleted_in_git`, `uncommitted_edit`, `ignored_target`, `unparseable`, `unsafe_path`, `segmented_page`, `export_mismatch`, `git_overwrites_database`.
+Reasons: `both_moved`, `held_drift_both`, `held_drift_unknown_differs`, `deleted_in_git`, `uncommitted_edit`, `ignored_target`, `unparseable`, `unsafe_path`, `segmented_page`, `export_mismatch`, `git_overwrites_database`, `ignore_status_unknown`.
 
 More: [docs/designs/GIT_CANONICAL_MEMORY.md#conversion](../../docs/designs/GIT_CANONICAL_MEMORY.md#conversion)
 
@@ -1697,7 +1707,7 @@ More: [docs/designs/GIT_CANONICAL_MEMORY.md#conversion](../../docs/designs/GIT_C
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A git-canonical conversion stopped because its strict pass did not finish, or finished with work left after the flag was set. | The conversion runs a full strict-equivalent pass before it sets canonical: git, and one genuine strict pass after. A pass that ends partial, blocked or deferred stops the conversion where it is: before the flag the source stays as it was, after it the source stays strict (Git wins) and the plan lists what is left. | Wait until gbrain sync status --source <id> --json shows the source idle, then preview again with gbrain sources canonical <id> --to git --dry-run and apply the new hash. | agent | `repeat the read that failed` | 1 | yes |
+| A git-canonical conversion stopped because its strict pass did not finish, or finished with work left after the flag was set. | The conversion runs a full strict-equivalent pass before it sets canonical: git, and one genuine strict pass after, then up to three closing strict passes while only door commits a live writer landed meanwhile are left (Git ahead of the database). A pass that ends partial, blocked or deferred stops the conversion where it is: before the flag the source stays as it was, after it the source stays strict (Git wins) and the plan lists what is left. | Wait until gbrain sync status --source <id> --json shows the source idle, then preview again with gbrain sources canonical <id> --to git --dry-run and apply the new hash. | agent | `repeat the read that failed` | 1 | yes |
 
 More: [docs/designs/GIT_CANONICAL_MEMORY.md#conversion](../../docs/designs/GIT_CANONICAL_MEMORY.md#conversion)
 
@@ -4089,6 +4099,16 @@ More: [docs/guides/write-refusals.md#slug_page_mismatch](../../docs/guides/write
 |---|---|---|---|---|---|---|
 | Canonical preparation requires a source-content correction; this profile never writes repository files. | Only the operator of the brain host can change what blocks this. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### sources_not_readable
+
+<a id="sources_not_readable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An unscoped search, query, recall or list_pages came back empty and was refused: every source this connection can read (the default source and federated sources) holds no page (for recall and query, no world fact either), while other sources on the brain hold pages it cannot read (not federated, and no source grant). | Answering would return an empty result that reads like a clean miss. The refusal names the host command that federates a source or grants this connection the sources it should read; it never names a hidden source and never widens access. A scope that holds pages but matched nothing, a granted token, an OAuth client, a bound connection and a read that names a source are never refused. | Ask the user which source these connections should read; the brain host runs `gbrain sources federate <source>`, or grants the token its sources with `gbrain auth rescope --token <name> --sources <ids>`. | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/multi-source-brains.md#an-unscoped-connection-whose-sources-hold-no-pages](../../docs/guides/multi-source-brains.md#an-unscoped-connection-whose-sources-hold-no-pages)
+
 ### split_bad_ratio
 
 <a id="split_bad_ratio"></a>
@@ -4343,6 +4363,16 @@ More: [docs/guides/write-refusals.md#timeline_rows_would_be_removed](../../docs/
 
 More: [docs/guides/data-ingestion.md#credential-redaction](../../docs/guides/data-ingestion.md#credential-redaction)
 
+### transcript_source_mismatch
+
+<a id="transcript_source_mismatch"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An explicit atom retry was refused before it started: its transcript does not resolve to the retry's source (a captured session of another source, a session with no known source, or a transcript outside the session corpus on a source other than default). | A batch that failed before session routing may hold another source's session transcript; retrying it would write that session's atoms into the wrong source. Captured sessions resolve through their stamp, frozen record or the registered path containing their cwd, and nothing falls back to the retry's source. | Run the atom drain for the source the session belongs to (corpus_source_other), or map a held session with gbrain sweep --assign-corpus <source> (preview first) and run that source. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `corpus_source_other`, `corpus_source_unresolved`, `corpus_legacy_unstamped`, `corpus_stamp_missing`, `corpus_source_missing`, `corpus_source_archived`, `corpus_source_incarnation_changed`, `corpus_path_unresolvable`, `transcript_outside_corpus`.
+
 ### triage_unreliable_backoff
 
 <a id="triage_unreliable_backoff"></a>
@@ -4366,6 +4396,18 @@ More: [docs/guides/data-ingestion.md#credential-redaction](../../docs/guides/dat
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The operation runs only from the trusted local CLI on the brain host; no MCP connection can call it. | Only the operator of the brain host can change what blocks this. | Ask the user to run the named gbrain command on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
+
+### turn_hook_not_loaded
+
+<a id="turn_hook_not_loaded"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The per-turn hook that puts "check gbrain first" next to every user turn is missing, untrusted, or does not load in the harness. | Agents use the brain when that rule reaches them on every turn; registering the MCP server or writing an instruction file alone leaves them answering without it. | Correct the request using the message above, then retry. Run: gbrain doctor --only harness_wiring --json | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `missing`, `untrusted`, `hook_failed`, `no_rule`, `not_loaded`.
+
+More: [docs/guides/repair.md#turn-hook-not-loaded](../../docs/guides/repair.md#turn-hook-not-loaded)
 
 ### two_consumers_on_host
 
@@ -4636,6 +4678,28 @@ More: [docs/ENGINES.md#vector-index-prewarm](../../docs/ENGINES.md#vector-index-
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Source content or relationships changed during verification. | The server failed; this is not a caller mistake. | Server-side failure, not a caller mistake. Run `gbrain doctor --json` on the brain host; if it repeats, report it to the user. | host_admin | `gbrain doctor --json` | 1 | no |
+
+### visibility_noncanonical
+
+<a id="visibility_noncanonical"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A file asks for visibility: private in a spelling page privacy does not read, so sync or import held it instead of storing it world-readable. | Page privacy reads only the exact lowercase key and value visibility: private. A file that spells it another way (Visibility: private, visibility: Private, a block scalar, a list, a flow mapping or a merge key) would be stored as a world page while its author believes it is private (#7848); put_page, edit_page, capture, ingest_capture, brainstorm --save and sources reconcile refuse the same request as visibility_not_applied. | Write visibility: private on its own frontmatter line (lowercase key and value), then commit and sync, or import the file again. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#visibility_noncanonical](../../docs/guides/write-refusals.md#visibility_noncanonical)
+
+### visibility_not_applied
+
+<a id="visibility_not_applied"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A page write asked for visibility: private, but the page would have stayed world-readable, so nothing was written. | A write that reports success while the page stays world-readable leaves the caller believing it is hidden. Page privacy reads only the exact lowercase key and value visibility: private (#7841). When the frontmatter is unreadable or ambiguous, the write is refused invalid_frontmatter instead. | Read the page and its revision, write visibility: private on its own frontmatter line (lowercase key and value), then submit again with a new request_id. Run: gbrain get --source '{source_id}' -- '{slug}' | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `noncanonical_value`, `not_kept`.
+
+More: [docs/guides/write-refusals.md#visibility_not_applied](../../docs/guides/write-refusals.md#visibility_not_applied)
 
 ### withdrawal_capacity
 
