@@ -118,7 +118,7 @@ export function pendingReceiptOf(error: unknown): WriteReceipt | null {
  * the stale window (a moved or restored brain, a replaced container home).
  */
 export function acceptPendingCovers(receipt: WriteReceipt | null | undefined): boolean {
-  return receipt?.diagnostic?.reason !== 'owner_stale';
+  return !receipt?.diagnostic?.owner;
 }
 
 /**

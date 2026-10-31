@@ -1,6 +1,6 @@
 /**
  * GBRA-248 W0a: owner activity on both engines. A worktree whose owner host
- * runs no consumer and has been quiet past 24 h reads owner_stale in the
+ * runs no consumer and has been quiet past 24 h reads stale (owner_unavailable plus diagnostic.owner) in the
  * receipt, which --accept-pending does not cover; a PGLite file held under
  * another host identity is stale at once; the owner is never stale to itself;
  * a live consumer keeps its owner fresh and its clean stop leaves a durable
@@ -50,15 +50,15 @@ async function worktree(engine: BrainEngine, owner: string, heartbeatHoursAgo: n
     VALUES($1::uuid, CASE WHEN $2::double precision IS NULL THEN NULL ELSE now()-($2::double precision*interval '1 hour') END) RETURNING id::text`, [owner, heartbeatHoursAgo]);
   return row!.id;
 }
-async function request(engine: BrainEngine, worktreeId: string | null, state: 'queued' | 'committed', hoursAgo: number): Promise<string> {
+async function request(engine: BrainEngine, worktreeId: string | null, state: 'queued' | 'committed', hoursAgo: number, intent = '{"content":"x"}'): Promise<string> {
   return engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('gbrain.persistence_protocol','2',true)");
     const [row] = await tx.executeRaw<{ id: string }>(`INSERT INTO persistence_requests(principal_kind,principal_id,request_id,operation,source_id,source_incarnation,slug,digest,authority,
         intent_bytes,terminal_reservation,state,intent,worktree_id,created_at,updated_at,completed_at,published_at)
-      VALUES('local_cli','owner-activity',$1::uuid,'put_page',$2,(SELECT incarnation FROM sources WHERE id=$2),$3,$4,'{}'::jsonb,0,0,$5,'{"content":"x"}'::jsonb,$6::uuid,
+      VALUES('local_cli','owner-activity',$1::uuid,'put_page',$2,(SELECT incarnation FROM sources WHERE id=$2),$3,$4,'{}'::jsonb,0,0,$5,$8::jsonb,$6::uuid,
         now()-($7::double precision*interval '1 hour'),now()-($7::double precision*interval '1 hour'),
         CASE WHEN $5='committed' THEN now()-($7::double precision*interval '1 hour') END,CASE WHEN $5='committed' THEN now()-($7::double precision*interval '1 hour') END)
-      RETURNING id::text`, [randomUUID(), SOURCE, `notes/${randomUUID()}`, randomUUID(), state, worktreeId, hoursAgo]);
+      RETURNING id::text`, [randomUUID(), SOURCE, `notes/${randomUUID()}`, randomUUID(), state, worktreeId, hoursAgo, intent]);
     return row!.id;
   });
 }
@@ -73,7 +73,9 @@ describe('owner activity', () => {
       const unknownYoung = await worktree(engine, randomUUID(), null); await request(engine, unknownYoung, 'queued', 1);
       const unknownOld = await worktree(engine, randomUUID(), null); await request(engine, unknownOld, 'queued', 48);
       const published = await worktree(engine, randomUUID(), 48); await request(engine, published, 'committed', 1); await request(engine, published, 'queued', 2);
-      const owners = await ownerActivity(engine, [gone, recent, own, unknownYoung, unknownOld, published]);
+      const synced = await worktree(engine, randomUUID(), 48);
+      await request(engine, synced, 'committed', 1, '{"kind":"managed_sync_import"}'); await request(engine, synced, 'queued', 2);
+      const owners = await ownerActivity(engine, [gone, recent, own, unknownYoung, unknownOld, published, synced]);
       expect(owners.get(gone)).toMatchObject({ live: false, stale: true, foreign_file_holder: pglite });
       expect(Date.now() - Date.parse(owners.get(gone)!.last_active!)).toBeGreaterThan(OWNER_STALE_MS);
       expect(owners.get(recent)).toMatchObject({ live: false, stale: pglite });
@@ -82,19 +84,23 @@ describe('owner activity', () => {
       expect(owners.get(unknownOld)).toMatchObject({ last_active: null, stale: true });
       expect(owners.get(published)!.stale).toBe(pglite);
       expect(Date.now() - Date.parse(owners.get(published)!.last_active!)).toBeLessThan(2 * 3_600_000);
+      expect(owners.get(synced)!.stale).toBe(pglite);
+      expect(Date.now() - Date.parse(owners.get(synced)!.last_active!)).toBeLessThan(2 * 3_600_000);
     }
   }));
 
-  test('the receipt names owner_stale and --accept-pending does not cover it; a repo-less write never names an owner', async () => inHome(async () => {
+  test('the receipt names a stale owner and --accept-pending does not cover it; the owner host receipt and a repo-less write name none', async () => inHome(async () => {
     for (const engine of engines) {
       const owner = randomUUID();
       const gone = await worktree(engine, owner, 48);
       const id = await request(engine, gone, 'queued', 48);
       const dbOnly = await request(engine, null, 'queued', 48);
-      const rows = [(await getWriteRequestById(engine, id))!, (await getWriteRequestById(engine, dbOnly))!];
+      const own = await worktree(engine, self, 48);
+      const recentId = await request(engine, own, 'queued', 48);
+      const rows = [(await getWriteRequestById(engine, id))!, (await getWriteRequestById(engine, dbOnly))!, (await getWriteRequestById(engine, recentId))!];
       const facts = await writeHealthFacts(engine, rows);
       const stale = receiptFor(rows[0]!, facts.get(id));
-      expect(stale.diagnostic).toMatchObject({ reason: 'owner_stale', next_action: 'inspect_owner', owner: { host_id: owner, live: false } });
+      expect(stale.diagnostic).toMatchObject({ reason: 'owner_unavailable', next_action: 'inspect_owner', owner: { host_id: owner, live: false } });
       const wire = publicWriteReceipt(stale as never);
       expect(isWriteReceipt(wire)).toBe(true);
       expect(wire.diagnostic?.owner?.host_id).toBe(owner);
@@ -103,9 +109,11 @@ describe('owner activity', () => {
       expect(writeErrorExitCode(pending(wire), true)).toBe(PENDING_WRITE_EXIT_CODE);
       expect(writeErrorExitCode(pending(wire), false)).toBe(PENDING_WRITE_EXIT_CODE);
       const repoLess = publicWriteReceipt(receiptFor(rows[1]!, facts.get(dbOnly)) as never);
-      expect(repoLess.diagnostic?.reason).not.toBe('owner_stale');
       expect(repoLess.diagnostic?.owner).toBeUndefined();
       expect(writeErrorExitCode(pending(repoLess), true)).toBe(0);
+      const quiet = publicWriteReceipt(receiptFor(rows[2]!, facts.get(recentId)) as never);
+      expect(quiet.diagnostic?.owner).toBeUndefined();
+      expect(writeErrorExitCode(pending(quiet), true)).toBe(0);
     }
   }));
 

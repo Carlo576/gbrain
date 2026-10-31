@@ -100,6 +100,20 @@ describe('cold-home re-init over an embedded PGLite brain', () => {
     expect(fileConfig(explicit).embedding_disabled).toBe(true);
     expect(fileConfig(explicit).embedding_model).toBeUndefined();
   }, 240_000);
+
+  test('a keyless brain re-initialized from a cold home stays keyless', async () => {
+    for (const firstFlags of [[], ['--no-embedding']]) {
+      const owner = coldHome();
+      const path = join(owner, 'keyless.pglite');
+      const first = await runCli(['init', '--pglite', '--path', path, ...firstFlags], owner);
+      expect({ code: first.exitCode, stderr: first.stderr }).toMatchObject({ code: 0 });
+      const home = coldHome();
+      const again = await runCli(['init', '--pglite', '--path', path], home);
+      expect({ code: again.exitCode, stderr: again.stderr }).toMatchObject({ code: 0 });
+      expect({ flags: firstFlags, disabled: fileConfig(home).embedding_disabled }).toEqual({ flags: firstFlags, disabled: true });
+      expect(again.stdout).not.toContain('kept this database');
+    }
+  }, 300_000);
 });
 
 describe('cold-home re-init over an embedded Postgres brain', () => {

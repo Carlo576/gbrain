@@ -10,8 +10,8 @@ import { claimOwnerKind, isOneShotCommand } from './claim-phase.ts';
 import { noteDirectPoolLease } from '../direct-pool-profile.ts';
 import { preparePageMutation } from './page-prepare.ts';
 import { prepareSemanticPageMutation } from './semantic-pages.ts';
-import { boundedOwnerActivity, getWriteRequestById, getWriteRequestProgress, receiptFor, type WriteRequestProgress } from './journal.ts';
-import type { OwnerActivity } from './owner-activity.ts';
+import { getWriteRequestById, getWriteRequestProgress, receiptFor, type WriteRequestProgress } from './journal.ts';
+import { OWNER_READ_BUDGET_MS, startOwnerRead, type OwnerActivity } from './owner-activity.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { isWriteErrorCode, type WriteReceipt } from './types.ts';
 import { registerPgliteReopen } from '../pglite-lifecycle.ts';
@@ -251,10 +251,13 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
   let deadline = started + waitMs;
   const firstPoll = recentlySettled.get(engine)?.has(id) ? 0 : Math.min(WRITE_POLL_START_MS, waitMs / 2);
   let delay = firstPoll, failure: { error: unknown; attempts: number } | undefined;
+  // GBRA-248: owner facts for a write that may be left pending, read during the wait's last OWNER_READ_BUDGET_MS so they never extend it.
+  let settleOwner: ((budgetMs: number) => Promise<Map<string, OwnerActivity>>) | undefined;
   try {
     while (!service.stopping && !opts.signal?.aborted) {
       if (handed) { row = handed; handed = undefined; if (isTerminal(row)) return { kind: 'terminal', row }; }
       const remaining = deadline - performance.now();
+      if (!settleOwner && row.worktree_id && remaining <= OWNER_READ_BUDGET_MS) settleOwner = startOwnerRead(engine, [row.worktree_id]);
       if (remaining <= 0) {
         if (opts.whileHeldMs && opts.whileHeldMs > waitMs && deadline === started + waitMs
           && (consumer.holds(id) || row.state === 'queued' && !row.blocked_reason)) { deadline = started + opts.whileHeldMs; continue; }
@@ -315,9 +318,12 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
   }
   const cause = BLOCKED_WRITE_REASONS.find(reason => reason === row.blocked_reason);
   if (cause) return { kind: 'blocked', row, request_id: row.request_id, cause, command: `gbrain sources writer status ${row.source_id} --json` };
-  // GBRA-248: a write left pending names its owner when that host runs no consumer, so the receipt (and --accept-pending) can tell a stale owner from a slow commit.
-  const owner = row.worktree_id ? (await boundedOwnerActivity(engine, [row.worktree_id])).get(row.worktree_id) : undefined;
-  if (owner) observedOwners.set(row, owner);
+  // GBRA-248: a write left pending names a stale owner, so the receipt (and --accept-pending) can tell it from a slow commit.
+  if (row.worktree_id) {
+    const owners = await (settleOwner ?? startOwnerRead(engine, [row.worktree_id]))(Math.min(OWNER_READ_BUDGET_MS, deadline - performance.now()));
+    const owner = owners.get(row.worktree_id);
+    if (owner) observedOwners.set(row, owner);
+  }
   return { kind: 'pending', row };
 }
 /** At most four progress reads per engine; concurrent waiters on one request share a read. */

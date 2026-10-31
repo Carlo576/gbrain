@@ -3,17 +3,15 @@
  * key was in reach (a cold GBRAIN_HOME, a container restarted without its
  * key) must not write embedding_disabled over a content database that already
  * carries an embedding identity. It keeps the database's model and width in
- * the file plane instead and says which key to set. A fresh database, an
- * explicit --no-embedding and a database already keyless by choice behave as
- * before.
+ * the file plane instead and says which key to set. Only stored vectors make
+ * the identity worth keeping: a database with none (a fresh one, or a keyless
+ * brain whose config row holds only the new-install default) still gets
+ * embedding_disabled, as does an explicit --no-embedding.
  */
 import type { BrainEngine } from '../core/engine.ts';
 import { readPrimaryEmbeddingStores, readStoredEmbeddingIdentity } from '../core/stored-embedding-identity.ts';
 import { resolveRecipe } from '../core/ai/model-resolver.ts';
 import type { ResolvedAIOptions } from './init.ts';
-
-/** The embedding identity src/schema.sql seeds into every new config table; it names no choice anyone made. */
-const SCHEMA_SEED_IDENTITY = { model: 'text-embedding-3-large', dimensions: 1536 };
 
 /** What the file plane keeps: the database's identity, or nothing (no embedding_disabled) when it holds vectors whose identity cannot be confirmed. */
 export interface KeptEmbedding { model?: string; dimensions?: number }
@@ -26,9 +24,8 @@ export async function keptEmbeddingIdentity(engine: BrainEngine, aiOpts: Resolve
     const [row] = await engine.executeRaw<{ present: boolean }>(`SELECT EXISTS (SELECT 1 FROM ${table} WHERE embedding IS NOT NULL) AS present`);
     if (row?.present) { embedded = true; break; }
   }
+  if (!embedded) return null;
   const stored = await readStoredEmbeddingIdentity(engine).catch(() => null);
-  const seeded = !stored?.model || (stored.model === SCHEMA_SEED_IDENTITY.model && stored.dimensions === SCHEMA_SEED_IDENTITY.dimensions);
-  if (!embedded && seeded) return null;
   const configured = Number(await engine.getConfig('embedding_dimensions').catch(() => null) ?? NaN);
   const agrees = stored?.model && (!Number.isFinite(configured) || configured === stored.dimensions);
   return agrees ? { model: stored!.model!, dimensions: stored!.dimensions } : {};

@@ -2,7 +2,7 @@
  * GBRA-248 W0a against the real CLI: a PGLite brain moved or restored under a
  * new host identity (its host.json did not come along, as with a fresh
  * container GBRAIN_HOME) queues writes for the old owner, which will never
- * publish them. The receipt names owner_stale with the owner's last activity,
+ * publish them. The receipt names the stale owner (reason owner_unavailable, a diagnostic.owner block) with its last activity,
  * --accept-pending (flag and env) still exits 10, and doctor's
  * owner_host_stale warns. Before the move the same brain's opt-in exits 0.
  */
@@ -50,7 +50,7 @@ beforeAll(async () => {
 afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe('a moved PGLite brain and the pending-write contract', () => {
-  test('on its owner a paused write is covered by --accept-pending; after the move it is owner_stale and exits 10', async () => {
+  test('on its owner a paused write is covered by --accept-pending; after the move its owner is stale and it exits 10', async () => {
     const seeded = await cli(['put', 'notes/seed', '--json'], page('Seed body.'));
     expect({ code: seeded.code, stderr: seeded.stderr }).toMatchObject({ code: 0 });
 
@@ -65,7 +65,7 @@ describe('a moved PGLite brain and the pending-write contract', () => {
       try {
         const held = await cli(['put', 'notes/held', '--request-id', heldId, '--wait', '1', '--accept-pending', '--json'], page('Held body.'));
         expect({ code: held.code, stderr: held.stderr }).toMatchObject({ code: 0 });
-        expect(JSON.parse(held.stdout).write_request.diagnostic?.reason).not.toBe('owner_stale');
+        expect(JSON.parse(held.stdout).write_request.diagnostic?.owner).toBeUndefined();
       } finally { await lock.release(); }
     });
     const drained = await cli(['put', 'notes/held', '--request-id', heldId, '--wait', '30', '--json'], page('Held body.'));
@@ -78,9 +78,9 @@ describe('a moved PGLite brain and the pending-write contract', () => {
     const pending = await cli(['put', 'notes/moved', '--request-id', id, '--wait', '1', '--accept-pending', '--json'], page('Moved body.'));
     expect({ code: pending.code, stderr: pending.stderr }).toMatchObject({ code: PENDING_WRITE_EXIT_CODE });
     const receipt = JSON.parse(pending.stdout).write_request;
-    expect(receipt).toMatchObject({ request_id: id, diagnostic: { reason: 'owner_stale', next_action: 'inspect_owner', owner: { live: false } } });
+    expect(receipt).toMatchObject({ request_id: id, diagnostic: { reason: 'owner_unavailable', next_action: 'inspect_owner', owner: { live: false } } });
     expect(Number.isFinite(Date.parse(receipt.diagnostic.owner.last_active))).toBe(true);
-    expect(pending.stderr).toContain('owner_stale');
+    expect(pending.stderr).toContain('quiet past the stale window');
     expect(pending.stderr).toContain('gbrain doctor --only owner_host_stale --json');
 
     const viaEnv = await cli(['put', 'notes/moved', '--request-id', id, '--wait', '0', '--json'], page('Moved body.'), { GBRAIN_ACCEPT_PENDING: '1' });

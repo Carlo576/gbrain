@@ -15,7 +15,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { backgroundPaused, backgroundWorktreeInactive, declaredBackground, readBackgroundPauseShare, resolveAdmissionOrigin, type AdmissionOrigin } from './admission-origin.ts';
 import { EFFECT_BYTES_SQL, RECEIPT_RESERVATION_FLOOR, receiptReservation, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
 import { writeHealth, type WriteHealthFacts } from './health.ts';
-import { ownerActivity, type OwnerActivity } from './owner-activity.ts';
+import { OWNER_READ_BUDGET_MS, startOwnerRead } from './owner-activity.ts';
 import { assertBackgroundOwner } from './owner-verification.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
@@ -1247,12 +1247,15 @@ export async function writeHealthFacts(engine: BrainEngine, rows: WriteRequest[]
     ) head ON true`, [roots], { signal: engine.kind === 'postgres' ? abort.signal : undefined })
     .catch(() => null).finally(() => { if (healthQueries.get(engine) === query) healthQueries.delete(engine); });
   healthQueries.set(engine, query);
+  // GBRA-248: owner facts read beside the head facts, inside the same 500 ms budget.
+  const ownerReadStarted = performance.now();
+  const settleOwners = startOwnerRead(engine, pending.flatMap(row => row.worktree_id ? [row.worktree_id] : []));
   let timer: ReturnType<typeof setTimeout> | undefined;
   const facts = await Promise.race([query, new Promise<null>(resolve => {
     timer = setTimeout(() => { abort.abort(); resolve(null); }, 500);
   })]).finally(() => { if (timer) clearTimeout(timer); });
+  const owners = await settleOwners(facts ? OWNER_READ_BUDGET_MS - (performance.now() - ownerReadStarted) : 0);
   if (!facts) return result;
-  const owners = await boundedOwnerActivity(engine, pending.flatMap(row => row.worktree_id ? [row.worktree_id] : []));
   const byRoot = new Map(facts.map(fact => [fact.root, fact]));
   for (const row of pending) {
     const fact = byRoot.get(row.worktree_id ?? `db:${row.source_incarnation}`);
@@ -1267,12 +1270,4 @@ export async function writeHealthFacts(engine: BrainEngine, rows: WriteRequest[]
       ...(owner ? { owner } : {}) });
   }
   return result;
-}
-/** GBRA-248: the owners of these worktrees, within the receipt read's 500 ms budget; a slow or failed read adds no owner facts. */
-export async function boundedOwnerActivity(engine: BrainEngine, worktreeIds: readonly string[]): Promise<Map<string, OwnerActivity>> {
-  if (!worktreeIds.length) return new Map();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([ownerActivity(engine, worktreeIds).catch(() => new Map<string, OwnerActivity>()),
-    new Promise<Map<string, OwnerActivity>>(resolve => { timer = setTimeout(() => resolve(new Map()), 500); })])
-    .finally(() => { if (timer) clearTimeout(timer); });
 }

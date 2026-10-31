@@ -27,7 +27,7 @@ export type WriteErrorCode = typeof WRITE_ERROR_CODES[number];
 
 export const WRITE_HEALTH_REASONS = ['pending', 'waiting_on_earlier_write', 'database_contention', 'writer_busy',
   'revision_changed_repreparing', 'recovery_required', 'writer_pool_capacity', 'owner_unavailable',
-  'writer_lock_unavailable', 'consumer_stopping', 'cause_unknown', 'owner_stale'] as const;
+  'writer_lock_unavailable', 'consumer_stopping', 'cause_unknown'] as const;
 export const WRITE_HEALTH_ASSESSMENTS = ['pending', 'blocked', 'stalled'] as const;
 export const WRITE_HEALTH_ACTIONS = ['poll', 'inspect_owner'] as const;
 export interface WriteDiagnostic {
@@ -36,7 +36,7 @@ export interface WriteDiagnostic {
   assessment: typeof WRITE_HEALTH_ASSESSMENTS[number];
   reason: typeof WRITE_HEALTH_REASONS[number];
   next_action: typeof WRITE_HEALTH_ACTIONS[number];
-  /** GBRA-248: the worktree owner when it runs no consumer: its host id and last recorded activity (null when none). */
+  /** GBRA-248: present only when the worktree owner is stale (reason owner_unavailable): no live consumer and quiet past the stale window. Older readers ignore it. */
   owner?: { host_id: string; live: boolean; last_active: string | null };
 }
 
