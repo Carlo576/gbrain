@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChatOpts, ChatResult } from '../../src/core/ai/gateway.ts';
 import { derivedWriteSeams } from '../../src/core/cycle/derived-write-through.ts';
+import { commitPathsLocked } from '../../src/core/git/commit-push.ts';
 import { runPhaseExtractAtoms } from '../../src/core/cycle/extract-atoms.ts';
 import { runPhaseSynthesizeConcepts } from '../../src/core/cycle/synthesize-concepts.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -196,6 +197,43 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const slugs = (await b.atoms()).map(a => a.slug);
         expect(slugs).toContain(crashed!);
         expect({ dirty: dirty(b), paths: lastCommitPaths(b) }).toEqual({ dirty: '', paths: slugs.map(relOf).sort() });
+      });
+    }, 180_000);
+
+    test('a refused commit never reverts a file another writer already committed with the batch\'s bytes', async () => {
+      await withBrain(databaseUrl, 'git', async b => {
+        const mergeHead = join(b.root, '.git', 'MERGE_HEAD');
+        derivedWriteSeams.beforeCommit = root => {
+          writeFileSync(join(root, 'notes.md'), 'writer B\n');
+          commitPathsLocked(root, ['notes.md'], 'writer B', { lockWaitMs: 5_000 });
+          writeFileSync(mergeHead, `${b.git('rev-parse', 'HEAD')}\n`);
+        };
+        let phase: Awaited<ReturnType<Brain['extract']>>;
+        try {
+          phase = await b.extract(['Renders vs proof'], 'hash-one');
+        } finally {
+          delete derivedWriteSeams.beforeCommit;
+          rmSync(mergeHead, { force: true });
+        }
+        const [atom] = await b.atoms();
+        expect({ swept: lastCommitPaths(b), status: phase.status, failed: phase.failed, file: existsSync(b.path(atom!.slug)),
+          bound: atom!.source_path !== null, dirty: dirty(b) })
+          .toEqual({ swept: ['notes.md', relOf(atom!.slug)].sort(), status: 'ok', failed: [], file: true, bound: true, dirty: '' });
+      });
+    }, 180_000);
+
+    test('a write root whose checkout lookup fails (unknown) is not committed into: its files stay and nothing rolls back', async () => {
+      await withBrain(databaseUrl, 'plain', async b => {
+        derivedWriteSeams.checkoutClass = () => 'unknown';
+        let phase: Awaited<ReturnType<Brain['extract']>>;
+        try {
+          phase = await b.extract(['Renders vs proof'], 'hash-one');
+        } finally {
+          delete derivedWriteSeams.checkoutClass;
+        }
+        const [atom] = await b.atoms();
+        expect({ status: phase.status, failed: phase.failed, file: existsSync(b.path(atom!.slug)), bound: atom!.source_path !== null })
+          .toEqual({ status: 'ok', failed: [], file: true, bound: true });
       });
     }, 180_000);
 

@@ -37,7 +37,7 @@ import { isDbOnly, loadStorageConfig } from '../storage-config.ts';
 import { deletePageThrough, isWriteThroughDisabled, resolvePageWriteTarget, writePageThrough, type PageWriteTarget } from '../write-through.ts';
 import { urlCloneReadOnly } from '../url-clone.ts';
 import { gitChildEnv, literalPathspecs } from '../git-env.ts';
-import { classifyGitCheckout } from '../git-checkout.ts';
+import { classifyGitCheckout, type GitCheckoutClass } from '../git-checkout.ts';
 import { checkoutRoot, commitAndPush, commitPathsLocked, notePending, scopePaths } from '../git/commit-push.ts';
 import { managedFilesystemRootFor, refreshManagedFilesystemRoots } from '../persistence/filesystem-guard.ts';
 import { withSourceFilesystemLock } from '../minions/source-filesystem.ts';
@@ -91,8 +91,16 @@ interface DerivedFileChange { slug: string; sourceId: string; filePath: string; 
 /** A batch commit the checkout refused: the door's code and message, the batch's files (root-relative) and those left as they were. */
 export interface DerivedCommitFailure { code: string; message: string; paths: string[]; kept: string[] }
 
-/** Test seam: runs after a batch's files are written and before its commit; a throw stands in for a crash (no rollback). */
-export const derivedWriteSeams: { beforeCommit?: (root: string) => void } = {};
+/**
+ * Test seams. `beforeCommit` runs after a batch's files are written and before its commit; a throw stands in for a crash
+ * (no rollback). `checkoutClass` replaces `classifyGitCheckout` for a write root (an `unknown` answer needs a failed lookup).
+ */
+export const derivedWriteSeams: { beforeCommit?: (root: string) => void; checkoutClass?: (root: string) => GitCheckoutClass } = {};
+
+/** Whether `root` sits in a Git checkout this module commits into (`classifyGitCheckout`, or the test seam). */
+function checkoutClassOf(root: string): GitCheckoutClass {
+  return (derivedWriteSeams.checkoutClass ?? classifyGitCheckout)(root);
+}
 
 /** How long a batch waits for the checkout's commit lock before it rolls back. */
 const DERIVED_COMMIT_LOCK_WAIT_MS = 30_000;
@@ -115,7 +123,7 @@ async function writeDerivedFile(engine: BrainEngine, slug: string, sourceId: str
   if (!result.written || !result.path) return result;
   noteWritten(resolved.target.writeRoot, result.path);
   return { ...result, change: { slug, sourceId, filePath: result.path, writeRoot: resolved.target.writeRoot, prior: expectedFileBytes,
-    after: readFileSync(result.path, 'utf-8'), bound: row?.source_path === null ? resolved.target.sourcePathToBind : null } };
+    after: result.content!, bound: row?.source_path === null ? resolved.target.sourcePathToBind : null } };
 }
 
 /**
@@ -125,7 +133,7 @@ async function writeDerivedFile(engine: BrainEngine, slug: string, sourceId: str
  */
 function noteWritten(root: string, filePath: string): void {
   try {
-    if (classifyGitCheckout(root) !== 'git') return;
+    if (checkoutClassOf(root) !== 'git') return;
     const top = checkoutRoot(root);
     notePending(top, scopePaths(top, [filePath], top));
   } catch { /* best-effort: the batch commit right after is the primary path */ }
@@ -171,14 +179,14 @@ async function deleteDerivedFile(engine: BrainEngine, slug: string, sourceId: st
  * #8073: commit a batch of derived file changes through the shared-checkout commit door (`commitPathsLocked`: the commit
  * lock, `commit --only` of exactly the named paths), one commit per checkout, under the source filesystem lock. Only paths
  * that exist or are tracked are named (an untracked file the batch removed has nothing to commit). A directory that is not
- * a Git checkout has nothing to commit: its files are the record. A refused commit rolls the batch back
- * (`rollBackDerived`) and comes back as a typed failure.
+ * a Git checkout, or whose checkout lookup fails (`unknown`), has nothing to commit: its files are the record. A refused
+ * commit rolls the batch back (`rollBackDerived`) and comes back as a typed failure unless every file was committed meanwhile.
  */
 async function commitDerivedChanges(engine: BrainEngine, label: string, changes: readonly DerivedFileChange[]): Promise<DerivedCommitFailure[]> {
   const failures: DerivedCommitFailure[] = [];
   for (const root of new Set(changes.map(c => c.writeRoot))) {
     const batch = changes.filter(c => c.writeRoot === root);
-    if (classifyGitCheckout(root) === 'not_git') continue;
+    if (checkoutClassOf(root) !== 'git') continue;
     derivedWriteSeams.beforeCommit?.(root);
     try {
       await refreshManagedFilesystemRoots(engine);
@@ -196,7 +204,8 @@ async function commitDerivedChanges(engine: BrainEngine, label: string, changes:
       if (managed) await commit();
       else await withSourceFilesystemLock(engine, root, commit);
     } catch (error) {
-      failures.push(await rollBackDerived(engine, root, batch, error));
+      const failure = await rollBackDerived(engine, root, batch, error);
+      if (failure) failures.push(failure);
     }
   }
   return failures;
@@ -215,13 +224,17 @@ function gitPaths(root: string, args: string[], input?: string): string[] {
 /**
  * Undo a batch whose commit was refused: each file still holding the bytes the batch wrote gets its prior bytes back (or is
  * removed when it had none), and the source_path the write bound is cleared so the next run's backfill writes the page
- * again. A file changed since (another writer's edit) is left as it is and listed in `kept`.
+ * again. A file changed since (another writer's edit) is left as it is and listed in `kept`. A file whose change HEAD
+ * already holds (another writer's locked commit swept it in from the pending ledger) is committed, not rolled back:
+ * restoring it would leave an uncommitted revert of HEAD. Null when every file of the batch is committed.
  */
-async function rollBackDerived(engine: BrainEngine, root: string, batch: readonly DerivedFileChange[], error: unknown): Promise<DerivedCommitFailure> {
+async function rollBackDerived(engine: BrainEngine, root: string, batch: readonly DerivedFileChange[], error: unknown): Promise<DerivedCommitFailure | null> {
   const code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'git_unavailable';
   const message = error instanceof Error ? error.message : String(error);
   const kept: string[] = [];
-  for (const change of batch) {
+  const pending = batch.filter(change => !headHolds(root, change));
+  if (!pending.length) return null;
+  for (const change of pending) {
     try {
       if ((existsSync(change.filePath) ? readFileSync(change.filePath, 'utf-8') : null) !== change.after) throw new Error('file_changed');
       if (change.prior === null) rmSync(change.filePath, { force: true });
@@ -238,8 +251,19 @@ async function rollBackDerived(engine: BrainEngine, root: string, batch: readonl
       kept.push(relative(root, change.filePath));
     }
   }
-  console.error(`[write-through] commit refused (${code}): ${batch.length - kept.length} generated file(s) rolled back, ${kept.length} left as they are`);
-  return { code, message, paths: batch.map(c => relative(root, c.filePath)), kept };
+  console.error(`[write-through] commit refused (${code}): ${pending.length - kept.length} generated file(s) rolled back, ${kept.length} left as they are`);
+  return { code, message, paths: pending.map(c => relative(root, c.filePath)), kept };
+}
+
+/** Whether HEAD of `root`'s checkout already holds the change's resulting bytes (absent for a removal); false when HEAD is unreadable. */
+function headHolds(root: string, change: DerivedFileChange): boolean {
+  const run = (args: string[]) => execFileSync('git', ['-C', root, ...args], { env: gitChildEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  try { run(['rev-parse', '--verify', '-q', 'HEAD']); } catch { return false; }
+  try {
+    return run(['show', `HEAD:./${relative(root, change.filePath).split('\\').join('/')}`]) === change.after;
+  } catch {
+    return change.after === null;
+  }
 }
 
 /** `result` with its held page files reported: added to `details.file_holds`, a `warn` status unless it failed, and a summary note. */

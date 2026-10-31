@@ -47,6 +47,8 @@ export interface WriteThroughLogger {
 export interface WriteThroughResult {
   written: boolean;
   path?: string;
+  /** The bytes written to `path` (set with `written: true`), so a caller can tell its own write from a later edit. */
+  content?: string;
   /**
    * True when the write was also committed to git (#2426). Only attempted on
    * repos hardened via `gbrain sources harden` (durability hook installed).
@@ -542,6 +544,7 @@ export async function writePageThrough(
     return {
       written: true,
       path: filePath,
+      content: md,
       ...(committed ? { committed, pushed, lastPushStatus } : {}),
     };
   } catch (e) {
