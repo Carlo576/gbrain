@@ -10,6 +10,15 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A `gbrain git commit-push` landing during a `gbrain sources refresh` no longer makes the refresh fail as `refresh_dirty` (#8117).** The refresh now runs its HEAD check and fast-forward merge under the checkout's commit lock, the same lock the door uses, so it waits for a door commit to finish instead of colliding with it on `.git/index.lock`.
+
+### Itemized changes
+
+- `src/core/persistence/worktree-refresh.ts`: `fenceAndMerge` takes the checkout's commit lock (`brain-commit.lock` plus the legacy push lock, waiting `GBRAIN_COMMIT_LOCK_WAIT_SECONDS`, default 60) from the HEAD check through the merge. A lock still held past that wait aborts the fenced refresh as retryable `commit_lock_busy`. A git process outside the lock that holds `.git/index.lock` gets three short retries, then a retryable `git_index_locked` refusal instead of the caller-class `refresh_dirty`. Either way HEAD is unchanged and the next run starts fresh.
+- Test: `test/worktree-refresh-index-lock-8117.test.ts`.
+
 ## [0.60.529.0] - 2026-10-31
 
 **A pull request that adds a file to the PGLite snapshot inputs no longer gets stopped at gstack's pregate secrets check by its own workflow cache keys (#8107).**

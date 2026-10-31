@@ -83,6 +83,9 @@ const describeHolder = (holder: RefreshHolder | null) => holder ? `pid ${holder.
 const DRAIN_POLL_MS = 250;
 const SYNC_BUDGET_MS = 300_000;
 const MAX_MEMBER_SYNC_PASSES = 20;
+const INDEX_LOCKED = /index\.lock': File exists|Unable to create '.*index\.lock'/;
+const INDEX_LOCK_ATTEMPTS = 4;
+const INDEX_LOCK_RETRY_MS = 250;
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never', LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' };
 
 function refusal(name: CatalogueName, cause: string, fix: string, refreshId?: string): OperationError {
@@ -591,22 +594,38 @@ async function fenceAndMerge(engine: BrainEngine, git: Git, sourceId: string, pl
       });
       const current = await readRefresh(engine, row.id);
       await hooks?.boundary?.('fenced', current);
-      const head = await headOf(git, plan.root);
-      if (head !== row.old_head) {
-        if (head === null) throw await markRecoveryRequired(engine, current, head, plan.root);
-        await abort(engine, current, ['fenced'], refusal('refresh_source_changed',
-          `The checkout HEAD moved from ${row.old_head} to ${head} after the precheck (an external commit or checkout); nothing was merged.`, `Retry gbrain sources refresh ${sourceId}`));
-      }
-      const dirt = await dirtyOverlap(git, plan.root, row.old_head, row.target_head);
-      if (dirt.overlap.length) await abort(engine, current, ['fenced'], dirtyRefusal(sourceId, dirt.overlap));
-      const merge = await git(['-C', plan.root, 'merge', '--ff-only', '--no-edit', '--quiet', row.target_head], 120_000);
-      const after = await headOf(git, plan.root);
-      if (merge.code !== 0 || after !== row.target_head) {
-        if (after === row.old_head) await abort(engine, current, ['fenced'], refusal('refresh_dirty',
-          `git merge --ff-only refused (${merge.stderr.trim().split('\n')[0] || `exit ${merge.code}`}); HEAD is unchanged at ${row.old_head}.`,
-          `Commit or discard the paths git names (check gbrain sources writer status ${sourceId} --json for pending git effects), then retry gbrain sources refresh ${sourceId}.`));
-        throw await markRecoveryRequired(engine, current, after, plan.root);
-      }
+      // #8117: `gbrain git commit-push` serializes on the checkout's commit lock, not on the refresh fence, so the HEAD check
+      // through the merge runs under that lock too: a door commit can neither move HEAD nor hold .git/index.lock in between.
+      const { acquireCommitLockAsync } = await import('../git/commit-push.ts');
+      const commitLock = await acquireCommitLockAsync(plan.root).catch(error => abort(engine, current, ['fenced'], error instanceof OperationError ? error
+        : opError('commit_lock_busy', `The checkout's commit lock could not be taken (${error instanceof Error ? error.message : String(error)}); nothing moved.`, `Retry gbrain sources refresh ${sourceId}.`, { retryable: true })));
+      try {
+        const head = await headOf(git, plan.root);
+        if (head !== row.old_head) {
+          if (head === null) throw await markRecoveryRequired(engine, current, head, plan.root);
+          await abort(engine, current, ['fenced'], refusal('refresh_source_changed',
+            `The checkout HEAD moved from ${row.old_head} to ${head} after the precheck (an external commit or checkout); nothing was merged.`, `Retry gbrain sources refresh ${sourceId}`));
+        }
+        const dirt = await dirtyOverlap(git, plan.root, row.old_head, row.target_head);
+        if (dirt.overlap.length) await abort(engine, current, ['fenced'], dirtyRefusal(sourceId, dirt.overlap));
+        let merge = await git(['-C', plan.root, 'merge', '--ff-only', '--no-edit', '--quiet', row.target_head], 120_000);
+        let after = await headOf(git, plan.root);
+        for (let attempt = 1; attempt < INDEX_LOCK_ATTEMPTS && merge.code !== 0 && after === row.old_head && INDEX_LOCKED.test(merge.stderr); attempt++) {
+          await new Promise(resolve => setTimeout(resolve, INDEX_LOCK_RETRY_MS * attempt));
+          merge = await git(['-C', plan.root, 'merge', '--ff-only', '--no-edit', '--quiet', row.target_head], 120_000);
+          after = await headOf(git, plan.root);
+        }
+        if (merge.code !== 0 || after !== row.target_head) {
+          const refused = merge.stderr.trim().split('\n')[0] || `exit ${merge.code}`;
+          if (after === row.old_head && INDEX_LOCKED.test(merge.stderr)) await abort(engine, current, ['fenced'], opError('git_index_locked',
+            `git merge --ff-only could not take the checkout's index lock (${refused}); HEAD is unchanged at ${row.old_head}.`,
+            `A git process outside gbrain's commit lock holds .git/index.lock. Retry gbrain sources refresh ${sourceId} once it exits; nothing moved.`, { retryable: true }));
+          if (after === row.old_head) await abort(engine, current, ['fenced'], refusal('refresh_dirty',
+            `git merge --ff-only refused (${refused}); HEAD is unchanged at ${row.old_head}.`,
+            `Commit or discard the paths git names (check gbrain sources writer status ${sourceId} --json for pending git effects), then retry gbrain sources refresh ${sourceId}.`));
+          throw await markRecoveryRequired(engine, current, after, plan.root);
+        }
+      } finally { await commitLock.release(); }
       await hooks?.boundary?.('merged', current);
       await bookkeeping(engine, current);
       return readRefresh(engine, row.id);
