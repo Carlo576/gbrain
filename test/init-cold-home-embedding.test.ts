@@ -118,27 +118,30 @@ describe('cold-home re-init over an embedded PGLite brain', () => {
 });
 
 describe('keptEmbeddingIdentity', () => {
-  test('keeps an agreeing identity only over vectors, and keeps nothing (so init disables as before) when it cannot be confirmed', async () => {
-    const engine = new PGLiteEngine();
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
     await engine.connect({}); await engine.initSchema();
-    try {
-      const implicit = { noEmbedding: true, implicitKeyless: true } as never;
-      const stored = (await readStoredEmbeddingIdentity(engine))!;
-      expect(await keptEmbeddingIdentity(engine, implicit, false)).toBeNull();
-      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
-      await embedOnePage(engine, stored.dimensions);
-      expect(await keptEmbeddingIdentity(engine, { noEmbedding: true } as never, false)).toBeNull();
-      expect(await keptEmbeddingIdentity(engine, implicit, true)).toBeNull();
-      expect(await keptEmbeddingIdentity(engine, implicit, false)).toEqual({ model: stored.model!, dimensions: stored.dimensions });
-      expect(keptEmbeddingNotice({ model: stored.model!, dimensions: stored.dimensions })).toContain(`kept this database's ${stored.model} (${stored.dimensions}d)`);
-      await engine.setConfig('embedding_dimensions', String(stored.dimensions + 1));
-      expect(await keptEmbeddingIdentity(engine, implicit, false)).toBeNull();
-      await engine.unsetConfig('embedding_dimensions');
-      await engine.unsetConfig('embedding_model');
-      expect(await keptEmbeddingIdentity(engine, implicit, false)).toBeNull();
-      await engine.setConfig('embedding_disabled', 'true');
-      expect(await keptEmbeddingIdentity(engine, implicit, false)).toBeNull();
-    } finally { await engine.disconnect(); }
+  }, 120_000);
+  afterAll(async () => { await engine.disconnect(); });
+
+  test('keeps an agreeing identity only over vectors, and keeps nothing (so init disables as before) when it cannot be confirmed', async () => {
+    const implicit = { noEmbedding: true, implicitKeyless: true } as never;
+    const stored = (await readStoredEmbeddingIdentity(engine))!;
+    expect(await keptEmbeddingIdentity(engine, implicit, false)).toBeNull();
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    await embedOnePage(engine, stored.dimensions);
+    expect(await keptEmbeddingIdentity(engine, { noEmbedding: true } as never, false)).toBeNull();
+    expect(await keptEmbeddingIdentity(engine, implicit, true)).toBeNull();
+    expect(await keptEmbeddingIdentity(engine, implicit, false)).toEqual({ model: stored.model!, dimensions: stored.dimensions });
+    expect(keptEmbeddingNotice({ model: stored.model!, dimensions: stored.dimensions })).toContain(`kept this database's ${stored.model} (${stored.dimensions}d)`);
+    await engine.setConfig('embedding_dimensions', String(stored.dimensions + 1));
+    expect(await keptEmbeddingIdentity(engine, implicit, false)).toBeNull();
+    await engine.unsetConfig('embedding_dimensions');
+    await engine.unsetConfig('embedding_model');
+    expect(await keptEmbeddingIdentity(engine, implicit, false)).toBeNull();
+    await engine.setConfig('embedding_disabled', 'true');
+    expect(await keptEmbeddingIdentity(engine, implicit, false)).toBeNull();
   }, 120_000);
 });
 
