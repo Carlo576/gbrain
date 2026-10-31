@@ -537,6 +537,7 @@
   "test/withdrawal-overlay-concurrency.test.ts": 7148,
   "test/withdrawal-publication-file.test.ts": 5332,
   "test/worktree-refresh-recovery-row-gbra130.test.ts": 9155,
+  "test/worktree-refresh-unexpected-throw.test.ts": 40798,
   "test/write-roundtrips-gbra156.test.ts": 14848,
   "test/write-through-leak-guard-alias-7203.test.ts": 63901,
   "test/writer-admin-state-embed-lease.test.ts": 2960,
