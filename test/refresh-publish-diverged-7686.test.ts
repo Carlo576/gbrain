@@ -266,6 +266,7 @@ for (const first of ['setting off', 'dry run'] as const) {
     commitFile(f.upstream, 'alpha/two.md', page('Alpha two', 'Rewritten upstream.'));
     git(f.upstream, 'push', '-q', '--force', 'origin', 'main');
     const rewritten = remoteHead(f);
+    rmSync(reflog, { force: true });
     if (first === 'dry run') await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
     await refusedWith(refreshWorktree(f.engine, f.alpha, { dryRun: first === 'dry run' }), 'refresh_diverged');
     await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
