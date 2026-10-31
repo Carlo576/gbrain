@@ -325,6 +325,7 @@
   "test/persistence-deactivate.test.ts": 24541,
   "test/persistence-diagnostics.test.ts": 11249,
   "test/persistence-edit-embedding-reuse.test.ts": 5361,
+  "test/persistence-effect-claim-loss.test.ts": 5000,
   "test/persistence-embedding-noop-settle.test.ts": 8785,
   "test/persistence-file-import.test.ts": 27866,
   "test/persistence-git-subdir-origin.test.ts": 14385,
