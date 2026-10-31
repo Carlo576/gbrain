@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.530.0] - 2026-10-31
 
 **`gbrain sources refresh` no longer exits with a bare `internal_error` when another database transaction holds a row its fence needs. A fence that waits past its 5 s lock timeout now refuses as `refresh_lock_timeout`, and `why` names the open transactions holding those tables. Nothing moves, and a later run completes once the holder is gone. Any other unexpected error now prints a typed `internal_error` refusal with its stack in `why` and the refresh row it left, which the next run resumes.**
 
