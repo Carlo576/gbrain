@@ -15,7 +15,8 @@
  * setting, one that moves the checkout or drops the local commits while
  * publishing, and one that pushes or fences anything when the merge conflicts or
  * the refresh is about to refuse a dirty overlap.
- * Seams: none; a real bare remote, a pushing clone and the managed checkout.
+ * Seams: the `hooks.boundary` callback for the refusal after a publish; otherwise
+ * a real bare remote, a pushing clone and the managed checkout.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { readFileSync, writeFileSync } from 'node:fs';
