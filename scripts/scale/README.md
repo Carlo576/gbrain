@@ -52,9 +52,10 @@ never drops below the Theil-Sen line through the ten tenth means. When the
 next-largest excess is over a quarter of the largest, the cost showed up
 twice and nothing is set aside, so work that recurs (a rebuild every few
 hundred pages, once per tenth, or twice in the import) is kept at the plain
-measure's sensitivity. A cost that lands only once (a rebuild every 5,000
-pages or more on a 10k import) looks like a stall; the 20k nightly tier sees
-it twice. The gate message names the stall and the
+measure's sensitivity. A cost that lands only once, or whose second landing
+is over 4x its first (on a 10k import, a rebuild every 5,000 pages or more,
+or every 4,500 starting early), looks like a stall; the 20k nightly tier sees
+it again. The gate message names the stall and the
 report's `import.<basis>.excused` records it. The report and its JSON
 `import` section carry both bases for every engine: wall time (`elapsed_ms`) and the import process's main-thread CPU time
 (`cpu_ms`, user + system, from each progress tick; in-process timing under
