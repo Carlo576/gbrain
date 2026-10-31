@@ -43,8 +43,13 @@ its EXPLAIN; the JSON report and a `.explain.txt` land next to `--out`);
 2 on a usage error; 3 when the harness itself crashed (not a verdict).
 The import-rate gate compares the last 10% of pages' per-page cost with the
 first 10% (<= 1.5x) and the total import with the time at the halfway mark
-(<= 2.5x). The report and its JSON `import` section carry both bases for every
-engine: wall time (`elapsed_ms`) and the import process's main-thread CPU time
+(<= 2.5x). A tenth's per-page cost is the lowest mean over ten equal slices of
+it, and total/half sums those costs over the tenths: a stall shorter than a
+slice (a WAL checkpoint, a burst from another tenant of a CI host) once failed
+three unrelated pull requests on its own (#7939), while a cost that grows with
+the brain raises every slice. `total_ms` and `ms_at_half` stay plain sums.
+The report and its JSON `import` section carry both bases for every engine:
+wall time (`elapsed_ms`) and the import process's main-thread CPU time
 (`cpu_ms`, user + system, from each progress tick; in-process timing under
 `--import-mode content`). PGLite is judged on CPU time: the database runs
 synchronously on the import's main thread, so that CPU time holds all of its

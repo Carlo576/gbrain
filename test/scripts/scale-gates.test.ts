@@ -161,6 +161,34 @@ describe('scale gates under --enforce', () => {
       expect(importRateGate('postgres', growing)).toMatchObject({ status: 'fail', enforced: true });
     });
 
+    // #7939: one stall (a WAL checkpoint, a burst from another tenant) inside the last tenth carried its mean past the
+    // gate on three unrelated PRs. Each tenth is judged by its cheapest tenth-of-a-tenth, which a stall that short
+    // cannot reach and a cost that grows with the brain raises everywhere.
+    const stall = (from: number, pages: number, ms: number) => (i: number) => (i >= from && i < from + pages ? ms / pages : 0);
+
+    test('an 8 s stall in the last tenth passes on Postgres wall time; the same 8 s spread over every page of it fails', () => {
+      const stalled = stall(PAGES * 0.95, 50, 8000);
+      const gate = importRateGate('postgres', progressStream(i => ({ wall: 5 + stalled(i), cpu: 5 })));
+      expect(gate.status).toBe('pass');
+      expect(gate.message).toContain('import rate (wall time): last 10% per-page cost 5 ms is 1x the first 10%');
+      expect(importRateGate('postgres', progressStream(i => ({ wall: lastTenth(i) ? 13 : 5, cpu: 5 })))).toMatchObject({ status: 'fail', enforced: true });
+    });
+
+    test('a stall in the second half passes total/half; a cost that rises over the second half fails it', () => {
+      const stalled = stall(PAGES * 0.7, 80, 30_000);
+      expect(importRateGate('postgres', progressStream(i => ({ wall: 5 + stalled(i), cpu: 5 }))).status).toBe('pass');
+      const report = { ...passingReport(), engine: 'postgres' as const };
+      report.import.wall = rateMeasure(Array.from({ length: PAGES }, (_, i) => (i >= PAGES / 2 && !lastTenth(i) ? 12 : 5)));
+      expect(report.import.wall).toMatchObject({ rate_ratio: 1, total_vs_half: 3.12 });
+      expect(evaluateScaleGates(report, ENFORCE).failures.map(f => f.gate)).toEqual(['import_rate']);
+    });
+
+    test('a slow page in every slice still counts: the cost of a tenth is a slice mean, not its fastest page', () => {
+      const everyTenthSlow = progressStream(i => ({ wall: lastTenth(i) && i % 10 === 0 ? 85 : 5, cpu: 5 }));
+      expect(importRateGate('postgres', everyTenthSlow)).toMatchObject({ status: 'fail' });
+      expect(importRateGate('postgres', everyTenthSlow).message).toContain('last 10% per-page cost 13 ms is 2.6x');
+    });
+
     test('a tick without cpu_ms, or a missing tick, leaves NaN for the harness to reject', () => {
       const stream = progressStream(() => ({ wall: 5, cpu: 5 })).split('\n');
       stream[5] = stream[5]!.replace(/,"cpu_ms":\d+/, '');
