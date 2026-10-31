@@ -20,6 +20,8 @@
 #   - watched keeps one log per call (ci:ubicloud runs several on one VM at
 #     once) and only after a kill.
 #   - Bash 5.2 lost-signal-trap guard (set -E, FAILED, finish).
+#   - UBI_REAP takes the usual false spellings (0/false/no/off) and refuses
+#     anything it cannot read, instead of treating every value but 0 as on.
 #
 # Scratch record: every VM this machine creates is appended to a VM-id file
 # (UBI_VM_RECORD; default ~/.capy/work/ubi-runner/vms.tsv when ~/.capy/work
@@ -148,6 +150,12 @@ for v in IDLE_TIMEOUT RUN_TIMEOUT HEARTBEAT QUOTA_WAIT; do
   [[ "${!v}" =~ ^[0-9]+$ ]] || die "UBI_$v must be a whole number of seconds (0 disables it)"
 done
 [ -z "$QUOTA_VCPUS" ] || [[ "$QUOTA_VCPUS" =~ ^[0-9]+$ ]] || die "UBI_QUOTA_VCPUS must be a whole number of vCPUs"
+# gbrain: UBI_REAP=false (or no/off) must not turn reaping on.
+case $(printf %s "$REAP" | tr '[:upper:]' '[:lower:]') in
+  0|false|no|off) REAP=0 ;;
+  1|true|yes|on) REAP=1 ;;
+  *) die "UBI_REAP must be 1 or 0 (true/false, yes/no and on/off also work), not '$REAP'" ;;
+esac
 
 owner_id() {
   local raw=${UBI_OWNER:-} file="$STATE_ROOT/owner-id" tmp
@@ -1061,7 +1069,7 @@ usage: ubi-runner.sh <command> [args]
 VMs are named $PREFIX-<owner>-<epoch>-<suffix>-t<ttl hours>; up, run and verify need
 UBI_OWNER (e.g. your thread code); run and verify end with a UBICLOUD: left=<n> line.
 defaults: size=$DEFAULT_SIZE location=$DEFAULT_LOCATION (env UBI_SIZE, UBI_LOCATION)
-env: UBI_TTL_HOURS (${TTL_HOURS}h in the name, 1-999), UBI_REAP (default 0 in gbrain; 1: up reaps first),
+env: UBI_TTL_HOURS (${TTL_HOURS}h in the name, 1-999), UBI_REAP (default 0 in gbrain; 1/true/yes/on: up reaps first),
      UBI_LEGACY_HOURS (${LEGACY_HOURS}h: reap's bound for this owner's TTL-less ubirun-* names),
      UBI_IDLE_TIMEOUT (${IDLE_TIMEOUT}s of silence kills the remote command, exit 124; 0 disables),
      UBI_RUN_TIMEOUT (${RUN_TIMEOUT}s wall clock; 0 unlimited), UBI_HEARTBEAT (${HEARTBEAT}s between heartbeat lines),

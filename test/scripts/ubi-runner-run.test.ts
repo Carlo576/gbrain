@@ -201,6 +201,28 @@ describe("owner and reap", () => {
     }
     expect(creates()).toEqual([]);
   }, 60_000);
+
+  // #8096 item 3: every UBI_REAP value but 0 used to turn the reap on.
+  it("UBI_REAP=false, no, off (any case) reaps nothing; true, yes, on reap; an unreadable value refuses before any API call", async () => {
+    serve({ rejectCreates: true, seed: [{ name: "ubirun-other-1000000000-bbbb-t1" }] });
+    for (const value of ["false", "FALSE", "no", "off", "0"]) {
+      const r = await run(["up"], { UBI_REAP: value });
+      expect(r.code).toBe(1);
+      expect(r.stderr).not.toContain("reaping");
+      expect(r.stderr).not.toContain("reap skipped");
+    }
+    expect(destroyed()).toEqual([]);
+    const maybe = await run(["up"], { UBI_REAP: "maybe" });
+    expect(maybe.code).toBe(1);
+    expect(maybe.stderr).toContain("UBI_REAP must be 1 or 0 (true/false, yes/no and on/off also work), not 'maybe'");
+    expect(creates()).toHaveLength(5);
+    for (const value of ["true", "Yes", "on"]) {
+      serve({ rejectCreates: true, seed: [{ name: "ubirun-other-1000000000-bbbb-t1" }] });
+      const r = await run(["up"], { UBI_REAP: value });
+      expect(r.stderr).toMatch(/reaping expired eu-central-h1\/ubirun-other-1000000000-bbbb-t1/);
+      expect(destroyed()).toEqual(["ubirun-other-1000000000-bbbb-t1"]);
+    }
+  }, 90_000);
 });
 
 describe("run leftover line", () => {
