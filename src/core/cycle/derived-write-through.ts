@@ -14,6 +14,11 @@
  * generated pages that have no file yet, a bounded batch per run. A page the
  * phase retires has its file removed, so sync cannot bring it back.
  *
+ * #8073: in a Git checkout those files are committed, one commit per batch
+ * through the shared-checkout door (`commitPathsLocked`), and a refused commit
+ * rolls the batch's files back (`commitDerivedChanges`), so the cycle never
+ * leaves untracked or modified files that make the scheduled sync skip.
+ *
  * #6982: a file is replaced or removed only when it holds nothing the
  * database lacks (`replaceableFile`: absent, or equal to the page or one of
  * its recent versions), and the write is bound to the bytes compared. A file
@@ -31,7 +36,11 @@ import { validateSourceId } from '../utils.ts';
 import { isDbOnly, loadStorageConfig } from '../storage-config.ts';
 import { deletePageThrough, isWriteThroughDisabled, resolvePageWriteTarget, writePageThrough, type PageWriteTarget } from '../write-through.ts';
 import { urlCloneReadOnly } from '../url-clone.ts';
-import { gitChildEnv } from '../git-env.ts';
+import { gitChildEnv, literalPathspecs } from '../git-env.ts';
+import { atomicWriteFileSync } from '../atomic-write.ts';
+import { classifyGitCheckout } from '../git-checkout.ts';
+import { commitPathsLocked } from '../git/commit-push.ts';
+import { withSourceFilesystemLock } from '../minions/source-filesystem.ts';
 import { fileDatabaseDriftToken, replaceableFile } from '../facts/file-body-guard.ts';
 
 export const DERIVED_WRITE_THROUGH_KEYS = {
@@ -76,16 +85,18 @@ export async function derivedFileTarget(engine: BrainEngine, slug: string, sourc
   return { ok: true, target };
 }
 
-/**
- * Write one generated page's markdown file. Never throws; the result says
- * whether a file was written, why not, or the write error. Ignored and db_only
- * targets are skipped on purpose (`skipped: 'not_canonical'`).
- * `expectedFileBytes` binds the write to the file the caller read (and
- * already compared); without it the file must pass `replaceableFile` first,
- * else nothing is written (`skipped: 'file_database_drift'`).
- */
-export async function writeDerivedPageThrough(engine: BrainEngine, slug: string, sourceId: string,
-  opts: { expectedFileBytes?: string | null } = {}): Promise<{ written: boolean; skipped?: string; error?: string }> {
+/** One file a derived write changed (#8073): its bytes before and after (null: absent) and the source_path the write bound. */
+interface DerivedFileChange { slug: string; sourceId: string; filePath: string; writeRoot: string; prior: string | null; after: string | null; bound: string | null }
+
+/** A batch commit the checkout refused: the door's code and message, the batch's files (root-relative) and those left as they were. */
+export interface DerivedCommitFailure { code: string; message: string; paths: string[]; kept: string[] }
+
+/** How long a batch waits for the checkout's commit lock before it rolls back. */
+const DERIVED_COMMIT_LOCK_WAIT_MS = 30_000;
+
+/** The file write of `writeDerivedPageThrough`, uncommitted, with the change it made. */
+async function writeDerivedFile(engine: BrainEngine, slug: string, sourceId: string,
+  opts: { expectedFileBytes?: string | null }): Promise<{ written: boolean; skipped?: string; error?: string; change?: DerivedFileChange }> {
   const resolved = await derivedFileTarget(engine, slug, sourceId);
   if (!resolved.ok) return { written: false, skipped: resolved.skipped };
   let expectedFileBytes = opts.expectedFileBytes;
@@ -94,24 +105,101 @@ export async function writeDerivedPageThrough(engine: BrainEngine, slug: string,
     if (!file.ok) return { written: false, skipped: 'file_database_drift' };
     expectedFileBytes = file.expectedFileBytes;
   }
-  const result = await writePageThrough(engine, slug, { sourceId, expectedFileBytes });
+  const [row] = await engine.executeRaw<{ source_path: string | null }>(
+    'SELECT source_path FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL', [sourceId, slug]);
+  const result = await writePageThrough(engine, slug, { sourceId, expectedFileBytes, deferCommit: true });
   if (result.error) console.error(`[write-through] ${slug}: ${result.error}`);
-  return result;
+  if (!result.written || !result.path) return result;
+  return { ...result, change: { slug, sourceId, filePath: result.path, writeRoot: resolved.target.writeRoot, prior: expectedFileBytes,
+    after: readFileSync(result.path, 'utf-8'), bound: row?.source_path === null ? resolved.target.sourcePathToBind : null } };
 }
 
 /**
- * Remove a retired generated page's file when the retired page (or one of
- * its versions) holds everything in it; the unlink is bound to the bytes
- * compared. Returns `file_database_drift` when the file holds an edit the
- * database lacks.
+ * Write one generated page's markdown file and commit it (#8073). Never
+ * throws; the result says whether a file was written, why not, or the write
+ * error. Ignored and db_only targets are skipped on purpose
+ * (`skipped: 'not_canonical'`). `expectedFileBytes` binds the write to the
+ * file the caller read (and already compared); without it the file must pass
+ * `replaceableFile` first, else nothing is written
+ * (`skipped: 'file_database_drift'`). A commit the checkout refuses rolls the
+ * file back and comes back as `error` (`<code>: <message>`).
  */
-async function deleteDerivedPageThrough(engine: BrainEngine, slug: string, sourceId: string): Promise<{ removed: boolean; skipped?: string }> {
+export async function writeDerivedPageThrough(engine: BrainEngine, slug: string, sourceId: string,
+  opts: { expectedFileBytes?: string | null } = {}): Promise<{ written: boolean; skipped?: string; error?: string }> {
+  const { change, ...result } = await writeDerivedFile(engine, slug, sourceId, opts);
+  if (!change) return result;
+  const [failure] = await commitDerivedChanges(engine, 'synthesize_concepts', [change]);
+  return failure ? { written: false, error: `${failure.code}: ${failure.message}` } : result;
+}
+
+/**
+ * Remove a retired generated page's file, uncommitted, when the retired page
+ * (or one of its versions) holds everything in it; the unlink is bound to the
+ * bytes compared. Returns `file_database_drift` when the file holds an edit
+ * the database lacks.
+ */
+async function deleteDerivedFile(engine: BrainEngine, slug: string, sourceId: string): Promise<{ removed: boolean; skipped?: string; change?: DerivedFileChange }> {
   const resolved = await derivedFileTarget(engine, slug, sourceId, { includeDeleted: true });
   if (!resolved.ok) return { removed: false, skipped: resolved.skipped };
   const file = await replaceableFile(engine, sourceId, slug, resolved.target.filePath);
   if (!file.ok) return { removed: false, skipped: 'file_database_drift' };
   if (file.expectedFileBytes === null) return { removed: false, skipped: 'file_not_present' };
-  return deletePageThrough(engine, slug, { sourceId, target: resolved.target, expectedFileBytes: file.expectedFileBytes });
+  const result = await deletePageThrough(engine, slug, { sourceId, target: resolved.target, expectedFileBytes: file.expectedFileBytes, deferCommit: true });
+  if (!result.removed) return result;
+  return { ...result, change: { slug, sourceId, filePath: resolved.target.filePath, writeRoot: resolved.target.writeRoot, prior: file.expectedFileBytes, after: null, bound: null } };
+}
+
+/**
+ * #8073: commit a batch of derived file changes through the shared-checkout commit door (`commitPathsLocked`: the commit
+ * lock, `commit --only` of exactly the named paths), one commit per checkout, under the source filesystem lock. Only paths
+ * that exist or are tracked are named (an untracked file the batch removed has nothing to commit). A directory that is not
+ * a Git checkout has nothing to commit: its files are the record. A refused commit rolls the batch back
+ * (`rollBackDerived`) and comes back as a typed failure.
+ */
+async function commitDerivedChanges(engine: BrainEngine, phase: keyof typeof DERIVED_WRITE_THROUGH_KEYS,
+  changes: readonly DerivedFileChange[]): Promise<DerivedCommitFailure[]> {
+  const failures: DerivedCommitFailure[] = [];
+  for (const root of new Set(changes.map(c => c.writeRoot))) {
+    const batch = changes.filter(c => c.writeRoot === root);
+    if (classifyGitCheckout(root) === 'not_git') continue;
+    try {
+      await withSourceFilesystemLock(engine, root, async () => {
+        const rels = batch.map(c => relative(root, c.filePath));
+        const tracked = new Set(execFileSync('git', ['-C', root, 'ls-files', '-z', '--', ...literalPathspecs(rels)], { env: gitChildEnv(), encoding: 'utf8' }).split('\0'));
+        const paths = batch.filter((c, i) => existsSync(c.filePath) || tracked.has(rels[i]!)).map(c => c.filePath);
+        if (paths.length) commitPathsLocked(root, paths, `gbrain: ${phase} write-through (${paths.length} generated file(s))`, { lockWaitMs: DERIVED_COMMIT_LOCK_WAIT_MS });
+      });
+    } catch (error) {
+      failures.push(await rollBackDerived(engine, root, batch, error));
+    }
+  }
+  return failures;
+}
+
+/**
+ * Undo a batch whose commit was refused: each file still holding the bytes the batch wrote gets its prior bytes back (or is
+ * removed when it had none), and the source_path the write bound is cleared so the next run's backfill writes the page
+ * again. A file changed since (another writer's edit) is left as it is and listed in `kept`.
+ */
+async function rollBackDerived(engine: BrainEngine, root: string, batch: readonly DerivedFileChange[], error: unknown): Promise<DerivedCommitFailure> {
+  const code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : 'git_unavailable';
+  const message = error instanceof Error ? error.message : String(error);
+  const kept: string[] = [];
+  for (const change of batch) {
+    try {
+      if ((existsSync(change.filePath) ? readFileSync(change.filePath, 'utf-8') : null) !== change.after) throw new Error('file_changed');
+      if (change.prior === null) rmSync(change.filePath, { force: true });
+      else atomicWriteFileSync(change.filePath, change.prior);
+      if (change.bound) {
+        await engine.executeRaw('UPDATE pages SET source_path = NULL WHERE source_id = $1 AND slug = $2 AND source_path = $3 AND deleted_at IS NULL',
+          [change.sourceId, change.slug, change.bound]);
+      }
+    } catch {
+      kept.push(relative(root, change.filePath));
+    }
+  }
+  console.error(`[write-through] commit refused (${code}): ${batch.length - kept.length} generated file(s) rolled back, ${kept.length} left as they are`);
+  return { code, message, paths: batch.map(c => relative(root, c.filePath)), kept };
 }
 
 /** `result` with its held page files reported: added to `details.file_holds`, a `warn` status unless it failed, and a summary note. */
@@ -122,17 +210,32 @@ export function reportFileHolds(result: PhaseResult, held: readonly string[] | u
     summary: `${result.summary} (${held.length} ${noun} file(s) left as they are: file_database_drift)` };
 }
 
-/** The phase's write-through hook: `write` publishes pages and removes retired ones' files; `held` reports each page left alone. */
+/** `result` with the hook's held files (`reportFileHolds`) and refused commits reported: `details.write_through_failed` and a `warn` status unless it failed. */
+export function reportDerivedWriteThrough(result: PhaseResult, files: DerivedWriteThrough | null, noun: string): PhaseResult {
+  const reported = reportFileHolds(result, files?.held, noun);
+  if (!files?.failed.length) return reported;
+  const count = files.failed.reduce((n, f) => n + f.paths.length - f.kept.length, 0);
+  return { ...reported, status: reported.status === 'fail' ? 'fail' : 'warn',
+    details: { ...reported.details, write_through_failed: files.failed },
+    summary: `${reported.summary} (${noun} file commit refused: ${files.failed[0]!.code}; ${count} file(s) rolled back, written again on the next run)` };
+}
+
+/**
+ * The phase's write-through hook: `write` publishes pages and removes retired ones' files, one commit per call; `held`
+ * reports each page left alone, `failed` each refused commit (after which the hook writes nothing more this run).
+ */
 export interface DerivedWriteThrough {
   write(slugs: readonly string[], retired?: readonly string[]): Promise<void>;
   held: string[];
+  failed: DerivedCommitFailure[];
 }
 
 /**
  * The phase's write-through hook, or null when it does not apply (key off,
  * managed brain, dry run): writes the given pages and removes the files of
- * the retired ones. Creating it writes the bounded backfill of generated
- * pages of the phase's type in the source that have no file yet.
+ * the retired ones, then commits the batch. Creating it writes the bounded
+ * backfill of generated pages of the phase's type in the source that have no
+ * file yet.
  */
 export async function derivedWriteThrough(
   engine: BrainEngine,
@@ -142,18 +245,22 @@ export async function derivedWriteThrough(
 ): Promise<DerivedWriteThrough | null> {
   if (opts.managed || opts.dryRun || !await derivedWriteThroughEnabled(engine, phase)) return null;
   const held: string[] = [];
+  const failed: DerivedCommitFailure[] = [];
   const kept = (skipped: string | undefined) => skipped === 'file_database_drift' || skipped === 'file_changed';
   const write = async (slugs: readonly string[], retired: readonly string[] = []) => {
+    if (failed.length) return;
+    const changes: DerivedFileChange[] = [];
     for (const slug of slugs) {
-      if (kept((await writeDerivedPageThrough(engine, slug, sourceId)).skipped)) {
-        held.push(fileDatabaseDriftToken(slug, sourceId, 'before', 'the generated page was not written to its file'));
-      }
+      const result = await writeDerivedFile(engine, slug, sourceId, {});
+      if (result.change) changes.push(result.change);
+      if (kept(result.skipped)) held.push(fileDatabaseDriftToken(slug, sourceId, 'before', 'the generated page was not written to its file'));
     }
     for (const slug of retired) {
-      if (kept((await deleteDerivedPageThrough(engine, slug, sourceId)).skipped)) {
-        held.push(fileDatabaseDriftToken(slug, sourceId, 'before', 'the retired page\'s file was not removed'));
-      }
+      const result = await deleteDerivedFile(engine, slug, sourceId);
+      if (result.change) changes.push(result.change);
+      if (kept(result.skipped)) held.push(fileDatabaseDriftToken(slug, sourceId, 'before', 'the retired page\'s file was not removed'));
     }
+    failed.push(...await commitDerivedChanges(engine, phase, changes));
   };
   const rows = await engine.executeRaw<{ slug: string }>(
     `SELECT slug FROM pages
@@ -164,7 +271,7 @@ export async function derivedWriteThrough(
     [sourceId, phase === 'extract_atoms' ? 'atom' : 'concept', DERIVED_BACKFILL_LIMIT],
   );
   await write(rows.map(r => r.slug));
-  return { write, held };
+  return { write, held, failed };
 }
 
 /** What a dream reverse-write did with one page's file. `held` is its `file_database_drift` entry. */

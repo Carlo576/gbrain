@@ -97,7 +97,7 @@ async function withBrain(databaseUrl: string | undefined, layout: Layout, run: (
 }
 
 const commitCount = (b: Brain) => Number(b.git('rev-list', '--count', 'HEAD'));
-const lastCommitPaths = (b: Brain) => b.git('show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean).sort();
+const lastCommitPaths = (b: Brain) => b.git('show', '--no-renames', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean).sort();
 const dirty = (b: Brain) => b.git('status', '--porcelain', '--untracked-files=all');
 const relOf = (slug: string) => `${slug}.md`;
 const filesUnder = (dir: string): string[] => !existsSync(dir) ? [] : readdirSync(dir, { recursive: true, withFileTypes: true })
