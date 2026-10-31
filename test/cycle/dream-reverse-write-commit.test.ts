@@ -11,7 +11,7 @@
  * (no local_path, no brain directory) gets no file; a directory that is not a Git checkout keeps its files.
  * Fails when: a reverse-write leaves its file uncommitted (the pre-fix path) or leaves a file behind after a refused
  * commit.
- * Seams: none; the dream outputs are imported pages. PGLite always, Postgres when DATABASE_URL is set.
+ * Seams: none; the dream outputs are imported pages, rendered as the database holds them (serializePageToMarkdown). PGLite always, Postgres when DATABASE_URL is set.
  */
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -19,9 +19,9 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeDreamPageFile, reverseWriteDreamRefs, writeDreamPageFile } from '../../src/core/cycle/derived-write-through.ts';
-import { renderPageToMarkdown } from '../../src/core/cycle/synthesize.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
+import { serializePageToMarkdown } from '../../src/core/markdown.ts';
 import { managedPersistenceEnabled } from '../../src/core/persistence/ownership.ts';
 import { _resetWriteThroughCacheForTest } from '../../src/core/write-through.ts';
 import { isolatedSharedSkillsEngine } from '../helpers/shared-skills-engine.ts';
@@ -75,7 +75,7 @@ async function withBrain(databaseUrl: string | undefined, layout: Layout, run: (
           async reverseWrite(slugs) {
             const held: string[] = [];
             const written = await reverseWriteDreamRefs(engine, brainDir, slugs.map(slug => ({ slug, source_id: SOURCE })),
-              { phase: 'synthesize', nativeSourceId: SOURCE, render: renderPageToMarkdown, held });
+              { phase: 'synthesize', nativeSourceId: SOURCE, render: (p, tags) => serializePageToMarkdown(p, tags), held });
             return { written, held };
           },
         });
@@ -110,7 +110,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
 
     test('the cycle summary file write commits, and a retired dream page\'s file removal commits', async () => {
       await withBrain(databaseUrl, 'git', async b => {
-        const summary = await writeDreamPageFile(b.engine, b.brainDir, SUMMARY, SOURCE, { nativeSourceId: SOURCE, markdown: renderPageToMarkdown((await b.engine.getPage(SUMMARY, { sourceId: SOURCE }))!, []) });
+        const summary = await writeDreamPageFile(b.engine, b.brainDir, SUMMARY, SOURCE, { nativeSourceId: SOURCE, markdown: serializePageToMarkdown((await b.engine.getPage(SUMMARY, { sourceId: SOURCE }))!, []) });
         expect({ written: summary.written, paths: lastCommitPaths(b), dirty: dirty(b) }).toEqual({ written: true, paths: [`${SUMMARY}.md`], dirty: '' });
         await b.reverseWrite([IDEA]);
         const before = commitCount(b);
