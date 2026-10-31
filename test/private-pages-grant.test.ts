@@ -244,25 +244,45 @@ for (const kind of testBackends()) {
       });
     });
 
-    test('writes keep hiding private pages: put_page into the private page stays refused for the owner', async () => {
+    test('writes keep hiding private pages: a write to the private page stays refused for the owner while a world page takes it', async () => {
       await rescopeToken('alice-example', '--scopes', 'read,write');
-      const out = await call(tokens['alice-example'], 'add_tag', { slug: PRIVATE_SLUG, tag: 'renewal' });
-      expect(out.isError).toBe(true);
-      await rescopeToken('alice-example', '--scopes', 'read');
+      try {
+        const control = await call(tokens['alice-example'], 'add_tag', { slug: TARGET_SLUG, tag: 'renewal' });
+        expect({ isError: control.isError, text: control.text.slice(0, 200) }).toMatchObject({ isError: false });
+        const out = await call(tokens['alice-example'], 'add_tag', { slug: PRIVATE_SLUG, tag: 'renewal' });
+        expect({ isError: out.isError, refused: out.text.includes('"code": "page_not_found"') }).toEqual({ isError: true, refused: true });
+        expect(out.text).not.toContain(SECRET[ALICE]);
+      } finally {
+        await rescopeToken('alice-example', '--scopes', 'read');
+      }
+    });
+
+    test('delta stays world-only for every remote caller, the owner included', async () => {
+      const since = '2000-01-01T00:00:00Z';
+      expect(await local('delta', { since, include_private: true })).toContain(PRIVATE_SLUG);
+      expect(await local('delta', { since })).not.toContain(PRIVATE_SLUG);
+      for (const who of ['alice-example', 'client-alice', 'bot-all', 'floor']) {
+        const out = await call(tokens[who], 'delta', { since, include_private: true });
+        expect({ who, isError: out.isError, listed: out.text.includes(PRIVATE_SLUG) }).toEqual({ who, isError: false, listed: false });
+        for (const secret of Object.values(SECRET)) expect({ who, leaked: out.text.includes(secret) }).toEqual({ who, leaked: false });
+      }
     });
 
     test('a rescope back to none hides the pages on the next call (token and client)', async () => {
       expect((await call(tokens['alice-example'], 'get_page', { slug: PRIVATE_SLUG })).text).toContain(SECRET[ALICE]);
       await rescopeToken('alice-example', '--private-pages', 'none');
       await rescopeClient(clients['client-alice'], '--private-pages', 'none');
-      for (const owner of ['alice-example', 'client-alice']) {
-        for (const [label, op, params] of reads()) {
-          const out = await call(tokens[owner], op, params);
-          expect({ owner, label, leaked: out.text.includes(SECRET[ALICE]) }).toEqual({ owner, label, leaked: false });
+      try {
+        for (const owner of ['alice-example', 'client-alice']) {
+          for (const [label, op, params] of reads()) {
+            const out = await call(tokens[owner], op, params);
+            expect({ owner, label, leaked: out.text.includes(SECRET[ALICE]) }).toEqual({ owner, label, leaked: false });
+          }
         }
+      } finally {
+        await rescopeToken('alice-example', '--private-pages', 'granted-sources');
+        await rescopeClient(clients['client-alice'], '--private-pages', 'granted-sources');
       }
-      await rescopeToken('alice-example', '--private-pages', 'granted-sources');
-      await rescopeClient(clients['client-alice'], '--private-pages', 'granted-sources');
       expect((await call(tokens['alice-example'], 'get_page', { slug: PRIVATE_SLUG })).text).toContain(SECRET[ALICE]);
     }, 120_000);
 

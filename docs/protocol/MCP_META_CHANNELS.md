@@ -140,7 +140,10 @@ beside `arguments` (MCP request-level `_meta`), or inside the tool arguments
 `_meta` into the arguments. That call's response carries no
 `brain_hot_memory`. Other values, or no value, leave the block as it is. A
 channel or shared session should send it on every call. A member's own
-direct-message session can leave it out.
+direct-message session can leave it out. The opt-out removes only this
+`_meta` block: a `context_pack` or `delta` body still lists the connection's
+recent facts, so a channel harness should not call them with a member token
+whose first source is that member's private source.
 
 ```json
 {"jsonrpc": "2.0", "id": 7, "method": "tools/call",

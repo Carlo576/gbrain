@@ -253,9 +253,12 @@ it, before any member's bot connects:
 
   A token with no source grant, a federated source the grant does not name,
   and a request's `source_ids` never add a source; `context_pack`, `delta`
-  and writes keep hiding private pages. `--private-pages none` hides them
-  again on the next request, and `gbrain auth list` shows each token's
-  setting.
+  and writes keep hiding private pages. In a named source the grant opens
+  every page remote reads treat as private, not only `visibility: private`:
+  pages with a privacy alias (`access`, `confidentiality`), atoms, concepts
+  and events derived from private or unknown origins, and pages whose
+  declared lineage is private. `--private-pages none` hides them again on the
+  next request, and `gbrain auth list` shows each token's setting.
 
 > **Warning: one shared source has no boundary inside it.** A bot that answers
 > everyone with one unscoped token over a single source exposes everything in
