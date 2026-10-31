@@ -251,13 +251,14 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
   let deadline = started + waitMs;
   const firstPoll = recentlySettled.get(engine)?.has(id) ? 0 : Math.min(WRITE_POLL_START_MS, waitMs / 2);
   let delay = firstPoll, failure: { error: unknown; attempts: number } | undefined;
-  // GBRA-248: owner facts for a write that may be left pending, read during the wait's last OWNER_READ_BUDGET_MS so they never extend it.
-  let settleOwner: ((budgetMs: number) => Promise<Map<string, OwnerActivity>>) | undefined, ownerReadAt = 0;
+  // GBRA-248: owner facts for a write that may be left pending or blocked, read during the wait's last OWNER_READ_BUDGET_MS (a
+  // shorter wait is extended to that budget); waiters on one worktree share the read and reuse its answer (sharedOwnerRead).
+  let ownerRead: SharedOwnerRead | undefined;
   try {
     while (!service.stopping && !opts.signal?.aborted) {
       if (handed) { row = handed; handed = undefined; if (isTerminal(row)) return { kind: 'terminal', row }; }
       const remaining = deadline - performance.now();
-      if (!settleOwner && row.worktree_id && remaining <= OWNER_READ_BUDGET_MS) { settleOwner = startOwnerRead(engine, [row.worktree_id]); ownerReadAt = performance.now(); }
+      if (!ownerRead && row.worktree_id && remaining <= OWNER_READ_BUDGET_MS) ownerRead = sharedOwnerRead(engine, row.worktree_id);
       if (remaining <= 0) {
         if (opts.whileHeldMs && opts.whileHeldMs > waitMs && deadline === started + waitMs
           && (consumer.holds(id) || row.state === 'queued' && !row.blocked_reason)) { deadline = started + opts.whileHeldMs; continue; }
@@ -316,16 +317,13 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
     return { kind: 'read_failed', row, request_id: row.request_id, reason: diagnosis.reason, transient: diagnosis.transient,
       ...(diagnosis.sqlstate ? { sqlstate: diagnosis.sqlstate } : {}), attempts: failure.attempts, message: diagnosis.message, why: diagnosis.remediation };
   }
-  const cause = BLOCKED_WRITE_REASONS.find(reason => reason === row.blocked_reason);
-  if (cause) return { kind: 'blocked', row, request_id: row.request_id, cause, command: `gbrain sources writer status ${row.source_id} --json` };
-  // GBRA-248: a write left pending names a stale owner, so the receipt (and --accept-pending) can tell it from a slow commit.
-  // The read always gets OWNER_READ_BUDGET_MS from its start: a wait shorter than that (wait 0) is extended by the difference, never more.
+  // GBRA-248: a write left pending or blocked names a stale owner, so the receipt (and --accept-pending) can tell it from a slow commit.
   if (row.worktree_id) {
-    if (!settleOwner) { settleOwner = startOwnerRead(engine, [row.worktree_id]); ownerReadAt = performance.now(); }
-    const owners = await settleOwner(Math.max(deadline, ownerReadAt + OWNER_READ_BUDGET_MS) - performance.now());
-    const owner = owners.get(row.worktree_id);
+    const owner = await (ownerRead ?? sharedOwnerRead(engine, row.worktree_id)).answer();
     if (owner) observedOwners.set(row, owner);
   }
+  const cause = BLOCKED_WRITE_REASONS.find(reason => reason === row.blocked_reason);
+  if (cause) return { kind: 'blocked', row, request_id: row.request_id, cause, command: `gbrain sources writer status ${row.source_id} --json` };
   return { kind: 'pending', row };
 }
 /** At most four progress reads per engine; concurrent waiters on one request share a read. */
@@ -371,6 +369,25 @@ function terminalReceiptHint(row: WriteRequest, reason: string): string {
 }
 /** GBRA-248: owner facts awaitWrite observed for a row it left pending (by identity; the row object travels to writeResponse unchanged). */
 const observedOwners = new WeakMap<WriteRequest, OwnerActivity>();
+/** GBRA-248: staleness moves on a 24 h scale, so an owner answer is reused for a few seconds and a batch of waiters pays one read. */
+const OWNER_CACHE_MS = 10_000;
+interface SharedOwnerRead { at: number; answer(): Promise<OwnerActivity | undefined> }
+const ownerReads = new WeakMap<BrainEngine, Map<string, SharedOwnerRead>>();
+/** One owner read per engine and worktree at a time; it answers within OWNER_READ_BUDGET_MS of its start (undefined: no stale-owner facts). */
+function sharedOwnerRead(engine: BrainEngine, worktreeId: string): SharedOwnerRead {
+  let reads = ownerReads.get(engine);
+  if (!reads) { reads = new Map(); ownerReads.set(engine, reads); }
+  const current = reads.get(worktreeId);
+  if (current && performance.now() - current.at < OWNER_CACHE_MS) return current;
+  const at = performance.now();
+  const settled = startOwnerRead(engine, [worktreeId])(OWNER_READ_BUDGET_MS).then(owners => {
+    if (!owners && reads!.get(worktreeId) === read) reads!.delete(worktreeId);
+    return owners?.get(worktreeId);
+  });
+  const read: SharedOwnerRead = { at, answer: () => settled };
+  reads.set(worktreeId, read);
+  return read;
+}
 export function writeResponse(row: WriteRequest, hints: { retryAfterMs?: number | null; waiterOnlyOwner?: ElectedOwner | null } = {}): Record<string, unknown> {
   const owner = isTerminal(row) ? undefined : observedOwners.get(row);
   const receipt = receiptFor(row, owner ? { owner } : undefined);

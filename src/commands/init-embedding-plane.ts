@@ -13,8 +13,8 @@ import { readPrimaryEmbeddingStores, readStoredEmbeddingIdentity } from '../core
 import { resolveRecipe } from '../core/ai/model-resolver.ts';
 import type { ResolvedAIOptions } from './init.ts';
 
-/** What the file plane keeps: the database's identity, or nothing (no embedding_disabled) when it holds vectors whose identity cannot be confirmed. */
-export interface KeptEmbedding { model?: string; dimensions?: number }
+/** The database identity the file plane keeps. Vectors whose model or width cannot be confirmed keep nothing: embedding_disabled is written as before, and doctor embedding_plane_disagreement points at migrate embeddings --status. */
+export interface KeptEmbedding { model: string; dimensions: number }
 
 export async function keptEmbeddingIdentity(engine: BrainEngine, aiOpts: ResolvedAIOptions | undefined, fresh: boolean): Promise<KeptEmbedding | null> {
   if (!aiOpts?.noEmbedding || !aiOpts.implicitKeyless || fresh) return null;
@@ -28,12 +28,11 @@ export async function keptEmbeddingIdentity(engine: BrainEngine, aiOpts: Resolve
   const stored = await readStoredEmbeddingIdentity(engine).catch(() => null);
   const configured = Number(await engine.getConfig('embedding_dimensions').catch(() => null) ?? NaN);
   const agrees = stored?.model && (!Number.isFinite(configured) || configured === stored.dimensions);
-  return agrees ? { model: stored!.model!, dimensions: stored!.dimensions } : {};
+  return agrees ? { model: stored!.model!, dimensions: stored!.dimensions } : null;
 }
 
 /** The notice init prints instead of the deferred-setup hint when it kept the database's identity. */
 export function keptEmbeddingNotice(kept: KeptEmbedding): string {
-  if (!kept.model) return '  Embedding: this database already holds vectors whose model could not be confirmed, so init left embedding settings unchanged instead of disabling them. Run gbrain migrate embeddings --status, then gbrain doctor --only embedding_plane_disagreement --json.';
   let key = 'the provider API key';
   try { key = resolveRecipe(kept.model.includes(':') ? kept.model : `openai:${kept.model}`).recipe.auth_env?.required?.[0] ?? key; } catch { /* unknown provider: generic wording */ }
   return `  Embedding: kept this database's ${kept.model} (${kept.dimensions}d) instead of disabling embeddings; no provider key was found. Set ${key}, then run gbrain embed --stale to embed pages written meanwhile.`;

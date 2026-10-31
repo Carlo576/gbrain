@@ -1217,7 +1217,7 @@ export async function initPGLite(opts: {
       database_path: dbPath,
       ...(opts.apiKey ? { openai_api_key: opts.apiKey } : {}),
       ...(opts.aiOpts?.noEmbedding
-        ? kept ? (kept.model ? { embedding_model: kept.model, embedding_dimensions: kept.dimensions } : {}) : { embedding_disabled: true }
+        ? kept ? { embedding_model: kept.model, embedding_dimensions: kept.dimensions } : { embedding_disabled: true }
         : (resolvedModel && resolvedDim)
           ? { embedding_model: resolvedModel, embedding_dimensions: resolvedDim }
           : {}),
@@ -1562,7 +1562,7 @@ export async function initPostgresCore(opts: {
       database_path: undefined, // clear any stale PGLite path
       ...(opts.apiKey ? { openai_api_key: opts.apiKey } : {}),
       ...(opts.aiOpts?.noEmbedding
-        ? kept ? (kept.model ? { embedding_model: kept.model, embedding_dimensions: kept.dimensions } : {}) : { embedding_disabled: true }
+        ? kept ? { embedding_model: kept.model, embedding_dimensions: kept.dimensions } : { embedding_disabled: true }
         : (resolvedModel && resolvedDim)
           ? { embedding_model: resolvedModel, embedding_dimensions: resolvedDim }
           : {}),

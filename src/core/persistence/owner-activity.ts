@@ -39,12 +39,11 @@ export interface OwnerActivity {
 }
 
 export async function ownerActivity(engine: BrainEngine, worktreeIds: readonly string[], opts: { now?: number; signal?: AbortSignal } = {}): Promise<Map<string, OwnerActivity>> {
-  const now = opts.now ?? Date.now();
   const result = new Map<string, OwnerActivity>();
   const ids = [...new Set(worktreeIds)].filter(Boolean);
   if (!ids.length) return result;
-  const rows = await engine.executeRaw<{ worktree_id: string; owner_host_id: string; live: boolean; last_active: string | Date | null; oldest_open: string | Date | null }>(`
-    SELECT w.id::text AS worktree_id, w.owner_host_id::text AS owner_host_id,
+  const rows = await engine.executeRaw<{ worktree_id: string; owner_host_id: string; live: boolean; last_active: string | Date | null; oldest_open: string | Date | null; db_now: string | Date }>(`
+    SELECT now() AS db_now, w.id::text AS worktree_id, w.owner_host_id::text AS owner_host_id,
       EXISTS (SELECT 1 FROM persistence_consumers c WHERE c.host_id=w.owner_host_id
         AND c.renewed_at > now() - ($2::double precision * interval '1 millisecond')) AS live,
       GREATEST(w.heartbeat_at,
@@ -64,7 +63,7 @@ export async function ownerActivity(engine: BrainEngine, worktreeIds: readonly s
     const self = local === row.owner_host_id;
     const foreign = engine.kind === 'pglite' && local !== null && !self;
     const since = lastActive ?? (row.oldest_open === null ? null : new Date(row.oldest_open).toISOString());
-    const quiet = since !== null && now - Date.parse(since) > OWNER_STALE_MS;
+    const quiet = since !== null && (opts.now ?? new Date(row.db_now).getTime()) - Date.parse(since) > OWNER_STALE_MS;
     result.set(row.worktree_id, { worktree_id: row.worktree_id, owner_host_id: row.owner_host_id, live: !!row.live,
       last_active: lastActive, foreign_file_holder: foreign, stale: !self && !row.live && (foreign || quiet) });
   }
@@ -76,18 +75,21 @@ export const OWNER_READ_BUDGET_MS = 500;
 
 /**
  * Starts the owner read now and returns `settle(ms)`, which waits at most that
- * much longer for it. A read still running then is cancelled (Postgres) and adds
- * no owner facts, as does a failed one, so callers fold it into a budget they
- * already have instead of adding one.
+ * much longer for it. The read is cancelled (Postgres) OWNER_READ_BUDGET_MS
+ * after it starts, or when a settle gives up first, and then, like a failed
+ * read, settles to null (no answer), so callers fold it into a budget they
+ * already have instead of adding one and no read outlives that budget.
  */
-export function startOwnerRead(engine: BrainEngine, worktreeIds: readonly string[]): (budgetMs: number) => Promise<Map<string, OwnerActivity>> {
+export function startOwnerRead(engine: BrainEngine, worktreeIds: readonly string[]): (budgetMs: number) => Promise<Map<string, OwnerActivity> | null> {
   const abort = new AbortController();
-  const read = worktreeIds.length ? ownerActivity(engine, worktreeIds, { signal: abort.signal }).catch(() => null) : Promise.resolve(null);
+  const expiry = setTimeout(() => abort.abort(), OWNER_READ_BUDGET_MS);
+  const read = (worktreeIds.length ? ownerActivity(engine, worktreeIds, { signal: abort.signal }).catch(() => null) : Promise.resolve(null))
+    .finally(() => clearTimeout(expiry));
   return async budgetMs => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const owners = await Promise.race([read, new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), Math.max(0, budgetMs)); })])
       .finally(() => { if (timer) clearTimeout(timer); });
     if (!owners) abort.abort();
-    return owners ?? new Map();
+    return owners;
   };
 }

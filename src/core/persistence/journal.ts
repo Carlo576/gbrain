@@ -1254,7 +1254,7 @@ export async function writeHealthFacts(engine: BrainEngine, rows: WriteRequest[]
   const facts = await Promise.race([query, new Promise<null>(resolve => {
     timer = setTimeout(() => { abort.abort(); resolve(null); }, OWNER_READ_BUDGET_MS);
   })]).finally(() => { if (timer) clearTimeout(timer); });
-  const owners = await settleOwners(facts ? OWNER_READ_BUDGET_MS - (performance.now() - ownerReadStarted) : 0);
+  const owners = await settleOwners(facts ? OWNER_READ_BUDGET_MS - (performance.now() - ownerReadStarted) : 0) ?? new Map();
   if (!facts) return result;
   const byRoot = new Map(facts.map(fact => [fact.root, fact]));
   for (const row of pending) {
