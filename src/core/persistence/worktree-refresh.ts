@@ -20,7 +20,7 @@
  * so status can say who holds it, and a row whose lock is free is orphaned: the
  * next plain refresh finishes it through the `--resume` path before refreshing.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
@@ -274,18 +274,33 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
   const remote = (await read(['config', '--get', `branch.${branch}.remote`], 1)).stdout.trim();
   const merge = (await read(['config', '--get', `branch.${branch}.merge`], 1)).stdout.trim();
   const heldUpstream = new Set<string>();
+  let upstreamRecorded = false;
   if (publishDiverged) {
+    const isSha = (sha: string) => /^[0-9a-f]{40,64}$/.test(sha) && !/^0+$/.test(sha);
     const upstreamFull = (await read(['rev-parse', '--symbolic-full-name', '@{upstream}'])).stdout.trim();
+    const logged = (await read(['log', '-g', '-n', '1000', '--format=%H', upstreamFull, '--'], 128)).stdout.split('\n').map(sha => sha.trim());
     let reflog = '';
-    try { reflog = readFileSync((await read(['rev-parse', '--path-format=absolute', '--git-path', `logs/${upstreamFull}`])).stdout.trim(), 'utf8'); } catch { /* no reflog */ }
+    try {
+      const fd = openSync((await read(['rev-parse', '--path-format=absolute', '--git-path', `logs/${upstreamFull}`])).stdout.trim(), 'r');
+      try {
+        const size = fstatSync(fd).size;
+        const first = Buffer.alloc(Math.min(size, 512));
+        const tail = Buffer.alloc(Math.min(size, 262_144));
+        readSync(fd, first, 0, first.length, 0);
+        readSync(fd, tail, 0, tail.length, size - tail.length);
+        reflog = `${first.toString('utf8').split('\n')[0]}\n${tail.toString('utf8')}`;
+      } finally { closeSync(fd); }
+    } catch { /* no reflog file: a reftable repository, or no reflog */ }
+    const columns = reflog.split('\n').flatMap(line => line.split(' ').slice(0, 2));
     const rows = await engine.executeRaw<{ target_head: string }>(`SELECT target_head FROM persistence_worktree_refreshes WHERE worktree_id=$1::uuid AND upstream_ref=$2 AND state='completed' ORDER BY created_at DESC LIMIT 100`, [binding.worktree_id, upstreamRef]);
-    for (const sha of [(await read(['rev-parse', '--verify', '-q', '@{upstream}^{commit}'], 1)).stdout.trim(),
-      ...reflog.split('\n').slice(-1000).flatMap(line => line.split(' ').slice(0, 2)), ...rows.map(r => r.target_head)]) {
-      if (/^[0-9a-f]{40,64}$/.test(sha) && !/^0+$/.test(sha)) heldUpstream.add(sha);
-    }
+    const recorded = [...logged, ...columns, ...rows.map(r => r.target_head)].filter(isSha);
+    const preFetch = (await read(['rev-parse', '--verify', '-q', '@{upstream}^{commit}'], 1)).stdout.trim();
+    const unlogged = ['false', 'no', 'off', '0'].includes((await read(['config', '--get', 'core.logAllRefUpdates'], 1)).stdout.trim().toLowerCase());
+    upstreamRecorded = recorded.length > 0 || (isSha(preFetch) && !unlogged);
+    for (const sha of [preFetch, ...recorded]) if (isSha(sha)) heldUpstream.add(sha);
   }
   if (remote && remote !== '.') {
-    const fetched = await git(['-C', root, 'fetch', '--no-tags', '--quiet', remote, merge || branch], fetchTimeoutMs);
+    const fetched = await git(['-C', root, ...(publishDiverged ? ['-c', 'core.logAllRefUpdates=true'] : []), 'fetch', '--no-tags', '--quiet', remote, merge || branch], fetchTimeoutMs);
     if (fetched.code !== 0) throw refusal('fetch_failed',
       fetched.timedOut ? `git fetch ${remote} did not finish within ${fetchTimeoutMs} ms; nothing changed.`
         : `git fetch ${remote} failed (${fetched.stderr.trim().split('\n')[0] || `exit ${fetched.code}`}); nothing changed.`,
@@ -297,10 +312,12 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
     `git -C ${q(root)} fetch ${remote || 'origin'}, then gbrain sources refresh ${sourceId}`);
   if (oldHead !== targetHead && !await isAncestor(git, root, oldHead, targetHead)) {
     if (!publishDiverged) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead);
-    const removed = (await read(['rev-list', `${targetHead}..${oldHead}`])).stdout.split('\n').map(sha => sha.trim()).find(sha => heldUpstream.has(sha));
-    if (!heldUpstream.size || removed) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead, removed
+    const tips = [...heldUpstream].filter(sha => sha !== targetHead);
+    const held = new Set(tips.length ? (await read(['rev-list', '--ignore-missing', `^${targetHead}`, ...tips])).stdout.split('\n').map(sha => sha.trim()) : []);
+    const removed = (await read(['rev-list', `${targetHead}..${oldHead}`])).stdout.split('\n').map(sha => sha.trim()).find(sha => sha && held.has(sha));
+    if (!upstreamRecorded || removed) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead, removed
       ? `${upstreamRef} no longer contains ${removed}, which it held before: its history was rewritten (a force-push), and publishing would merge back the commits the rewrite removed.`
-      : `gbrain has no record of what ${upstreamRef} held before this fetch, so it cannot tell a force-push from local commits.`);
+      : `gbrain has no record of what ${upstreamRef} held before this fetch (no reflog entry and no completed refresh), so it cannot tell a force-push from local commits.`);
     const base = (await read(['merge-base', oldHead, targetHead], 1)).stdout.trim() || oldHead;
     const incoming = await dirtyOverlap(git, root, base, targetHead);
     if (incoming.overlap.length) throw dirtyRefusal(sourceId, incoming.overlap);

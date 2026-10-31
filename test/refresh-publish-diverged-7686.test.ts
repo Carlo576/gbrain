@@ -229,3 +229,43 @@ for (const [label, forget] of [['', false], [' even when the first fetch to see 
     expect((await f.refreshRows()).filter(r => r.state !== 'completed')).toEqual([]);
   }), 120_000);
 }
+
+test('setting on, reflog off and no completed refresh: the refusal\'s own fetch records the rewrite, so a second refresh refuses too, and with no record at all it refuses', () => each(async f => {
+  const reflog = git(f.root, 'rev-parse', '--path-format=absolute', '--git-path', 'logs/refs/remotes/origin/main').trim();
+  git(f.root, 'config', 'core.logAllRefUpdates', 'false');
+  rmSync(reflog, { force: true });
+  f.push('alpha/purged.md', page('Purged', 'A page the upstream later removed by rewriting history.'));
+  git(f.root, 'fetch', '-q', 'origin'); git(f.root, 'merge', '-q', '--ff-only', 'origin/main');
+  const purged = f.head();
+  git(f.upstream, 'reset', '-q', '--hard', 'HEAD~1');
+  commitFile(f.upstream, 'alpha/two.md', page('Alpha two', 'Rewritten upstream.'));
+  git(f.upstream, 'push', '-q', '--force', 'origin', 'main');
+  const rewritten = remoteHead(f);
+  writeFileSync(join(f.root, 'beta/local.md'), page('Local', 'A local commit nobody pushed.'));
+  git(f.root, 'add', 'beta/local.md'); git(f.root, 'commit', '-qm', 'local only');
+  await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+  for (let run = 0; run < 2; run++) expect((await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_diverged')).message).toContain(`no longer contains ${purged}`);
+  rmSync(reflog, { force: true });
+  expect((await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_diverged')).message).toContain('no record of what');
+  expect(remoteHead(f)).toBe(rewritten);
+}), 120_000);
+
+test('setting on: a local commit the upstream held inside a merge, then dropped by a force-push, is never published', () => each(async f => {
+  const before = remoteHead(f);
+  writeFileSync(join(f.root, 'beta/local.md'), page('Local', 'Merged upstream from this checkout, then rewritten away.'));
+  git(f.root, 'add', 'beta/local.md'); git(f.root, 'commit', '-qm', 'local merged upstream');
+  const local = f.head();
+  git(f.upstream, 'fetch', '-q', f.root, 'HEAD');
+  commitFile(f.upstream, 'alpha/side.md', page('Side', 'An upstream commit beside the merge.'));
+  git(f.upstream, 'merge', '-q', '--no-edit', 'FETCH_HEAD');
+  git(f.upstream, 'push', '-q', 'origin', 'main');
+  git(f.root, 'fetch', '-q', 'origin');
+  git(f.upstream, 'reset', '-q', '--hard', before);
+  commitFile(f.upstream, 'alpha/two.md', page('Alpha two', 'Rewritten upstream.'));
+  git(f.upstream, 'push', '-q', '--force', 'origin', 'main');
+  const rewritten = remoteHead(f);
+  await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+  expect((await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_diverged')).message).toContain(`no longer contains ${local}`);
+  expect(remoteHead(f)).toBe(rewritten);
+  expect(f.head()).toBe(local);
+}), 120_000);
