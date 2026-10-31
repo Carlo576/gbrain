@@ -9,7 +9,7 @@ fixes those and the other kinds listed in
 [What each kind fixes](#what-each-kind-fixes). Every run is a preview unless
 you pass `--apply`.
 The explicit-only kinds, among them `google-file-modes`, `stale-atoms`, `atoms-restore`, `extractor-facts`,
-`captured-facts`, `redacted-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `content-receipt-root`, `stuck-recovery`, `aliases`, `rename-identity` and `segmented-mirror`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
+`captured-facts`, `agent-session-facts`, `redacted-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `content-receipt-root`, `stuck-recovery`, `aliases`, `rename-identity` and `segmented-mirror`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
 `gbrain doctor --remediation-plan` lists the same kinds as repair steps, and
 `gbrain doctor --remediate --yes --include-repairs --expect <plan_hash>` runs them under a budget
 (see [Run repairs through doctor](#run-repairs-through-doctor)).
@@ -126,7 +126,7 @@ gives each a fresh row number); it never deletes or rewrites a page.
 | `--no-embed` | `safe-chunks` and `contextual-mode`: skip the embedding provider. Run `gbrain embed --stale` later. `timeline` and `visibility` pages are re-embedded by their publication either way. |
 | `--all` | Run every automatic kind in order. Explicit-only kinds are listed with their preview command, never run. |
 | `--expect <hash>` | Explicit-only kinds: apply exactly the set the preview printed under this hash. Required with `--apply` for `stale-atoms`, `atoms-restore`, `extractor-facts`, `captured-facts`, `redacted-facts`, `loop-facts`, `failed-writes`, `frontmatter`, `managed-sync-orphans` and `content-receipt-root`. |
-| `--include-ambiguous` | `extractor-facts` and `captured-facts`: widen the hashed set to `ambiguous` facts. `frontmatter`: add interpretive file changes. Pass it to both the preview and the apply. See [Extractor facts](#extractor-facts), [Captured facts](#captured-facts) and [Frontmatter](#frontmatter). |
+| `--include-ambiguous` | `extractor-facts`, `captured-facts` and `agent-session-facts`: widen the hashed set to `ambiguous` facts. `frontmatter`: add interpretive file changes. Pass it to both the preview and the apply. See [Extractor facts](#extractor-facts), [Captured facts](#captured-facts) and [Frontmatter](#frontmatter). |
 | `--only <path>`, `--skip <path>` | `frontmatter` only: select source-relative files (repeatable). The hash covers the selection, so pass the same flags to the apply. |
 | `--diff` | `frontmatter` only: print every per-file diff instead of one sample per class (`--json` always carries all of them). |
 | `--yes` | `frontmatter --apply` only: the user agreed to the previewed file changes (destructive consent). Without it a terminal asks, and a run without a terminal exits 3 with the consent payload. |
@@ -2003,6 +2003,56 @@ cannot reactivate it; a fact with no fence row expires database-only (one
 maintenance request per page on a managed brain). Nothing is withdrawn, so
 `gbrain remember` can save the same claim again.
 
+<a id="agent-session-facts"></a>
+### Agent-session facts
+
+An orchestrator that launches headless worker sessions on your account (for
+example `claude -p` workers) renders each worker's first message from a
+template brief. Before #8064 the capture hooks banked those sessions as yours,
+so the briefs were saved as your own preferences, beliefs and commitments, and
+consolidate could promote them into takes held by you. New captures from such
+sessions now carry a speaker sidecar and are attributed to the agent.
+`gbrain repair agent-session-facts` fixes the facts already stored. It is
+explicit-only, preview-bound and destructive, and it runs on the brain host (it
+reads the session corpus there). It never deletes anything.
+
+**Say to your agent:** *"Doctor says some facts came from agent-launched
+sessions. Show me which ones and which takes would be retired before changing
+anything."* The agent runs `gbrain repair agent-session-facts`, shows you the
+list and, after you agree, runs the printed apply command.
+
+```bash
+gbrain doctor                                   # agent_session_facts
+gbrain repair agent-session-facts               # preview: every candidate with its class, and the takes to retire
+gbrain repair agent-session-facts --cwd /srv/agent-workers --session <session-id> --principal worker-a
+gbrain repair agent-session-facts --apply --expect <hash> --yes
+gbrain doctor
+```
+
+| Class | Meaning | Re-attributed |
+| --- | --- | --- |
+| `evidenced` | The fact's session has a speaker sidecar (`<session>.speaker.json` in the corpus directory, its `sourced/` spool or beside the session's corpus files), you named it with `--session <id>`, or its `<session>.source.json` records a working directory under a `--cwd <prefix>` you passed (compared on whole path segments after resolving symlinks). | By `--apply --expect <hash> --yes` |
+| `ambiguous` | The session's first message (spaces collapsed, lowercased, at least 40 characters) matches the first 160 characters of the first message of at least 3 other sessions: a template brief. A heuristic, so it is listed in every preview but applied only on request. | Only with `--include-ambiguous` and that preview's hash |
+| `excluded:owner_also_said` | The same claim and entity also has an active fact attributed to you from a session that is not suspect, so you said it too. | Never |
+
+Only active capture-lane facts (`hook:writeback`, `hook:compact`,
+`sweep:corpus`) attributed to you or to nobody are candidates. Facts of a
+session with no retained corpus file, sidecar or source record are counted as
+`unclassifiable` and kept. `--cwd` and `--session` are repeatable; pass the
+same flags to the apply (the printed apply command carries them).
+
+The apply sets `attributed_to` to `other` and appends
+`speaker: agent <label>, not the owner` to the fact's context. The label is the
+sidecar's, else `--principal <label>`, else `agent-launched`. A fact with a row
+in its page's `## Facts` fence is rewritten in the page (one revision-bound
+`put_page` per page); a fact with no fence row is rewritten database-only (one
+maintenance request per page on a managed brain, one transaction otherwise).
+Then each take of kind `fact` held by you that is still active and unresolved,
+and whose every contributing fact is no longer yours, is retired: struck in its
+page's takes fence when the page holds it, otherwise made inactive in the
+database. The preview lists those as `take_to_retire`. A fact or take that
+changed since the preview reports `changed_since_preview` and is kept.
+
 <a id="redacted-facts"></a>
 ### Redacted facts
 
@@ -3569,6 +3619,7 @@ walk me through it before changing anything."*
 | Working-tree sync prints `legacy file(s) skipped … not valid UTF-8` | `find <checkout> -name '*.md' ! -exec iconv -f UTF-8 -t UTF-8 -o /dev/null {} \; -print` | re-save each listed file as UTF-8 | the next `gbrain sync --working-tree` no longer prints the line | user (re-saves the files) | none |
 | Doctor `google_file_modes` warns, or the upgrade printed `[google] Google source <id> keeps its files in <dir>, outside ~/.gbrain` | `gbrain repair google-file-modes --source <id>` | `gbrain repair google-file-modes --source <id> --apply` | `gbrain doctor --only google_file_modes --json` (`google_file_modes` ok) | brain host, after the user agrees | none |
 | Recall or hot memory returns facts from gbrain's own claude-cli sessions or from pasted text; doctor `captured_facts_active` warns; the upgrade banner prints `captured_facts_active: N (explicit_kind_required; …)` | `gbrain repair captured-facts` (add `--include-ambiguous` to include paste candidates) | `gbrain repair captured-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only captured_facts_active --json` (`captured_facts_active` ok) | brain host, after the user agrees | `destructive` (quarantines facts) |
+| Recall, hot memory or takes treat an orchestrator's worker briefs as your own preferences or commitments; doctor `agent_session_facts` warns | `gbrain repair agent-session-facts` (add `--cwd <prefix>` or `--session <id>` for sessions you know an orchestrator launched, `--include-ambiguous` for repeated openings) | `gbrain repair agent-session-facts --apply --expect <hash> --yes` with the hash that preview printed | `gbrain doctor --only agent_session_facts --json` (`agent_session_facts` ok) | brain host, after the user agrees | `destructive` (re-attributes facts, retires takes) |
 | A stored fact reads `[redacted](…)` where a word such as "System" belongs; doctor `facts_redaction_marker` warns; `trust scan` flags the marker | `gbrain repair redacted-facts` | `gbrain repair redacted-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only facts_redaction_marker --json` (ok, or only facts the preview listed as `ambiguous` or `unproven`) | brain host, after the user agrees | none |
 | Timelines put hundreds of facts on one day; doctor `fact_bulk_dates` warns that a day holds a bulk-loaded share of a source's facts | `gbrain repair fact-claim-dates --source <id>` | `gbrain repair fact-claim-dates --source <id> --apply --expect <hash> --yes` with the hash that preview printed | `gbrain repair fact-claim-dates --source <id>` lists nothing to move (doctor keeps warning while facts without a date in the claim keep the load day) | brain host, after the user agrees | none |
 | Doctor `provenance_stamp_drift` warns that pages lost their provenance stamps or trust marker, or would re-read above their stored tier | `gbrain repair provenance --source <id>` | `gbrain repair provenance --source <id> --apply --expect <hash> --yes` with the hash that preview printed | `gbrain doctor --only provenance_stamp_drift` is ok | brain host, after the user agrees | destructive |
@@ -3825,7 +3876,7 @@ Each heading below is the `docs` anchor a refusal carries.
 
 ### Explicit-only repair kinds
 
-`google-file-modes`, `stale-atoms`, `extractor-facts`, `captured-facts`,
+`google-file-modes`, `stale-atoms`, `extractor-facts`, `captured-facts`, `agent-session-facts`,
 `loop-facts`, `ontology-facts`, `file-drift`, `missing-tables`, `segmented-mirror` and `secret-spans` run only when named: `gbrain repair <kind>` previews, and
 `gbrain repair <kind> --apply` applies (every kind but `google-file-modes`
 also needs `--expect <hash>`, so it applies exactly the previewed set; `google-file-modes` re-checks each file's owner,
@@ -3856,7 +3907,7 @@ saved preview is older than 7 days, or the selection no longer matches it (for
 hash." Re-run the printed preview command and apply with the new hash. It
 applies to `gbrain jobs authorize-legacy --select`, `gbrain jobs cancel
 --select`, `gbrain repair stale-atoms`, `gbrain repair extractor-facts`,
-`gbrain repair captured-facts` and `gbrain repair loop-facts`.
+`gbrain repair captured-facts`, `gbrain repair agent-session-facts` and `gbrain repair loop-facts`.
 
 ### Recovery bundle unsupported
 
