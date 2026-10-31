@@ -5,7 +5,9 @@
 // VMs never reach `running`, so every `up` stays mid-provision until killed,
 // unless `running` is set: then a created VM shows as running at 192.0.2.1
 // (pair it with a fake `ssh` on PATH). `faults` makes `destroy` or `list`
-// answer HTTP 500 / 503 from the next request on.
+// answer HTTP 500 / 503 from the next request on; `destroyFaults` answers the
+// next destroy requests one by one with a status, or holds one past the
+// client's timeout without acting on it ("hang").
 
 export interface MockVm {
   location: string;
@@ -23,6 +25,8 @@ export interface MockUbicloudOptions {
   rejectCreates?: boolean;
   /** Created VMs show as running at 192.0.2.1. */
   running?: boolean;
+  /** Answers for the next destroy requests, in order: an HTTP status, or "hang" (3 s, then a 504 nobody reads). */
+  destroyFaults?: Array<number | "hang">;
   seed?: Array<{ location?: string; name: string; size?: string }>;
 }
 
@@ -74,6 +78,12 @@ export function startMockUbicloud(opts: MockUbicloudOptions = {}): MockUbicloud 
         return text(`id: vm-${name}\nname: ${name}\nstate: ${vm.state}\nlocation: ${vm.location}\nsize: ${vm.size}\n${vm.state === "running" ? "ip4: 192.0.2.1\n" : ""}`);
       }
       if (verb === "destroy") {
+        const fault = opts.destroyFaults?.shift();
+        if (fault === "hang") {
+          await Bun.sleep(3000);
+          return text("! Unexpected response status: 504", 504);
+        }
+        if (fault !== undefined) return text(`! Unexpected response status: ${fault}`, fault);
         if (faults.destroy) return text("! Unexpected response status: 500", 500);
         if (vm && vm.state !== "destroying") {
           vm.state = "destroying";
