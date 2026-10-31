@@ -7,11 +7,13 @@
  * on pushes HEAD merged with the upstream in memory (the keep-checkout publish,
  * which never moves the checkout), then fast-forwards, keeping the local commits;
  * with the setting off it refuses `refresh_diverged` as before; a conflicting path
- * refuses `integrate_conflict` naming the path and changes nothing; a dry run never
- * publishes.
+ * refuses `integrate_conflict` naming the path and changes nothing; an uncommitted
+ * edit on an incoming path refuses `refresh_dirty` before anything is pushed; a dry
+ * run never publishes.
  * Regression it catches: a refresh that pushes local commits without the
  * setting, one that moves the checkout or drops the local commits while
- * publishing, and one that pushes or fences anything when the merge conflicts.
+ * publishing, and one that pushes or fences anything when the merge conflicts or
+ * the refresh is about to refuse a dirty overlap.
  * Seams: none; a real bare remote, a pushing clone and the managed checkout.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
@@ -130,6 +132,19 @@ test('setting on: a conflicting path refuses integrate_conflict naming it, and n
   expect(git(f.root, 'status', '--porcelain', '--untracked-files=no')).toBe('');
   expect(await f.refreshRows()).toEqual([]);
   expect(await f.lastCommit(f.alpha)).toBe(lastAlpha);
+}), 120_000);
+
+test('setting on: an uncommitted edit on an incoming path refuses refresh_dirty before publishing, so nothing is pushed, fenced or moved', () => each(async f => {
+  const local = diverge(f);
+  const remote = remoteHead(f);
+  writeFileSync(join(f.root, 'alpha/two.md'), page('Alpha two', 'An uncommitted local edit.'));
+  await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+  const error = await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_dirty');
+  expect(error.message).toContain('alpha/two.md');
+  expect(remoteHead(f)).toBe(remote);
+  expect(f.head()).toBe(local);
+  expect(readFileSync(join(f.root, 'alpha/two.md'), 'utf8')).toContain('An uncommitted local edit.');
+  expect(await f.refreshRows()).toEqual([]);
 }), 120_000);
 
 test('setting on: a dry run publishes nothing and still refuses refresh_diverged', () => each(async f => {

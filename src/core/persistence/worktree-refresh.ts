@@ -283,6 +283,9 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
     `git -C ${q(root)} fetch ${remote || 'origin'}, then gbrain sources refresh ${sourceId}`);
   if (oldHead !== targetHead && !await isAncestor(git, root, oldHead, targetHead)) {
     if (!publishDiverged) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead);
+    const base = (await read(['merge-base', oldHead, targetHead], 1)).stdout.trim() || oldHead;
+    const incoming = await dirtyOverlap(git, root, base, targetHead);
+    if (incoming.overlap.length) throw dirtyRefusal(sourceId, incoming.overlap);
     const localCommits = Number((await read(['rev-list', '--count', `${targetHead}..${oldHead}`])).stdout.trim()) || 0;
     const pushed = commitAndPush({ repo: root, pushOnly: true, keepCheckout: true });
     const plan = await precheck(engine, git, sourceId, fetchTimeoutMs);
