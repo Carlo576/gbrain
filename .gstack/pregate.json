@@ -135,8 +135,8 @@
       "paths": [
         ".github/workflows/*.yml"
       ],
-      "pattern": "pglite-snapshot-(?:default-)?\\$\\{\\{ runner\\.os \\}\\}-\\$\\{\\{ hashFiles\\('[\\w-]*[./*][\\w./*-]*'(?:, '[\\w-]*[./*][\\w./*-]*')*\\) \\}\\}$",
-      "reason": "GitHub Actions cache keys: the whole value is pglite-snapshot-[default-]${{ runner.os }}-${{ hashFiles('<path globs>') }} where every argument holds a '.', '/' or '*', never a credential"
+      "pattern": "pglite-snapshot-(?:default-)?\\$\\{\\{ runner\\.os \\}\\}-\\$\\{\\{ hashFiles\\('(?:src|test|scripts)(?:/(?:\\*\\*|[a-z*][a-z*_-]*(?:\\.[a-z]+)?))+'(?:, '(?:src|test|scripts)(?:/(?:\\*\\*|[a-z*][a-z*_-]*(?:\\.[a-z]+)?))+')*\\) \\}\\}$",
+      "reason": "GitHub Actions PGLite snapshot cache keys: the whole value is pglite-snapshot-[default-]${{ runner.os }}-${{ hashFiles(<args>) }} and every argument is a lowercase path or glob under src/, test/ or scripts/; an argument with digits, capitals or a ./ prefix is not covered and stays flagged"
     }
   ]
 }

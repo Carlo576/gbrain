@@ -44,6 +44,9 @@ describe('pregate allowlist: workflow cache keys', () => {
       pat,
       "pglite-snapshot-${{ runner.os }}-${{ hashFiles('" + pat + "') }}",
       "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/*.ts', '" + pat + "') }}",
+      "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/*.ts', './" + hex + "') }}",
+      "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/*.ts', 'src/" + hex + ".ts') }}",
+      "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/*.ts', 'src/Zx9Qw8Lk2Mn4Bv6Cx1Za3Sd5Fg7Hj9Kl0Pq2Wr4.ts') }}",
     ]) expect({ value, covered: covers(value) }).toEqual({ value, covered: false });
   });
 });
