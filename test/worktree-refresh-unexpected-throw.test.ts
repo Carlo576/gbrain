@@ -114,15 +114,29 @@ test('an unexpected throw under --dry-run repeats --dry-run in its fix, never a 
   expect(failure.suggestion).toContain('Run gbrain sources refresh source-a --dry-run again');
 });
 
-test('a refresh-row lookup that never answers still yields the refusal, saying the row could not be read', async () => {
+test('a refresh-row lookup that never answers still yields the refusal, and the stalled read is bounded and cancelled', async () => {
   const statement = Object.assign(new Error('canceling statement due to user request'), { code: '57014' });
-  let lookups = 0;
-  const fake = { kind: 'postgres', getConfig: async () => { throw statement; }, executeRaw: () => { lookups++; return new Promise(() => {}); } } as unknown as BrainEngine;
+  const reads: Array<{ signal?: AbortSignal; timeoutMs?: number }> = [];
+  const fake = { kind: 'postgres', getConfig: async () => { throw statement; },
+    executeRaw: (_sql: string, _params?: unknown[], opts?: { signal?: AbortSignal; timeoutMs?: number }) => { reads.push(opts ?? {}); return new Promise(() => {}); } } as unknown as BrainEngine;
   const failure = await withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a').then(() => null, error => error));
-  expect(lookups).toBeGreaterThan(0);
+  expect(reads.length).toBeGreaterThan(0);
   expect(failure.code).toBe('internal_error');
   expect(failure.suggestion).toContain('The refresh row could not be read');
+  expect(reads[0]!.timeoutMs).toBe(3_000);
+  expect(reads[0]!.signal?.aborted).toBe(true);
 }, 15_000);
+
+test('a deadlock or serialization failure is a retryable internal_error; an ordinary statement error is not marked retryable', async () => {
+  const refuse = async (code: string) => {
+    const thrown = Object.assign(new Error('deadlock detected'), { code });
+    const fake = { kind: 'postgres', getConfig: async () => { throw thrown; }, executeRaw: async () => { throw thrown; } } as unknown as BrainEngine;
+    return withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a').then(() => null, error => error));
+  };
+  expect((await refuse('40P01')).retryable).toBe(true);
+  expect((await refuse('40001')).retryable).toBe(true);
+  expect((await refuse('42883')).retryable).toBeUndefined();
+});
 
 test('home-directory redaction leaves a sibling path that only shares the home prefix intact', async () => {
   const statement = Object.assign(new Error('canceling statement due to user request'), { code: '57014' });
@@ -229,6 +243,25 @@ test.skipIf(!process.env.DATABASE_URL)('the lock-timeout why names only row-lock
   expect(failure!.why).toContain('the one blocking the fence may not be listed');
   expect(failure!.why).not.toContain('is among them');
 }), 120_000);
+
+test.skipIf(!process.env.DATABASE_URL)('a lock-holder lookup that never answers still refuses refresh_lock_timeout, and the stalled read is cancelled', () => withRefreshFixture(engine, async f => {
+  f.push('alpha/two.md', page('Alpha two', 'Upstream side.'));
+  const held = await holdSourceRow(f.alpha);
+  const target = f.engine as unknown as { executeRaw: (this: unknown, sql: string, params?: unknown[], opts?: { signal?: AbortSignal }) => Promise<unknown> };
+  const original = target.executeRaw;
+  let stalled: AbortSignal | undefined;
+  target.executeRaw = function (sql, params, opts) {
+    if (!sql.includes('a.xact_start IS NOT NULL')) return original.call(this, sql, params, opts);
+    stalled = opts?.signal;
+    return new Promise((_, reject) => opts?.signal?.addEventListener('abort', () => reject(opts.signal!.reason), { once: true }));
+  };
+  let failure: OperationError | null;
+  try { failure = await refreshWorktree(f.engine, f.alpha).then(() => null, error => error); }
+  finally { target.executeRaw = original; await held.release(); }
+  expect(failure!.code).toBe('refresh_lock_timeout');
+  expect(failure!.why).toBe('The lookup of open transactions holding those rows failed or took longer than 3 s.');
+  expect(stalled?.aborted).toBe(true);
+}), 60_000);
 
 test.skipIf(!process.env.DATABASE_URL)('a lock timeout after the drain whose holder also holds the refresh row still refuses, leaving the row draining for the next run', () => withRefreshFixture(engine, async f => {
   const before = f.head();

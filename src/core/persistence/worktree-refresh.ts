@@ -498,7 +498,26 @@ const redact = (text: string) => {
   const ownHome = new RegExp(`${escaped}(?![\\w.-])`, 'g');
   return redactConnectionInfo(redactUrlsInText(home.length > 1 ? text.replace(ownHome, '~') : text));
 };
-const FAILURE_LOOKUP_MS = 3_000;
+const LOOKUP_MS = 3_000;
+/**
+ * A best-effort diagnostic read on a refusal path, bounded at LOOKUP_MS: each raw statement runs under a transaction-local
+ * statement_timeout and a signal that cancels it at the bound, so neither the refusal nor a pooled connection waits on it.
+ * A read still pending at the bound resolves null.
+ */
+async function boundedLookup<T>(engine: BrainEngine, read: (engine: BrainEngine) => Promise<T>): Promise<T | null> {
+  const controller = new AbortController();
+  const deadlineAt = Date.now() + LOOKUP_MS;
+  const bounded = new Proxy(engine, { get(target, key) {
+    if (key === 'executeRaw') return (sql: string, params?: unknown[], opts?: object) =>
+      target.executeRaw(sql, params, { ...opts, signal: controller.signal, timeoutMs: LOOKUP_MS, deadlineAt });
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<null>(resolve => { timer = setTimeout(() => { controller.abort(); resolve(null); }, LOOKUP_MS); });
+  return Promise.race([Promise.resolve().then(() => read(bounded)), timedOut]).catch(() => null).finally(() => clearTimeout(timer));
+}
+const TRANSIENT_SQLSTATES = new Set(['40P01', '40001', '57014']);
 
 /**
  * GBRA-250: an untyped throw (a statement error, a TypeError) leaves the refresh where it stood, so a fenced or syncing row
@@ -508,21 +527,19 @@ const FAILURE_LOOKUP_MS = 3_000;
  */
 async function unexpectedRefreshFailure(engine: BrainEngine, sourceId: string, opts: RefreshOptions, error: unknown): Promise<OperationError> {
   const thrown = error instanceof Error ? error : new Error(String(error));
-  const errorCode = typeof (error as { code?: unknown } | null)?.code === 'string' ? ` (${(error as { code: string }).code})` : '';
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const lookup = await Promise.race([
-    Promise.resolve().then(async () => {
-      const binding = await getWorktreeBinding(engine, sourceId, existingLocalHostId());
-      return { active: binding ? await readActiveRefresh(engine, binding.worktree_id) : null };
-    }),
-    new Promise<null>(resolve => { timer = setTimeout(resolve, FAILURE_LOOKUP_MS, null); }),
-  ]).catch(() => null).finally(() => clearTimeout(timer));
+  const code = typeof (error as { code?: unknown } | null)?.code === 'string' ? (error as { code: string }).code : null;
+  const lookup = await boundedLookup(engine, async reads => {
+    const binding = await getWorktreeBinding(reads, sourceId, existingLocalHostId());
+    return { active: binding ? await readActiveRefresh(reads, binding.worktree_id) : null };
+  });
   const command = `gbrain sources refresh ${sourceId}${opts.dryRun ? ' --dry-run' : ''}${opts.abandon ? ' --abandon' : opts.resume ? ' --resume' : ''}`;
   const left = !lookup ? 'The refresh row could not be read, so a fenced or syncing refresh may still be active.'
     : lookup.active ? `Refresh ${lookup.active.id} stays ${lookup.active.state}${opts.abandon ? '.' : `, and the next gbrain sources refresh ${sourceId} resumes it.`}` : 'No refresh row was left active.';
-  return opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${errorCode}: ${thrown.message}`),
+  const failure = opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${code ? ` (${code})` : ''}: ${thrown.message}`),
     `${left} Run ${command} again; if it fails the same way, report this output (why holds the stack) with gbrain doctor --json.`,
     { why: redact(thrown.stack ?? `${thrown.name}: ${thrown.message}`) });
+  if (code && TRANSIENT_SQLSTATES.has(code)) failure.retryable = true;
+  return failure;
 }
 
 async function runRefresh(engine: BrainEngine, sourceId: string, opts: RefreshOptions): Promise<WorktreeRefreshResult> {
@@ -623,17 +640,17 @@ const LOCK_NOT_AVAILABLE = '55P03';
  * which row each one holds), instead of an untyped internal_error.
  */
 async function lockTimeoutRefusal(engine: BrainEngine, sourceId: string, refreshId?: string): Promise<OperationError> {
-  const holders = engine.kind !== 'postgres' ? [] : await engine.executeRaw<{ pid: number; application_name: string; state: string | null; open_seconds: number }>(
+  const holders = engine.kind !== 'postgres' ? [] : await boundedLookup(engine, reads => reads.executeRaw<{ pid: number; application_name: string; state: string | null; open_seconds: number }>(
     `SELECT a.pid, a.application_name, a.state, extract(epoch FROM now() - a.xact_start)::int AS open_seconds
        FROM pg_stat_activity a
       WHERE a.pid <> pg_backend_pid() AND a.xact_start IS NOT NULL AND a.datname = current_database()
         AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.granted AND l.mode <> 'AccessShareLock'
           AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
           AND l.relation IN ('persistence_brain'::regclass, 'persistence_worktrees'::regclass, 'sources'::regclass, 'persistence_worktree_refreshes'::regclass))
-      ORDER BY a.xact_start LIMIT 5`).catch(() => null);
+      ORDER BY a.xact_start LIMIT 5`));
   const error = refusal('refresh_lock_timeout', `The refresh fence of source ${sourceId} waited past its 5 s lock timeout for a brain, worktree, source or refresh row another database transaction holds; nothing moved.`,
     `Retry gbrain sources refresh ${sourceId}. If it repeats, a transaction holding one of those rows is stuck: why lists the oldest candidates, which may not include it, so confirm the blocker on the brain host before ending any transaction.`, refreshId);
-  error.why = holders === null ? 'The lookup of open transactions holding those rows failed.'
+  error.why = holders === null ? 'The lookup of open transactions holding those rows failed or took longer than 3 s.'
     : holders.length ? redact(`The oldest open transactions holding locks on those tables, at most five; the one blocking the fence may not be listed: ${holders.map(h => `pid ${h.pid} (${h.application_name || 'no application name'}, ${h.state ?? 'unknown state'}, open ${h.open_seconds} s)`).join('; ')}`)
     : 'No open transaction holding a lock on those tables was visible to this database role.';
   return error;
