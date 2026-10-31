@@ -27,6 +27,7 @@ import { page, withRefreshFixture } from './helpers/worktree-refresh-fixture.ts'
 import { withEnv } from './helpers/with-env.ts';
 
 let engine: BrainEngine;
+const asRedacted = (frame: string) => frame.replace(new RegExp(`${homedir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.-])`, 'g'), '~');
 let close: (() => Promise<void>) | undefined;
 let databaseUrl = '';
 beforeAll(async () => {
@@ -47,7 +48,7 @@ test('an untyped throw after the merge is a typed refusal with its stack, and th
   expect(failure).toBeInstanceOf(OperationError);
   expect(failure.code).toBe('internal_error');
   expect(failure.message).toContain('TypeError: member bookkeeping exploded');
-  expect(failure.why).toContain(boom.stack!.split('\n')[1]!.trim());
+  expect(failure.why).toContain(asRedacted(boom.stack!.split('\n')[1]!.trim()));
   const [row] = await f.refreshRows();
   expect(row!.state).toBe('syncing');
   expect(failure.suggestion).toContain(`Refresh ${row!.id} stays syncing`);
@@ -73,7 +74,7 @@ test('sources refresh prints an untyped throw as a refused document carrying the
   expect(doc.status).toBe('refused');
   expect(doc.code).toBe('internal_error');
   expect(doc.cause).toContain('Error (57014): canceling statement due to user request');
-  expect(doc.why).toContain(statement.stack!.split('\n')[1]!.trim());
+  expect(doc.why).toContain(asRedacted(statement.stack!.split('\n')[1]!.trim()));
   expect(doc.fix).toContain('gbrain sources refresh source-a');
 });
 
