@@ -10,6 +10,7 @@
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import postgres from '#postgres';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -75,6 +76,28 @@ test('sources refresh prints an untyped throw as a refused document carrying the
   expect(doc.fix).toContain('gbrain sources refresh source-a');
 });
 
+test('a database access error the classifier recognizes is rethrown unchanged, keeping its own repair fix', async () => {
+  const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' });
+  const fake = { kind: 'postgres', getConfig: async () => { throw refused; }, executeRaw: async () => { throw refused; } } as unknown as BrainEngine;
+  const failure = await withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a').then(() => null, error => error));
+  expect(failure).toBe(refused);
+});
+
+test('an unexpected throw whose refresh row cannot be read says so, with credentials and the home directory redacted', async () => {
+  const dsn = ['postgres', '://example:prefix)', 'SYNTHETIC', '_SECRET_SUFFIX@db.invalid/brain'].join('');
+  const statement = Object.assign(new Error(`canceling statement due to user request near ${dsn}`), { code: '57014' });
+  statement.stack = `Error: canceling statement\n    at fence (${homedir()}/brain-checkout/src/x.ts:1:1)\n    at ${dsn}`;
+  const fake = { kind: 'postgres', getConfig: async () => { throw statement; }, executeRaw: async () => { throw statement; } } as unknown as BrainEngine;
+  const failure = await withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a').then(() => null, error => error));
+  expect(failure).toBeInstanceOf(OperationError);
+  expect(failure.code).toBe('internal_error');
+  expect(failure.suggestion).toContain('The refresh row could not be read');
+  expect(failure.message).not.toContain('SYNTHETIC_SECRET_SUFFIX');
+  expect(failure.why).not.toContain('SYNTHETIC_SECRET_SUFFIX');
+  expect(failure.why).not.toContain(homedir());
+  expect(failure.why).toContain('~/brain-checkout/src/x.ts');
+});
+
 test('a host identity file that cannot be read still yields a typed internal_error refusal', () => withRefreshFixture(engine, async f => {
   const hostFile = join(persistenceHome(), 'host.json');
   const original = readFileSync(hostFile, 'utf8');
@@ -85,7 +108,7 @@ test('a host identity file that cannot be read still yields a typed internal_err
   expect(failure).toBeInstanceOf(OperationError);
   expect((failure as OperationError).code).toBe('internal_error');
   expect((failure as OperationError).message).toContain('SyntaxError');
-  expect((failure as OperationError).suggestion).toContain('No refresh row was left active.');
+  expect((failure as OperationError).suggestion).toContain('The refresh row could not be read');
 }), 120_000);
 
 /**

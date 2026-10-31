@@ -21,7 +21,7 @@
  * next plain refresh finishes it through the `--resume` path before refreshing.
  */
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncResult } from '../../commands/sync.ts';
@@ -44,6 +44,7 @@ import { ACTIVE_REFRESH_STATES_SQL, CHECKOUT_EFFECT_KINDS_SQL, type WorktreeRefr
 import { gitChildEnv } from '../git-env.ts';
 import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
 import { redactUrlsInText } from '../url-redact.ts';
+import { classifyPgAccessError } from '../pg-access-classify.ts';
 import { classifyOriginUniqueViolation } from './origin-guard.ts';
 
 export interface WorktreeRefreshRow {
@@ -485,21 +486,32 @@ function finished(row: WorktreeRefreshRow, sync: { synced: RefreshMemberSync[]; 
  */
 export async function refreshWorktree(engine: BrainEngine, sourceId: string, opts: RefreshOptions = {}): Promise<WorktreeRefreshResult> {
   try { return await runRefresh(engine, sourceId, opts); }
-  catch (error) { throw error instanceof OperationError ? error : await unexpectedRefreshFailure(engine, sourceId, error); }
+  catch (error) {
+    if (error instanceof OperationError || classifyPgAccessError(error).reason !== 'unknown') throw error;
+    throw await unexpectedRefreshFailure(engine, sourceId, error);
+  }
 }
 
-const redact = (text: string) => redactUrlsInText(redactConnectionInfo(text));
+const redact = (text: string) => {
+  const home = homedir();
+  return redactConnectionInfo(redactUrlsInText(home.length > 1 ? text.split(home).join('~') : text));
+};
 
 /**
  * GBRA-250: an untyped throw (a statement error, a TypeError) leaves the refresh where it stood, so a fenced or syncing row
  * resumes on the next run. The refusal names that row and carries the stack in `why`, so a failure seen once leaves a trace.
+ * A database access error the classifier recognizes (connection refused, a missing table) is rethrown unchanged, so the CLI
+ * keeps its own repair fix for it.
  */
 async function unexpectedRefreshFailure(engine: BrainEngine, sourceId: string, error: unknown): Promise<OperationError> {
   const thrown = error instanceof Error ? error : new Error(String(error));
   const sqlstate = typeof (error as { code?: unknown } | null)?.code === 'string' ? ` (${(error as { code: string }).code})` : '';
-  const binding = await Promise.resolve().then(() => getWorktreeBinding(engine, sourceId, existingLocalHostId())).catch(() => null);
-  const active = binding ? await readActiveRefresh(engine, binding.worktree_id).catch(() => null) : null;
-  const left = active ? `Refresh ${active.id} stays ${active.state}, and the next gbrain sources refresh ${sourceId} resumes it.` : 'No refresh row was left active.';
+  const lookup = await Promise.resolve().then(async () => {
+    const binding = await getWorktreeBinding(engine, sourceId, existingLocalHostId());
+    return { active: binding ? await readActiveRefresh(engine, binding.worktree_id) : null };
+  }).catch(() => null);
+  const left = !lookup ? 'The refresh row could not be read, so a fenced or syncing refresh may still be active.'
+    : lookup.active ? `Refresh ${lookup.active.id} stays ${lookup.active.state}, and the next gbrain sources refresh ${sourceId} resumes it.` : 'No refresh row was left active.';
   return opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${sqlstate}: ${thrown.message}`),
     `${left} Run gbrain sources refresh ${sourceId} again; if it fails the same way, report this output (why holds the stack) with gbrain doctor --json.`,
     { why: redact(thrown.stack ?? `${thrown.name}: ${thrown.message}`) });
@@ -608,13 +620,13 @@ async function lockTimeoutRefusal(engine: BrainEngine, sourceId: string, refresh
       WHERE a.pid <> pg_backend_pid() AND a.xact_start IS NOT NULL AND a.datname = current_database()
         AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.granted AND l.mode <> 'AccessShareLock'
           AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
-          AND l.relation IN ('persistence_brain'::regclass, 'persistence_worktrees'::regclass, 'sources'::regclass))
-      ORDER BY a.xact_start LIMIT 5`).catch(() => []);
-  const error = refusal('refresh_lock_timeout', `The refresh fence of source ${sourceId} waited past its 5 s lock timeout for a brain, worktree or source row another database transaction holds; nothing moved.`,
-    `Retry gbrain sources refresh ${sourceId}. If it repeats, the transaction named in why is stuck: find out what it is on the brain host before ending it.`, refreshId);
-  error.why = holders.length
-    ? redact(`Open transactions holding row locks on those tables: ${holders.map(h => `pid ${h.pid} (${h.application_name || 'no application name'}, ${h.state ?? 'unknown state'}, open ${h.open_seconds} s)`).join('; ')}`)
-    : 'No open transaction holding a lock on those tables was visible to this database role.';
+          AND l.relation IN ('persistence_brain'::regclass, 'persistence_worktrees'::regclass, 'sources'::regclass, 'persistence_worktree_refreshes'::regclass))
+      ORDER BY a.xact_start LIMIT 5`).catch(() => null);
+  const error = refusal('refresh_lock_timeout', `The refresh fence of source ${sourceId} waited past its 5 s lock timeout for a brain, worktree, source or refresh row another database transaction holds; nothing moved.`,
+    `Retry gbrain sources refresh ${sourceId}. If it repeats, one of the transactions named in why is stuck: find out which on the brain host before ending it.`, refreshId);
+  error.why = holders === null ? 'The lookup of open transactions holding those rows failed.'
+    : holders.length ? redact(`Open transactions holding row locks on those tables (the transaction blocking the fence is among them): ${holders.map(h => `pid ${h.pid} (${h.application_name || 'no application name'}, ${h.state ?? 'unknown state'}, open ${h.open_seconds} s)`).join('; ')}`)
+    : 'No open transaction holding a row lock on those tables was visible to this database role.';
   return error;
 }
 
