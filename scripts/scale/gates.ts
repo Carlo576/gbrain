@@ -63,30 +63,16 @@ export function importProgressPerFile(stderr: string): { wallMs: number[]; cpuMs
   return { wallMs: perFile(wall), cpuMs: perFile(cpu) };
 }
 
-/**
- * #7939: the per-page cost of each tenth of the import is the lowest mean over ten equal slices of it, and both ratios
- * use that cost (`total_vs_half` sums it over the tenths). A stall shorter than a slice of the window (a WAL checkpoint,
- * a burst from another tenant of a shared CI host) used to carry a tenth's mean past the gate on its own (1.74x, 2.1x,
- * and 2.57x total/half on three unrelated PRs); a per-page cost that grows with the brain raises every slice.
- * `total_ms` and `ms_at_half` stay the plain sums.
- */
 export function rateMeasure(perPageMs: number[]): RateMeasure {
   const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
-  const sliceCost = (xs: number[]) => {
-    const size = Math.max(1, Math.floor(xs.length / 10));
-    let lowest = Infinity;
-    for (let at = 0; at + size <= xs.length; at += size) lowest = Math.min(lowest, sum(xs.slice(at, at + size)) / size);
-    return lowest;
-  };
-  const tenths = Array.from({ length: 10 }, (_, d) => perPageMs.slice(Math.floor(perPageMs.length * d / 10), Math.floor(perPageMs.length * (d + 1) / 10)))
-    .filter(xs => xs.length > 0).map(xs => ({ pages: xs.length, cost: sliceCost(xs) }));
-  const first = tenths[0]!.cost;
-  const last = tenths.at(-1)!.cost;
-  const work = (ts: typeof tenths) => sum(ts.map(t => t.cost * t.pages));
+  const tenth = Math.max(1, Math.floor(perPageMs.length / 10));
+  const first = sum(perPageMs.slice(0, tenth)) / tenth;
+  const last = sum(perPageMs.slice(-tenth)) / tenth;
+  const half = sum(perPageMs.slice(0, Math.floor(perPageMs.length / 2)));
+  const total = sum(perPageMs);
   const round = (n: number, places: number) => Math.round(n * 10 ** places) / 10 ** places;
   return { per_page_ms_first10: round(first, 1), per_page_ms_last10: round(last, 1), rate_ratio: round(last / first, 2),
-    total_ms: Math.round(sum(perPageMs)), ms_at_half: Math.round(sum(perPageMs.slice(0, Math.floor(perPageMs.length / 2)))),
-    total_vs_half: round(work(tenths) / work(tenths.slice(0, Math.ceil(tenths.length / 2))), 2) };
+    total_ms: Math.round(total), ms_at_half: Math.round(half), total_vs_half: round(total / half, 2) };
 }
 
 /**

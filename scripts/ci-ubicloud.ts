@@ -65,7 +65,10 @@
  * (left: this run's VMs still listed; others: this owner's other VMs, for
  * information), also appended to UBI_LEFT_FILE when set
  * (scripts/pregate-remote-gate.sh reads it). A left other than 0 fails a run
- * that would otherwise pass; --keep reports its VMs as left=<n> kept=1.
+ * that would otherwise pass; --keep reports its VMs as left=<n> kept=1. A run
+ * that exits before it requests any VM (a missing key or owner, a broken
+ * inventory) prints left=0 vms=0, so pregate reads its failure as the gate's,
+ * and a missing line still means a crash after VMs were requested.
  */
 
 import { spawnSync, type ChildProcess } from "node:child_process";
@@ -207,6 +210,8 @@ function sh(cmd: string, args: string[]): string {
 const lines = (text: string) => text.split(/\s+/).map((l) => l.trim()).filter(Boolean);
 
 const children = new Map<ChildProcess, string>();
+let vmRequested = false;
+let leftReported = false;
 
 /** Run the runner script; output goes to `out` (a path) or is returned (scripts/ubicloud/run-script.ts). */
 function runner(args: string[], opts: Omit<RunScriptOpts, "cwd" | "onSpawn" | "onClose"> = {}): Promise<{ code: number; stdout: string }> {
@@ -495,6 +500,7 @@ async function main() {
     const setupLog = join(runDir, "logs", `setup-${vm.name}.log`);
     if (tornDown) return;
     vm.requested = true;
+    vmRequested = true;
     appendFileSync(ledger, `${vm.name} ${opts.location}\n`);
     const up = await runner(["up", "-n", vm.name, "-s", opts.size, "-l", opts.location, ...(opts.image === "stock" ? [] : ["-b", opts.image])], { out: setupLog });
     if (tornDown) return;
@@ -679,6 +685,7 @@ async function leftover(owner: string, names: string[], kept: boolean): Promise<
   const line = `UBICLOUD: left=${left} owner=${owner} vms=${names.length} ${kept ? "kept=1" : `others=${others}`}`;
   console.log(line);
   if (process.env.UBI_LEFT_FILE) appendFileSync(process.env.UBI_LEFT_FILE, line + "\n");
+  leftReported = true;
   return left === 0;
 }
 
@@ -702,6 +709,12 @@ function sortedObject(obj: Record<string, number>): Record<string, number> {
 }
 
 if (import.meta.main) {
+  process.on("exit", () => {
+    if (leftReported || vmRequested) return;
+    const line = `UBICLOUD: left=0 owner=${process.env.UBI_OWNER ?? ""} vms=0 others=unknown`;
+    console.log(line);
+    if (process.env.UBI_LEFT_FILE) appendFileSync(process.env.UBI_LEFT_FILE, line + "\n");
+  });
   main().catch((error) => {
     console.error(error);
     process.exit(1);

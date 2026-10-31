@@ -150,6 +150,10 @@ done
     expect(tapToolResults(call(2, 'search'), ok(2))).toEqual([{ name: 'search', ok: true }]);
     expect(tapToolResults([call(2, 'search'), call(2, 'query')].join('\n'), [bad(2), ok(2)].join('\n'))).toEqual([{ name: 'search', ok: false }, { name: 'query', ok: false }]);
     expect(tapToolResults(`[${call(5, 'put_page')}]`, `[${ok(5)}]`)).toEqual([{ name: 'put_page', ok: true }]);
+    const ping = (id: number) => JSON.stringify({ jsonrpc: '2.0', id, method: 'ping' });
+    const pong = (id: number) => JSON.stringify({ jsonrpc: '2.0', id, result: {} });
+    expect(tapToolResults([call(2, 'search'), ping(2)].join('\n'), pong(2))).toEqual([{ name: 'search', ok: false }]);
+    expect(tapToolResults([call(2, 'search'), ping(2)].join('\n'), [ok(2), pong(2)].join('\n'))).toEqual([{ name: 'search', ok: true }]);
   });
 
   test('tapToolCalls counts only tools/call requests, batches included', () => {

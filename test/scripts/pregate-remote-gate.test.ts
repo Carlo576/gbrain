@@ -143,6 +143,16 @@ describe('pregate-remote-gate.sh', () => {
     expect(failing.out.trim().split('\n').at(-1)).toBe(`PREGATE_REMOTE: tree=${contentTree()} tests=5 failed=1`);
   });
 
+  it('a ci-ubicloud run that exits before it requests any VM reports left=0 vms=0, so its failure stays a gate result, not PREGATE_REMOTE_INFRA', () => {
+    const ci = resolve(import.meta.dir, '..', '..', 'scripts/ci-ubicloud.ts');
+    const r = run(`bun ${ci}`, { UBICLOUD_API_KEY: undefined, UBICLOUD_API_TOKEN: undefined }, true);
+    expect(r.out).toContain('UBICLOUD_API_KEY (or UBICLOUD_API_TOKEN) is not set');
+    expect(r.out).toContain('UBICLOUD: left=0 owner=gbra0test vms=0 others=unknown');
+    expect(r.err).not.toContain('PREGATE_REMOTE_INFRA');
+    expect(r.err).toContain('no ci-ubicloud summary');
+    expect(r.code).toBe(2);
+  });
+
   it('refuses before the gate without UBI_OWNER or when PREGATE_TREE is another tree', () => {
     const marker = join(repo, '.git', 'ran');
     const noOwner = run(`touch ${marker}`, { UBI_OWNER: '' });
