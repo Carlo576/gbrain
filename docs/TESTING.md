@@ -701,8 +701,8 @@ File/stdin imports also merge unobserved entries; only a complete GitHub unit,
 serial or explicit full-profile E2E run replaces that lane's entire map. Captured artifacts need their final
 successful completion marker, and GitHub imports verify every expected job.
 Incomplete or failed inputs leave the existing map intact. Repeated `--run`
-(5-10 full runs) takes each file's median; one run carries its runner
-speed. Metadata records runs, commits, units and counts. Unit/E2E weights are milliseconds;
+(5-10 full runs, in any order) takes each file's median; one run carries its runner
+speed. Every mode drops entries for files git no longer tracks. Metadata records runs, commits, units and counts. Unit/E2E weights are milliseconds;
 serial weights remain seconds. New files receive the corpus p75 estimate.
 
 The default E2E miner reads selected jobs and merges partial observations.
