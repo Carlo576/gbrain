@@ -998,6 +998,10 @@
         "name": "sync_overwritten_db_edits"
       },
       {
+        "category": "brain",
+        "name": "sync_rows_behind_checkpoint"
+      },
+      {
         "category": "meta",
         "name": "sync_config_keys"
       },
@@ -1020,6 +1024,14 @@
       {
         "category": "brain",
         "name": "outside_content_fences"
+      },
+      {
+        "category": "ops",
+        "name": "owner_host_stale"
+      },
+      {
+        "category": "brain",
+        "name": "embedding_plane_disagreement"
       },
       {
         "category": "brain",

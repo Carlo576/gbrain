@@ -87,6 +87,7 @@ import { uncommittedDeletionsRepair, UNCOMMITTED_DELETIONS_CONSENT_TEXT } from '
 import { factClaimDatesRepair } from './fact-claim-dates.ts';
 import { provenanceRepair } from './provenance.ts';
 import { secretSpansRepair } from './secret-spans.ts';
+import { rowsBehindRepair } from './rows-behind.ts';
 import { generationsRepair, generationsSelectionArgv, type GenerationsSelection } from '../generations/repair.ts';
 import { restoreDaysHint } from '../generations/config.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
@@ -598,6 +599,16 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'by rule and each changed field\'s old and new SHA-256, never a value; --apply --expect <hash> rewrites exactly that set, one transaction per '
       + 'page, then re-scans it. Database only: no file write, no Git commit, and a sync hold stays, so held pages are redacted where they are stored. '
       + 'History (page versions, receipts, Git) is kept. Trusted local CLI only; runs only when named; never on upgrade.',
+  },
+  'rows-behind': {
+    handler: rowsBehindRepair, embeds: 'effect', checks: ['sync_rows_behind_checkpoint'], explicit_only: true, preview_bound: true,
+    summary: 'Re-import the rows a managed sync\'s checkpoint moved past (#8071): the page holds an older version of its file than the commit '
+      + 'sources.last_commit says was imported, with no hold, so no later sync re-imports it. Needs --source; refused off the canonical owner host '
+      + '(not_owner_host). The preview compares each row with the file read from Git at the checkpoint (confirmed by the importer), lists each row '
+      + 'with its path, blob and action and writes nothing: reimport (the committed bytes through the managed import; no file is written), or '
+      + 'hold:<code> when that import is refused or the file is over the sync read bound (the hold sync would have opened). Rows with no import record '
+      + 'join only with --include-ambiguous; rows with an uncommitted working-tree edit are left out. --apply --expect <hash> applies exactly that set. '
+      + 'Runs only when named; never on upgrade.',
   },
   'generations': {
     handler: generationsRepair, embeds: 'effect', checks: ['generation_retirements', 'generation_held', 'generation_pending'], explicit_only: true, preview_bound: true, consent: 'destructive',

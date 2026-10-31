@@ -50,6 +50,44 @@ gbrain config set sources.refresh_publish_diverged true
 - Docs: `docs/guides/live-sync.md`, `docs/guides/write-refusals.md`, `docs/guides/troubleshooting.md`, `docs/guides/shared-checkout-git.md`, `docs/architecture/canonical-writers.md` and its census.
 - Tests: `test/refresh-publish-diverged-7686.test.ts` (setting on and off, a conflict, quarantine, a dirty overlap, a refusal after the publish, a publish child that fails, and a dry run, on PGLite and on Postgres through `test/e2e/worktree-refresh-postgres.test.ts`). Tests 7c and 7d in `test/persistence-worktree-refresh.test.ts` share one fixture across their cells and run in about half the time, with every assertion kept (#7782).
 
+## [0.60.525.0] - 2026-10-31
+
+**Sync no longer moves its checkpoint past a file it never imported (#8071), a source refresh can no longer hold its lock for over an hour (#8072), and dream-cycle pages written into a Git checkout are now committed instead of left untracked (#8073).**
+
+If a file was edited while a sync pass was importing it, sync could record the newer bytes as imported while the page kept the older text. Once you committed the edit, sync treated the file as settled and the page stayed stale with no hold. Sync now records only the bytes the page actually holds, so the committed edit is imported on the next pass. To find pages already left behind, `gbrain doctor` adds `sync_rows_behind_checkpoint`: on each managed source's owner host it compares every live Markdown page with the file committed at the source's checkpoint, skips paths sync would not import, and reports `unknown` rather than ok when it runs out of time. `gbrain repair rows-behind --source <id>` previews the fix, and `--apply --expect <hash>` re-imports the committed file through the normal import (or opens the hold sync would have opened). Pages with no import record change only with `--include-ambiguous`, pages with uncommitted edits are listed and left alone, and nothing runs on upgrade. Repo-less brains are not affected.
+
+A refresh's member syncs now run under a deadline, `sources.refresh_sync_budget_ms` (default 5 minutes). A member that commits nothing in that time is reported `refresh_sync_timeout` with the write it waited on, a member that made progress is reported deferred, and the refresh always finishes and releases its lock, so later ticks run again. A Markdown file over 24 MiB that sync had to read whole to refuse (held `file_too_large`, for example for a facts fence) is no longer re-read on every tick; it is checked again only when it changes, after `gbrain sources retry-held <source>`, or after a gbrain upgrade.
+
+Atom and concept write-through and the reverse-written synthesis, patterns and cycle-summary pages now commit each batch through the checkout's commit door, naming only the files they wrote. Before, those files stayed untracked and made the scheduled pull skip every run. A refused commit rolls the batch's files back and the phase reports `write_through_failed`; files a crash left uncommitted are picked up by the next commit, and your own untracked files are never touched. Repo-less sources, non-Git folders, `storage.db_only` paths and gitignored paths behave as before.
+
+### Itemized changes
+
+- `src/core/persistence/sync-prepare.ts`: the import record names the working file only when it holds the imported bytes (line endings aside).
+- `src/core/persistence/rows-behind.ts` (new), `src/commands/doctor/checks/rows-behind.ts` (new), `src/core/repair/rows-behind.ts` (new): the `sync_rows_behind_checkpoint` doctor check and the explicit-only `rows-behind` repair kind; doctor and export goldens updated.
+- `src/core/persistence/worktree-refresh.ts`, `src/commands/sources-refresh.ts`: member syncs run through the governed drain under `sources.refresh_sync_budget_ms`; new code `refresh_sync_timeout`.
+- `src/core/persistence/sync-screen.ts`, `src/core/persistence/sync-holds.ts`: a held over-limit file is re-screened only when it changes.
+- `src/core/cycle/derived-write-through.ts`, `src/core/cycle/extract-atoms.ts`, `src/core/cycle/synthesize-concepts.ts`, `src/core/write-through.ts`: one commit per batch, rollback on a refused commit, pending write-through ledger.
+- `docs/guides/repair.md`, `docs/guides/live-sync.md`, `docs/guides/error-codes.md`, `docs/guides/write-refusals.md`: the new check, repair kind, budget and code.
+
+## [0.60.524.0] - 2026-10-31
+
+**A brain moved or restored under a new host identity no longer leaves writes pending forever behind an `--accept-pending` exit 0, and a keyless re-init from a cold `GBRAIN_HOME` no longer switches an embedded brain to keyword-only (GBRA-248 W0).**
+
+A managed source publishes only through the host that owns its checkout. When a brain moved to another machine, was restored from a backup, or ran in a container that restarted with a fresh `GBRAIN_HOME`, the new process got a new host identity, its writes queued for the old owner, and nothing said that owner was gone: the receipt read as an ordinary pending write and `--accept-pending` (or `GBRAIN_ACCEPT_PENDING=1`) exited 0, so hooks and cron treated writes that would never publish as saved. A pending receipt now flags that owner (reason `owner_unavailable` with a new `diagnostic.owner` block holding its last activity, which older clients ignore; doctor names the host) when it runs no live consumer and has been quiet for more than 24 hours, or at once on PGLite when this process holds the database file under another identity. `--accept-pending` does not cover such a write: `gbrain put`, `gbrain call`, brainstorm saves and `gbrain trust accept --all` exit 10 and say why. A consumer's clean stop now stamps the worktrees its host owns, so a stopped owner is not mistaken for a gone one. The owner host never sees the block, a repo-less (database-only) write never names an owner, and nothing claims or transfers ownership. New doctor check `owner_host_stale` lists the waiting writes with the owner and the read-only next step.
+
+`gbrain init` with no provider key in reach falls back to keyless. Run from a cold home against a database that already had an embedding model and vectors, it wrote `embedding_disabled: true` into the new config file, and the brain stopped embedding. When that fallback was implicit and the database holds vectors, init now keeps the database's stored model and width in the config file instead and prints the key to set and `gbrain embed --stale`. A fresh keyless install, a keyless brain with no vectors, an explicit `--no-embedding` and a database that already disables embeddings behave as before. New doctor check `embedding_plane_disagreement` finds brains the old behavior left in that state and prints the `gbrain init --force --embedding-model …` enable for the same model.
+
+### Itemized changes
+
+- `src/core/persistence/owner-activity.ts` (new): owner liveness, last activity and the stale rule; `journal.ts` attaches it to receipt facts inside budgets the reads already have, cancelled past them; `health.ts`, `types.ts`, `params.ts`: the optional `diagnostic.owner` receipt field.
+- `src/core/persistence/service.ts`: a write left pending carries its owner facts into the receipt.
+- `src/core/persistence/write-wait.ts`: `acceptPendingCovers`; `writeErrorExitCode` keeps exit 10 when `diagnostic.owner` is present; `persistence-delegate.ts`, `brainstorm.ts`, `trust.ts` follow it.
+- `src/core/persistence/consumer-heartbeat.ts`: a clean stop stamps `persistence_worktrees.heartbeat_at` for the host's worktrees.
+- `src/commands/init-embedding-plane.ts` (new), `src/commands/init.ts`: the implicit-keyless marker and the kept database identity on both engines.
+- Doctor: `owner_host_stale` (`checks/owner-host-stale.ts`) and `embedding_plane_disagreement` (`checks/embedding-plane.ts`); `core/readiness.ts` exports `enableArgv`.
+- Docs: troubleshooting entries `#owner-host-stale` (with the stable `GBRAIN_HOME` guidance for servers and containers) and `#embedding-plane-disagreement`; the exit-status tables.
+- Tests: `test/owner-stale-moved-brain.test.ts` (real CLI, PGLite), `test/persistence-owner-activity.test.ts` (PGLite and Postgres), `test/init-cold-home-embedding.test.ts` (PGLite and Postgres), `test/doctor-owner-host-stale.test.ts`, `test/doctor-embedding-plane-disagreement.test.ts`; doctor goldens.
+
 ## [0.60.523.0] - 2026-10-31
 
 **A launcher can now tell gbrain that a session's user turns are an agent's, not yours, so orchestrator worker briefs stop landing in your brain as your own preferences (#8064). Codex sessions that open and close with no prompt no longer raise a week-long parser_drift alert (#8016), and task notifications and agent-team messages no longer get brain context injected as if you typed them (#8028).**
