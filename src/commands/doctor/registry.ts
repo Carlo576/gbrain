@@ -140,6 +140,7 @@ import { derivationPurgeSweepsEntry } from './checks/derivation-purge-sweeps.ts'
 import { missingRecordedFilesEntry } from './checks/missing-recorded-files.ts';
 import { uncommittedSyncDeletionsEntry } from './checks/uncommitted-sync-deletions.ts';
 import { overwrittenEditsEntry } from './checks/overwritten-edits.ts';
+import { rowsBehindEntry } from './checks/rows-behind.ts';
 import { managedSyncMovementEntry } from './checks/managed-sync-movement.ts';
 import { managedSyncLatencyEntry } from './checks/managed-sync-latency.ts';
 import { commitNotifierEntry } from './checks/commit-notifier.ts';
@@ -293,6 +294,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   uncommittedSyncDeletionsEntry,
   unindexedFilesEntry,
   overwrittenEditsEntry,
+  rowsBehindEntry,
   syncConfigKeysEntry,
   // #6712 PR 4a: the read-only convergence shadow (deep tier: a full level read per source).
   managedSyncConvergenceEntry,
