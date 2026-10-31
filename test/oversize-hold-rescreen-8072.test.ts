@@ -34,6 +34,8 @@ import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
 import { DEADLINE_PASS_GRACE_MS } from '../src/core/persistence/sync-drain.ts';
 import { retryHeld } from '../src/commands/sources-retry-held.ts';
+import { printRefreshOutcome } from '../src/commands/sources-refresh.ts';
+import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { VERSION } from '../src/version.ts';
 import { conversationPage } from './helpers/conversation-page.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -94,6 +96,14 @@ test('#8072: a held over-ceiling file the streamed import refused is not read ag
   expect(streamedImportWork.bytes).toBeGreaterThan(0);
   expect(await requestsFor(f, 'conv')).toBe(requests + 1);
   expect(await holdsOf(f)).toMatchObject([{ path: 'conv.md', code: 'file_too_large', meta: { attempts: 2 } }]);
+
+  // New bytes for the held file re-screen it on the next tick, with no retry.
+  f.push('alpha/conv.md', fenced.replace('Example fact', 'An edited example fact'));
+  streamedImportWork.bytes = 0;
+  expect((await refreshWorktree(f.engine, f.alpha)).status).toBe('completed');
+  expect(streamedImportWork.bytes).toBeGreaterThan(0);
+  expect(await requestsFor(f, 'conv')).toBe(requests + 2);
+  expect(await holdsOf(f)).toMatchObject([{ path: 'conv.md', code: 'file_too_large' }]);
 }), 600_000);
 
 test('#8072: a streamed file_too_large hold re-screens on retry or another gbrain version; a size-only one on every sync', () => {
@@ -113,6 +123,10 @@ test('#8072: a refresh past its sync budget completes with its members deferred,
   expect(f.head()).toBe(target);
   expect(await f.lastCommit(f.alpha)).not.toBe(target);
   expect((await f.refreshRows()).map(row => row.state)).toEqual(['completed']);
+  // Cron and wrappers read the exit code: a deferred refresh is not a clean 0.
+  const log = console.log;
+  console.log = () => {};
+  try { printRefreshOutcome({ result: deferred }, true); expect(currentExitCode()).toBe(1); } finally { console.log = log; _resetCliExitVerdictForTests(); process.exitCode = 0; }
 
   const again = await refreshWorktree(f.engine, f.alpha);
   expect(again).toMatchObject({ status: 'sync_deferred', next: `gbrain sources refresh ${f.alpha}` });

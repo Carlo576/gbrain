@@ -38,6 +38,7 @@ import { compareInlineExportFile, compareSegmentedExportBlob, declaredDatabaseOn
 import { prepareRepairPublication, repairScreenConfig } from './file-repair.ts';
 import { SYNC_READ_BOUND } from './sync-blobs.ts';
 import { heldGitPaths, readSyncImportProvenances } from './sync-holds.ts';
+import { loadSyncEligibility } from './sync-discovery.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
 
 export const ROWS_BEHIND_BATCH = 256;
@@ -47,7 +48,7 @@ export const ROWS_BEHIND_DOCS = 'docs/guides/repair.md#rows-behind';
 
 /** Why a row is not reported, counted per scan. */
 export type RowsBehindSkip = 'held' | 'database_moved' | 'changed_after_checkpoint' | 'no_file_at_checkpoint' | 'not_markdown' | 'declared_database_only'
-  | 'not_regular_file' | 'unsafe_path' | 'unconfirmed' | 'current';
+  | 'not_regular_file' | 'unsafe_path' | 'not_eligible' | 'unconfirmed' | 'current';
 
 export interface RowBehind {
   slug: string;
@@ -101,11 +102,11 @@ const empty = (sourceId: string, status: RowsBehindScan['status'], reason?: stri
 const isMarkdown = (path: string) => /\.mdx?$/i.test(path);
 
 export async function scanRowsBehind(engine: BrainEngine, sourceId: string,
-  opts: { deadlineAt?: number; listLimit?: number; confirmUnproven?: boolean; now?: () => number } = {}): Promise<RowsBehindScan> {
+  opts: { deadlineAt?: number; confirmUnproven?: boolean; now?: () => number } = {}): Promise<RowsBehindScan> {
   if (!(await managedPersistenceEnabled(engine))) return empty(sourceId, 'not_applicable', 'not_managed');
   const context = await sourceContext(engine, sourceId);
   if (!context.ok) return empty(sourceId, context.status, context.reason);
-  const [source] = await engine.executeRaw<{ last_commit: string | null }>('SELECT last_commit FROM sources WHERE id=$1', [sourceId]);
+  const [source] = await engine.executeRaw<{ last_commit: string | null; config: Record<string, unknown> | null }>('SELECT last_commit, config FROM sources WHERE id=$1', [sourceId]);
   if (!source?.last_commit) return empty(sourceId, 'not_applicable', 'no_checkpoint');
   const root = context.root;
   try { isSourceDbOnlySlug(root, '', 'refuse'); } catch { return empty(sourceId, 'unknown', 'invalid_source_config'); }
@@ -117,9 +118,9 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string,
   await readHonorAliases(engine);
   const scope = relative(checkpoint.gitRoot, realpathSync(root)).split(sep).join('/');
   const gitPath = (rel: string) => scope ? `${scope}/${rel}` : rel;
+  const { eligible } = await loadSyncEligibility(engine, { root, gitRoot: checkpoint.gitRoot, sourceId, source: { last_commit: source.last_commit, config: source.config ?? {} } });
   const policy = { mirror: false, databaseOnlySource: false, dbOnly: (slug: string) => isSourceDbOnlySlug(root, slug, 'refuse'), ignored: new Set<string>() };
   const scan: RowsBehindScan = { ...empty(sourceId, 'known'), checkpoint: checkpoint.commit, head: head.commit };
-  const limit = opts.listLimit ?? ROWS_BEHIND_LIST_LIMIT;
   const count = (why: RowsBehindSkip) => { scan.counts[why] = (scan.counts[why] ?? 0) + 1; };
   const now = opts.now ?? Date.now;
   const late = () => opts.deadlineAt !== undefined && now() >= opts.deadlineAt;
@@ -148,6 +149,7 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string,
         const rel = relative(root, path).split(sep).join('/');
         if (rel.startsWith('../') || rel === '..') { skip(key.id, 'unsafe_path'); continue; }
         if (!isMarkdown(rel)) { skip(key.id, 'not_markdown'); continue; }
+        if (!eligible(gitPath(rel))) { skip(key.id, 'not_eligible'); continue; }
         const frontmatter = typeof key.frontmatter === 'string' ? JSON.parse(key.frontmatter) : key.frontmatter;
         if (declaredDatabaseOnly({ ...key, frontmatter }, rel, policy)) { skip(key.id, 'declared_database_only'); continue; }
         const blob = checkpoint.blobs.get(gitPath(rel));
@@ -191,7 +193,7 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string,
       if (typeof row === 'string') { count(row); continue; }
       const list = row.record === 'recorded' ? scan.behind : scan.unproven;
       if (row.record === 'recorded') scan.behind_count++; else scan.unproven_count++;
-      if (list.length < limit) list.push(row); else scan.truncated = true;
+      if (list.length < ROWS_BEHIND_LIST_LIMIT) list.push(row); else scan.truncated = true;
     }
     for (const [id, why] of skipped) if (stop === null || id < stop) count(why);
     scan.pages += stop === null ? ids.length : ids.filter(id => id < stop!).length;

@@ -89,7 +89,7 @@ export async function derivedFileTarget(engine: BrainEngine, slug: string, sourc
 interface DerivedFileChange { slug: string; sourceId: string; filePath: string; writeRoot: string; prior: string | null; after: string | null; bound: string | null }
 
 /** A batch commit the checkout refused: the door's code and message, the batch's files (root-relative) and those left as they were. */
-export interface DerivedCommitFailure { code: string; message: string; paths: string[]; kept: string[] }
+export interface DerivedCommitFailure { code: string; message: string; root: string; paths: string[]; kept: string[] }
 
 /**
  * Test seams. `beforeCommit` runs after a batch's files are written and before its commit; a throw stands in for a crash
@@ -252,7 +252,7 @@ async function rollBackDerived(engine: BrainEngine, root: string, batch: readonl
     }
   }
   console.error(`[write-through] commit refused (${code}): ${pending.length - kept.length} generated file(s) rolled back, ${kept.length} left as they are`);
-  return { code, message, paths: pending.map(c => relative(root, c.filePath)), kept };
+  return { code, message, root, paths: pending.map(c => relative(root, c.filePath)), kept };
 }
 
 /** Whether HEAD of `root`'s checkout already holds the change's resulting bytes (absent for a removal); false when HEAD is unreadable. */
@@ -271,7 +271,7 @@ export function reportFileHolds(result: PhaseResult, held: readonly string[] | u
   if (!held?.length) return result;
   return { ...result, status: result.status === 'fail' ? 'fail' : 'warn',
     details: { ...result.details, file_holds: [...new Set([...((result.details.file_holds as string[] | undefined) ?? []), ...held])] },
-    summary: `${result.summary} (${held.length} ${noun} file(s) left as they are: ${[...new Set(held.map(h => /^\S+ \((\w+)/.exec(h)?.[1] ?? 'file_database_drift'))].join(', ')})` };
+    summary: `${result.summary} (${held.length} ${noun} file(s) held: ${[...new Set(held.map(h => /^\S+ \((\w+)/.exec(h)?.[1] ?? 'file_database_drift'))].join(', ')})` };
 }
 
 /** `result` with the hook's held files (`reportFileHolds`) and refused commits reported: `details.write_through_failed` and a `warn` status unless it failed. */
@@ -368,10 +368,10 @@ async function dreamFileTarget(engine: BrainEngine, brainDir: string, slug: stri
  * path instead of the classic door.
  */
 export async function writeDreamPageFile(engine: BrainEngine, brainDir: string, slug: string, sourceId: string,
-  opts: { nativeSourceId: string; markdown: string; label?: string }): Promise<DreamPageFileWrite> {
+  opts: { nativeSourceId: string; markdown: string }): Promise<DreamPageFileWrite> {
   const file = await writeDreamFile(engine, brainDir, slug, sourceId, opts);
   if (!file.change) return file.result;
-  const [failure] = await commitDerivedChanges(engine, opts.label ?? 'dream', [file.change]);
+  const [failure] = await commitDerivedChanges(engine, 'dream', [file.change]);
   return failure ? { written: false, held: dreamCommitFailedToken(slug, failure) } : file.result;
 }
 
@@ -473,7 +473,7 @@ export async function reverseWriteDreamRefs<R extends { slug: string; source_id:
     }
   } finally {
     for (const failure of await commitDerivedChanges(engine, opts.phase, changes)) {
-      for (const change of changes.filter(c => failure.paths.includes(relative(c.writeRoot, c.filePath)))) {
+      for (const change of changes.filter(c => c.writeRoot === failure.root && failure.paths.includes(relative(c.writeRoot, c.filePath)))) {
         opts.held?.push(dreamCommitFailedToken(change.slug, failure));
         rolledBack++;
       }

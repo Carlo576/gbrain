@@ -18,6 +18,8 @@
  * - a checkpoint file the import refuses is held with the refusal's code instead of imported;
  * - the scan checks its deadline inside a batch and reports how far it got; doctor counts unproven rows without the
  *   importer's confirmation; a hold row applies the refusal the apply computes;
+ * - a path sync does not read (`sync.exclude`) is not behind; an unreadable checkpoint commit is unknown, never clean;
+ * - the apply refuses a reimport row whose page moved since the preview and a hold row whose import is no longer refused;
  * - repo-less: a brain with no checkout reports not_applicable (ok) and the preview lists nothing.
  *
  * PGLite always; Postgres too when DATABASE_URL is set (test/e2e wrapper).
@@ -278,6 +280,43 @@ for (const backend of testBackends()) describe(`[${backend}] #8071: rows behind 
     const hold = await readGitHold(engine, 'default', await incarnationOf(engine), 'notes/a.md');
     expect(hold?.code).toBe('invalid_frontmatter');
     expect(hold?.message).not.toContain('saved with an older preview');
+  }, { databaseUrl, setup }), 240_000);
+
+  test('a path sync does not read (sync.exclude) is not behind; an unreadable checkpoint commit is unknown, never clean', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await engine.setConfig('sync.exclude', 'notes/a.md');
+    await seedBehind(engine, root, { 'notes/a': { content: note('notes/a', 'The redacted body of notes/a.'), record: 'checkpoint' } });
+    const scan = await scanRowsBehind(engine, 'default');
+    expect(scan.behind).toEqual([]);
+    expect(scan.counts).toMatchObject({ not_eligible: 1 });
+    expect(await doctor(engine)).toMatchObject({ status: 'ok', details: { count: 0 } });
+    const preview = await repair(engine);
+    expect(listing(preview)).toEqual([]);
+    expect((await pageOf(engine, 'notes/a')).body).toContain('The committed body of notes/a.');
+
+    await unguarded(engine, () => engine.executeRaw("UPDATE sources SET last_commit=$1 WHERE id='default'", ['f'.repeat(40)]).then(() => {}));
+    expect(await scanRowsBehind(engine, 'default')).toMatchObject({ status: 'unknown', reason: 'checkpoint_unreadable', complete: false });
+    expect(await doctor(engine)).toMatchObject({ name: CHECK, status: 'ok', readiness_state: 'unknown' });
+  }, { databaseUrl, setup }), 240_000);
+
+  test('the apply refuses a reimport row whose page moved since the preview and a hold row whose import is no longer refused', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await seedBehind(engine, root, {
+      'notes/a': { content: note('notes/a', 'The redacted body of notes/a.'), record: 'checkpoint' },
+      'notes/b': { content: note('notes/b', 'The redacted body of notes/b.'), record: 'checkpoint' },
+    });
+    const preview = await repair(engine);
+    expect(listing(preview)).toEqual([['default:notes/a', 'reimport'], ['default:notes/b', 'reimport']]);
+    await putDatabaseOnly(engine, ctx, 'notes/a', 'A database-only edit of notes/a.');
+    // The saved set names notes/b as a hold, as a preview taken while its import was refused would have.
+    await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys = jsonb_set(jsonb_set(completed_keys, '{0,items,1,action}', '"hold"'), '{0,items,1,refusal}', '{"code":"invalid_frontmatter","message":"saved with an older preview"}'::jsonb)
+      WHERE op=$1 AND completed_keys->0->>'hash'=$2 AND completed_keys->0->'items'->1->>'slug'='notes/b'`, [PREVIEW_APPROVAL_OP, preview.preview_hash]);
+    const applied = await repair(engine, { apply: true, expect: preview.preview_hash });
+    expect(applied.outcome_items?.map(item => [item.item, item.outcome, item.reason])).toEqual([
+      ['default:notes/a', 'changed_since_preview', 'page_moved'], ['default:notes/b', 'changed_since_preview', 'import_no_longer_refused']]);
+    expect((await pageOf(engine, 'notes/a')).body).toContain('A database-only edit of notes/a.');
+    expect((await pageOf(engine, 'notes/b')).body).toContain('The committed body of notes/b.');
+    expect(await readGitHold(engine, 'default', await incarnationOf(engine), 'notes/b.md')).toBeNull();
   }, { databaseUrl, setup }), 240_000);
 
   test('repo-less: a brain with no checkout is not applicable and the preview lists nothing', async () => {
