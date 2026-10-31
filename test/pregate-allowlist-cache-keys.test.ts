@@ -34,12 +34,14 @@ describe('pregate allowlist: workflow cache keys', () => {
   });
 
   test('a secret-shaped value on a key: line is still flagged', () => {
+    const hex = ['9f8a7b6c5d4e', '3f2a1b0c9d8e', '7f6a5b4c3d2e1f0a'].join('');
+    const pat = ['gh', 'p_', 'Zx9Qw8Lk2Mn4', 'Bv6Cx1Za3Sd5', 'Fg7Hj9Kl0Pq2Wr4'].join('');
     for (const value of [
-      'pglite-snapshot-9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a',
+      `pglite-snapshot-${hex}`,
       'pglite-snapshot-${{ runner.os }}-Zx9Qw8Lk2Mn4Bv6Cx1Za3Sd5Fg7Hj9Kl0Pq2Wr4',
       "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/*.ts') }}-Zx9Qw8Lk2Mn4Bv6Cx1Za3Sd5Fg7",
-      "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/*.ts', 'ghp_Zx9Qw8Lk2Mn4Bv6Cx1Za3Sd5Fg7Hj9Kl0Pq2W\\'') }}",
-      'ghp_Zx9Qw8Lk2Mn4Bv6Cx1Za3Sd5Fg7Hj9Kl0Pq2Wr4',
+      "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/*.ts', '" + pat.slice(0, -2) + "\\'') }}",
+      pat,
     ]) expect({ value, covered: covers(value) }).toEqual({ value, covered: false });
   });
 });
