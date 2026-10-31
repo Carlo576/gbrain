@@ -9,7 +9,8 @@
  * with the setting off it refuses `refresh_diverged` as before; a conflicting path
  * refuses `integrate_conflict` naming the path and changes nothing; an uncommitted
  * edit on an incoming path refuses `refresh_dirty` before anything is pushed; a dry
- * run never publishes.
+ * run never publishes; with gbrain.quarantine on, the refresh names the parked
+ * local version; a refusal after the publish says the remote already holds it.
  * Regression it catches: a refresh that pushes local commits without the
  * setting, one that moves the checkout or drops the local commits while
  * publishing, and one that pushes or fences anything when the merge conflicts or
@@ -145,6 +146,31 @@ test('setting on: an uncommitted edit on an incoming path refuses refresh_dirty 
   expect(f.head()).toBe(local);
   expect(readFileSync(join(f.root, 'alpha/two.md'), 'utf8')).toContain('An uncommitted local edit.');
   expect(await f.refreshRows()).toEqual([]);
+}), 120_000);
+
+test('setting on with gbrain.quarantine: a conflicting path is published as the remote version and the refresh names the parked local version', () => each(async f => {
+  diverge(f, { path: 'alpha/two.md', content: page('Alpha two', 'Local side.') });
+  git(f.root, 'config', 'gbrain.quarantine', 'true');
+  await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+  const out: string[] = [];
+  const log = console.log;
+  _resetCliExitVerdictForTests();
+  console.log = (line: string) => { out.push(line); };
+  try { await runSourcesRefresh(f.engine, [f.alpha]); } finally { console.log = log; _resetCliExitVerdictForTests(); process.exitCode = 0; }
+  const ref = git(f.root, 'for-each-ref', '--format=%(refname)', 'refs/gbrain/quarantine/').trim();
+  expect(ref).toMatch(/^refs\/gbrain\/quarantine\//);
+  expect(git(f.root, 'show', `${ref}:alpha/two.md`)).toContain('Local side.');
+  expect(out.join('\n')).toContain(`this machine's version is kept under ${ref}`);
+  expect(out.join('\n')).toContain('alpha/two.md');
+}), 120_000);
+
+test('setting on: a refusal after the publish says the local commits were already published', () => each(async f => {
+  diverge(f);
+  await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+  const error = await refusedWith(refreshWorktree(f.engine, f.alpha, { hooks: { boundary: point => {
+    if (point === 'drained') git(f.root, 'commit', '-q', '--allow-empty', '-m', 'external');
+  } } }), 'refresh_source_changed');
+  expect(error.message).toContain(`already published the checkout's 1 local commit(s) merged with the upstream as ${remoteHead(f)}`);
 }), 120_000);
 
 test('setting on: a dry run publishes nothing and still refuses refresh_diverged', () => each(async f => {

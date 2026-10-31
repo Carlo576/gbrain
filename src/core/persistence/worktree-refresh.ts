@@ -42,7 +42,7 @@ import { startPersistenceConsumer } from './service.ts';
 import { lockTopologyPrincipal, lockTopologyRows, topologyPrincipal, withTopologyLocks } from './topology-locks.ts';
 import { ACTIVE_REFRESH_STATES_SQL, CHECKOUT_EFFECT_KINDS_SQL, type WorktreeRefreshState } from './worktree-refresh-schema.ts';
 import { gitChildEnv } from '../git-env.ts';
-import { commitAndPush } from '../git/commit-push.ts';
+import { commitAndPush, type QuarantineEntry } from '../git/commit-push.ts';
 import { isTruthy } from '../connectors/config-keys.ts';
 import { classifyOriginUniqueViolation } from './origin-guard.ts';
 
@@ -71,7 +71,7 @@ export interface WorktreeRefreshResult {
   /** #7679: an orphaned refresh this run finished (or rolled back) through the `--resume` path before its own refresh. */
   recovered?: { refresh_id: string; state: WorktreeRefreshState; status: WorktreeRefreshResult['status']; previous_holder: RefreshHolder | null };
   /** #7686: the diverged checkout's local commits this run published, merged with the upstream, before fast-forwarding (`sources.refresh_publish_diverged`). */
-  published?: { sha: string; local_commits: number; integrated: number };
+  published?: { sha: string; local_commits: number; integrated: number; quarantined?: QuarantineEntry; superseded_remote_paths?: string[] };
 }
 /** #7679: the process that holds a refresh's lock, recorded on the row so status can name it. */
 export interface RefreshHolder { host_id: string | null; hostname: string; pid: number; started_at: string }
@@ -288,8 +288,10 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
     if (incoming.overlap.length) throw dirtyRefusal(sourceId, incoming.overlap);
     const localCommits = Number((await read(['rev-list', '--count', `${targetHead}..${oldHead}`])).stdout.trim()) || 0;
     const pushed = commitAndPush({ repo: root, pushOnly: true, keepCheckout: true });
-    const plan = await precheck(engine, git, sourceId, fetchTimeoutMs);
-    return { ...plan, published: { sha: pushed.sha ?? plan.targetHead, local_commits: localCommits, integrated: pushed.integrated } };
+    const published = { sha: pushed.sha ?? targetHead, local_commits: localCommits, integrated: pushed.integrated,
+      ...(pushed.quarantined ? { quarantined: pushed.quarantined } : {}), ...(pushed.superseded_remote_paths ? { superseded_remote_paths: pushed.superseded_remote_paths } : {}) };
+    const plan = await precheck(engine, git, sourceId, fetchTimeoutMs).catch(error => { throw notePublished(error, published); });
+    return { ...plan, published: { ...published, sha: pushed.sha ?? plan.targetHead } };
   }
   const dirt = await dirtyOverlap(git, root, oldHead, targetHead);
   if (dirt.overlap.length) throw dirtyRefusal(sourceId, dirt.overlap);
@@ -311,6 +313,11 @@ async function divergedRefusal(git: Git, root: string, sourceId: string, upstrea
     why: `HEAD has ${local} that ${upstreamRef} lacks while ${upstreamRef} moved on; pushing HEAD merged with it makes HEAD an ancestor of the upstream, so the refresh can fast-forward.`,
     user_message: `The checkout of source ${sourceId} has ${local} that were never pushed while its remote moved on. Push them, merged with the remote, so gbrain can bring the checkout up to date? Conflicting files stop the push and change nothing.`,
     docs: 'docs/guides/write-refusals.md#refresh_diverged' };
+  return error;
+}
+/** #7686: a refusal after this run's publish says the remote already holds the local commits, so "nothing changed" is not misread. */
+function notePublished(error: unknown, published: WorktreeRefreshResult['published']): unknown {
+  if (published && error instanceof Error) error.message += ` This run had already published the checkout's ${published.local_commits} local commit(s) merged with the upstream as ${published.sha} (${REFRESH_PUBLISH_DIVERGED_KEY}), so the remote holds them.`;
   return error;
 }
 function dirtyRefusal(sourceId: string, overlap: string[], refreshId?: string): OperationError {
@@ -453,9 +460,11 @@ export async function refreshWorktree(engine: BrainEngine, sourceId: string, opt
 }
 
 async function refreshOnce(engine: BrainEngine, sourceId: string, opts: RefreshOptions, fetchTimeoutMs: number, waitDrainMs: number): Promise<WorktreeRefreshResult> {
-  return withGit(async git => {
+  let published: WorktreeRefreshResult['published'];
+  return withGit<WorktreeRefreshResult>(async git => {
     const publishDiverged = !opts.dryRun && isTruthy(await engine.getConfig(REFRESH_PUBLISH_DIVERGED_KEY));
     const plan = await precheck(engine, git, sourceId, fetchTimeoutMs, publishDiverged);
+    published = plan.published;
     const base = { refresh_id: null, worktree_id: plan.binding.worktree_id, source_ids: plan.members, old_head: plan.oldHead,
       target_head: plan.targetHead, upstream_ref: plan.upstreamRef, preserved_uncommitted: plan.preserved, incoming_files: plan.incoming,
       ...(plan.published ? { published: plan.published } : {}) };
@@ -504,7 +513,7 @@ async function refreshOnce(engine: BrainEngine, sourceId: string, opts: RefreshO
       const result = finished(await readRefresh(engine, row.id), sync, plan.preserved);
       return plan.published ? { ...result, published: plan.published } : result;
     } finally { await refreshLock.release(); }
-  });
+  }).catch(error => { throw notePublished(error, published); });
 }
 
 /** Step 2: native topology + worktree locks, then one transaction inserting the `draining` row. */

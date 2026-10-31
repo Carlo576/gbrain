@@ -675,7 +675,9 @@ vars — incident-time escape hatches, not everyday knobs.
    the upstream in memory, the same publish as
    `gbrain git commit-push --push-only --keep-checkout`, and fast-forwards to
    the merge. It never moves the checkout to merge, a conflicting file refuses
-   `integrate_conflict` naming it with nothing pushed, an uncommitted edit to a
+   `integrate_conflict` naming it with nothing pushed (with `gbrain.quarantine`
+   on, the remote's version is published, this machine's is kept under
+   `refs/gbrain/quarantine/`, and the refresh says so), an uncommitted edit to a
    file the upstream changed refuses `refresh_dirty` before anything is pushed,
    and `--dry-run` never publishes.
 
