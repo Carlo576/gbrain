@@ -16,7 +16,7 @@ import { connectedEngine, type DoctorContext, type DoctorEntry } from '../contex
 
 const DOCS = 'docs/guides/troubleshooting.md#owner-host-stale';
 
-export async function ownerHostStaleCheck(engine: BrainEngine, now = Date.now()): Promise<Check> {
+export async function ownerHostStaleCheck(engine: BrainEngine): Promise<Check> {
   try {
     const [present] = await engine.executeRaw<{ managed: boolean }>(`SELECT to_regclass('public.persistence_requests') IS NOT NULL AND to_regclass('public.persistence_worktrees') IS NOT NULL AS managed`);
     if (!present?.managed) return { name: 'owner_host_stale', status: 'ok', message: 'This brain keeps no managed write journal.', details: { count: 0, stale_after_ms: OWNER_STALE_MS, stale: [], docs: DOCS } };
@@ -25,7 +25,7 @@ export async function ownerHostStaleCheck(engine: BrainEngine, now = Date.now())
         (SELECT array_agg(b.source_id ORDER BY b.source_id) FROM persistence_source_bindings b WHERE b.worktree_id=r.worktree_id) AS source_ids
       FROM persistence_requests r WHERE r.worktree_id IS NOT NULL AND r.state IN ('queued','running','recovering')
       GROUP BY r.worktree_id`);
-    const owners = await ownerActivity(engine, open.map(row => row.worktree_id), { now });
+    const owners = await ownerActivity(engine, open.map(row => row.worktree_id));
     const stale = open.flatMap(row => {
       const owner = owners.get(row.worktree_id);
       return owner?.stale ? [{ worktree_id: row.worktree_id, source_ids: row.source_ids ?? [], owner_host_id: owner.owner_host_id, last_active: owner.last_active,

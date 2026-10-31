@@ -6,7 +6,7 @@
  * a live consumer keeps its owner fresh and its clean stop leaves a durable
  * timestamp; a repo-less (database-only) write never names an owner.
  */
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +20,7 @@ import { getWriteRequestById, receiptFor, writeHealthFacts } from '../src/core/p
 import { isWriteReceipt, publicWriteReceipt } from '../src/core/persistence/types.ts';
 import { acceptPendingCovers, writeErrorExitCode } from '../src/core/persistence/write-wait.ts';
 import { PENDING_WRITE_EXIT_CODE } from '../src/core/exit-codes.ts';
+import { ownerHostStaleCheck } from '../src/commands/doctor/checks/owner-host-stale.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 
@@ -116,6 +117,19 @@ describe('owner activity', () => {
       const quiet = publicWriteReceipt(receiptFor(rows[2]!, facts.get(recentId)) as never);
       expect(quiet.diagnostic?.owner).toBeUndefined();
       expect(writeErrorExitCode(pending(quiet), true)).toBe(0);
+    }
+  }));
+
+  test('Postgres: staleness reads the database clock, so a caller clock days ahead neither stales a recent owner in the receipt nor in doctor', async () => inHome(async () => {
+    for (const engine of engines.filter(e => e.kind === 'postgres')) {
+      const recent = await worktree(engine, randomUUID(), 1);
+      await request(engine, recent, 'queued', 1);
+      const clock = spyOn(Date, 'now').mockReturnValue(Date.now() + 3 * OWNER_STALE_MS);
+      try {
+        expect((await ownerActivity(engine, [recent])).get(recent)).toMatchObject({ live: false, stale: false });
+        const check = await ownerHostStaleCheck(engine);
+        expect((check.details as { stale: { worktree_id: string }[] }).stale.map(row => row.worktree_id)).not.toContain(recent);
+      } finally { clock.mockRestore(); }
     }
   }));
 

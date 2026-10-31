@@ -38,7 +38,7 @@ export interface OwnerActivity {
   stale: boolean;
 }
 
-export async function ownerActivity(engine: BrainEngine, worktreeIds: readonly string[], opts: { now?: number; signal?: AbortSignal } = {}): Promise<Map<string, OwnerActivity>> {
+export async function ownerActivity(engine: BrainEngine, worktreeIds: readonly string[], opts: { signal?: AbortSignal } = {}): Promise<Map<string, OwnerActivity>> {
   const result = new Map<string, OwnerActivity>();
   const ids = [...new Set(worktreeIds)].filter(Boolean);
   if (!ids.length) return result;
@@ -63,7 +63,7 @@ export async function ownerActivity(engine: BrainEngine, worktreeIds: readonly s
     const self = local === row.owner_host_id;
     const foreign = engine.kind === 'pglite' && local !== null && !self;
     const since = lastActive ?? (row.oldest_open === null ? null : new Date(row.oldest_open).toISOString());
-    const quiet = since !== null && (opts.now ?? new Date(row.db_now).getTime()) - Date.parse(since) > OWNER_STALE_MS;
+    const quiet = since !== null && new Date(row.db_now).getTime() - Date.parse(since) > OWNER_STALE_MS;
     result.set(row.worktree_id, { worktree_id: row.worktree_id, owner_host_id: row.owner_host_id, live: !!row.live,
       last_active: lastActive, foreign_file_holder: foreign, stale: !self && !row.live && (foreign || quiet) });
   }
