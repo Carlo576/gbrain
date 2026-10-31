@@ -128,6 +128,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #5137: an env provider key shadowing a different config key.
   'embedding_key_source',
   'embedding_migration_state',
+  // GBRA-248 W0b: the config file disables embeddings over a database that holds vectors (doctor/checks/embedding-plane.ts).
+  'embedding_plane_disagreement',
   'embedding_provider',
   // #5691: query-instruction advisory for instruction-style embedding models.
   'embedding_query_prefix',
@@ -360,6 +362,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'two_consumers_on_host',
   'consumers_without_heartbeat',
   'host_identity_mismatch',
+  // GBRA-248 W0a: managed writes waiting on an owner host quiet past the stale window (doctor/checks/owner-host-stale.ts).
+  'owner_host_stale',
   // #6696 C6: a live serve or worker on an older build than this checkout (doctor/checks/persistence-consumers.ts).
   'serve_build_drift',
   // #7245: serve, the jobs supervisor, worker parents and job children on different builds (doctor/checks/runtime-build-skew.ts).
