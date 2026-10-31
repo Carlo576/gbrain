@@ -1078,7 +1078,12 @@ async function dispatchResolvedCall(
     // #5575 CEO-18: a floored connection only reaches read ops that enforce its floor.
     enforceReadTrustFloor(ctx.auth, op);
     // GBRA-156: a read op does not change what the hook reads, so it runs beside the handler (a degraded engine's reconnect stays the handler's).
-    const earlyMeta = opts.metaHook && op.mutating === false && !isEngineDegraded(engine) ? runMetaHook(opts.metaHook, name, ctx) : undefined;
+    // The hot-memory hook reads ctx.sourceId only, so a call that names its own sources gets no ambient-source payload.
+    const namedIds = safeParams.source_ids;
+    const namesSources = (Array.isArray(namedIds) ? namedIds.length > 0 : typeof namedIds === 'string' && namedIds.trim() !== '')
+      || (typeof safeParams.source_id === 'string' && safeParams.source_id !== '' && safeParams.source_id !== ctx.sourceId);
+    const metaHook = namesSources ? undefined : opts.metaHook;
+    const earlyMeta = metaHook && op.mutating === false && !isEngineDegraded(engine) ? runMetaHook(metaHook, name, ctx) : undefined;
     const sharedStdio = ctx.transport === 'stdio' && !ctx.auth &&
       (op.requiredScopes?.length || ['list_skills', 'get_skill', 'get_skill_asset', 'list_brain_skillpack'].includes(name));
     let registration: Awaited<ReturnType<typeof readLocalWriter>> | undefined;
@@ -1170,8 +1175,8 @@ async function dispatchResolvedCall(
     // The hook is wrapped in its own try/catch — any DB blip / cache miss /
     // helper crash degrades to no hook keys rather than flipping the whole
     // tool call to error.
-    if (opts.metaHook) {
-      const { meta, failure } = await (earlyMeta ?? runMetaHook(opts.metaHook, name, ctx));
+    if (metaHook) {
+      const { meta, failure } = await (earlyMeta ?? runMetaHook(metaHook, name, ctx));
       if (meta && Object.keys(meta).length > 0) out._meta = { ...(out._meta ?? {}), ...meta };
       if (failure !== undefined) ctx.logger.warn(`[mcp] _meta hook failed for ${name}: ${failure}; degrading to no hook keys`);
     }

@@ -20,6 +20,10 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { operationsByName, type OperationContext } from '../src/core/operations.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { dispatchToolCall } from '../src/mcp/dispatch.ts';
+import { allowedOpNames } from '../src/mcp/surface.ts';
+import { getBrainHotMemoryMeta, __resetHotMemoryCacheForTests } from '../src/core/facts/meta-hook.ts';
+import { operations } from '../src/core/operations.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 
 const CANARY = 'canarybravo';
@@ -119,6 +123,43 @@ for (const kind of testBackends()) {
       const recall = await run('recall', { question: 'zephyrblatt orchard harvest', query: 'zephyrblatt orchard harvest', source_id: 'source-a', source_ids: ['source-c'] });
       expect(recall.wire).not.toContain('Zephyrblatt');
       expect(recall.notices.map(n => n.code)).toContain('empty_retrieval');
+    });
+
+    for (const extra of [{ supersessions: true }, { session_id: 's1' }, { include_pending: true, query: 'zephyrblatt', entity: 'zephyrblatt-orchard' }]) {
+      test(`recall ${JSON.stringify(extra)}: an empty intersection reads nothing`, async () => {
+        const { wire } = await run('recall', { ...extra, source_id: 'source-a', source_ids: ['source-c'] });
+        expect(wire).not.toContain('Zephyrblatt');
+        expect(wire).not.toContain(CANARY);
+      });
+    }
+
+    describe('through dispatch on the starter surface', () => {
+      const call = (name: string, args: Record<string, unknown>) => dispatchToolCall(engine, name, args, {
+        remote: true, transport: 'http', sourceId: 'source-a', auth: GRANTED_ABC as never, surface: 'starter',
+        allowedOps: allowedOpNames(operations as never, 'starter'), config: { engine: kind, embedding_disabled: true } as never,
+        metaHook: getBrainHotMemoryMeta,
+      } as never) as Promise<{ isError?: boolean; content: Array<{ text: string }>; _meta?: Record<string, unknown> }>;
+
+      test('the hidden source_ids param still narrows recall and list_pages', async () => {
+        const list = await call('list_pages', { source_ids: ['source-b'] });
+        expect(list.content[0].text).toContain('chats/orchard-bravo');
+        expect(list.content[0].text).not.toContain('orchard-alpha');
+        const recall = await call('recall', { query: 'zephyrblatt orchard harvest', source_ids: ['source-b'] });
+        expect(recall.content[0].text).toContain(CANARY);
+        expect(recall.content[0].text).not.toContain('alpha team');
+      });
+
+      test('a call that names sources gets no ambient-source hot memory', async () => {
+        __resetHotMemoryCacheForTests();
+        const control = await call('list_pages', {});
+        expect(JSON.stringify(control._meta?.brain_hot_memory ?? null)).toContain('alpha team');
+        for (const [name, args] of [['list_pages', { source_ids: ['source-b'] }], ['search', { query: 'zephyrblatt', source_ids: ['source-b'] }], ['list_pages', { source_id: 'source-b' }]] as const) {
+          const out = await call(name, args);
+          expect(out.isError ?? false).toBe(false);
+          expect(out._meta?.brain_hot_memory).toBeUndefined();
+          expect(JSON.stringify(out)).not.toContain('alpha team');
+        }
+      });
     });
 
     test('an empty array behaves exactly like omitting it', async () => {
