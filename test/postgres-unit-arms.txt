@@ -458,6 +458,7 @@ test/search-remote-page-cap.test.ts
 test/search-transcript-quote-budget.test.ts
 test/search-transcript-quote-coverage.test.ts
 test/search-transcript-quote.test.ts
+test/search-transcript-quote-tiers.test.ts
 test/search-vector-scope-parity.test.ts
 test/search/page-rank-cut.test.ts
 test/search/rerank-gate-hybrid.test.ts

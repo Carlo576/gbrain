@@ -13,6 +13,7 @@ import { opTransport } from './op-fix.ts';
 import { readPolicyOpts } from './context.ts';
 import { MIN_TRUST_PARAM, resolveReadEligibility } from '../eligibility/policy.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
+import { pageTypesById, quotePageText, quotesStored } from '../search/transcript-quote.ts';
 import {
   enforceSubagentSlugFence,
   enforceClientSlugFence,
@@ -100,7 +101,16 @@ const get_timeline: Operation = {
       ...(limit !== undefined ? { limit } : {}),
       eligibility,
     });
-    return stampRowTrust(ctx.engine, 'timeline_entries', entries, e => (e as { id: number }).id);
+    const stamped = await stampRowTrust(ctx.engine, 'timeline_entries', entries, e => (e as { id: number }).id);
+    if (ctx.remote === false || stamped.length === 0) return stamped;
+    // GST-687: an untrusted reader gets an entry of a chat page, or one below the owner's tier, quoted like get_page's timeline.
+    const types = await pageTypesById(ctx.engine, stamped.map(e => e.page_id));
+    return stamped.map(e => {
+      const type = types.get(e.page_id);
+      if (!quotesStored(type, e.trust_tier)) return e;
+      const quote = (text: string) => quotePageText(text, p.slug as string, type);
+      return { ...e, summary: quote(e.summary), ...(e.detail ? { detail: quote(e.detail) } : {}), quoted: 'transcript' as const };
+    });
   },
   scope: 'read',
   cliHints: { name: 'timeline', positional: ['slug'] },

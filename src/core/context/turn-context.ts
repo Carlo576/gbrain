@@ -271,6 +271,11 @@ export interface AssembleTurnContextOpts {
    * widens; anything else is world. The push hook path never sets this.
    */
   includePrivate?: boolean;
+  /**
+   * pack/delta (GST-687): the verb's caller is untrusted (MCP, `ctx.remote !== false`): hot and entity facts below the
+   * owner's tier come back quoted, in the structured facts and the rendered text alike. The push hook path never sets this.
+   */
+  untrusted?: boolean;
   /** pack — cap on entity-card fan-out (default 8; push path passes smaller). */
   maxEntities?: number;
   /**
@@ -412,7 +417,7 @@ export async function assembleTurnContext(
         takesHoldersAllowList: ['world'],
         ...(policy.floor ? { auth: { minTrust: policy.floor } as OperationContext['auth'] } : {}),
       };
-      const meta = await getBrainHotMemoryMeta('turn_context', metaCtx, { sessionOnly: opts.sessionOnly });
+      const meta = await getBrainHotMemoryMeta('turn_context', metaCtx, { sessionOnly: opts.sessionOnly, untrusted: false });
       const hot = meta?.brain_hot_memory as { facts?: TurnContextFact[]; suppressed?: SuppressionSummary } | undefined;
       withheldFacts += hot?.suppressed?.withheld ?? 0;
       const all = Array.isArray(hot?.facts) ? [...hot.facts] : [];
@@ -587,7 +592,7 @@ async function fetchHotFacts(
       // #5575 CEO-18: the calling connection's floor keys and filters hot memory too.
       ...(floor ? { auth: { minTrust: floor } as OperationContext['auth'] } : {}),
     };
-    const meta = await getBrainHotMemoryMeta('turn_context', metaCtx, { sessionOnly: opts.sessionOnly });
+    const meta = await getBrainHotMemoryMeta('turn_context', metaCtx, { sessionOnly: opts.sessionOnly, untrusted: opts.untrusted === true });
     const hot = meta?.brain_hot_memory as { facts?: TurnContextFact[]; suppressed?: SuppressionSummary } | undefined;
     const facts = Array.isArray(hot?.facts) ? hot.facts.filter(f => !floor || admitsTrust(f.trust_tier ?? 'unknown', floor)) : [];
     return { facts, withheld: hot?.suppressed?.withheld ?? 0 };
@@ -672,7 +677,8 @@ async function assemblePack(
   const mentions = new Map(acc.mentions);
   const cards = acc.cards.map((c) => (mentions.has(keyOf(c)) ? { ...c, newer_mentions: mentions.get(keyOf(c)) } : c));
   const facts = [...acc.facts];
-  const entityFacts = [...acc.entityFacts];
+  // GST-687: an entity fact reaches an untrusted reader as hot memory does (quoteFacts); a failed lookup withholds them.
+  const entityFacts = opts.untrusted === true ? await quoteFacts(engine, [...acc.entityFacts], true).catch(() => []) : [...acc.entityFacts];
   // `since` filter (adversarial review: was documented but dead) — open-thread
   // events are cut to those after the cursor, matching the verb contract.
   const since = typeof opts.since === 'string' && opts.since.trim() ? opts.since : undefined;
@@ -800,7 +806,7 @@ async function assembleDelta(
         // #5888: duplicates collapse to their newest representative, as in hot memory.
         const collapsed = await collapseHotFacts(engine, opts.sourceId, kept, members);
         // #8042: a remote reader gets a fact taken from third-party text quoted.
-        const shown: Array<(typeof collapsed)[number] & { quoted?: 'transcript' }> = remote ? await quoteFacts(engine, collapsed) : collapsed;
+        const shown: Array<(typeof collapsed)[number] & { quoted?: 'transcript' }> = remote ? await quoteFacts(engine, collapsed, opts.untrusted === true) : collapsed;
         acc.facts = {
           status: 'ok',
           raw: kept.map((r) => ({ id: r.id, at: iso(r), repId: members.get(r.id) ?? r.id })),

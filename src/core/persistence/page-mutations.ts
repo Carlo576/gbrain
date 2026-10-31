@@ -43,7 +43,7 @@ import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { liveSearchable } from './searchable.ts';
 import { cachedPreadmitBrain, dropPreadmitCache, preadmitReads, preadmitRecheckFailed } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
-import { isQuotedPageType, unquoteTranscriptText } from '../search/transcript-quote.ts';
+import { holdsSummarizedToolCalls, isQuotedPageType, quotesTier, unquoteTranscriptText } from '../search/transcript-quote.ts';
 import { isMirrorOnlyPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 
 export async function requestPrincipalForContext(ctx: OperationContext): Promise<Principal> {
@@ -255,13 +255,23 @@ export async function submitPageMutation(ctx: OperationContext,
 /**
  * #8042: a remote put_page (put_pages too) of a quoted page's get_page content writes the page body, not the fences
  * get_page added (search/transcript-quote.ts). A fence naming the page is removed when its stored type or the type the
- * new content declares is one get_page quotes (either, so a retype keeps the body); a note's own fence-like text is kept.
+ * new content declares is one get_page quotes (either, so a retype keeps the body), or (GST-687) when the stored page is
+ * below the owner's tier, which get_page quotes too; an owner note's own fence-like text is kept.
+ * GST-687: content carrying a tool-call summary that only the neutralized read of the stored chat page holds (get_page's
+ * reading shape, fetch) is refused, so a read-then-write never replaces a stored tool call with its summary.
  */
 async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: string, content: string): Promise<string> {
   const unquoted = unquoteTranscriptText(content, slug);
+  const summarized = /, arguments omitted\]/.test(unquoted);
+  if (!summarized && (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? '')))) return unquoted;
+  const [stored] = await engine.executeRaw<{ type: string | null; trust_tier: string | null; compiled_truth: string | null; timeline: string | null }>(
+    'SELECT type, trust_tier, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
+  if (summarized && stored && isQuotedPageType(stored.type) && holdsSummarizedToolCalls(`${stored.compiled_truth ?? ''}\n${stored.timeline ?? ''}`, unquoted)) {
+    throw new OperationError('invalid_params', `put_page: this content has tool calls that a read of ${slug} summarized; writing it would replace the stored calls with their summaries.`,
+      'Nothing was written. Read the page with get_page include_content: true (its content keeps the stored text) and write that back, or change the page with edit_page.');
+  }
   if (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? ''))) return unquoted;
-  const [stored] = await engine.executeRaw<{ type: string | null }>('SELECT type FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
-  return isQuotedPageType(stored?.type) ? unquoted : content;
+  return stored && (isQuotedPageType(stored.type) || quotesTier(stored.trust_tier)) ? unquoted : content;
 }
 
 /**
