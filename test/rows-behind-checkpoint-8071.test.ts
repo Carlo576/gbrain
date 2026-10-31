@@ -301,16 +301,19 @@ for (const backend of testBackends()) describe(`[${backend}] #8071: rows behind 
     expect(await doctor(engine)).toMatchObject({ name: CHECK, status: 'ok', readiness_state: 'unknown' });
   }, { databaseUrl, setup }), 240_000);
 
-  test('nested typed index pages are screened with one batched head read per batch, not a Git read per page', () => managedBrain(async ({ engine, root }) => {
+  test('nested typed index pages are screened with one batched head read per batch, not a Git read per page; a large one is read alone', () => managedBrain(async ({ engine, root }) => {
     for (const dir of ['notes/s1', 'notes/s2', 'notes/s3']) { mkdirSync(join(root, dir), { recursive: true }); writeFileSync(join(root, dir, 'index.md'), note(dir, `The index of ${dir}.`)); }
+    mkdirSync(join(root, 'notes/big'), { recursive: true });
+    writeFileSync(join(root, 'notes/big/index.md'), note('notes/big', 'A long index line.\n'.repeat(5_000)));
     commit(root, 'indexes');
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
     const trace = join(tmpdir(), `gbrain-rows-behind-trace-${randomUUID()}.log`);
     try {
       const scan = await withEnv({ GIT_TRACE: trace }, () => scanRowsBehind(engine, 'default'));
-      expect(scan).toMatchObject({ status: 'known', complete: true, behind: [], pages: 8 });
-      // The eligibility screen reads the index pages' heads from the batch's checkpoint blobs, never one lookup per page.
-      expect(readFileSync(trace, 'utf8').split('\n').filter(line => line.includes('cat-file') && line.includes('--batch-check'))).toEqual([]);
+      expect(scan).toMatchObject({ status: 'known', complete: true, behind: [], pages: 9 });
+      // The small index pages' heads come from one batched read of their checkpoint blobs, never a lookup per page. A blob
+      // larger than the head kept is not loaded into the batch's read; its head is read on its own (one lookup).
+      expect(readFileSync(trace, 'utf8').split('\n').filter(line => line.includes('cat-file') && line.includes('--batch-check'))).toHaveLength(1);
     } finally { rmSync(trace, { force: true }); }
   }, { databaseUrl, setup }), 240_000);
 

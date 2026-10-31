@@ -39,6 +39,7 @@ import { prepareRepairPublication, repairScreenConfig } from './file-repair.ts';
 import { SYNC_READ_BOUND } from './sync-blobs.ts';
 import { heldGitPaths, readSyncImportProvenances } from './sync-holds.ts';
 import { loadSyncEligibility } from './sync-discovery.ts';
+import { METAFILE_HEAD_BYTES } from '../sync.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
 
 export const ROWS_BEHIND_BATCH = 256;
@@ -156,7 +157,7 @@ export async function scanRowsBehind(engine: BrainEngine, sourceId: string,
         if (blob.mode !== '100644' && blob.mode !== '100755') { skip(key.id, 'not_regular_file'); continue; }
         listed.push({ key, rel, blob });
       }
-      metafileHeads.prime(listed.map(row => ({ path: gitPath(row.rel), oid: row.blob.oid, size: row.blob.size })));
+      metafileHeads.prime(listed.filter(row => row.blob.size <= METAFILE_HEAD_BYTES).map(row => ({ path: gitPath(row.rel), oid: row.blob.oid, size: row.blob.size })));
       const rows = listed.filter(row => {
         if (eligible(gitPath(row.rel))) return true;
         skip(row.key.id, 'not_eligible');
