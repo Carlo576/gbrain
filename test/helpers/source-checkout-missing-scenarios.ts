@@ -11,10 +11,19 @@
  *   that tells the agent to repair file permissions; a remote caller is not shown the host path; nothing is written.
  * Regression: both shapes refused every page write with storage_error ("The canonical file target cannot be accessed
  * as a regular file") because the file target was resolved against the source directory itself.
+ *
+ * The same write door, when the checkout is present but its private ownership records no longer verify:
+ * - recreated at its recorded path (a backup restore or a container copy: new inode and birth time): the write refuses
+ *   recovery_required with detail physical_root_directory_changed, and its fix is the owner-run relocated-root
+ *   self-transfer (prepare, then accept), which the agent tells the user to run and never runs itself;
+ * - an ownership record readable by other users (a recursive chmod): the write refuses recovery_required with detail
+ *   ownership_record_not_private and points at doctor, which names the file and the chmod 600 that restores it instead
+ *   of telling the operator to delete it. Restoring the mode makes the next write succeed.
+ * Regression: both refused with no detail and a fix that only said to read the receipt.
  */
 import { expect } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import type { AuthInfo } from '../../src/core/ops/contract.ts';
@@ -24,7 +33,10 @@ import { mintLegacyToken } from '../../src/core/token-mint.ts';
 import { parseRescopeTokenArgs, rescopeLegacyToken } from '../../src/core/grants/legacy-token.ts';
 import { runManagedSourceLifecycle } from '../../src/core/persistence/source-lifecycle.ts';
 import { dispatchToolCall } from '../../src/mcp/dispatch.ts';
+import { PHYSICAL_ROOT_MARKER } from '../../src/core/persistence/physical-root-record.ts';
+import { checkForeignOwnershipMarkers } from '../../src/commands/doctor/checks/orphan-bindings.ts';
 import { managedBrain } from './managed-brain.ts';
+import { recreateRoot } from './recreate-root.ts';
 
 const page = (title: string, extra = '') => `---\ntitle: ${title}\ntype: note\n${extra}---\n\n${title} body.\n`;
 
@@ -95,5 +107,45 @@ export function missingSourceCheckout(databaseUrl?: string) {
       expect((await call('get_page', { slug: args.slug })).body.error).toBe('page_not_found');
     }
     expect(existsSync(memberDir)).toBe(false);
+  }, { databaseUrl });
+}
+
+export function recreatedCheckout(databaseUrl?: string) {
+  return managedBrain(async ({ engine, root }) => {
+    const call = caller(engine, await memberToken(engine, 'default'));
+    expect((await call('put_page', { slug: 'notes/before-move', content: page('notes/before-move') })).body.error ?? null).toBeNull();
+    recreateRoot(root, { keepStamp: true });
+    const out = await call('put_page', { slug: 'notes/after-move', content: page('notes/after-move') });
+    expect({ isError: out.isError, code: out.body.code, detail: out.body.detail }).toEqual({ isError: true, code: 'recovery_required', detail: 'physical_root_directory_changed' });
+    expect(out.body.fix).toMatchObject({ next: 'tell_user_to_run', actor: 'user' });
+    expect(out.body.fix.argv).toEqual(expect.arrayContaining(['transfer', 'prepare', 'default', '--self-transfer', '--confirm-relocated-root']));
+    expect(out.body.fix.then.argv).toEqual(expect.arrayContaining(['transfer', 'accept', 'default', '--self-transfer', '--confirm-relocated-root']));
+    expect(out.text).not.toContain(root);
+    expect((await call('get_page', { slug: 'notes/after-move' })).body.error).toBe('page_not_found');
+  }, { databaseUrl });
+}
+
+export function ownershipRecordNotPrivate(databaseUrl?: string) {
+  if (process.platform === 'win32') return Promise.resolve();
+  return managedBrain(async ({ engine, root }) => {
+    const call = caller(engine, await memberToken(engine, 'default'));
+    const stamp = join(root, PHYSICAL_ROOT_MARKER);
+    expect((await call('put_page', { slug: 'notes/before-chmod', content: page('notes/before-chmod') })).body.error ?? null).toBeNull();
+    chmodSync(stamp, 0o644);
+    const out = await call('put_page', { slug: 'notes/after-chmod', content: page('notes/after-chmod') });
+    expect({ isError: out.isError, code: out.body.code, detail: out.body.detail }).toEqual({ isError: true, code: 'recovery_required', detail: 'ownership_record_not_private' });
+    expect(out.body.fix).toMatchObject({ next: 'tell_user_to_run', argv: ['gbrain', 'doctor', '--only', 'foreign_ownership_marker'] });
+    expect(out.text).not.toContain(root);
+
+    const check = await checkForeignOwnershipMarkers(engine);
+    const markers = (check.details as { markers: Array<{ path: string; problem: string }> }).markers;
+    expect(markers.map(marker => marker.path)).toEqual([stamp]);
+    expect(markers[0].problem).toContain(`chmod 600 '${stamp}'`);
+    expect(check.message).toContain(`chmod 600 '${stamp}'`);
+    expect(check.message).not.toContain('remove exactly the named file');
+
+    chmodSync(stamp, 0o600);
+    expect((await call('put_page', { slug: 'notes/after-chmod', content: page('notes/after-chmod') })).body.error ?? null).toBeNull();
+    expect((await call('get_page', { slug: 'notes/after-chmod' })).body.compiled_truth).toContain('notes/after-chmod body.');
   }, { databaseUrl });
 }

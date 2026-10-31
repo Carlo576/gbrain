@@ -25,8 +25,7 @@ import type { PgAccessReason } from '../pg-access-classify.ts';
 import { contentRefusalFromReceipt } from '../import-screen.ts';
 import { fenceIssuesFromDetail, fenceLocationFromDetail } from '../fence-repair/refusal.ts';
 import { withdrawnFromDetail } from '../facts/withdrawal.ts';
-import { heldFileDiagnostic, sourceCheckoutMissingRefusal } from './verb-errors.ts';
-import { SOURCE_CHECKOUT_MISSING } from './publication-failure.ts';
+import { heldFileDiagnostic, storedCheckoutRefusal } from './verb-errors.ts';
 import { isMissingPageMessage } from './page-identity.ts';
 import { registerPersistenceConsumerConfig } from '../embedding-disabled.ts';
 
@@ -411,10 +410,8 @@ export function writeResponse(row: WriteRequest, hints: { retryAfterMs?: number 
     const pending = pendingImportRefusal(row, row.authority?.remote === true);
     Object.assign(error, { suggestion: pending.suggestion, fix: pending.fix, reason: pending.reason, detail: pending.detail, docs: pending.docs ?? error.docs });
   }
-  if (isTerminal(row) && (row.error_detail as { origin?: unknown } | null | undefined)?.origin === SOURCE_CHECKOUT_MISSING) {
-    const missing = sourceCheckoutMissingRefusal(row.source_id, row.slug || null);
-    Object.assign(error, { suggestion: missing.suggestion, fix: missing.fix, detail: missing.detail, docs: missing.docs });
-  }
+  const checkout = isTerminal(row) ? storedCheckoutRefusal((row.error_detail as { origin?: unknown } | null | undefined)?.origin, row.source_id, row.slug || null) : undefined;
+  if (checkout) Object.assign(error, { suggestion: checkout.suggestion, fix: checkout.fix, detail: checkout.detail, docs: checkout.docs });
   // #6317 (B1b): a waiter-only process names the owner that publishes for it, so the caller is told who holds the write instead of polling blind.
   if (!isTerminal(row) && hints.waiterOnlyOwner) {
     const owner = hints.waiterOnlyOwner;

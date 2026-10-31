@@ -12,7 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [Unreleased]
 
-**Page writes to a source whose directory is missing on the brain host no longer fail with a misleading `storage_error`. A source that is a folder inside a checkout now gets its folder created on the first write, and a source whose whole checkout is gone gets a refusal that says so.**
+**Page writes to a source whose directory is missing on the brain host no longer fail with a misleading `storage_error`. A source that is a folder inside a checkout now gets its folder created on the first write, and a source whose whole checkout is gone gets a refusal that says so. A checkout restored or copied into place, or one whose private ownership records lost their mode, now refuses with the exact owner step that fixes it.**
 
 ### What changed
 
@@ -21,7 +21,10 @@ identifiers and attribution are available in the pre-removal Git revision
 | The source is a folder inside a checkout and the folder is missing (Git keeps no empty folder, so a fresh clone of a repository whose member folder has no files yet lacks it) | every `put_page`, `capture` and `add_timeline_entry` to it failed with `storage_error` ("The canonical file target cannot be accessed as a regular file"), so a token granted only that member's source could save nothing | the write creates the folder and the page, and the same token reads it back |
 | The source's whole checkout is missing (a brain copied to another machine or into a container without its source directories) | the same `storage_error`, whose fix told the agent to repair file permissions | `recovery_required` with `detail: source_checkout_missing`, naming the source; the fix is the read-only `gbrain sources writer status --source <id> --json`, which shows the registered path. Remote callers are not shown the path. Nothing is written, as before |
 
-A token's source grant decides where it writes exactly as before; this changes only how the file path inside the granted source is resolved.
+| The checkout was restored, copied or recreated at its recorded path (new inode or birth time) | `recovery_required` whose `fix` only said to read the receipt | `detail: physical_root_directory_changed`, and the `fix` is the owner-run relocated-root self-transfer (`gbrain sources writer transfer prepare` then `accept`, both with `--self-transfer --confirm-relocated-root`) with `next: tell_user_to_run`. The re-stamp stays a deliberate step on the brain host |
+| An ownership record of the checkout became readable by other users (a recursive `chmod` of a copied brain) | `recovery_required` ("The private physical-checkout identity cannot be verified"), and doctor's `foreign_ownership_marker` called the file foreign and told the operator to remove it | `detail: ownership_record_not_private` with `gbrain doctor --only foreign_ownership_marker` as the fix; doctor now reports this brain's own record with its mode and the exact `chmod 600 '<path>'`, never removal, and lists each record once |
+
+A token's source grant decides where it writes exactly as before; this changes only how the file path inside the granted source is resolved and how these refusals name their exit.
 
 ## [0.60.527.0] - 2026-10-31
 
