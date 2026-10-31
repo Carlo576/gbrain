@@ -10,6 +10,20 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Five severe fixes: the secret scan now redacts keys that follow a JSON or percent escape, a connector page that turns private leaves Git HEAD, deleted pages no longer stay searchable under a scoped writer role, a stale freshness marker can no longer starve the job queue, and a slow embedder no longer loses `remember` writes (#7978, #7971, #7637, #7941, #8135).**
+
+The secret scan's rules required a non-word character before a key, but a JSON escape (`\n`, `\t`, `\u0022`) and a percent-escape (`%22`) end on a word character, so a key at the start of an escaped tool-output string or inside a URL-encoded value was never redacted. Every rule now also matches after such an escape, and a vendor key that recurs glued to a word (`token_<key>`) is scrubbed wherever the same key is claimed elsewhere in the document. On a managed connector source bound to a Git checkout, a page that turned private kept its public file at HEAD; it is now removed in the same publication. Under a database role with row-level security that lacks policies on the derived-state tables, deleting a page left its retrieval rows searchable and page versions lost their trust and attribution stamps without an error; those writes now refuse with `writer_coordinator_required`, and `docs/ENGINES.md` lists the policies such a role needs. A freshness marker naming a commit the source had already passed kept every sync queuing another top-priority follow-up; a completed run now settles it once the checkout has nothing left to import. A `remember` whose embed took longer than its 30 s preparation budget ended `preparation_stalled` with nothing saved; the fact is now saved without a vector and embedded later.
+
+### Itemized changes
+
+- `src/core/secret-scan.ts`: escape-boundary twin for every rule, run only on lines holding an escape; vendor and JWT values (20 to 512 characters) join the echo dictionary (#7978). The `high_entropy_assignment` shapes moved to `src/core/secret-scan-assignment.ts` (module size cap).
+- `src/core/persistence/connector-sync.ts`: a strict private import of a public page publishes the file removal from `preparePrivateTransition` (#7971 item 1).
+- `src/core/derived-state-maintainers.ts`, migration v281: the eight derived-state maintainer triggers stay `SECURITY INVOKER` and fail closed when the caller's row-level security hides a table they need; `docs/ENGINES.md` "Derived-state maintainers" recipe (#7637).
+- `src/core/notifier/store.ts`, `handoff.ts`, `resident.ts`: settlement takes the checkout HEAD after the run (#7941).
+- `src/core/facts/single-prepare.ts`, `src/core/persistence/memory-prepare.ts`, `service.ts`: the fact embed is bounded inside the preparation deadline (#8135).
+
 ## [0.60.529.0] - 2026-10-31
 
 **A pull request that adds a file to the PGLite snapshot inputs no longer gets stopped at gstack's pregate secrets check by its own workflow cache keys (#8107).**
