@@ -1252,7 +1252,7 @@ export async function writeHealthFacts(engine: BrainEngine, rows: WriteRequest[]
   const settleOwners = startOwnerRead(engine, pending.flatMap(row => row.worktree_id ? [row.worktree_id] : []));
   let timer: ReturnType<typeof setTimeout> | undefined;
   const facts = await Promise.race([query, new Promise<null>(resolve => {
-    timer = setTimeout(() => { abort.abort(); resolve(null); }, 500);
+    timer = setTimeout(() => { abort.abort(); resolve(null); }, OWNER_READ_BUDGET_MS);
   })]).finally(() => { if (timer) clearTimeout(timer); });
   const owners = await settleOwners(facts ? OWNER_READ_BUDGET_MS - (performance.now() - ownerReadStarted) : 0);
   if (!facts) return result;

@@ -10,6 +10,7 @@
 import type { Check } from '../../doctor.ts';
 import type { BrainEngine } from '../../../core/engine.ts';
 import { ownerActivity, OWNER_STALE_MS } from '../../../core/persistence/owner-activity.ts';
+import { PENDING_WRITE_EXIT_CODE } from '../../../core/exit-codes.ts';
 import { agentFix, checkError } from '../check-fix.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 
@@ -39,7 +40,7 @@ export async function ownerHostStaleCheck(engine: BrainEngine, now = Date.now())
         + stale.slice(0, 3).map(row => `${row.source_ids.join(', ') || row.worktree_id}: owner host ${row.owner_host_id}, last active ${row.last_active ?? 'at no recorded time'}, ${row.open_writes} waiting since ${row.oldest_open}${row.foreign_file_holder ? ' (this process holds the PGLite file under a different host identity)' : ''}.`).join(' ')
         + `${stale.length > 3 ? ` (first 3 of ${stale.length} shown.)` : ''} `
         + 'These writes are kept and publish only when that host runs gbrain again. If the brain was moved or restored onto this machine, or this container restarted with a new GBRAIN_HOME, '
-        + 'run gbrain with the owner\'s GBRAIN_HOME (keep it stable per container). The accept-pending opt-in does not cover these writes: they still exit 10. Never edit or delete a host.json.',
+        + 'run gbrain with the owner\'s GBRAIN_HOME (keep it stable per container). The accept-pending opt-in does not cover these writes: they still exit ' + PENDING_WRITE_EXIT_CODE + '. Never edit or delete a host.json.',
       fix: agentFix(['gbrain', 'sources', 'writer', 'status', '--json'], 'Read-only: shows local_host_id, each binding\'s owner_host_id and the owner\'s consumers.', 'owner_host_stale', { docs: DOCS }) };
   } catch (error) {
     return checkError('owner_host_stale', 'read the owner hosts of waiting writes', error, { details: { count: 'unknown', health: 'unknown', docs: DOCS } });

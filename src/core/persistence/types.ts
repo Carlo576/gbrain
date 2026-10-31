@@ -36,8 +36,8 @@ export interface WriteDiagnostic {
   assessment: typeof WRITE_HEALTH_ASSESSMENTS[number];
   reason: typeof WRITE_HEALTH_REASONS[number];
   next_action: typeof WRITE_HEALTH_ACTIONS[number];
-  /** GBRA-248: present only when the worktree owner is stale (reason owner_unavailable): no live consumer and quiet past the stale window. Older readers ignore it. */
-  owner?: { host_id: string; live: boolean; last_active: string | null };
+  /** GBRA-248: present whenever the worktree owner is stale (no live consumer, quiet past the stale window), with its last recorded activity; the reason is owner_unavailable unless recovery outranks it. No host id: receipts reach remote callers. Older readers ignore it. */
+  owner?: { last_active: string | null };
 }
 
 export interface WriteReceipt {
@@ -102,8 +102,7 @@ export function isWriteDiagnostic(value: unknown): value is WriteDiagnostic {
   }
   if (value.owner !== undefined) {
     const owner = value.owner;
-    if (!isRecord(owner) || typeof owner.host_id !== 'string' || !owner.host_id || typeof owner.live !== 'boolean'
-      || (owner.last_active !== null && (typeof owner.last_active !== 'string' || !Number.isFinite(Date.parse(owner.last_active))))) return false;
+    if (!isRecord(owner) || (owner.last_active !== null && (typeof owner.last_active !== 'string' || !Number.isFinite(Date.parse(owner.last_active))))) return false;
   }
   return true;
 }
@@ -167,8 +166,7 @@ export function publicWriteReceipt(receipt: WriteReceipt): WriteReceipt {
       age_ms: receipt.diagnostic.age_ms, assessment: receipt.diagnostic.assessment,
       reason: receipt.diagnostic.reason, next_action: receipt.diagnostic.next_action,
       ...(receipt.diagnostic.observed_at !== undefined ? { observed_at: receipt.diagnostic.observed_at } : {}),
-      ...(receipt.diagnostic.owner !== undefined ? { owner: { host_id: receipt.diagnostic.owner.host_id, live: receipt.diagnostic.owner.live,
-        last_active: receipt.diagnostic.owner.last_active } } : {}),
+      ...(receipt.diagnostic.owner !== undefined ? { owner: { last_active: receipt.diagnostic.owner.last_active } } : {}),
     } } : {}),
   };
 }

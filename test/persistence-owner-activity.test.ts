@@ -100,10 +100,12 @@ describe('owner activity', () => {
       const rows = [(await getWriteRequestById(engine, id))!, (await getWriteRequestById(engine, dbOnly))!, (await getWriteRequestById(engine, recentId))!];
       const facts = await writeHealthFacts(engine, rows);
       const stale = receiptFor(rows[0]!, facts.get(id));
-      expect(stale.diagnostic).toMatchObject({ reason: 'owner_unavailable', next_action: 'inspect_owner', owner: { host_id: owner, live: false } });
+      expect(stale.diagnostic).toMatchObject({ reason: 'owner_unavailable', next_action: 'inspect_owner' });
+      expect(Number.isFinite(Date.parse(stale.diagnostic!.owner!.last_active!))).toBe(true);
       const wire = publicWriteReceipt(stale as never);
       expect(isWriteReceipt(wire)).toBe(true);
-      expect(wire.diagnostic?.owner?.host_id).toBe(owner);
+      expect(wire.diagnostic?.owner).toBeDefined();
+      expect(JSON.stringify(wire)).not.toContain(owner);
       expect(acceptPendingCovers(wire)).toBe(false);
       const pending = (receipt: unknown) => ({ toJSON: () => ({ error: 'write_pending', write_request: receipt }) });
       expect(writeErrorExitCode(pending(wire), true)).toBe(PENDING_WRITE_EXIT_CODE);

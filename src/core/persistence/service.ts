@@ -252,12 +252,12 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
   const firstPoll = recentlySettled.get(engine)?.has(id) ? 0 : Math.min(WRITE_POLL_START_MS, waitMs / 2);
   let delay = firstPoll, failure: { error: unknown; attempts: number } | undefined;
   // GBRA-248: owner facts for a write that may be left pending, read during the wait's last OWNER_READ_BUDGET_MS so they never extend it.
-  let settleOwner: ((budgetMs: number) => Promise<Map<string, OwnerActivity>>) | undefined;
+  let settleOwner: ((budgetMs: number) => Promise<Map<string, OwnerActivity>>) | undefined, ownerReadAt = 0;
   try {
     while (!service.stopping && !opts.signal?.aborted) {
       if (handed) { row = handed; handed = undefined; if (isTerminal(row)) return { kind: 'terminal', row }; }
       const remaining = deadline - performance.now();
-      if (!settleOwner && row.worktree_id && remaining <= OWNER_READ_BUDGET_MS) settleOwner = startOwnerRead(engine, [row.worktree_id]);
+      if (!settleOwner && row.worktree_id && remaining <= OWNER_READ_BUDGET_MS) { settleOwner = startOwnerRead(engine, [row.worktree_id]); ownerReadAt = performance.now(); }
       if (remaining <= 0) {
         if (opts.whileHeldMs && opts.whileHeldMs > waitMs && deadline === started + waitMs
           && (consumer.holds(id) || row.state === 'queued' && !row.blocked_reason)) { deadline = started + opts.whileHeldMs; continue; }
@@ -319,8 +319,10 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
   const cause = BLOCKED_WRITE_REASONS.find(reason => reason === row.blocked_reason);
   if (cause) return { kind: 'blocked', row, request_id: row.request_id, cause, command: `gbrain sources writer status ${row.source_id} --json` };
   // GBRA-248: a write left pending names a stale owner, so the receipt (and --accept-pending) can tell it from a slow commit.
+  // The read always gets OWNER_READ_BUDGET_MS from its start: a wait shorter than that (wait 0) is extended by the difference, never more.
   if (row.worktree_id) {
-    const owners = await (settleOwner ?? startOwnerRead(engine, [row.worktree_id]))(Math.min(OWNER_READ_BUDGET_MS, deadline - performance.now()));
+    if (!settleOwner) { settleOwner = startOwnerRead(engine, [row.worktree_id]); ownerReadAt = performance.now(); }
+    const owners = await settleOwner(Math.max(deadline, ownerReadAt + OWNER_READ_BUDGET_MS) - performance.now());
     const owner = owners.get(row.worktree_id);
     if (owner) observedOwners.set(row, owner);
   }
