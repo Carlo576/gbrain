@@ -117,6 +117,8 @@ export interface WritePageThroughOpts {
    * (`skipped: 'file_changed'`). Omitted: no preimage check.
    */
   expectedFileBytes?: string | null;
+  /** The caller commits the file itself (#8073: one commit per batch), so the hardened per-file commit is skipped. */
+  deferCommit?: boolean;
 }
 
 export function withNoRepoWriteThroughWarning<T extends { written: boolean; skipped?: string; warning?: string }>(result: T, sourceId: string, operation = 'put_page'): T {
@@ -528,7 +530,7 @@ export async function writePageThrough(
     let lastPushStatus: PushLogOutcome | undefined;
     try {
       assertSourceFilesystemActive();
-      if (isDurabilityHardened(writeRoot)) {
+      if (!opts.deferCommit && isDurabilityHardened(writeRoot)) {
         committed = commitWriteThroughFile(writeRoot, filePath, slug);
         if (committed) {
           pushed = 'pending';
@@ -607,7 +609,7 @@ export interface DeleteThroughResult {
 export async function deletePageThrough(
   engine: BrainEngine,
   slug: string,
-  opts: { sourceId?: string; logger?: WriteThroughLogger; target?: PageWriteTarget; expectedFileBytes?: string } = {},
+  opts: { sourceId?: string; logger?: WriteThroughLogger; target?: PageWriteTarget; expectedFileBytes?: string; deferCommit?: boolean } = {},
 ): Promise<DeleteThroughResult> {
   const sourceId = opts.sourceId ?? 'default';
   try {
@@ -644,7 +646,7 @@ export async function deletePageThrough(
     // never fails the delete (the DB row + the unlink are the durable state).
     let committed = false;
     try {
-      if (isDurabilityHardened(writeRoot)) {
+      if (!opts.deferCommit && isDurabilityHardened(writeRoot)) {
         committed = commitWriteThroughFile(writeRoot, filePath, slug, 'delete write-through');
       }
     } catch { /* best-effort */ }
