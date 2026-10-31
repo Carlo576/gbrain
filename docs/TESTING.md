@@ -458,8 +458,8 @@ too; build the admin app on the host when updating its committed bundle.
 from one heaviest-first work queue; every VM is destroyed on exit. VM setup, scheduling, weights, quota
 and flags are in [scripts/ubicloud/README.md](../scripts/ubicloud/README.md).
 
-VMs are named `ubirun-<owner>-<epoch>-<suffix>-t<H>`; set `UBI_OWNER` to your thread
-code. `scripts/ubicloud/ubi-runner.sh usage` shows vCPUs by owner.
+VMs are named `ubirun-<owner>-<epoch>-<suffix>-t<H>`; `UBI_OWNER` (your thread
+code) is required. `scripts/ubicloud/ubi-runner.sh usage` shows vCPUs by owner.
 A sleeping machine kills the run with no signal, so teardown never runs: on Capy, run
 `ci:ubicloud` as a watched background operation. After any interrupted run, check
 `ubi-runner.sh list --mine` and reap leftovers with `down NAME` (or `gc HOURS`, own VMs only).
