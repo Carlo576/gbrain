@@ -155,15 +155,12 @@ for v in IDLE_TIMEOUT RUN_TIMEOUT HEARTBEAT QUOTA_WAIT; do
   [[ "${!v}" =~ ^[0-9]+$ ]] || die "UBI_$v must be a whole number of seconds (0 disables it)"
 done
 [ -z "$QUOTA_VCPUS" ] || [[ "$QUOTA_VCPUS" =~ ^[0-9]+$ ]] || die "UBI_QUOTA_VCPUS must be a whole number of vCPUs"
-for v in DOWN_TIMEOUT REAP_DOWN_TIMEOUT; do
-  [[ "${!v}" =~ ^[1-9][0-9]*$ ]] || die "UBI_$v must be a whole number of seconds from 1"
-done
-# gbrain: UBI_REAP=false (or no/off) must not turn reaping on.
-case $(printf %s "$REAP" | tr '[:upper:]' '[:lower:]') in
-  0|false|no|off) REAP=0 ;;
-  1|true|yes|on) REAP=1 ;;
-  *) die "UBI_REAP must be 1 or 0 (true/false, yes/no and on/off also work), not '$REAP'" ;;
-esac
+# check_seconds VAR: UBI_DOWN_TIMEOUT and UBI_REAP_DOWN_TIMEOUT are checked only
+# by the commands that read them (up and down, reap), so a stale value never
+# blocks list, usage or a teardown that does not read it.
+check_seconds() {
+  [[ "${!1}" =~ ^[1-9][0-9]*$ ]] || die "UBI_$1 must be a whole number of seconds from 1"
+}
 
 owner_id() {
   local raw=${UBI_OWNER:-} file="$STATE_ROOT/owner-id" tmp
@@ -393,6 +390,7 @@ mine_rows() {
 # outside the prefix are never touched: only a TTL lets reap judge another lane's VM.
 cmd_reap() {
   local now rows loc name owner expires created n=0 failed=0
+  check_seconds REAP_DOWN_TIMEOUT
   # cmd_down reads DOWN_TIMEOUT; a reap waits at most REAP_DOWN_TIMEOUT per VM.
   local DOWN_TIMEOUT=$REAP_DOWN_TIMEOUT
   [[ "$LEGACY_HOURS" =~ ^[1-9][0-9]{0,3}$ ]] || die "UBI_LEGACY_HOURS must be a whole number of hours from 1 to 9999 with no leading zero (how old a TTL-less ubirun-* VM must be before reap destroys it)"
@@ -572,6 +570,13 @@ UP_NAME=""
 UP_READY=""
 cmd_up() {
   require_owner
+  check_seconds DOWN_TIMEOUT
+  # gbrain: UBI_REAP=false (or no/off) must not turn reaping on; only up reads it.
+  case $(printf %s "$REAP" | tr '[:upper:]' '[:lower:]') in
+    0|false|no|off) REAP=0 ;;
+    1|true|yes|on) REAP=1 ;;
+    *) die "UBI_REAP must be 1 or 0 (true/false, yes/no and on/off also work), not '$REAP'" ;;
+  esac
   local size=$DEFAULT_SIZE location=$DEFAULT_LOCATION name="" storage="" image=ubuntu-noble ttl=""
   while [ $# -gt 0 ]; do
     case $1 in
@@ -1115,7 +1120,7 @@ case $cmd in
   pack) cmd_pack "$@" ;;
   unpack) cmd_unpack "$@" ;;
   pull) cmd_pull "$@" ;;
-  down) cmd_down "$@" ;;
+  down) check_seconds DOWN_TIMEOUT; cmd_down "$@" ;;
   list) cmd_list "$@" ;;
   usage) cmd_usage ;;
   owner) echo "$OWNER" ;;

@@ -257,6 +257,23 @@ describe("down retries a failed destroy request", () => {
     expect(api.vms.has("vm-a")).toBe(true);
   }, 60_000);
 
+  it("UBI_REAP, UBI_DOWN_TIMEOUT and UBI_REAP_DOWN_TIMEOUT are checked only by the commands that read them", async () => {
+    const api = serve({ seed: [{ name: "vm-a" }] });
+    const stale = { UBI_REAP: "maybe", UBI_DOWN_TIMEOUT: "0", UBI_REAP_DOWN_TIMEOUT: "x" };
+    for (const args of [["list", "--mine"], ["usage"]]) expect((await run(args, stale)).code).toBe(0);
+    const badDown = await run(["down", "vm-a"], { UBI_DOWN_TIMEOUT: "0" });
+    expect(badDown.code).toBe(1);
+    expect(badDown.stderr).toContain("UBI_DOWN_TIMEOUT must be a whole number of seconds from 1");
+    expect(api.vms.has("vm-a")).toBe(true);
+    const down = await run(["down", "vm-a"], { UBI_REAP: "maybe", UBI_REAP_DOWN_TIMEOUT: "x", UBI_DOWN_TIMEOUT: "60" });
+    expect(down.code).toBe(0);
+    expect(api.vms.has("vm-a")).toBe(false);
+    const up = await run(["up"], { UBI_DOWN_TIMEOUT: "0" });
+    expect(up.code).toBe(1);
+    expect(up.stderr).toContain("UBI_DOWN_TIMEOUT must be a whole number of seconds from 1");
+    expect(creates()).toEqual([]);
+  }, 60_000);
+
   it("reap waits at most UBI_REAP_DOWN_TIMEOUT per VM, not UBI_DOWN_TIMEOUT", async () => {
     const api = serve({ seed: [{ name: "ubirun-other-1000000000-bbbb-t1" }, { name: "ubirun-peer-1000000000-cccc-t1" }] });
     api.faults.destroy = true;

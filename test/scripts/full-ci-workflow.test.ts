@@ -144,6 +144,7 @@ describe('full CI on pull requests', () => {
         [manifest({ complete: false, problems: ['unit shard 3 has no receipt'] }), 'is incomplete: unit shard 3 has no receipt'],
         [manifest({ schema: 'other/v0' }), 'has schema other/v0'],
         [manifest({ files: [{ file: 'verify', lane: 'verify', arm: '', executed: 1, failed: 0, skipped: 0 }] }), 'lists no test file'],
+        [manifest({ files: null }), 'has no readable files list'],
       ] as const) {
         const { tree, stdout } = record(doc);
         expect(tree).toEqual(base);

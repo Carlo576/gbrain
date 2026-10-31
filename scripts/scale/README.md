@@ -48,10 +48,13 @@ paused database container or a WAL checkpoint lands in one page's time and
 once failed unrelated pull requests on its own. Each tenth is cut into ten
 slices; the slice with the largest excess over its tenth's median slice is
 lowered to the next-largest excess anywhere in the import, and its tenth
-never drops below the Theil-Sen line through the ten tenth means. Work that
-recurs (a rebuild every few hundred pages, or once per tenth) is kept at the
-plain measure's sensitivity; only the margin of its largest occurrence over
-the next one can be set aside. The gate message names the stall and the
+never drops below the Theil-Sen line through the ten tenth means. When the
+next-largest excess is over a quarter of the largest, the cost showed up
+twice and nothing is set aside, so work that recurs (a rebuild every few
+hundred pages, once per tenth, or twice in the import) is kept at the plain
+measure's sensitivity. A cost that lands only once (a rebuild every 5,000
+pages or more on a 10k import) looks like a stall; the 20k nightly tier sees
+it twice. The gate message names the stall and the
 report's `import.<basis>.excused` records it. The report and its JSON
 `import` section carry both bases for every engine: wall time (`elapsed_ms`) and the import process's main-thread CPU time
 (`cpu_ms`, user + system, from each progress tick; in-process timing under

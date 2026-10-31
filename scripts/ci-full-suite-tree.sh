@@ -7,7 +7,9 @@
 # Input (environment): ARTIFACT_DIR, RUN_ID, RUN_ATTEMPT, WORKFLOW, EVENT, and
 # optionally MANIFEST, the run's ci-manifest.json (scripts/ci-manifest.ts).
 # Output: $ARTIFACT_DIR/tree.json and step-summary lines.
-# `files` (every test file the run executed, repo-relative) and `tests` (its
+# `files` (every test file the run loaded, repo-relative, across lanes and
+# arms; a file whose tests all skipped counts, because the remote gate's
+# inventory lists the same env- and platform-gated files) and `tests` (its
 # executed test count) come only from a complete manifest of this run, attempt
 # and commit. Otherwise both are left out with a warning: the record still says
 # the full suite passed, but gstack cannot take it as run evidence.
@@ -29,8 +31,11 @@ else
     elif .complete != true then "ci-manifest.json is incomplete: \(.problems | join("; "))"
     else "" end' "$MANIFEST" 2>&1) || problem="ci-manifest.json is unreadable: $problem"
   if [ -z "$problem" ]; then
-    jq -c '{files: ([.files[].file | select(test("\\.test\\.[cm]?[jt]sx?$"))] | unique), tests: ([.files[].executed] | add // 0)}' "$MANIFEST" > "$evidence"
-    [ "$(jq '.files | length' "$evidence")" -gt 0 ] || { problem="ci-manifest.json lists no test file"; echo '{}' > "$evidence"; }
+    if ! jq -c '{files: ([.files[].file | select(test("\\.test\\.[cm]?[jt]sx?$"))] | unique), tests: ([.files[].executed] | add // 0)}' "$MANIFEST" > "$evidence" 2>/dev/null; then
+      problem="ci-manifest.json has no readable files list"; echo '{}' > "$evidence"
+    elif [ "$(jq '.files | length' "$evidence")" -eq 0 ]; then
+      problem="ci-manifest.json lists no test file"; echo '{}' > "$evidence"
+    fi
   fi
 fi
 jq -n --arg tree "$tree" --arg sha "$sha" --arg workflow "$WORKFLOW" --arg event "$EVENT" \

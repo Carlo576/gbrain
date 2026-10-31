@@ -77,8 +77,9 @@ export function importProgressPerFile(stderr: string): { wallMs: number[]; cpuMs
  * and only the part of it no other part of the import repeats:
  *
  * - Each tenth of the import is cut into ten slices. A slice's excess is its mean per-page cost above the median
- *   slice of its tenth. The slice with the largest excess is lowered to the second-largest excess anywhere in the
- *   import, so a cost that shows up twice (two rebuilds, two stalls) is set aside only by the margin between them.
+ *   slice of its tenth. When the second-largest excess anywhere in the import is over a quarter of the largest, the
+ *   cost showed up twice (two rebuilds, the second one larger because the brain grew) and nothing is set aside.
+ *   Otherwise the slice with the largest excess is lowered to the second-largest.
  * - The lowered tenth never drops below the Theil-Sen line through the ten tenth means, so a cost that lands once in
  *   every tenth and grows with the brain is kept in full: those tenth means rise on that line.
  *
@@ -105,6 +106,7 @@ export function excusedStall(perPageMs: number[]): ExcusedStall | undefined {
     return parts.map(s => ({ ...s, d, excess: s.mean - typical }));
   }).sort((a, b) => b.excess - a.excess);
   const [worst, next] = [slices[0]!, slices[1]!];
+  if (next.excess > worst.excess / 4) return undefined;
   const means = tenths.map(t => t.mean);
   const slopes = means.flatMap((a, i) => means.slice(i + 1).map((b, k) => (b - a) / (k + 1)));
   const slope = median(slopes);

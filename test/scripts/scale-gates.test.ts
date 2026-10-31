@@ -209,6 +209,8 @@ describe('scale gates under --enforce', () => {
       ['a rebuild once per tenth (every 1,000 pages), one slice per tenth', 'fail', 'fail', rebuild(1000, 0.5)],
       ['the same rebuild half a tenth later', 'fail', 'fail', rebuild(1000, 0.5, 500)],
       ['two 12 s stalls in the last tenth', 'fail', 'fail', i => stall(9300, 12_000)(i) + stall(9700, 12_000)(i)],
+      ['a rebuild every 4,000 pages (twice) costing 10 ms x pages so far', 'fail', 'fail', rebuild(4000, 10)],
+      ['a rebuild every 2,000 pages costing 3 ms x pages so far', 'fail', 'fail', rebuild(2000, 3)],
       ['every page of the last tenth 60% slower', 'fail', 'fail', i => (i >= 9000 ? 3 : 0)],
     ];
     test.each(CASES)('%s: before #7939 %s, now %s', (_name, before, now, extra) => {
@@ -236,6 +238,10 @@ describe('scale gates under --enforce', () => {
       ['a plain O(n) per-page cost', k => linear(k)],
       ['a rebuild once per tenth', k => rebuild(1000, k)],
       ['a rebuild once per tenth, half a tenth later', k => rebuild(1000, k, 500)],
+      ['a rebuild every 1,750 pages', k => rebuild(1750, k)],
+      ['a rebuild every 2,000 pages', k => rebuild(2000, k)],
+      ['a rebuild every 3,000 pages', k => rebuild(3000, k)],
+      ['a rebuild every 4,000 pages (twice)', k => rebuild(4000, k)],
     ];
     test.each(RECURRING)('%s fails at the same size as under the plain measure', (_name, family) => {
       const ratio = failsAt(rateMeasure, family) / failsAt(plainMeasure, family);
@@ -252,8 +258,16 @@ describe('scale gates under --enforce', () => {
     });
 
     test('at most one slice is set aside, and only by its margin over the next-largest excess', () => {
-      const ms = series(i => stall(9300, 12_000)(i) + stall(2500, 5_000)(i), false);
-      expect(rateMeasure(ms).excused).toEqual({ ms: 7_000, first_page: 9301, last_page: 9400 });
+      const ms = series(i => stall(9300, 12_000)(i) + stall(2500, 2_000)(i), false);
+      expect(rateMeasure(ms).excused).toEqual({ ms: 10_000, first_page: 9301, last_page: 9400 });
+    });
+
+    test('a second excess over a quarter of the largest is a recurrence: nothing is set aside', () => {
+      for (const extra of [(i: number) => stall(9300, 12_000)(i) + stall(2500, 5_000)(i), rebuild(4000, 10)]) {
+        const ms = series(extra, false);
+        expect(rateMeasure(ms).excused).toBeUndefined();
+        expect(rateMeasure(ms)).toMatchObject(plainMeasure(ms));
+      }
     });
 
     test('the gate message names the stall it set aside', () => {
