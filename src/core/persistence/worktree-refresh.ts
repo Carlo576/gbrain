@@ -494,8 +494,11 @@ export async function refreshWorktree(engine: BrainEngine, sourceId: string, opt
 
 const redact = (text: string) => {
   const home = homedir();
-  return redactConnectionInfo(redactUrlsInText(home.length > 1 ? text.split(home).join('~') : text));
+  const escaped = home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const ownHome = new RegExp(`${escaped}(?![\\w.-])`, 'g');
+  return redactConnectionInfo(redactUrlsInText(home.length > 1 ? text.replace(ownHome, '~') : text));
 };
+const FAILURE_LOOKUP_MS = 3_000;
 
 /**
  * GBRA-250: an untyped throw (a statement error, a TypeError) leaves the refresh where it stood, so a fenced or syncing row
@@ -505,15 +508,19 @@ const redact = (text: string) => {
  */
 async function unexpectedRefreshFailure(engine: BrainEngine, sourceId: string, opts: RefreshOptions, error: unknown): Promise<OperationError> {
   const thrown = error instanceof Error ? error : new Error(String(error));
-  const sqlstate = typeof (error as { code?: unknown } | null)?.code === 'string' ? ` (${(error as { code: string }).code})` : '';
-  const lookup = await Promise.resolve().then(async () => {
-    const binding = await getWorktreeBinding(engine, sourceId, existingLocalHostId());
-    return { active: binding ? await readActiveRefresh(engine, binding.worktree_id) : null };
-  }).catch(() => null);
-  const command = `gbrain sources refresh ${sourceId}${opts.abandon ? ' --abandon' : opts.resume ? ' --resume' : ''}`;
+  const errorCode = typeof (error as { code?: unknown } | null)?.code === 'string' ? ` (${(error as { code: string }).code})` : '';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const lookup = await Promise.race([
+    Promise.resolve().then(async () => {
+      const binding = await getWorktreeBinding(engine, sourceId, existingLocalHostId());
+      return { active: binding ? await readActiveRefresh(engine, binding.worktree_id) : null };
+    }),
+    new Promise<null>(resolve => { timer = setTimeout(resolve, FAILURE_LOOKUP_MS, null); }),
+  ]).catch(() => null).finally(() => clearTimeout(timer));
+  const command = `gbrain sources refresh ${sourceId}${opts.dryRun ? ' --dry-run' : ''}${opts.abandon ? ' --abandon' : opts.resume ? ' --resume' : ''}`;
   const left = !lookup ? 'The refresh row could not be read, so a fenced or syncing refresh may still be active.'
     : lookup.active ? `Refresh ${lookup.active.id} stays ${lookup.active.state}${opts.abandon ? '.' : `, and the next gbrain sources refresh ${sourceId} resumes it.`}` : 'No refresh row was left active.';
-  return opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${sqlstate}: ${thrown.message}`),
+  return opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${errorCode}: ${thrown.message}`),
     `${left} Run ${command} again; if it fails the same way, report this output (why holds the stack) with gbrain doctor --json.`,
     { why: redact(thrown.stack ?? `${thrown.name}: ${thrown.message}`) });
 }
@@ -612,7 +619,8 @@ async function fenceDraining(engine: BrainEngine, sourceId: string, plan: Plan, 
 const LOCK_NOT_AVAILABLE = '55P03';
 /**
  * GBRA-250: a fence transaction that waited past its lock_timeout for a row another transaction holds (Postgres 55P03) is a
- * typed refusal naming the open transactions that hold locks on the fenced tables, instead of an untyped internal_error.
+ * typed refusal naming the oldest open transactions that hold locks on the fenced tables (candidates: pg_locks cannot show
+ * which row each one holds), instead of an untyped internal_error.
  */
 async function lockTimeoutRefusal(engine: BrainEngine, sourceId: string, refreshId?: string): Promise<OperationError> {
   const holders = engine.kind !== 'postgres' ? [] : await engine.executeRaw<{ pid: number; application_name: string; state: string | null; open_seconds: number }>(
@@ -624,10 +632,10 @@ async function lockTimeoutRefusal(engine: BrainEngine, sourceId: string, refresh
           AND l.relation IN ('persistence_brain'::regclass, 'persistence_worktrees'::regclass, 'sources'::regclass, 'persistence_worktree_refreshes'::regclass))
       ORDER BY a.xact_start LIMIT 5`).catch(() => null);
   const error = refusal('refresh_lock_timeout', `The refresh fence of source ${sourceId} waited past its 5 s lock timeout for a brain, worktree, source or refresh row another database transaction holds; nothing moved.`,
-    `Retry gbrain sources refresh ${sourceId}. If it repeats, one of the transactions named in why is stuck: find out which on the brain host before ending it.`, refreshId);
+    `Retry gbrain sources refresh ${sourceId}. If it repeats, a transaction holding one of those rows is stuck: why lists the oldest candidates, which may not include it, so confirm the blocker on the brain host before ending any transaction.`, refreshId);
   error.why = holders === null ? 'The lookup of open transactions holding those rows failed.'
-    : holders.length ? redact(`Open transactions holding row locks on those tables (the transaction blocking the fence is among them): ${holders.map(h => `pid ${h.pid} (${h.application_name || 'no application name'}, ${h.state ?? 'unknown state'}, open ${h.open_seconds} s)`).join('; ')}`)
-    : 'No open transaction holding a row lock on those tables was visible to this database role.';
+    : holders.length ? redact(`The oldest open transactions holding locks on those tables, at most five; the one blocking the fence may not be listed: ${holders.map(h => `pid ${h.pid} (${h.application_name || 'no application name'}, ${h.state ?? 'unknown state'}, open ${h.open_seconds} s)`).join('; ')}`)
+    : 'No open transaction holding a lock on those tables was visible to this database role.';
   return error;
 }
 
@@ -678,7 +686,10 @@ async function fenceAndMerge(engine: BrainEngine, git: Git, sourceId: string, pl
       await engine.transaction(async tx => {
         await tx.executeRaw("SELECT set_config('lock_timeout','5s',true)");
         await transition(tx, stored, ['draining'], 'aborted', refusalOutcome(error));
-      }).catch(abortError => { if ((abortError as { code?: string }).code !== LOCK_NOT_AVAILABLE) throw abortError; });
+      }).catch(abortError => {
+        if ((abortError as { code?: string }).code !== LOCK_NOT_AVAILABLE) throw abortError;
+        error.message = `${error.message} Refresh ${row.id} stays draining, and the next gbrain sources refresh ${sourceId} resumes it.`;
+      });
       error.detail ??= `refresh_id=${row.id}`;
     }
     throw error;

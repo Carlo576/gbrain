@@ -106,6 +106,34 @@ test('an unexpected throw under --abandon repeats --abandon in its fix, never a 
   expect(failure.suggestion).toContain('Run gbrain sources refresh source-a --abandon again');
 });
 
+test('an unexpected throw under --dry-run repeats --dry-run in its fix, never a refresh that would move the checkout', async () => {
+  const statement = Object.assign(new Error('canceling statement due to user request'), { code: '57014' });
+  const fake = { kind: 'postgres', getConfig: async () => { throw statement; }, executeRaw: async () => { throw statement; } } as unknown as BrainEngine;
+  const failure = await withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a', { dryRun: true }).then(() => null, error => error));
+  expect(failure.code).toBe('internal_error');
+  expect(failure.suggestion).toContain('Run gbrain sources refresh source-a --dry-run again');
+});
+
+test('a refresh-row lookup that never answers still yields the refusal, saying the row could not be read', async () => {
+  const statement = Object.assign(new Error('canceling statement due to user request'), { code: '57014' });
+  let lookups = 0;
+  const fake = { kind: 'postgres', getConfig: async () => { throw statement; }, executeRaw: () => { lookups++; return new Promise(() => {}); } } as unknown as BrainEngine;
+  const failure = await withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a').then(() => null, error => error));
+  expect(lookups).toBeGreaterThan(0);
+  expect(failure.code).toBe('internal_error');
+  expect(failure.suggestion).toContain('The refresh row could not be read');
+}, 15_000);
+
+test('home-directory redaction leaves a sibling path that only shares the home prefix intact', async () => {
+  const statement = Object.assign(new Error('canceling statement due to user request'), { code: '57014' });
+  statement.stack = `Error: canceling statement\n    at fence (${homedir()}/brain-checkout/src/x.ts:1:1)\n    at load (${homedir()}-example/src/y.ts:1:1)`;
+  const fake = { kind: 'postgres', getConfig: async () => { throw statement; }, executeRaw: async () => { throw statement; } } as unknown as BrainEngine;
+  const failure = await withEnv({ GBRAIN_REFRESH_SYNC_BUDGET_MS: undefined }, () => refreshWorktree(fake, 'source-a').then(() => null, error => error));
+  expect(failure.why).toContain('~/brain-checkout/src/x.ts');
+  expect(failure.why).toContain(`${homedir()}-example/src/y.ts`);
+  expect(failure.why).not.toContain('~-example');
+});
+
 test('a host identity file that cannot be read still yields a typed internal_error refusal', () => withRefreshFixture(engine, async f => {
   const hostFile = join(persistenceHome(), 'host.json');
   const original = readFileSync(hostFile, 'utf8');
@@ -198,6 +226,8 @@ test.skipIf(!process.env.DATABASE_URL)('the lock-timeout why names only row-lock
   expect(failure!.why).not.toContain(`pid ${reader.pid} `);
   expect(failure!.why).not.toContain('holder-sql-marker');
   expect(failure!.why).not.toContain('SELECT');
+  expect(failure!.why).toContain('the one blocking the fence may not be listed');
+  expect(failure!.why).not.toContain('is among them');
 }), 120_000);
 
 test.skipIf(!process.env.DATABASE_URL)('a lock timeout after the drain whose holder also holds the refresh row still refuses, leaving the row draining for the next run', () => withRefreshFixture(engine, async f => {
@@ -210,6 +240,7 @@ test.skipIf(!process.env.DATABASE_URL)('a lock timeout after the drain whose hol
   expect(failure.code).toBe('refresh_lock_timeout');
   const [row] = await f.refreshRows();
   expect(row!.state).toBe('draining');
+  expect(failure.message).toContain(`Refresh ${row!.id} stays draining, and the next gbrain sources refresh ${f.alpha} resumes it.`);
   expect(f.head()).toBe(before);
   expect((await refreshWorktree(f.engine, f.alpha)).status).toBe('completed');
   expect(await f.lastCommit(f.alpha)).toBe(target);
