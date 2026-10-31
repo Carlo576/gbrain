@@ -1421,8 +1421,9 @@ unchanged is current. A row is reported only when its revision is the one its
 last sync import wrote. A row the database changed since that import belongs
 to [file drift](#file-drift) and is not reported here. A row with no import
 record is counted as `unproven` from the content comparison alone and does not warn. Held paths, paths a later
-commit changed (the next sync imports them) and declared database-only pages
-are skipped. A file over the sync read bound is never read; its row is
+commit changed (the next sync imports them), paths sync would not import
+(`not_eligible`: outside the source's scope, matched by `sync.exclude`, hidden,
+or a reserved skillpack path) and declared database-only pages are skipped. A file over the sync read bound is never read; its row is
 reported with the `file_too_large` refusal sync would hold it with. The scan
 is bounded by `GBRAIN_DOCTOR_ROWS_BEHIND_TIMEOUT_MS` (default 10 s), checked before
 each row's comparison; a scan the budget stopped (doctor names the pages it
