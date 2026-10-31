@@ -2020,6 +2020,21 @@
           {
             "category": "brain",
             "details": {
+              "ambiguous": 0,
+              "docs": "docs/guides/repair.md#agent-session-facts",
+              "evidenced": 0,
+              "excluded": 0,
+              "repair": "agent-session-facts",
+              "unclassifiable": 0
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No active owner-attributed fact from an agent-launched session remains.",
+            "name": "agent_session_facts",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
               "affected": 0,
               "docs": "docs/guides/repair.md#redacted-facts",
               "repair": "redacted-facts"
@@ -6796,6 +6811,21 @@
             "elapsed_ms": "<volatile>",
             "message": "No active fact from a gbrain self-capture or paste candidate remains. This counts facts in the database; the self_capture check counts corpus files.",
             "name": "captured_facts_active",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "ambiguous": 0,
+              "docs": "docs/guides/repair.md#agent-session-facts",
+              "evidenced": 0,
+              "excluded": 0,
+              "repair": "agent-session-facts",
+              "unclassifiable": 0
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No active owner-attributed fact from an agent-launched session remains.",
+            "name": "agent_session_facts",
             "status": "ok"
           },
           {

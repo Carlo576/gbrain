@@ -42,7 +42,9 @@ in front of the model without a separate call.
 
 **When it is sent.** On a successful tool call over stdio (`gbrain serve`) and
 over HTTP (`gbrain serve --http`), except `recall`, `extract_facts` and
-`forget_fact`, which already return facts. It is absent when there is nothing
+`forget_fact`, which already return facts, and except a call that names its own
+sources (a non-empty `source_ids`, or a `source_id` other than the connection's
+source), so a narrowed request never carries another source's facts. It is absent when there is nothing
 to send, and it is best-effort: if it cannot be built, the key is left out and
 the tool call still succeeds. It cannot be turned off per call.
 
