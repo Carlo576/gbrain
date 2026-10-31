@@ -30,6 +30,7 @@ gbrain config set sources.refresh_publish_diverged true
 | Diverged checkout, setting off (the default) | refused `refresh_diverged` | unchanged; the refusal now also names the setting |
 | A file both sides changed, setting on | n/a | refuses `integrate_conflict` naming the file; nothing is pushed, fenced or moved. With `gbrain.quarantine` on, the remote's version is published instead and the refresh names the ref that keeps this machine's version |
 | An uncommitted edit to a file the upstream changed, setting on | n/a | refuses `refresh_dirty` before anything is pushed |
+| An upstream rewritten by a force-push (it no longer holds a commit it held before), or no record of the upstream before the fetch, setting on | n/a | refuses `refresh_diverged` and pushes nothing, so the commits the rewrite removed never come back without the user |
 | A refusal after the publish landed | n/a | the refusal says the remote already holds the local commits |
 | `--dry-run` | refused `refresh_diverged` | unchanged: a dry run never publishes |
 | `gbrain config set sources.refresh_fetch_timeout_ms` / `sources.refresh_drain_wait_ms` | refused as an unknown key, although the refresh reads both | accepted |
@@ -44,7 +45,7 @@ gbrain config set sources.refresh_publish_diverged true
 
 ### Itemized changes
 
-- `src/core/persistence/worktree-refresh.ts`: when `sources.refresh_publish_diverged` is on and the run is not a dry run, the precheck runs the keep-checkout publish (`gbrain git commit-push --push-only --keep-checkout` in a bounded child, never on the PGLite owner's event loop) for a diverged checkout (after refusing `refresh_dirty` first when an uncommitted edit touches a file the upstream changed), re-fetches and continues; the result carries `published` (with any quarantined or superseded paths, which the text output names), and a refusal after the publish says the remote already holds the local commits. The `refresh_diverged` suggestion names the setting.
+- `src/core/persistence/worktree-refresh.ts`: when `sources.refresh_publish_diverged` is on and the run is not a dry run, the precheck runs the keep-checkout publish (`gbrain git commit-push --push-only --keep-checkout` in a bounded child, never on the PGLite owner's event loop) for a diverged checkout (after refusing `refresh_dirty` first when an uncommitted edit touches a file the upstream changed), re-fetches and continues; it refuses `refresh_diverged` instead when the checkout holds a commit the upstream held before (its remote-tracking reflog or a completed refresh's target) but no longer contains, or when neither record exists; the result carries `published` (with any quarantined or superseded paths, which the text output names), and a refusal after the publish says the remote already holds the local commits. The `refresh_diverged` suggestion names the setting.
 - `src/commands/sources-refresh.ts`: a text line for the publish.
 - `src/core/config-runtime-keys.ts`: registers `sources.refresh_publish_diverged`, `sources.refresh_fetch_timeout_ms` and `sources.refresh_drain_wait_ms`.
 - Docs: `docs/guides/live-sync.md`, `docs/guides/write-refusals.md`, `docs/guides/troubleshooting.md`, `docs/guides/shared-checkout-git.md`, `docs/architecture/canonical-writers.md` and its census.

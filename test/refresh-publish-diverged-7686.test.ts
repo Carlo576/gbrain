@@ -32,7 +32,7 @@ import { REFRESH_PUBLISH_DIVERGED_KEY, refreshWorktree } from '../src/core/persi
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
-import { git, page, withRefreshFixture, type RefreshFixture } from './helpers/worktree-refresh-fixture.ts';
+import { commitFile, git, page, withRefreshFixture, type RefreshFixture } from './helpers/worktree-refresh-fixture.ts';
 
 const backends = testBackends();
 const engines: BrainEngine[] = [];
@@ -201,4 +201,25 @@ test('setting on: a dry run publishes nothing and still refuses refresh_diverged
   await refusedWith(refreshWorktree(f.engine, f.alpha, { dryRun: true }), 'refresh_diverged');
   expect(remoteHead(f)).toBe(remote);
   expect(f.head()).toBe(local);
+}), 120_000);
+
+test('setting on: an upstream rewritten by a force-push is never published; the refresh refuses refresh_diverged and the remote keeps the rewrite', () => each(async f => {
+  f.push('alpha/purged.md', page('Purged', 'A page the upstream later removed by rewriting history.'));
+  expect(await refreshWorktree(f.engine, f.alpha)).toMatchObject({ status: 'completed' });
+  const purged = f.head();
+  git(f.upstream, 'reset', '-q', '--hard', 'HEAD~1');
+  commitFile(f.upstream, 'alpha/two.md', page('Alpha two', 'Rewritten upstream.'));
+  git(f.upstream, 'push', '-q', '--force', 'origin', 'main');
+  const rewritten = remoteHead(f);
+  writeFileSync(join(f.root, 'beta/local.md'), page('Local', 'A local commit nobody pushed.'));
+  git(f.root, 'add', 'beta/local.md'); git(f.root, 'commit', '-qm', 'local only');
+  const local = f.head();
+  await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+  const error = await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_diverged');
+  expect(error.message).toContain(`no longer contains ${purged}`);
+  expect(error.suggestion).not.toContain('gbrain config set');
+  expect(remoteHead(f)).toBe(rewritten);
+  expect(() => git(f.root, 'cat-file', '-e', `origin/main:alpha/purged.md`)).toThrow();
+  expect(f.head()).toBe(local);
+  expect((await f.refreshRows()).filter(r => r.state !== 'completed')).toEqual([]);
 }), 120_000);

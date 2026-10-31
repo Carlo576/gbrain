@@ -7427,7 +7427,8 @@ vars — incident-time escape hatches, not everyday knobs.
    on, the remote's version is published, this machine's is kept under
    `refs/gbrain/quarantine/`, and the refresh says so), an uncommitted edit to a
    file the upstream changed refuses `refresh_dirty` before anything is pushed,
-   and `--dry-run` never publishes.
+   an upstream rewritten by a force-push (or one gbrain has no earlier record
+   of) still refuses `refresh_diverged`, and `--dry-run` never publishes.
 
    **Say to your agent:** *"Bring my notes source up to date with its remote."*
 

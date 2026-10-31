@@ -286,6 +286,14 @@ async function precheck(engine: BrainEngine, git: Git, sourceId: string, fetchTi
     `git -C ${q(root)} fetch ${remote || 'origin'}, then gbrain sources refresh ${sourceId}`);
   if (oldHead !== targetHead && !await isAncestor(git, root, oldHead, targetHead)) {
     if (!publishDiverged) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead);
+    const upstreamFull = (await read(['rev-parse', '--symbolic-full-name', '@{upstream}'])).stdout.trim();
+    const heldUpstream = new Set([...(await read(['log', '-g', '-n', '1000', '--format=%H', upstreamFull, '--'], 128)).stdout.split('\n'),
+      ...(await engine.executeRaw<{ target_head: string }>(`SELECT target_head FROM persistence_worktree_refreshes WHERE worktree_id=$1::uuid AND state='completed' ORDER BY created_at DESC LIMIT 100`, [binding.worktree_id])).map(r => r.target_head)]
+      .map(sha => sha.trim()).filter(Boolean));
+    const removed = (await read(['rev-list', `${targetHead}..${oldHead}`])).stdout.split('\n').map(sha => sha.trim()).find(sha => heldUpstream.has(sha));
+    if (!heldUpstream.size || removed) throw await divergedRefusal(git, root, sourceId, upstreamRef, oldHead, targetHead, removed
+      ? `${upstreamRef} no longer contains ${removed}, which it held before: its history was rewritten (a force-push), and publishing would merge back the commits the rewrite removed.`
+      : `gbrain has no record of what ${upstreamRef} held before this fetch, so it cannot tell a force-push from local commits.`);
     const base = (await read(['merge-base', oldHead, targetHead], 1)).stdout.trim() || oldHead;
     const incoming = await dirtyOverlap(git, root, base, targetHead);
     if (incoming.overlap.length) throw dirtyRefusal(sourceId, incoming.overlap);
@@ -332,16 +340,17 @@ async function publishInChild(root: string, sourceId: string): Promise<{ sha: st
  * upstream into HEAD in memory and pushes the merge (refusing on a conflict, never touching the checkout), after which HEAD
  * is an ancestor of the upstream and the refresh fast-forwards. It publishes the local commits, so the user decides.
  */
-async function divergedRefusal(git: Git, root: string, sourceId: string, upstreamRef: string, oldHead: string, targetHead: string): Promise<OperationError> {
+async function divergedRefusal(git: Git, root: string, sourceId: string, upstreamRef: string, oldHead: string, targetHead: string, rewrite?: string): Promise<OperationError> {
   const count = Number((await git(['-C', root, 'rev-list', '--count', `${targetHead}..${oldHead}`])).stdout.trim()) || 0;
   const local = count ? `${count} local commit(s)` : 'the local commits';
   const argv = ['gbrain', 'git', 'commit-push', '--push-only', '--keep-checkout', '--path', root, '--json'];
   const error = refusal('refresh_diverged',
-    `The checkout HEAD ${oldHead} is not an ancestor of ${upstreamRef} (${targetHead}); a fast-forward is impossible and nothing changed.`,
-    `Publish ${local} merged with ${upstreamRef}: ${argv.map(q).join(' ')} (it merges in memory, refuses on a conflict and never moves the checkout), then retry gbrain sources refresh ${sourceId}. Ask the user first, because it pushes those commits (git -C ${q(root)} log --stat ${upstreamRef}..HEAD lists them). gbrain sources reclone ${sourceId} replaces the checkout instead and drops them. To let every refresh publish a diverged checkout this way on its own, the user can run gbrain config set ${REFRESH_PUBLISH_DIVERGED_KEY} true.`);
+    `The checkout HEAD ${oldHead} is not an ancestor of ${upstreamRef} (${targetHead}); a fast-forward is impossible and nothing changed.${rewrite ? ` ${rewrite} ${REFRESH_PUBLISH_DIVERGED_KEY} does not publish it on its own.` : ''}`,
+    `Publish ${local} merged with ${upstreamRef}: ${argv.map(q).join(' ')} (it merges in memory, refuses on a conflict and never moves the checkout), then retry gbrain sources refresh ${sourceId}. Ask the user first, because it pushes those commits (git -C ${q(root)} log --stat ${upstreamRef}..HEAD lists them). gbrain sources reclone ${sourceId} replaces the checkout instead and drops them.${rewrite ? '' : ` To let every refresh publish a diverged checkout this way on its own, the user can run gbrain config set ${REFRESH_PUBLISH_DIVERGED_KEY} true.`}`);
   error.fix = { argv, consent: [], actor: 'user', ask_user: true, requires_exclusive: false,
     why: `HEAD has ${local} that ${upstreamRef} lacks while ${upstreamRef} moved on; pushing HEAD merged with it makes HEAD an ancestor of the upstream, so the refresh can fast-forward.`,
-    user_message: `The checkout of source ${sourceId} has ${local} that were never pushed while its remote moved on. Push them, merged with the remote, so gbrain can bring the checkout up to date? Conflicting files stop the push and change nothing.`,
+    user_message: rewrite ? `The remote of source ${sourceId} was rewritten (${rewrite}) Push this checkout's history merged with it anyway, or replace the checkout with gbrain sources reclone ${sourceId}?`
+      : `The checkout of source ${sourceId} has ${local} that were never pushed while its remote moved on. Push them, merged with the remote, so gbrain can bring the checkout up to date? Conflicting files stop the push and change nothing.`,
     docs: 'docs/guides/write-refusals.md#refresh_diverged' };
   return error;
 }
