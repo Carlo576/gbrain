@@ -49,4 +49,11 @@ describe('pregate allowlist: workflow cache keys', () => {
       "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/*.ts', 'src/Zx9Qw8Lk2Mn4Bv6Cx1Za3Sd5Fg7Hj9Kl0Pq2Wr4.ts') }}",
     ]) expect({ value, covered: covers(value) }).toEqual({ value, covered: false });
   });
+
+  test('a long ** chain in a hashFiles argument is rejected without backtracking', () => {
+    const value = "pglite-snapshot-${{ runner.os }}-${{ hashFiles('src" + '/**'.repeat(26) + "X') }}";
+    const started = performance.now();
+    expect(covers(value)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
 });
