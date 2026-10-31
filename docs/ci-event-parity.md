@@ -117,9 +117,11 @@ since. A full run
 on the tree still in progress is waited for (90 minutes at most, a progress
 line every minute), also while the other workflow has no full run on the tree:
 full-ci's second dispatch can still appear, and a failure of the run in
-progress refuses instead of starting VMs. A passed run whose executed-test receipt
-is refused (an unreadable, stale or empty ledger) ends the wait at once, since no
-later run makes reuse possible. The newest full run on the tree decides,
+progress refuses instead of starting VMs. A passed run on the head whose
+executed-test receipt is refused (an unreadable, stale or empty ledger) ends the
+wait at once, since no later dispatch of the head is coming; the same refusal on
+another head with the same tree keeps waiting for the head's own dispatch, and a
+receipt download that failed (a 5xx or timeout) is read again on the next poll. The newest full run on the tree decides,
 across the head and every recent head with the same tree, so neither an empty
 commit nor an older pass elsewhere skips a newer failure; a failed one refuses
 with no receipt. A run that did not run the full job (a diagnostic dispatch, a

@@ -146,8 +146,9 @@ function accept(run: FullRun, tree: string, rejected: Rejection[], where: string
  * the identical tree reuses; a stamp-only difference goes through gstack-pregate's stamp rule, never through here.
  * The newest full run on the tree decides, across `head` and every other recent head with the same tree: in progress
  * waits, a failure refuses (no receipt, no VMs), cancelled or not a full run (its full job skipped or absent: a
- * diagnostic dispatch, a push that reused) looks further back; a passed run whose executed-test receipt is refused is
- * `rejected`, which no later run on the tree changes; anything else is `none` and the caller runs the VM gate.
+ * diagnostic dispatch, a push that reused) looks further back; a passed run on `head` whose executed-test receipt is
+ * refused is `rejected`, since no later dispatch of `head` is coming (on another same-tree head it is `none`: `head`'s
+ * own dispatch can still appear); anything else is `none` and the caller runs the VM gate.
  */
 export type GateState = 'reuse' | 'pending' | 'failed' | 'rejected' | 'none';
 /**
@@ -162,7 +163,7 @@ export interface GateDeps extends ReuseDeps {
   /** The newest workflow_dispatch and push runs of `file`, whatever their status (a failed run counts against its tree too). */
   recentRuns(file: string): Promise<FullRun[]>;
   /** Executed (pass, fail) test identities in the run's executed-identities artifact, each job at its newest attempt (`ledgerAttempt` when an earlier attempt wrote it), or why they cannot be read. */
-  executed(run: FullRun): Promise<ExecutedCounts | { reason: string }>;
+  executed(run: FullRun): Promise<ExecutedCounts | { reason: string; transient?: boolean }>;
 }
 
 export async function decideGate(deps: GateDeps, p: Profile, head: string, tree: string, repo: string): Promise<GateDecision> {
@@ -186,7 +187,10 @@ export async function decideGate(deps: GateDeps, p: Profile, head: string, tree:
         continue;
       }
       const why = await reject(deps, p, run, repo, tree, tree);
-      if (!why) return await gateAccept(deps, p, run, tree, repo);
+      if (!why) {
+        const d = await gateAccept(deps, p, run, tree, repo);
+        return d.state === 'rejected' && run.head_sha !== head ? { ...d, state: 'none' } : d;
+      }
       if (why.reason === 'run_in_progress') return { state: 'pending', detail: `${p.workflow} ${why.detail}` };
       if (why.reason === 'run_failed' || why.reason === 'full_suite_not_success') return { state: 'failed', detail: `${p.workflow} ${why.detail}`, url: runUrl(repo, run) };
       rejected.push({ run_id: run.id, ...why });
@@ -201,7 +205,7 @@ const runUrl = (repo: string, run: FullRun) => `https://github.com/${repo}/actio
 
 async function gateAccept(deps: GateDeps, p: Profile, run: FullRun, tree: string, repo: string): Promise<GateDecision> {
   const got = await deps.executed(run);
-  if ('reason' in got) return { state: 'rejected', detail: `${p.workflow}: ${got.reason}` };
+  if ('reason' in got) return { state: got.transient ? 'none' : 'rejected', detail: `${p.workflow}: ${got.reason}` };
   const { ledgerAttempt, ...counts } = got;
   // A re-run that leaves the ledger job alone carries it into the new attempt with its original start; a ledger job
   // that ran again but uploaded nothing leaves the older attempt's ledger behind, now stale.
@@ -303,7 +307,7 @@ export function gateDeps(client: GitHubClient): GateDeps {
     },
     async executed(run) {
       const got = await fetchArtifactJson(client, run.id, 'executed-identities', 'executed-identities.json');
-      if (got.reason) return { reason: got.reason };
+      if (got.reason) return got.transient ? { reason: got.reason, transient: true } : { reason: got.reason };
       const doc = got.value as { head?: { identities?: Array<{ status?: string }> }; issues?: Array<{ kind?: string }>; run?: { id?: unknown; attempt?: unknown } | null; job_latest?: { executed?: unknown; failed?: unknown } } | null;
       const ids = doc?.head?.identities;
       if (!Array.isArray(ids)) return { reason: `run ${run.id}'s executed-identities.json has no head.identities list` };

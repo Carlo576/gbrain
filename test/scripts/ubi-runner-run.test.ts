@@ -257,6 +257,16 @@ describe("down retries a failed destroy request", () => {
     expect(api.vms.has("vm-a")).toBe(true);
   }, 60_000);
 
+  it("a destroy that keeps failing backs off instead of resending every poll", async () => {
+    const api = serve({ seed: [{ name: "vm-a" }] });
+    api.faults.destroy = true;
+    const r = await run(["down", "vm-a"], { UBI_DOWN_TIMEOUT: "4" });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("could not confirm eu-central-h1/vm-a is gone after 4s (last destroy request: HTTP 500)");
+    expect(api.destroyRequests).toBeGreaterThanOrEqual(2);
+    expect(api.destroyRequests).toBeLessThanOrEqual(4);
+  }, 60_000);
+
   it("UBI_REAP, UBI_DOWN_TIMEOUT and UBI_REAP_DOWN_TIMEOUT are checked only by the commands that read them", async () => {
     const api = serve({ seed: [{ name: "vm-a" }] });
     const stale = { UBI_REAP: "maybe", UBI_DOWN_TIMEOUT: "0", UBI_REAP_DOWN_TIMEOUT: "x" };

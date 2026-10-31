@@ -337,7 +337,7 @@ describe('ci-reuse remote-gate decision', () => {
   const run = (file: File, over: Partial<FullRun> = {}): FullRun & { file: File } => ({ ...prRun({ id: file === 'test.yml' ? 600 : 700, head_sha: A, ...over }), file });
   const tree = (r: FullRun & { file: File }, over: Record<string, unknown> = {}) => ({ ...treeJson(r, { workflow: files[r.file].workflow }), ...over });
 
-  function gate(o: { commits?: Record<string, Commit>; runs: Array<FullRun & { file: File }>; artifacts?: Record<number, unknown>; jobs?: Record<string, JobRow[]>; executed?: Record<number, ExecutedCounts | { reason: string }> }): GateDeps {
+  function gate(o: { commits?: Record<string, Commit>; runs: Array<FullRun & { file: File }>; artifacts?: Record<number, unknown>; jobs?: Record<string, JobRow[]>; executed?: Record<number, ExecutedCounts | { reason: string; transient?: boolean }> }): GateDeps {
     const commits = o.commits ?? { [A]: { tree: T, parents: [BASE] } };
     const art = o.artifacts ?? Object.fromEntries(o.runs.map(r => [r.id, tree(r)]));
     return {
@@ -532,6 +532,35 @@ describe('ci-reuse remote-gate decision', () => {
       expect(r.lines.some(l => l.includes('waiting for'))).toBe(false);
       expect(r.lines.join('\n')).toContain('[ci-reuse] gate: no reuse: Test');
     }
+  });
+
+  test('a receipt that could not be read (a GitHub 5xx or timeout) is not a refusal: the wait polls again', async () => {
+    const live = run('e2e.yml', { status: 'in_progress', conclusion: null });
+    const deps = gate({ runs: [run('test.yml'), live], executed: { 600: { reason: "reading run 600's 'executed-identities' artifact failed: HTTP 503", transient: true } } });
+    expect(await decideGate(deps, PROFILES.test, A, T, REPO)).toMatchObject({ state: 'none' });
+    const r = await go(deps, A, T, 3 * 60_000);
+    expect(r.code).toBe(4);
+    expect(r.lines.filter(l => l.includes('waiting for')).length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('a refused receipt on another same-tree head does not end the wait: the head\'s own dispatch can still appear', async () => {
+    const C2 = '8'.repeat(40);
+    const commits = { [A]: { tree: T, parents: [BASE] }, [C2]: { tree: T, parents: [BASE] } };
+    const older = run('test.yml', { id: 560, head_sha: C2 });
+    const own = run('test.yml', { status: 'in_progress', conclusion: null });
+    const live = run('e2e.yml', { status: 'in_progress', conclusion: null });
+    let polls = 0;
+    const deps = gate({ commits, runs: [older, own, live], executed: { 560: { reason: 'no executed-identities artifact' } } });
+    const lagging = { ...deps, async runsForHead(file: string, sha: string) {
+      if (file === 'test.yml' && sha === A && ++polls >= 3) Object.assign(own, { status: 'completed', conclusion: 'success' }), Object.assign(live, { status: 'completed', conclusion: 'success' });
+      const rows = await deps.runsForHead(file, sha);
+      return file === 'test.yml' && sha === A && polls < 2 ? rows.filter(r => r !== own) : rows;
+    } };
+    expect(await decideGate(gate({ commits, runs: [older, live], executed: { 560: { reason: 'no executed-identities artifact' } } }), PROFILES.test, A, T, REPO)).toMatchObject({ state: 'none', detail: expect.stringContaining('no executed-identities artifact') });
+    const r = await go(lagging, A, T, 90 * 60_000);
+    expect(r.code).toBe(0);
+    expect(r.lines.some(l => l.includes('waiting for'))).toBe(true);
+    expect(r.last).toBe('GBRAIN_REUSE_RESULT tests=1300 failed=0');
   });
 
   test('a same-tree other head whose newest run skipped the full job, or was cancelled, looks further back (#7927)', async () => {

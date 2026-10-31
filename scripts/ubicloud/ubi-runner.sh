@@ -23,8 +23,9 @@
 #   - UBI_REAP takes the usual false spellings (0/false/no/off) and refuses
 #     anything it cannot read, instead of treating every value but 0 as on.
 #   - down retries a destroy request that timed out or got a 5xx (also 408,
-#     429 and 404) inside its poll loop until UBI_DOWN_TIMEOUT, and gives up
-#     early only on another 4xx; reap bounds each VM's wait with
+#     429 and 404) inside its poll loop, backing off 1, 2, 4 ... 60 s, until
+#     UBI_DOWN_TIMEOUT, and gives up early only on another 4xx; reap bounds
+#     each VM's wait with
 #     UBI_REAP_DOWN_TIMEOUT. Both are pending upstream (GSTA-36).
 #
 # Scratch record: every VM this machine creates is appended to a VM-id file
@@ -687,7 +688,7 @@ cmd_down() {
     fi
   fi
 
-  local deadline=$(( $(date +%s) + DOWN_TIMEOUT )) seen=0 asked=0 out code now failed=""
+  local deadline=$(( $(date +%s) + DOWN_TIMEOUT )) seen=0 asked=0 backoff=1 out code now failed=""
   out=$(mktemp)
   while :; do
     now=$(date +%s)
@@ -704,6 +705,7 @@ cmd_down() {
         code=$(api "$out" vm "$loc/$name" destroy -f)
         if [ "$code" = 200 ]; then
           asked=$now
+          backoff=1
           failed=""
           log "destroy requested: $loc/$name"
         elif [[ "$code" =~ ^4[0-9][0-9]$ ]] && [ "$code" != 404 ] && [ "$code" != 408 ] && [ "$code" != 429 ]; then
@@ -714,6 +716,8 @@ cmd_down() {
         else
           [ "$code" = "$failed" ] || log "destroy request for $loc/$name got HTTP $code; retrying until ${DOWN_TIMEOUT}s have passed"
           failed=$code
+          asked=$(( now - 60 + backoff ))
+          backoff=$(( backoff * 2 > 60 ? 60 : backoff * 2 ))
         fi
       fi
     elif [ "$code" = 404 ]; then
