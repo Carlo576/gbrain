@@ -344,6 +344,15 @@ function mapThrough(edits: Edit[], pos: number, isEnd: boolean): number {
   return pos + shift;
 }
 
+/**
+ * Whether a leading date header line on this row is gbrain's: the delivery wrote one (DeliveryMeta.date_header), or the row is a
+ * fact, whose text gbrain composes whole (facts-arm.ts factRow and the fact reserve, evidence-date.ts), so a first line that
+ * matches is its date header and never the fact's own words.
+ */
+function rowHeader(row: Row, header: boolean): boolean {
+  return header || row.result_type === 'fact';
+}
+
 /** The delivery's date header line when the delivery wrote one (DeliveryMeta.date_header) and the text still starts with it; otherwise empty. */
 function headerLine(text: string, header: boolean): string {
   return header ? DATE_HEADER_RE.exec(text)?.[0] ?? '' : '';
@@ -443,7 +452,7 @@ export function unquoteTranscriptText(text: string, slug: string): string {
 export function neutralizeTranscriptRows<T extends Row>(rows: T[], header = false): T[] {
   return rows.map(r => {
     if (quoteLabel(r) === null) return r;
-    const { text, map } = neutralizeWithMap(r.chunk_text, header);
+    const { text, map } = neutralizeWithMap(r.chunk_text, rowHeader(r, header));
     const d = (r as { delivered?: Delivered }).delivered;
     if (!d?.match_spans?.length || text === r.chunk_text) return { ...r, chunk_text: text } as T;
     const match_spans = d.match_spans.map(s => { const start = map(s.start, false); return { ...s, start, end: Math.max(start, map(s.end, true)) }; });
@@ -454,7 +463,7 @@ export function neutralizeTranscriptRows<T extends Row>(rows: T[], header = fals
 /** The text as step 2 delivers it for this row: what a token budget counts (evidence-delivery.ts `capEvidenceToBudget`). */
 export function deliveredQuoteText(row: Row, text: string, header = false): string {
   const label = quoteLabel({ ...row, chunk_text: text });
-  return label === null ? text : fenceTranscriptText(text, label, header);
+  return label === null ? text : fenceTranscriptText(text, label, rowHeader(row, header));
 }
 
 /**
@@ -469,10 +478,11 @@ export function fenceTranscriptRows<T extends Row>(rows: T[], recount?: { count:
   return rows.map(r => {
     const label = quoteLabel(r);
     if (label === null) return r;
-    const chunk_text = fenceTranscriptText(r.chunk_text, label, header);
+    const head = rowHeader(r, header);
+    const chunk_text = fenceTranscriptText(r.chunk_text, label, head);
     const d = (r as { delivered?: Delivered }).delivered;
     if (!d) return { ...r, chunk_text, quoted: 'transcript' } as T;
-    const headLen = headerLine(r.chunk_text, header).length;
+    const headLen = headerLine(r.chunk_text, head).length;
     const prefix = chunk_text.indexOf('\n', chunk_text.indexOf('\n', headLen) + 1) + 1 - headLen;
     const tokens = recount ? recount.count(chunk_text) : d.tokens;
     if (recount) { recount.delivery.tokens_delivered += tokens - d.tokens; recount.delivery.budget_used += tokens - d.tokens; }
