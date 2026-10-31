@@ -10,6 +10,16 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**When `gbrain sources refresh` hits an unexpected error (a database statement error, a code fault), it now prints a typed `internal_error` refusal with the error's stack in `why` and the refresh row it left, instead of a bare `internal_error` with neither. One failure leaves enough to diagnose it, and the next run resumes the row as before.**
+
+### Itemized changes
+
+- `src/core/persistence/worktree-refresh.ts`: `refreshWorktree` turns any non-`OperationError` throw into `internal_error` with the error name, SQLSTATE and message (connection details and URLs redacted), the stack in `why`, and a fix naming the active refresh row and its state. The row is not changed. The already-current path no longer throws a `TypeError` of its own when a member sync rejects with a non-object.
+- `src/commands/sources-refresh.ts`: refusals print `why` (a `why` key under `--json`, a `Why:` line otherwise).
+- Test: `test/worktree-refresh-unexpected-throw.test.ts` (PGLite, and Postgres under `DATABASE_URL`).
+
 ## [0.60.528.0] - 2026-10-31
 
 **The test-isolation scan is about 25 times faster on Linux and 12 times faster on macOS, so `bun run verify` and the macOS validation job no longer come close to their per-check caps (#8053, #8099).**

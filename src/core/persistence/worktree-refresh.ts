@@ -42,6 +42,8 @@ import { startPersistenceConsumer } from './service.ts';
 import { lockTopologyPrincipal, lockTopologyRows, topologyPrincipal, withTopologyLocks } from './topology-locks.ts';
 import { ACTIVE_REFRESH_STATES_SQL, CHECKOUT_EFFECT_KINDS_SQL, type WorktreeRefreshState } from './worktree-refresh-schema.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
+import { redactUrlsInText } from '../url-redact.ts';
 import { classifyOriginUniqueViolation } from './origin-guard.ts';
 
 export interface WorktreeRefreshRow {
@@ -482,6 +484,27 @@ function finished(row: WorktreeRefreshRow, sync: { synced: RefreshMemberSync[]; 
  * host only; refusals throw catalogue errors (`code`, cause, literal fix, docs).
  */
 export async function refreshWorktree(engine: BrainEngine, sourceId: string, opts: RefreshOptions = {}): Promise<WorktreeRefreshResult> {
+  try { return await runRefresh(engine, sourceId, opts); }
+  catch (error) { throw error instanceof OperationError ? error : await unexpectedRefreshFailure(engine, sourceId, error); }
+}
+
+/**
+ * GBRA-250: an untyped throw (a statement error, a TypeError) leaves the refresh where it stood, so a fenced or syncing row
+ * resumes on the next run. The refusal names that row and carries the stack in `why`, so a failure seen once leaves a trace.
+ */
+async function unexpectedRefreshFailure(engine: BrainEngine, sourceId: string, error: unknown): Promise<OperationError> {
+  const thrown = error instanceof Error ? error : new Error(String(error));
+  const sqlstate = typeof (error as { code?: unknown } | null)?.code === 'string' ? ` (${(error as { code: string }).code})` : '';
+  const redact = (text: string) => redactUrlsInText(redactConnectionInfo(text));
+  const binding = await getWorktreeBinding(engine, sourceId, existingLocalHostId()).catch(() => null);
+  const active = binding ? await readActiveRefresh(engine, binding.worktree_id).catch(() => null) : null;
+  const left = active ? `Refresh ${active.id} stays ${active.state}, and the next gbrain sources refresh ${sourceId} resumes it.` : 'No refresh row was left active.';
+  return opError('internal_error', redact(`The refresh of source ${sourceId} failed unexpectedly: ${thrown.name}${sqlstate}: ${thrown.message}`),
+    `${left} Run gbrain sources refresh ${sourceId} again; if it fails the same way, report this output (why holds the stack) with gbrain doctor --json.`,
+    { why: redact(thrown.stack ?? `${thrown.name}: ${thrown.message}`) });
+}
+
+async function runRefresh(engine: BrainEngine, sourceId: string, opts: RefreshOptions): Promise<WorktreeRefreshResult> {
   const syncBudgetMs = await configuredMs(engine, opts.syncBudgetMs, 'GBRAIN_REFRESH_SYNC_BUDGET_MS', 'sources.refresh_sync_budget_ms', SYNC_BUDGET_MS);
   if (opts.resume || opts.abandon) return resumeOrAbandon(engine, sourceId, opts, syncBudgetMs);
   const fetchTimeoutMs = await configuredMs(engine, opts.fetchTimeoutMs, 'GBRAIN_REFRESH_FETCH_TIMEOUT_MS', 'sources.refresh_fetch_timeout_ms', 120_000, 2 ** 31 - 1);
@@ -512,7 +535,8 @@ async function refreshOnce(engine: BrainEngine, sourceId: string, opts: RefreshO
           if (result.blocked) blocked.push(result.blocked);
           synced.push({ source_id: member, status: result.status, last_commit: await lastCommit(engine, member) });
         } catch (error) {
-          blocked.push({ source_id: member, code: (error as OperationError).code ?? 'storage_error', message: (error as Error).message, resume: `gbrain sync --source ${member} --no-pull` });
+          blocked.push({ source_id: member, code: error instanceof OperationError ? error.code : 'storage_error', message: error instanceof Error ? error.message : String(error),
+            resume: `gbrain sync --source ${member} --no-pull` });
         }
       }
       const deferred = synced.some(member => member.status === 'deferred');
