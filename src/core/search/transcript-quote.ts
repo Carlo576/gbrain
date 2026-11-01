@@ -429,9 +429,10 @@ function neutralizeWithMap(text: string, header: boolean): { text: string; map: 
 const SUMMARY_RE = /\[tool calls?(?:: [^\]\n]*)?, arguments omitted\]/g;
 
 /**
- * GST-687: `text` holds the summary of a tool call the stored page (`stored`: its body) holds as a call, and keeps fewer of
- * those calls than the stored page does, so a reading shape (get_page, fetch, search) replaced at least one with its summary
- * and writing it back would lose the call. Each string is scanned once, whatever the number of distinct summaries.
+ * GST-687: `text` holds a tool-call summary that a whole read of the stored page (`stored`: its body) does not hold (a
+ * partial read, a window or a chunk, can cut a call into another summary), or the summary of a call the stored page holds
+ * and fewer of those calls, so a reading shape (get_page, fetch, search) replaced at least one call with its summary and
+ * writing it back would lose the call. Each string is scanned once, whatever the number of distinct summaries.
  */
 export function holdsSummarizedToolCalls(stored: string, text: string): boolean {
   const tally = (s: string) => {
@@ -439,16 +440,17 @@ export function holdsSummarizedToolCalls(stored: string, text: string): boolean 
     for (const [summary] of s.matchAll(SUMMARY_RE)) counts.set(summary, (counts.get(summary) ?? 0) + 1);
     return counts;
   };
-  const calls = (s: string) => {
-    const counts = tally(neutralizeToolCalls(s));
+  const calls = (s: string, read = tally(neutralizeToolCalls(s))) => {
+    const counts = new Map(read);
     for (const [summary, n] of tally(s)) counts.set(summary, (counts.get(summary) ?? 0) - n);
     return counts;
   };
   const summaries = tally(text);
   if (summaries.size === 0) return false;
-  const storedCalls = calls(stored);
+  const read = tally(neutralizeToolCalls(stored));
+  const storedCalls = calls(stored, read);
   const kept = calls(text);
-  return [...summaries.keys()].some(s => (kept.get(s) ?? 0) < (storedCalls.get(s) ?? 0));
+  return [...summaries.keys()].some(s => !read.has(s) || (kept.get(s) ?? 0) < (storedCalls.get(s) ?? 0));
 }
 
 /**

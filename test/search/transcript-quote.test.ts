@@ -512,6 +512,19 @@ describe('holdsSummarizedToolCalls (GST-687 put_page guard)', () => {
     expect(holdsSummarizedToolCalls(stored, '**alice-example**: noted.')).toBe(false);
   });
 
+  test('a summary a whole read of the stored page never produces, as a cut window or chunk gives, is refused', () => {
+    expect(holdsSummarizedToolCalls(stored, `${stored}\n\n**bob-example**: [tool call, arguments omitted]`)).toBe(true);
+    const long = JSON.stringify({ type: 'tool_use', id: 'toolu_b', input: { query: 'ledger '.repeat(20) }, name: 'search' });
+    const page = `**alice-example**: looking it up ${long}\n\n**bob-example**: thanks.`;
+    const cut = page.indexOf('ledger') + 30;
+    expect(holdsSummarizedToolCalls(page, neutralizeToolCalls(page.slice(0, cut)) + neutralizeToolCalls(page.slice(cut)))).toBe(true);
+    const xml = '<function_calls>\n<invoke name="search">\n<parameter name="query">ledger</parameter>\n</invoke>\n<invoke name="fetch">\n<parameter name="url">x</parameter>\n</invoke>\n</function_calls>';
+    const xmlPage = `**alice-example**: checking\n${xml}\n\n**bob-example**: thanks.`;
+    const at = xmlPage.indexOf('<invoke name="fetch"');
+    expect(holdsSummarizedToolCalls(xmlPage, neutralizeToolCalls(xmlPage.slice(0, at)) + neutralizeToolCalls(xmlPage.slice(at)))).toBe(true);
+    expect(holdsSummarizedToolCalls(xmlPage, neutralizeToolCalls(xmlPage))).toBe(true);
+  });
+
   test('thousands of distinct summaries are counted in one scan', () => {
     const many = Array.from({ length: 20_000 }, (_, i) => `[tool call: tool_${i}, arguments omitted]`).join('\n');
     expect(holdsSummarizedToolCalls(many, many)).toBe(false);
