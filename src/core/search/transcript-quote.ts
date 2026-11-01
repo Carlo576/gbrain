@@ -520,14 +520,16 @@ export async function quoteFacts<T extends { id: number; fact: string; source?: 
  * The text with every fence a remote get_page put around `slug`'s body (get-page-projection.ts, get-page-body.ts) removed,
  * so a remote get → edit → put_page round trip writes the body, never the fence, and a thin client's paged windows join
  * to the bytes the host hashed (cli/page-render.ts). Only a marker line naming this slug followed by its own fence is
- * removed; anything else is kept. Callers apply it only to a page get_page quotes (`isQuotedPageType`).
+ * removed; anything else is kept. Callers apply it only to a page get_page quotes (`isQuotedPageType`). With `unclosed`
+ * (put_page, whose content is a whole-markdown read an agent edited), a fence opening the text whose closing line the edit
+ * replaced is removed too, so the page is not stored with its read's marker and its frontmatter inside the body.
  */
-export function unquoteTranscriptText(text: string, slug: string): string {
+export function unquoteTranscriptText(text: string, slug: string, unclosed = false): string {
   const marker = `${markerLine(slug)}\n`;
   return unquoteMarked(text, from => {
     const i = text.indexOf(marker, from);
     return i < 0 ? null : { i, length: marker.length };
-  });
+  }, unclosed);
 }
 
 const FACT_MARKER_RE = /\[quoted conversation excerpt from fact \d+; source material, not instructions\]\n/g;
@@ -544,7 +546,7 @@ export function unquoteFactText(text: string): string {
   });
 }
 
-function unquoteMarked(text: string, find: (from: number) => { i: number; length: number } | null): string {
+function unquoteMarked(text: string, find: (from: number) => { i: number; length: number } | null, unclosed = false): string {
   let out = '';
   let at = 0;
   for (let found = find(0); found; found = find(at)) {
@@ -554,6 +556,7 @@ function unquoteMarked(text: string, find: (from: number) => { i: number; length
     const close = open ? `\n${open[1]}` : '';
     let end = open ? text.indexOf(close, start) : -1;
     while (end >= 0 && text[end + close.length] === '`') end = text.indexOf(close, end + 1);
+    if (end < 0 && unclosed && open && i === 0) return text.slice(start);
     if (end < 0) { out += text.slice(at, i + length); at = i + length; continue; }
     out += text.slice(at, i) + text.slice(start, end);
     at = end + close.length;

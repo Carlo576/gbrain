@@ -267,6 +267,20 @@ for (const backend of testBackends()) {
       expect((await engine.getPage(slug))!.frontmatter.example).toBe(example);
     }, 120_000);
 
+    test('item 3: a whole-markdown read edited past its closing fence (last line replaced, or text appended after it) is stored unfenced', async () => {
+      for (const [slug, edit] of [['notes/tail-replaced', (c: string) => c.replace(/\n[^\n]*\n?$/, '\nAppended line.\n')], ['notes/tail-appended', (c: string) => `${c}\nAppended line.\n`]] as const) {
+        await engine.putPage(slug, { type: 'note', title: 'Tail edit', compiled_truth: 'First line.\n\nSecond line.', timeline: '', frontmatter: { status: 'draft' } });
+        const read = await ok('get_page', { slug, include_content: true, content_only: true });
+        expect(read.content).toContain(MARKER);
+        await ok('put_page', { slug, content: edit(read.content), expected_revision: read.revision });
+        const page = await engine.getPage(slug);
+        expect([page!.title, page!.frontmatter.status]).toEqual(['Tail edit', 'draft']);
+        expect(page!.compiled_truth).not.toContain('quoted conversation excerpt');
+        expect(page!.compiled_truth).not.toContain('```');
+        expect(page!.compiled_truth).toMatch(/Second line\.\n+Appended line\.$/);
+      }
+    }, 120_000);
+
     test('item 3: a fenced title pasted into hand-written frontmatter is stored unfenced, every other value unchanged', async () => {
       const head = (title: string) => `---\ntype: note\ntitle: ${title}\nwhen: 2024-06-01\ncode: 0123\n---\n\nPasted body.\n`;
       for (const slug of ['notes/pasted-plain', 'notes/pasted-fenced']) await ok('put_page', { slug, content: head('Pasted') });

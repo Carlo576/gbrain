@@ -283,7 +283,7 @@ function unquotedFrontmatter(sent: string, content: string, slug: string): strin
 }
 
 async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: string, content: string): Promise<string> {
-  const bodyUnquoted = unquoteTranscriptText(content, slug);
+  const bodyUnquoted = unquoteTranscriptText(content, slug, true);
   const unquoted = unquotedFrontmatter(content, bodyUnquoted, slug);
   const summarized = /, arguments omitted\]/.test(unquoted);
   const quotedType = isQuotedPageType(String(parseMarkdownHead(unquoted).frontmatter.type ?? ''));
