@@ -10,7 +10,9 @@
  * refuses `integrate_conflict` naming the path and changes nothing; an uncommitted
  * edit on an incoming path refuses `refresh_dirty` before anything is pushed; a dry
  * run never publishes; with gbrain.quarantine on, the refresh names the parked
- * local version; a refusal after the publish says the remote already holds it.
+ * local version; a refusal after the publish says the remote already holds it; a
+ * force-push that lands between the refresh's check and the publish's push is never
+ * merged back (the publish is bound to the upstream the refresh checked).
  * Regression it catches: a refresh that pushes local commits without the
  * setting, one that moves the checkout or drops the local commits while
  * publishing, and one that pushes or fences anything when the merge conflicts or
@@ -229,6 +231,24 @@ for (const [label, forget] of [['', false], [' even when the first fetch to see 
     expect((await f.refreshRows()).filter(r => r.state !== 'completed')).toEqual([]);
   }), 120_000);
 }
+
+test('setting on: a force-push that lands after the refresh checked the upstream and before the publish pushes is never merged back; the publish refuses and the remote keeps the rewrite', () => each(async f => {
+  f.push('alpha/purged.md', page('Purged', 'A page the upstream later removed by rewriting history.'));
+  expect(await refreshWorktree(f.engine, f.alpha)).toMatchObject({ status: 'completed' });
+  const purged = f.head();
+  f.push('alpha/three.md', page('Alpha three', 'A normal upstream commit after the purged one.'));
+  git(f.upstream, 'checkout', '-q', '--detach', `${purged}~1`);
+  commitFile(f.upstream, 'alpha/two.md', page('Alpha two', 'Rewritten upstream.'));
+  const rewrite = git(f.upstream, 'rev-parse', 'HEAD').trim();
+  writeFileSync(join(f.root, 'beta/local.md'), page('Local', 'A local commit nobody pushed.'));
+  git(f.root, 'add', 'beta/local.md'); git(f.root, 'commit', '-qm', 'local only');
+  const racing = join(bin, `gbrain-race-${f.engine.kind}`);
+  writeFileSync(racing, `#!/bin/sh\ngit -C '${f.upstream}' push -q --force origin ${rewrite}:refs/heads/main || exit 97\nexec '${childCli}' "$@"\n`);
+  chmodSync(racing, 0o755);
+  await f.engine.setConfig(REFRESH_PUBLISH_DIVERGED_KEY, 'true');
+  await withEnv({ GBRAIN_JOB_CHILD_CLI: racing }, () => refusedWith(refreshWorktree(f.engine, f.alpha), 'push_unconfirmed'));
+  expect(remoteHead(f)).toBe(rewrite);
+}), 120_000);
 
 test('setting on, reflog off and no completed refresh: the refusal\'s own fetch records the rewrite, so a second refresh refuses too, and with no record at all it refuses', () => each(async f => {
   const reflog = git(f.root, 'rev-parse', '--path-format=absolute', '--git-path', 'logs/refs/remotes/origin/main').trim();
