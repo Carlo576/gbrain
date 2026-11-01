@@ -115,7 +115,7 @@ and `view: markdown` keep the stored text byte-exact inside the fence, so
 `edit_page` `old_text` copied from inside a fence still matches, and
 `put_page` given that `content` back removes exactly the fences get_page
 added around this page before writing (a fence-like text in an owner-tier
-note's stored body is kept). A remote `put_page` whose content holds a
+note's stored body is kept; a whole-markdown read whose closing fence the edit replaced or appended past is unfenced too). A remote `put_page` whose content holds a
 tool-call summary that a whole read of the stored page never produces, or
 that keeps fewer of a summarized call than the stored page holds, is
 refused with `invalid_params` and stores nothing; a summary inside a kept call's
