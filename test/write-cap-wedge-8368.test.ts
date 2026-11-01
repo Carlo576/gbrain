@@ -33,6 +33,9 @@ import { classifyTerminal } from '../src/core/persistence/terminal-classify.ts';
 import { checkPersistenceCapacity } from '../src/commands/doctor/checks/persistence-capacity.ts';
 import { performSync } from '../src/commands/sync/perform.ts';
 import { CODES } from '../src/core/error-registry.ts';
+import { OperationError } from '../src/core/ops/contract.ts';
+import { classifyItemFailure } from '../src/core/item-failure.ts';
+import { classifyConnectorError } from '../src/core/connectors/item-holds.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { reviewedWriterIntent } from './helpers/writer-admin-intent.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -158,7 +161,10 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
         const own = await refusedWith(stuck);
         expect(own).toMatchObject({ code: 'queue_capacity', detail: 'outstanding=4 limit=4' });
         expect(own!.message).toContain(`source ${stuck} holds 4`);
-        // (d) doctor warns at the cap and names the holder; its fix is the read-only writer status of that source.
+        // (d) young requests at the cap are a busy drain, not a stall: doctor stays ok.
+        expect(await checkPersistenceCapacity(engine)).toMatchObject({ status: 'ok', details: { outstanding: [] } });
+        // Once they stop settling, doctor warns at the cap and names the holder; its fix is the read-only writer status of that source.
+        await engine.executeRaw(`UPDATE persistence_requests SET created_at=now()-interval '1 hour' WHERE source_id=$1 AND state IN ('queued','running')`, [stuck]);
         const check = await checkPersistenceCapacity(engine);
         expect(check.status).toBe('warn');
         expect(check.message).toContain(stuck);
@@ -184,4 +190,10 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
       }
     }), 120_000);
   });
+});
+
+test('#8368: owner_marker_missing stops a sync or connector run for the source instead of counting against one item', () => {
+  const refusal = new OperationError('owner_marker_missing', 'The ownership marker is missing.');
+  expect(classifyItemFailure(refusal).scope).not.toBe('item');
+  expect(classifyConnectorError(refusal)).toMatchObject({ code: 'owner_marker_missing', scope: 'source' });
 });

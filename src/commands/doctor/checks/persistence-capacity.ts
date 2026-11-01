@@ -10,6 +10,7 @@ import { BACKGROUND_PRODUCERS, readBackgroundPauseShare } from '../../../core/pe
 const VERIFY = 'gbrain doctor --only persistence_capacity --json';
 const DOCS = 'docs/guides/concurrent-writes.md#quota-near-exhaustion';
 const OUTSTANDING_WARN = 0.9;
+const OUTSTANDING_STALL_S = 600;
 
 /**
  * #5470/#6696 (A3): a cumulative managed-write cap (permanent request IDs,
@@ -20,8 +21,9 @@ const OUTSTANDING_WARN = 0.9;
  * their compacted (net) size. Each key gets the one value that covers a year.
  * A scope past the background pause line (A5) names the producers it pauses.
  * The fix verifies through doctor and the read-scope `get_brain_health` band (#6696 B2).
- * #8368: an outstanding-request cap at 90% or more is a warning too, naming the sources holding its slots (requests
- * that never settle hold them, so raising the cap is not the fix); its fix is the holder's read-only writer status.
+ * #8368: an outstanding-request cap at 90% or more whose oldest outstanding request is over ten minutes old is a warning
+ * too, naming the sources holding its slots (requests that never settle hold them, so raising the cap is not the fix); its
+ * fix is the holder's read-only writer status. A healthy sync drain runs near the line with young requests and stays ok.
  */
 export async function checkPersistenceCapacity(engine: BrainEngine): Promise<Check> {
   try {
@@ -36,9 +38,11 @@ export async function checkPersistenceCapacity(engine: BrainEngine): Promise<Che
     for (const row of capacityDiagnostics(counters, limits)) {
       if (row.resource !== 'outstanding_count' || row.limit <= 0 || row.used < Math.ceil(row.limit * OUTSTANDING_WARN)) continue;
       const principal = /^principal:([^:]+):(.+)$/.exec(row.scope);
-      const holders = await engine.executeRaw<{ source_id: string; n: number | string }>(`SELECT source_id,count(*) AS n FROM persistence_requests
+      const holders = await engine.executeRaw<{ source_id: string; n: number | string; oldest_s: number | string }>(`SELECT source_id,count(*) AS n,
+        EXTRACT(EPOCH FROM now()-min(created_at)) AS oldest_s FROM persistence_requests
         WHERE state IN ('queued','running','recovering')${principal ? ' AND principal_kind=$1 AND principal_id=$2' : ''} GROUP BY source_id ORDER BY count(*) DESC,source_id LIMIT 3`,
         principal ? [principal[1], principal[2]] : []);
+      if (!holders.some(holder => Number(holder.oldest_s) >= OUTSTANDING_STALL_S)) continue;
       outstanding.push({ scope: row.scope, resource: row.resource, used: row.used, limit: row.limit, config_key: row.config_key,
         holders: holders.map(holder => ({ source_id: holder.source_id, outstanding: Number(holder.n) })) });
     }

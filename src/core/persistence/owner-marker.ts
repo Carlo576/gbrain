@@ -19,7 +19,7 @@ export function ownerMarkerRestoreFix(sourceId: string, binding?: { root: string
       '--manifest', '<manifest digest printed by prepare>', '--self-transfer', ...intent('accept')],
     inputs: [adminState, ...(binding ? [] : [{ name: 'root', how: 'the binding root writer status prints' }, { name: 'owner_epoch', how: 'the owner_epoch prepare printed' }])],
     consent: [], actor: 'host_admin', requires_exclusive: false,
-    why: 'Accepts the self-transfer: ownership stays on this host, the marker is written again and writes to the source resume. A sync file refused meanwhile is retried by gbrain sources retry-held and the same sync.',
+    why: 'Accepts the self-transfer: ownership stays on this host, the marker is written again and writes to the source resume. A sync that stopped blocked_by_failures on a refused file is finished by running the same sync again.',
     verify: { argv: ['gbrain', 'sources', 'writer', 'failures', sourceId, '--json'] } } };
 }
 
