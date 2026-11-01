@@ -73,6 +73,13 @@ function mockEngine(overrides: Partial<Record<string, any>> = {}): BrainEngine {
           return Promise.resolve(undefined);
         };
       }
+      // Existing-page writes call the transactional race-reconciliation
+      // query. This mock represents the ordinary no-race case.
+      if (prop === 'executeRaw') {
+        return overrides.executeRaw
+          ? (...args: any[]) => overrides.executeRaw(...args)
+          : () => Promise.resolve([]);
+      }
       // transaction: just call the fn with the same engine (no real DB transaction in tests)
       if (prop === 'transaction') return async (fn: (tx: BrainEngine) => Promise<any>) => fn(engine);
       return track(prop);

@@ -110,6 +110,9 @@ async function seedPage(opts: {
   }
 }
 
+// All tests share one mutable PGLite engine. Keep the two logical suites on
+// one serial queue so their per-test TRUNCATE hooks cannot race transactions.
+describe.serial('v0.41.2.1: shared PGLite engine', () => {
 describe('v0.41.2.1: discoverExtractablePages SQL contract', () => {
   test('discovers legacy + pack-extractable types, excludes synthesis outputs', async () => {
     // Legacy floor + `note` (declared extractable:true in gbrain-base, now
@@ -236,7 +239,11 @@ describe('v0.41.2.1: discoverExtractablePages SQL contract', () => {
   test('executeRaw failure returns [] (fail-soft, transcript path proceeds)', async () => {
     // Inject a SQL error by passing a sourceId that breaks the query —
     // actually easier: temporarily replace executeRaw to throw.
-    const realExecute = engine.executeRaw.bind(engine);
+    // Preserve the unbound method: transactions create a derived engine whose
+    // executeRaw receiver points at the transaction connection. Restoring a
+    // bound method here silently routes later FOR UPDATE queries outside the
+    // transaction and deadlocks updates in subsequent tests.
+    const realExecute = engine.executeRaw;
     (engine as unknown as { executeRaw: typeof engine.executeRaw }).executeRaw =
       async () => { throw new Error('synthetic discovery failure'); };
     try {
@@ -267,6 +274,17 @@ describe('v0.41.2.1: runPhaseExtractAtoms — dual-source merge + idempotency', 
     expect(result.details?.duplicates_skipped).toBe(1); // page collided with transcript
     expect(result.details?.transcripts_processed).toBe(1);
     expect(result.details?.pages_processed).toBe(1);
+    const atoms = await engine.executeRaw<{
+      source_path: string | null;
+      source_slug: string | null;
+    }>(
+      `SELECT frontmatter->>'source_path' AS source_path,
+              frontmatter->>'source_slug' AS source_slug
+         FROM pages WHERE type = 'atom' ORDER BY slug`,
+    );
+    expect(atoms).toHaveLength(2);
+    expect(atoms).toContainEqual({ source_path: null, source_slug: 'meeting/unique' });
+    expect(atoms).toContainEqual({ source_path: '/transcript-A.txt', source_slug: null });
   });
 
   test('atom frontmatter: page-origin uses source_slug, transcript-origin uses source_path', async () => {
@@ -625,6 +643,7 @@ describe('local extract-atoms config knobs', () => {
     const body = captured[0].split('\n\n---\n\n')[1] ?? '';
     expect(body).toBe('z'.repeat(600));
   }, 30_000);
+});
 });
 
 // Invalid-value fallbacks for the two knobs: garbage config must degrade to

@@ -13,6 +13,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { execFileSync } from 'node:child_process';
 
 let home: string;
 const origHome = process.env.GBRAIN_HOME;
@@ -53,7 +54,10 @@ describe('register + read round trip', () => {
       queue: 'default',
       nice_requested: 10,
       nice_effective: 10,
-      started_at: Date.now(),
+      // The PID-reuse guard compares registration time with the OS process
+      // start. Use this test process's actual start, not the later registry
+      // write time, which correctly looks like a recycled PID.
+      started_at: Date.parse(execFileSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8' }).trim()),
     });
 
     const live = readWorkers(() => 10); // inject niceness read

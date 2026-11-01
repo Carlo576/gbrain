@@ -80,6 +80,9 @@ describe('collectSyncableFiles — import.ts entry point (git-ls-files fast path
     writeFileSync(join(dir, '.dira', 'entries', 'dec-0001.md'), '---\ntype: note\ntitle: A\n---\n\nbody');
     mkdirSync(join(dir, 'brain'), { recursive: true });
     writeFileSync(join(dir, 'brain', 'plan.md'), '---\ntype: note\ntitle: B\n---\n\nbody');
+    // Some developer machines globally ignore .dira. This fixture is about
+    // the tracked-file git fast path, so force-track its hidden page.
+    execSync('git add -f -- .dira/entries/dec-0001.md', { cwd: dir, stdio: 'pipe' });
     gitCommitAll(dir);
   }
 

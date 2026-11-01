@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { withEnv } from './helpers/with-env.ts';
+import { checkRerankerHealth } from '../src/commands/doctor/checks/calibration.ts';
 import {
   logRerankFailure,
   readRecentRerankFailures,
@@ -135,6 +136,25 @@ describe('rerank-audit JSONL round-trip', () => {
     } finally {
       try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
     }
+  });
+
+  test('doctor reports disabled despite historical reranker failures', async () => {
+    await withFreshAuditDir(async () => {
+      logRerankFailure({
+        model: 'voyage:rerank-2.5',
+        reason: 'auth',
+        query_hash: 'historical',
+        doc_count: 30,
+        error_summary: 'missing key from a previous configuration',
+      });
+      const engine = { getConfig: async () => 'false' } as any;
+
+      const check = await checkRerankerHealth(engine);
+
+      expect(check.status).toBe('ok');
+      expect(check.message).toContain('Reranker disabled');
+      expect(check.message).toContain('1 historical failure');
+    });
   });
 });
 

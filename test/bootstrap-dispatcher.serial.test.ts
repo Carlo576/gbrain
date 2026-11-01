@@ -39,6 +39,9 @@ let tmpParent: string; // GBRAIN_HOME parent (configDir appends .gbrain)
 let home: string;
 let ws: string;
 let prevHome: string | undefined;
+let prevUserHome: string | undefined;
+let prevCodexHome: string | undefined;
+let prevClaudeConfig: string | undefined;
 
 const REQUIRED_ANSWERS: Record<string, string> = {
   AGENT_NAME: 'Dispatch',
@@ -87,7 +90,15 @@ beforeAll(async () => {
   mkdirSync(home, { recursive: true });
   ws = mkdtempSync(join(tmpdir(), 'gb-dispatch-ws-'));
   prevHome = process.env.GBRAIN_HOME;
+  prevUserHome = process.env.HOME;
+  prevCodexHome = process.env.CODEX_HOME;
+  prevClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
   process.env.GBRAIN_HOME = tmpParent;
+  // This suite exercises synthetic agent workspaces; never let the host
+  // account's Codex/Claude config change dispatcher behavior or get written.
+  process.env.HOME = tmpParent;
+  process.env.CODEX_HOME = join(tmpParent, 'codex-home');
+  process.env.CLAUDE_CONFIG_DIR = join(tmpParent, 'claude-config');
 
   // Interview: all required answers, MCP_SCOPE set, HOOKS_CONSENT SKIPPED.
   expect(initState(ws).ok).toBe(true);
@@ -105,6 +116,12 @@ beforeAll(async () => {
 afterAll(() => {
   if (prevHome === undefined) delete process.env.GBRAIN_HOME;
   else process.env.GBRAIN_HOME = prevHome;
+  if (prevUserHome === undefined) delete process.env.HOME;
+  else process.env.HOME = prevUserHome;
+  if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = prevCodexHome;
+  if (prevClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+  else process.env.CLAUDE_CONFIG_DIR = prevClaudeConfig;
   rmSync(tmpParent, { recursive: true, force: true });
   rmSync(ws, { recursive: true, force: true });
 });
@@ -777,7 +794,16 @@ describe('receipt overwrite guard wired into every writer [CX2-12]', () => {
   }, 30_000);
 
   test('hooks: newer-format receipt → refusal, registration record not written', async () => {
-    const before = readFileSync(receiptPath(home), 'utf8');
+    // Make this contract independent of earlier tests: hooks must first see
+    // a rendered agent workspace before the newer receipt is substituted.
+    expect(setAnswer(ws, 'HOOKS_CONSENT', 'yes').ok).toBe(true);
+    const confirmed = readBackHash(ws);
+    if (!confirmed.ok) throw new Error(confirmed.message);
+    expect(confirm(ws, confirmed.hash).ok).toBe(true);
+    const rendered = await capture(() => runBootstrap(['render', '--workspace', ws]));
+    expect(rendered.result).toBe(0);
+    const hadReceipt = existsSync(receiptPath(home));
+    const before = hadReceipt ? readFileSync(receiptPath(home), 'utf8') : null;
     writeNewerReceipt(home);
     try {
       const { runner } = makeRunner();
@@ -789,7 +815,12 @@ describe('receipt overwrite guard wired into every writer [CX2-12]', () => {
       expect(r.result).toBe(1);
       expect(r.err).toContain('upgrade gbrain');
     } finally {
-      writeFileSync(receiptPath(home), before, 'utf8');
+      if (before !== null) writeFileSync(receiptPath(home), before, 'utf8');
+      else rmSync(receiptPath(home), { force: true });
+      skipAnswer(ws, 'HOOKS_CONSENT');
+      const declined = readBackHash(ws);
+      if (!declined.ok) throw new Error(declined.message);
+      confirm(ws, declined.hash);
     }
   }, 30_000);
 

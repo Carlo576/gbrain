@@ -14,6 +14,7 @@ import {
   resetGateway,
   rerank,
   __setRerankTransportForTests,
+  __setSunsetClockForTests,
   _resetSunsetWarningsForTest,
 } from '../../src/core/ai/gateway.ts';
 
@@ -28,6 +29,9 @@ let stderrChunks: string[] = [];
 let origWrite: typeof process.stderr.write;
 
 beforeEach(() => {
+  // These tests cover the announced warning period, so keep their clock
+  // before the provider sunset instead of depending on the machine date.
+  __setSunsetClockForTests(() => new Date('2026-09-03T23:59:59.000Z'));
   _resetSunsetWarningsForTest();
   stderrChunks = [];
   origWrite = process.stderr.write.bind(process.stderr);
@@ -45,6 +49,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  __setSunsetClockForTests(null);
   process.stderr.write = origWrite;
   __setRerankTransportForTests(null);
   _resetSunsetWarningsForTest();
@@ -73,6 +78,12 @@ describe('sunset warn-on-use (v0.46.3)', () => {
     await rerank({ query: 'q2', documents: ['b'] });
     const hits = stderrChunks.join('').split('DEPRECATED').length - 1;
     expect(hits).toBe(2);
+  });
+
+  test('after the sunset, rerank short-circuits instead of calling the provider', async () => {
+    __setSunsetClockForTests(() => new Date('2026-09-05T00:00:00.000Z'));
+    await expect(rerank({ query: 'q', documents: ['a'] })).rejects.toMatchObject({ reason: 'sunset_short_circuit' });
+    expect(stderrChunks.join('')).not.toContain('DEPRECATED');
   });
 
   test('a non-sunset provider warns nothing', async () => {

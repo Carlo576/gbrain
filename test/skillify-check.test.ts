@@ -12,16 +12,19 @@
 import { describe, test, expect } from 'bun:test';
 import { execFileSync } from 'child_process';
 import { join } from 'path';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, chmodSync, realpathSync } from 'fs';
+import { tmpdir } from 'os';
 
 const REPO = join(__dirname, '..');
 const SCRIPT = join(REPO, 'scripts', 'skillify-check.ts');
 
-function run(args: string[]): { exitCode: number; stdout: string; stderr: string } {
+function run(args: string[], cwd = REPO): { exitCode: number; stdout: string; stderr: string } {
   try {
     const stdout = execFileSync('bun', ['run', SCRIPT, ...args], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
-      cwd: REPO,
+      cwd,
+      maxBuffer: 20 * 1024 * 1024,
     });
     return { exitCode: 0, stdout, stderr: '' };
   } catch (err: any) {
@@ -34,6 +37,40 @@ function run(args: string[]): { exitCode: number; stdout: string; stderr: string
 }
 
 describe('skillify-check CLI', () => {
+  test('recent JSON audits nested recent code and an empty scan returns an empty array', () => {
+    const root = mkdtempSync(join(tmpdir(), 'skillify-recent-'));
+    try {
+      const recent = join(root, 'src', 'commands', 'doctor', 'nested.ts');
+      const old = join(root, 'src', 'core', 'old.ts');
+      mkdirSync(join(root, 'src', 'commands', 'doctor'), { recursive: true });
+      mkdirSync(join(root, 'src', 'core'), { recursive: true });
+      writeFileSync(join(root, 'package.json'), '{}');
+      writeFileSync(recent, 'export {};');
+      writeFileSync(old, 'export {};');
+      const now = Date.now();
+      const recentTime = new Date(now - 60 * 60 * 1000);
+      const oldTime = new Date(now - 8 * 24 * 60 * 60 * 1000);
+      utimesSync(recent, recentTime, recentTime);
+      utimesSync(old, oldTime, oldTime);
+
+      const found = run(['--recent', '--json'], root);
+      expect(JSON.parse(found.stdout)).toHaveLength(1);
+      expect(realpathSync(JSON.parse(found.stdout)[0].path)).toBe(realpathSync(recent));
+
+      const emptyRoot = mkdtempSync(join(tmpdir(), 'skillify-empty-'));
+      try {
+        writeFileSync(join(emptyRoot, 'package.json'), '{}');
+        const empty = run(['--recent', '--json'], emptyRoot);
+        expect(empty.exitCode).toBe(0);
+        expect(JSON.parse(empty.stdout)).toEqual([]);
+      } finally {
+        rmSync(emptyRoot, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('text mode runs against a known-skilled file', () => {
     // publish is one of the gbrain commands with SKILL.md + tests +
     // resolver entry. Should get a non-zero score.
@@ -97,8 +134,6 @@ describe('skillify-check CLI', () => {
 // check-resolvable wiring (per plan-eng-review — no silent pass on missing binary)
 // ---------------------------------------------------------------------------
 
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 import { afterEach } from 'bun:test';
 

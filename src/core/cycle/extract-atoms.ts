@@ -307,7 +307,7 @@ export async function discoverExtractablePages(
   ];
   if (hasFilter) params.push(affectedSlugs);
 
-  try {
+    try {
     const rows = await engine.executeRaw<{
       slug: string;
       compiled_truth: string;
@@ -906,7 +906,7 @@ export async function runPhaseExtractAtoms(
         const provenanceLinks: LinkBatchInput[] = [];
         for (const atom of atoms) {
           const srcRef = item.kind === 'transcript' ? item.filePath : item.slug;
-          const slug = atomSlug(atom.title, srcRef);
+          const slug = await resolveAtomSlug(engine, atom.title, srcRef, item, sourceId);
           const originFrontmatter =
             item.kind === 'transcript'
               ? { source_path: item.filePath }
@@ -1250,16 +1250,49 @@ function sourceDate(ref: string): string {
 }
 
 /**
- * Deterministic per-atom slug: `atoms/<source-date>/<stem>-<title-hash>`.
+ * Deterministic per-atom slug: `atoms/<source-date>/<stem>-<identity-hash>`.
  * - Date comes from the SOURCE, not the run date, so re-extracting an
  *   append-only transcript on a later day yields the SAME slug → putPage
  *   upserts instead of minting a cross-day duplicate.
- * - The 6-char title hash keeps two distinct atoms whose titles share the
- *   first 60 chars on separate slugs, so a deterministic slug never silently
- *   clobbers a *different* atom. Hash is over the title only (not body) so an
- *   LLM rewording the body on re-extraction still upserts rather than dupes.
+ * - The 6-char identity hash binds the title to its source reference. Equal
+ *   titles extracted from different sources therefore do not overwrite each
+ *   other; body-only edits from the same source still upsert in place.
  */
 function atomSlug(title: string, srcRef: string): string {
+  const hash = createHash('sha256').update(`${srcRef}\0${title}`).digest('hex').slice(0, 6);
+  return `atoms/${sourceDate(srcRef)}/${atomSlugStem(title)}-${hash}`;
+}
+
+/** Previous title-only identity, used to preserve existing atom slugs. */
+function legacyAtomSlug(title: string, srcRef: string): string {
   const hash = createHash('sha256').update(title).digest('hex').slice(0, 6);
   return `atoms/${sourceDate(srcRef)}/${atomSlugStem(title)}-${hash}`;
+}
+
+async function resolveAtomSlug(
+  engine: BrainEngine,
+  title: string,
+  srcRef: string,
+  item: { kind: 'transcript'; filePath: string } | { kind: 'page'; slug: string },
+  sourceId: string,
+): Promise<string> {
+  const current = atomSlug(title, srcRef);
+  const legacy = legacyAtomSlug(title, srcRef);
+  if (legacy === current) return current;
+
+  // Keep updating an existing pre-source-bound atom in place when it belongs
+  // to this source. If the old title-only slug belongs to another source,
+  // leave it intact and use the new source-bound slug.
+  try {
+    const previous = await engine.getPage(legacy, { sourceId });
+    const expectedOrigin = item.kind === 'transcript' ? item.filePath : item.slug;
+    const storedOrigin = item.kind === 'transcript'
+      ? previous?.frontmatter?.source_path
+      : previous?.frontmatter?.source_slug;
+    if (storedOrigin === expectedOrigin) return legacy;
+  } catch {
+    // A legacy lookup is only a compatibility hint; keep the new identity
+    // when the lookup is unavailable.
+  }
+  return current;
 }

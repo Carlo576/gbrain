@@ -992,7 +992,7 @@ describe('#3583 review: orphan-sentinel self-heal probe/clear race', () => {
       const result = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
       expect(result.status).toBe('up_to_date');
     } finally {
-      (engine as unknown as { executeRaw: typeof engine.executeRaw }).executeRaw = origExecuteRaw;
+      delete (engine as unknown as { executeRaw?: typeof engine.executeRaw }).executeRaw;
     }
 
     // The duplicate is real, so its sentinel survives...
@@ -1322,7 +1322,7 @@ describe('#3583 review: a writer landing AFTER the second probe gets its sentine
       const result = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
       expect(result.status).toBe('up_to_date');
     } finally {
-      (engine as unknown as { executeRaw: typeof engine.executeRaw }).executeRaw = origExecuteRaw;
+      delete (engine as unknown as { executeRaw?: typeof engine.executeRaw }).executeRaw;
     }
 
     // Probe #1 and #2 (orphan verdict) + probe #3 (post-clear verify).
@@ -1395,7 +1395,7 @@ describe('#3583 review: the failure-gate clear paths also verify-and-restore', (
       const result = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
       expect(result.status).toBe('synced');
     } finally {
-      (engine as unknown as { executeRaw: typeof engine.executeRaw }).executeRaw = origExecuteRaw;
+      delete (engine as unknown as { executeRaw?: typeof engine.executeRaw }).executeRaw;
     }
 
     expect(await engine.getPage('people/dana-old-gate-writer')).not.toBeNull();
@@ -1439,7 +1439,7 @@ describe('#3583 review: the failure-gate clear paths also verify-and-restore', (
       const result = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
       expect(result.status).toBe('up_to_date');
     } finally {
-      (engine as unknown as { executeRaw: typeof engine.executeRaw }).executeRaw = origExecuteRaw;
+      delete (engine as unknown as { executeRaw?: typeof engine.executeRaw }).executeRaw;
     }
 
     expect(probeCalls).toBe(3);
@@ -1529,7 +1529,7 @@ describe('#3583 review: a throwing bookmark advance can no longer lose a sentine
     } catch {
       threw = true;
     } finally {
-      (engine as unknown as { executeRaw: typeof engine.executeRaw }).executeRaw = origExecuteRaw;
+      delete (engine as unknown as { executeRaw?: typeof engine.executeRaw }).executeRaw;
     }
     expect(threw).toBe(true);
 

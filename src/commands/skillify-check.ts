@@ -405,11 +405,16 @@ function recentlyModified(root: string, days: number = 7): string[] {
   const roots = ['src/commands', 'src/core', 'scripts']
     .map(r => join(root, r))
     .filter(existsSync);
-  for (const r of roots) {
+  const visit = (dir: string): void => {
     try {
-      for (const f of readdirSync(r)) {
-        if (!f.match(/\.(ts|mjs|js|py)$/)) continue;
-        const fp = join(r, f);
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fp = join(dir, entry.name);
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          visit(fp);
+          continue;
+        }
+        if (!entry.isFile() || !entry.name.match(/\.(ts|mjs|js|py)$/)) continue;
         try {
           const st = statSync(fp);
           if (st.isFile() && st.mtimeMs >= cutoff) candidates.push(fp);
@@ -420,7 +425,8 @@ function recentlyModified(root: string, days: number = 7): string[] {
     } catch {
       /* skip */
     }
-  }
+  };
+  for (const r of roots) visit(r);
   return candidates;
 }
 
@@ -457,6 +463,10 @@ export async function runSkillifyCheckInline(args: string[]): Promise<void> {
     : args.filter(a => !a.startsWith('--'));
 
   if (targets.length === 0) {
+    if (recent && json) {
+      console.log('[]');
+      process.exit(0);
+    }
     console.error('No targets. Pass a path or --recent.');
     process.exit(1);
   }

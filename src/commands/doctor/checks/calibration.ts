@@ -567,9 +567,9 @@ export async function checkVoiceGateHealth(engine: BrainEngine): Promise<Check> 
  * v0.35.0.0+ reranker_health doctor check.
  *
  * Logic (post-CDX2 review):
- *   1) Read `search.reranker.enabled` first. When disabled and no
- *      failures in window → 'ok: reranker disabled'. Avoids interpreting
- *      "no events" as "broken" when reranker is simply not in use.
+ *   1) Read `search.reranker.enabled` first. When disabled, report ok even
+ *      when the audit window contains historical failures from a previous
+ *      configuration; reranking is not on the current search path.
  *   2) Walk last 7 days of `~/.gbrain/audit/rerank-failures-*.jsonl`.
  *   3) Auth failures: ANY single one warns (config-time problem doctor's
  *      own probe should have caught — surface it).
@@ -589,13 +589,21 @@ export async function checkRerankerHealth(engine: BrainEngine): Promise<Check> {
     const rerankerEnabled = cfg === 'true' || cfg === '1';
 
     const failures = readRecentRerankFailures(7);
+    if (!rerankerEnabled) {
+      const historical = failures.length === 0
+        ? 'no historical failures in the last 7 days'
+        : `${failures.length} historical failure event${failures.length === 1 ? '' : 's'} ignored`;
+      return {
+        name: 'reranker_health',
+        status: 'ok',
+        message: `Reranker disabled — ${historical}`,
+      };
+    }
     if (failures.length === 0) {
       return {
         name: 'reranker_health',
         status: 'ok',
-        message: rerankerEnabled
-          ? 'No rerank failures in last 7 days'
-          : 'Reranker disabled — no failures expected',
+        message: 'No rerank failures in last 7 days',
       };
     }
 

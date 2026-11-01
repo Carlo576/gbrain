@@ -51,9 +51,9 @@
  */
 
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'fs';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { createHash, randomBytes } from 'crypto';
 import { execFileSync } from 'child_process';
 import { GIT_ENV, GIT_ENV_AUTH, GIT_SSRF_SUBCOMMAND_FLAGS, detectDefaultBranch, divergenceSafePull } from './git-remote.ts';
@@ -152,7 +152,13 @@ export type PushLockResult =
   | { acquired: false; holderPid: number | null };
 
 export function pushLockDir(repoRoot: string): string {
-  const hash = createHash('sha256').update(repoRoot).digest('hex').slice(0, 16);
+  // Git may report a physical path while callers hold a symlinked path to
+  // the same checkout. Lock identity must follow the repository, not the
+  // spelling of the path, or the two callers can push concurrently.
+  let canonicalRoot: string;
+  try { canonicalRoot = realpathSync(repoRoot); }
+  catch { canonicalRoot = resolve(repoRoot); }
+  const hash = createHash('sha256').update(canonicalRoot).digest('hex').slice(0, 16);
   return join(ensureGbrainHome(), 'locks', `push-${hash}.lock`);
 }
 

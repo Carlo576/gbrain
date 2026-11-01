@@ -58,23 +58,36 @@ fi
 # Run it against a temp GBRAIN_HOME. The smoketest boots a persistent PGLite
 # brain, upserts a page, and reads it back; it prints one JSON line and exits 0
 # only on a successful round-trip.
-OUTPUT="$(GBRAIN_HOME="$GBRAIN_HOME_DIR" HOME="$GBRAIN_HOME_DIR" GBRAIN_SKIP_STARTUP_HOOKS=1 "$OUT_BIN" 2>&1 || true)"
+set +e
+OUTPUT="$(GBRAIN_HOME="$GBRAIN_HOME_DIR" HOME="$GBRAIN_HOME_DIR" GBRAIN_SKIP_STARTUP_HOOKS=1 "$OUT_BIN" 2>&1)"
+SMOKE_EXIT_STATUS=$?
+set -e
 
-if echo "$OUTPUT" | grep -qE '\$bunfs|Extension bundle not found|PGLite failed to initialize|pglite\.data'; then
+if [[ "$OUTPUT" == *'$bunfs'* || \
+      "$OUTPUT" == *'Extension bundle not found'* || \
+      "$OUTPUT" == *'PGLite failed to initialize'* || \
+      "$OUTPUT" == *'pglite.data'* ]]; then
   echo "[check-pglite-embedded] FAIL: compiled binary hit a Bun-vfs asset error (assets not embedded)." >&2
   echo "[check-pglite-embedded] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1
 fi
 
-if ! echo "$OUTPUT" | grep -q '"pageFound":true'; then
+if [ "$SMOKE_EXIT_STATUS" -ne 0 ]; then
+  echo "[check-pglite-embedded] FAIL: compiled binary exited with status $SMOKE_EXIT_STATUS." >&2
+  echo "[check-pglite-embedded] Output was:" >&2
+  echo "$OUTPUT" >&2
+  exit 1
+fi
+
+if [[ "$OUTPUT" != *'"pageFound":true'* ]]; then
   echo "[check-pglite-embedded] FAIL: compiled binary did not find the seeded page." >&2
   echo "[check-pglite-embedded] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1
 fi
 
-if ! echo "$OUTPUT" | grep -q '"ok":true'; then
+if [[ "$OUTPUT" != *'"ok":true'* ]]; then
   echo "[check-pglite-embedded] FAIL: PGLite embedded smoketest returned ok:false." >&2
   echo "[check-pglite-embedded] Output was:" >&2
   echo "$OUTPUT" >&2

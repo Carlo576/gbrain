@@ -132,7 +132,7 @@ describe('memorable_relay_health rung ladder', () => {
     try {
       seedGbrainConfig(home, true);
       const ev = seedEvidence(home, { backend: 'gbrain' });
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '', CODEX_HOME: join(home, 'codex-home') }, async () => {
         await writeMemorableConsent();
         await appendSessionReceipt(RECEIPT);
         const c = await buildMemorableRelayCheck();
@@ -171,7 +171,7 @@ describe('memorable_relay_health rung ladder', () => {
     try {
       seedGbrainConfig(home, true);
       const ev = seedEvidence(home, { backend: 'local', consent: 'read-write' });
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '', CODEX_HOME: join(home, 'codex-home') }, async () => {
         await writeMemorableConsent();
         const p = await relayResultsPath();
         mkdirSync(dirname(p), { recursive: true });
@@ -191,7 +191,7 @@ describe('memorable_relay_health rung ladder', () => {
     try {
       seedGbrainConfig(home, true);
       const ev = seedEvidence(home, { backend: 'local', consent: 'read-write' });
-      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '' }, async () => {
+      await withEnv({ GBRAIN_HOME: home, GBRAIN_MEMORABLE: undefined, GBRAIN_MEMORABLE_CONFIG: ev, PATH: stubBinDir(home), MEMORABLE_BIN: '', CODEX_HOME: join(home, 'codex-home') }, async () => {
         await writeMemorableConsent();
         await appendSessionReceipt(RECEIPT);
         const p = await relayResultsPath();
