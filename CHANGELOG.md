@@ -105,6 +105,37 @@ A page that quotes a facts or takes marker in prose was held `invalid_fence` as 
 
 - `src/core/persistence/worktree-refresh.ts`: `fenceAndMerge` takes the checkout's commit lock (`brain-commit.lock` plus the legacy push lock, waiting `GBRAIN_COMMIT_LOCK_WAIT_SECONDS`, default 60) from the HEAD check through the merge. A lock still held past that wait aborts the fenced refresh as retryable `commit_lock_busy`. A git process outside the lock that holds `.git/index.lock` gets three short retries, then a retryable `git_index_locked` refusal instead of the caller-class `refresh_dirty`. Either way HEAD is unchanged and the next run starts fresh.
 - Test: `test/worktree-refresh-index-lock-8117.test.ts`.
+## [0.60.532.0] - 2026-11-01
+
+**CI wave 3: a passed full-ci pair can now clear the remote gate without a second full suite on VMs, the import-rate scale gate no longer fails on one stall, an effect pass that loses its database connection gives its claims back at once, and the Ubicloud runner's teardown retries instead of leaking VMs (#7939, #8103, #8096, #7607, #8119).**
+
+The `full-suite-tree` and `e2e-full-suite-tree` artifacts now record every test file the run executed and the executed test count, taken from the run's complete `ci-manifest.json`, so gstack's `pregate clear --run` can accept a passed full-ci pair on the same tree as run evidence. `bash scripts/pregate-remote-gate.sh --list` prints the gate's own inventory, and the seven files that never left a receipt on GitHub now do, or leave the gate. The import-rate gate sets aside at most one stall per import (a paused database container, a WAL checkpoint) and never work that recurs; a cost that lands only once in a 10k import is a known gap the 20k nightly still sees. An effect pass whose database connection drops while claiming or flushing git effects gives back every claim it had not finished as soon as the database answers, within 30 s and stopping on shutdown, instead of leaving them to a 2-minute lease. The remote gate's CI-reuse wait keeps waiting for the head's own dispatch, refuses when the run in progress fails, and treats a failed artifact download as retryable. The Ubicloud runner's `down` retries a timed-out or 5xx destroy with backoff until `UBI_DOWN_TIMEOUT`, `reap` bounds each VM's wait, and `UBI_REAP` refuses spellings it cannot read.
+
+### Itemized changes
+
+- `scripts/ci-full-suite-tree.sh`, `.github/workflows/test.yml`, `e2e.yml`: `files` and `tests` in tree.json from a complete, matching manifest; the full jobs need `executed-receipts`. The reconciliation crash suites run through `run-with-receipt.sh` (now accepting `bun --no-env-file test`); the keyed-only `test/e2e/skills.test.ts` leaves the keyless gate.
+- `scripts/pregate-remote-gate.sh`, `scripts/ci-ubicloud.ts`: `--list` prints the gate inventory and fails on an empty one.
+- `scripts/scale/gates.ts`: one-stall rule for `import_rate`; `import.<basis>.excused` names the time set aside (#7939).
+- `src/core/persistence/effects.ts`: connection-loss give-back for claimed, set-aside and unflushed git effects, fenced on each claim's token (ported from #7607).
+- `scripts/ci-reuse.ts`, `scripts/lib/gh-issue.ts`: the gate waits for a run in progress beside a missing one, refuses a refused receipt only on the head itself, and retries a failed download; an earlier attempt's ledger counts only when its job was carried over (#8096).
+- `scripts/ubicloud/ubi-runner.sh`: `down` destroy retries with 1 to 60 s backoff, `reap` per-VM bound `UBI_REAP_DOWN_TIMEOUT`, strict `UBI_REAP` (#8103, #8096).
+- `scripts/mine-shard-weights.ts`: prunes against tracked files in every mode; shard weights refreshed (#8119).
+- Test fixes ported from #7607: page-embedding lease ordering, git-commit-push-6530 cases, timeline-chunk-reuse handback, segmented-prior-view heap sample, awk portability lint.
+
+## [0.60.531.0] - 2026-10-31
+
+**Five severe fixes: the secret scan now redacts keys that follow a JSON or percent escape, a connector page that turns private leaves Git HEAD, deleted pages no longer stay searchable under a scoped writer role, a stale freshness marker can no longer starve the job queue, and a slow embedder no longer loses `remember` writes (#7978, #7971, #7637, #7941, #8135).**
+
+The secret scan's rules required a non-word character before a key, but a JSON escape (`\n`, `\t`, `\u0022`) and a percent-escape (`%22`) end on a word character, so a key at the start of an escaped tool-output string or inside a URL-encoded value was never redacted. Every rule now also matches right after such an escape (an escaped quote between a keyword like `password` and its value is still a gap, tracked in #8265), and a vendor key that recurs glued to a word (`token_<key>`) is scrubbed wherever the same key is claimed elsewhere in the document. On a managed connector source bound to a Git checkout, a page that turned private kept its public file at HEAD; it is now removed in the same publication. A page that already turned private before this release keeps its old public file until it is removed by hand (#8269). Under a database role with row-level security that lacks policies on the derived-state tables, deleting a page left its retrieval rows searchable and page versions lost their trust and attribution stamps without an error; those writes now refuse with `writer_coordinator_required`, and `docs/ENGINES.md` lists the policies such a role needs. A freshness marker naming a commit the source had already passed kept every sync queuing another top-priority follow-up; a completed run now settles it once the checkout has nothing left to import. A `remember` whose embed took longer than its 30 s preparation budget ended `preparation_stalled` with nothing saved; the fact is now saved without a vector and embedded later.
+
+### Itemized changes
+
+- `src/core/secret-scan.ts`: escape-boundary twin for every rule, run only on lines holding an escape; vendor and JWT values (20 to 512 characters) join the echo dictionary under their own 32-value cap, so planted vendor strings cannot crowd out a bearer token's echo (#7978). The `high_entropy_assignment` shapes moved to `src/core/secret-scan-assignment.ts` (module size cap).
+- `src/core/persistence/connector-sync.ts`: a strict private import of a public page publishes the file removal from `preparePrivateTransition` (#7971 item 1).
+- `src/core/derived-state-maintainers.ts`, migration v281: the eight derived-state maintainer triggers stay `SECURITY INVOKER` and fail closed when the caller's row-level security hides a table they need; `docs/ENGINES.md` "Derived-state maintainers" recipe (#7637).
+- `src/core/notifier/store.ts`, `handoff.ts`, `resident.ts`: settlement takes the checkout HEAD after the run (#7941).
+- `src/core/facts/single-prepare.ts`, `src/core/persistence/memory-prepare.ts`, `service.ts`: the fact embed is bounded inside the preparation deadline (#8135).
+
 ## [0.60.530.0] - 2026-10-31
 
 **`gbrain sources refresh` no longer exits with a bare `internal_error` when another database transaction holds a row its fence needs. A fence that waits past its 5 s lock timeout now refuses as `refresh_lock_timeout`, and `why` names the open transactions holding those tables. Nothing moves, and a later run completes once the holder is gone. Any other unexpected error now prints a typed `internal_error` refusal with its stack in `why` and the refresh row it left, which the next run resumes.**
