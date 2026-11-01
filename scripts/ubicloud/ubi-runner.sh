@@ -804,7 +804,10 @@ cmd_pack() {
         | while IFS= read -r -d '' f; do
             if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi
           done \
-        | tar --null -T - -c -C "$tmp" .git -zf -
+        | tar -cf "$tmp/checkout.tar" --null -T -
+      # bsdtar (macOS) applies -C before it reads a -T list, so .git is appended in a second step.
+      tar -rf "$tmp/checkout.tar" -C "$tmp" .git
+      gzip -c "$tmp/checkout.tar"
     )
     rm -rf "$tmp"; trap - EXIT
   else

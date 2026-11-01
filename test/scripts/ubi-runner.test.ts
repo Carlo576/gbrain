@@ -230,7 +230,7 @@ describe("stale sweep and ownership", () => {
 
   // macOS runs the one-true-awk, which rejected usage's vCPU loop (a comparison in an unparenthesized printf list).
   it("usage prints the same table under every awk on PATH, the one-true-awk included where installed", async () => {
-    const awks = [["original-awk"], ["mawk"], ["gawk"], ["busybox", "awk"]].filter(([bin]) => Bun.which(bin!));
+    const awks = [["original-awk"], ["mawk"], ["gawk"], ["busybox", "awk"], ...(process.platform === "darwin" ? [["awk"]] : [])].filter(([bin]) => Bun.which(bin!));
     expect(awks.length).toBeGreaterThan(0);
     const tables: string[] = [];
     for (const awk of awks) {
