@@ -1439,6 +1439,7 @@
           "excludePrivate?: boolean | undefined",
           "exclude_slug_prefixes?: string[] | undefined",
           "exclude_slugs?: string[] | undefined",
+          "expandedTypes?: ExpandedTypeFilter[] | undefined",
           "floorRatio?: number | undefined",
           "graph_signals?: boolean | undefined",
           "hnswIterativeScan?: \"relaxed_order\" | \"strict_order\" | \"off\" | undefined",
@@ -4754,21 +4755,21 @@
         "kind": "variable",
         "name": "importFile",
         "signature": [
-          "(engine: BrainEngine, filePath: string, relativePath: string, opts?: { noEmbed?: boolean; inferFrontmatter?: boolean; sourceId?: string; forceRechunk?: boolean; activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string>; }>; }; firstCommitAt?: Date; bodyPolicy?: PageBodyPolicy; }) => Promise<ImportResult>"
+          "(engine: BrainEngine, filePath: string, relativePath: string, opts?: { noEmbed?: boolean; inferFrontmatter?: boolean; sourceId?: string; forceRechunk?: boolean; activePack?: ProjectionAwareTypePack; firstCommitAt?: Date; bodyPolicy?: PageBodyPolicy; }) => Promise<ImportResult>"
         ]
       },
       {
         "kind": "function",
         "name": "importFromContent",
         "signature": [
-          "(engine: BrainEngine, slug: string, content: string, opts?: { prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; coordinated?: boolean; boundedChunkWrites?: true; existingSnapshot?: PageSnapshot | null; prepareFrontmatter?: (page: ParsedPage) => void; noEmbed?: boolean; sourceId?: string; filename?: string; sourcePath?: string; sourceRoot?: string; fileTimes?: { birthtime?: Date; mtime?: Date; firstCommit?: Date; }; forceRechunk?: boolean; activePack?: ParseOpts[\"activePack\"]; source_kind?: string | null; source_uri?: string | null; ingested_via?: string | null; segmentedOwner?: SegmentedStagingOwner; reuseSegments?: SegmentedImport; remote?: boolean; preserveGateMarkers?: boolean; allowEmptyOverwrite?: boolean; overrideTier?: unknown; writeGate?: WriteGateInput; holdNoncanonicalPrivate?: boolean; beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>; onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void; } & ImportFenceOptions) => Promise<ImportResult>"
+          "(engine: BrainEngine, slug: string, content: string, opts?: { prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; coordinated?: boolean; boundedChunkWrites?: true; existingSnapshot?: PageSnapshot | null; prepareFrontmatter?: (page: ParsedPage) => void; canonicalizeNewType?: boolean; noEmbed?: boolean; sourceId?: string; filename?: string; sourcePath?: string; sourceRoot?: string; fileTimes?: { birthtime?: Date; mtime?: Date; firstCommit?: Date; }; forceRechunk?: boolean; activePack?: ProjectionAwareTypePack; source_kind?: string | null; source_uri?: string | null; ingested_via?: string | null; segmentedOwner?: SegmentedStagingOwner; reuseSegments?: SegmentedImport; remote?: boolean; preserveGateMarkers?: boolean; allowEmptyOverwrite?: boolean; overrideTier?: unknown; writeGate?: WriteGateInput; holdNoncanonicalPrivate?: boolean; beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>; onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void; } & ImportFenceOptions) => Promise<ImportResult>"
         ]
       },
       {
         "kind": "function",
         "name": "importFromFile",
         "signature": [
-          "(engine: BrainEngine, filePath: string, relativePath: string, opts?: { noEmbed?: boolean; inferFrontmatter?: boolean; sourceId?: string; forceRechunk?: boolean; activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string>; }>; }; firstCommitAt?: Date; bodyPolicy?: PageBodyPolicy; }) => Promise<ImportResult>"
+          "(engine: BrainEngine, filePath: string, relativePath: string, opts?: { noEmbed?: boolean; inferFrontmatter?: boolean; sourceId?: string; forceRechunk?: boolean; activePack?: ProjectionAwareTypePack; firstCommitAt?: Date; bodyPolicy?: PageBodyPolicy; }) => Promise<ImportResult>"
         ]
       },
       {
@@ -7977,6 +7978,7 @@
           "exclude_slug_prefixes?: string[] | undefined",
           "exclude_slugs?: string[] | undefined",
           "expandFn?: ((query: string) => Promise<string[]>) | undefined",
+          "expandedTypes?: ExpandedTypeFilter[] | undefined",
           "expansion?: boolean | undefined",
           "expansionVariantBudget?: number | null | undefined",
           "explain?: boolean | undefined",
@@ -8042,9 +8044,12 @@
           "excludePrivate?: boolean | undefined",
           "excludeSlugPrefixes?: string[] | undefined",
           "excludeSlugs?: string[] | undefined",
+          "expandedTypes?: ExpandedTypeFilter[] | undefined",
           "requireSafeChunks?: boolean | undefined",
           "sourceId?: string | undefined",
-          "sourceIds?: string[] | undefined"
+          "sourceIds?: string[] | undefined",
+          "type?: string | undefined",
+          "types?: string[] | undefined"
         ],
         "name": "IdentityTierOpts"
       },
@@ -9536,6 +9541,7 @@
           "excludePrivate?: boolean | undefined",
           "exclude_slug_prefixes?: string[] | undefined",
           "exclude_slugs?: string[] | undefined",
+          "expandedTypes?: ExpandedTypeFilter[] | undefined",
           "floorRatio?: number | undefined",
           "graph_signals?: boolean | undefined",
           "hnswIterativeScan?: \"relaxed_order\" | \"strict_order\" | \"off\" | undefined",
