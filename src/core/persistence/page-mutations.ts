@@ -44,6 +44,7 @@ import { liveSearchable } from './searchable.ts';
 import { cachedPreadmitBrain, dropPreadmitCache, preadmitReads, preadmitRecheckFailed } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { holdsSummarizedToolCalls, isQuotedPageType, quotesTier, unquoteTranscriptText } from '../search/transcript-quote.ts';
+import { chunkVisibleFilter } from '../search/safe-chunks.ts';
 import { isMirrorOnlyPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 
 export async function requestPrincipalForContext(ctx: OperationContext): Promise<Principal> {
@@ -268,7 +269,8 @@ async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: s
     'SELECT id, type, trust_tier FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
   // The stored page's own literal summaries, read from its chunks; a summary split across two chunks is missed, so that write is refused.
   const storedSummaries = async (pageId: number) => (await engine.executeRaw<{ chunk_text: string }>(
-    "SELECT chunk_text FROM content_chunks WHERE page_id = $1 AND chunk_text LIKE '%, arguments omitted]%'", [pageId])).map(r => r.chunk_text).join('\n');
+    `SELECT cc.chunk_text FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+      WHERE cc.page_id = $1 AND cc.chunk_text LIKE '%, arguments omitted]%' AND ${chunkVisibleFilter('p', 'cc')}`, [pageId])).map(r => r.chunk_text).join('\n');
   if (summarized && stored && isQuotedPageType(stored.type) && holdsSummarizedToolCalls(await storedSummaries(Number(stored.id)), unquoted)) {
     throw new OperationError('invalid_params', `put_page: this content has tool calls that a read of ${slug} summarized; writing it would replace the stored calls with their summaries.`,
       'Nothing was written. Read the page with get_page include_content: true (its content keeps the stored text) and write that back, or change the page with edit_page.');

@@ -23,7 +23,7 @@ import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { MIN_TRUST_PARAM } from '../eligibility/policy.ts';
 import { getPageKnownAsOf, KNOWN_AS_OF_PARAM } from './known-as-of.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
-import { quoteTimelineRows } from './timeline.ts';
+import { quoteTimelineRows } from './timeline-quote.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { getContentFlag } from '../quarantine.ts';

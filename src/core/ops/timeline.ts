@@ -8,12 +8,12 @@ import { MERGE_PRECONDITION_PARAMS, WRITE_REQUEST_PARAM } from '../persistence/p
  * (cycle).
  */
 
-import { opError, type Operation, type OperationContext } from './contract.ts';
+import { opError, type Operation } from './contract.ts';
 import { opTransport } from './op-fix.ts';
 import { readPolicyOpts } from './context.ts';
 import { MIN_TRUST_PARAM, resolveReadEligibility } from '../eligibility/policy.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
-import { pageTypesById, quotePageText, quotesStored } from '../search/transcript-quote.ts';
+import { quoteTimelineRows } from './timeline-quote.ts';
 import {
   enforceSubagentSlugFence,
   enforceClientSlugFence,
@@ -21,19 +21,6 @@ import {
 
 // --- Timeline ---
 
-/** GST-687: an untrusted reader gets an entry of a chat page, or one below the owner's tier, quoted like get_page's timeline. */
-export async function quoteTimelineRows<T extends { page_id: number; summary: string; detail?: string | null; trust_tier: string | null }>(
-  ctx: OperationContext, slug: string, rows: T[],
-): Promise<Array<T | (T & { quoted: 'transcript' })>> {
-  if (ctx.remote === false || rows.length === 0) return rows;
-  const types = await pageTypesById(ctx.engine, rows.map(e => e.page_id));
-  return rows.map(e => {
-    const type = types.get(e.page_id);
-    if (!quotesStored(type, e.trust_tier)) return e;
-    const quote = (text: string) => quotePageText(text, slug, type);
-    return { ...e, summary: quote(e.summary), ...(e.detail ? { detail: quote(e.detail) } : {}), quoted: 'transcript' as const };
-  });
-}
 
 const add_timeline_entry: Operation = {
   name: 'add_timeline_entry',
