@@ -240,6 +240,7 @@ test('setting on: a force-push that lands after the refresh checked the upstream
   git(f.upstream, 'checkout', '-q', '--detach', `${purged}~1`);
   commitFile(f.upstream, 'alpha/two.md', page('Alpha two', 'Rewritten upstream.'));
   const rewrite = git(f.upstream, 'rev-parse', 'HEAD').trim();
+  git(f.root, 'config', 'user.name', 'Example'); git(f.root, 'config', 'user.email', 'example@example.invalid');
   writeFileSync(join(f.root, 'beta/local.md'), page('Local', 'A local commit nobody pushed.'));
   git(f.root, 'add', 'beta/local.md'); git(f.root, 'commit', '-qm', 'local only');
   const racing = join(bin, `gbrain-race-${f.engine.kind}`);
