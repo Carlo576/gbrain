@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.538.0] - 2026-11-01
 
 **Agents connected over MCP now see the chronicle reads, takes reads and a quoted page's title and frontmatter quoted as source material, and the context gbrain's hooks inject quotes facts below "your notes" too.**
 
