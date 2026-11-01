@@ -149,6 +149,34 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
     expect(verdict!.action.verify?.argv).toBeDefined();
   }), 150_000);
 
+  test('a refused group member whose claim moved is left to its claimant and the rest still end failed', () => withEnv(env(), async () => {
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    const fixture = await requestFixture(engine);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    // A claimed group: three members running under one claim.
+    const claimed: WriteRequest[] = [];
+    for (const slug of ['notes/one', 'notes/two', 'notes/three']) {
+      const admitted = await fixture.admit(slug);
+      await editRequest(engine, admitted.id, "state='running',execution_token=$2::uuid,claim_expires_at=now()+interval '1 hour'", [randomUUID()]);
+      claimed.push((await getWriteRequestById(engine, admitted.id))!);
+    }
+    const consumer = new PersistenceConsumer(engine, { engine: engine.kind }, async () => { throw new Error('unused'); }, { hostId: localHostId() });
+    // The first member's lease lapses and another claimant takes it between the consumer's read and its completion.
+    const transaction = engine.transaction.bind(engine);
+    let moved = false;
+    engine.transaction = (async (fn: Parameters<BrainEngine['transaction']>[0]) => {
+      if (!moved) { moved = true; await editRequest(engine, claimed[0]!.id, 'execution_token=$2::uuid', [randomUUID()]); }
+      return transaction(fn);
+    }) as BrainEngine['transaction'];
+    try {
+      await (consumer as unknown as { failRefusedClaims(rows: unknown[], error: OperationError): Promise<boolean> })
+        .failRefusedClaims(claimed, new OperationError('owner_marker_missing', 'The ownership marker is missing.'));
+    } finally { engine.transaction = transaction; }
+    const states = await engine.executeRaw<{ state: string; error_code: string | null }>(
+      'SELECT state,error_code FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [fixture.sourceId]);
+    expect(states.map(row => [row.state, row.error_code])).toEqual([['running', null], ['failed', 'owner_marker_missing'], ['failed', 'owner_marker_missing']]);
+  }), 60_000);
+
   describe('(b, d) one source cannot starve another on the shared local principal', () => {
     async function dbSource() {
       const id = `fair-${randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -225,34 +253,6 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
     }), 120_000);
   });
 });
-
-test('#8368: a refused group member whose claim moved is left to its claimant and the rest still end failed', async () => {
-  const engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
-  try {
-    const fixture = await requestFixture(engine);
-    // A claimed group: three members running under one claim.
-    const claimed: WriteRequest[] = [];
-    for (const slug of ['notes/one', 'notes/two', 'notes/three']) {
-      const admitted = await fixture.admit(slug);
-      await editRequest(engine, admitted.id, "state='running',execution_token=$2::uuid,claim_expires_at=now()+interval '1 hour'", [randomUUID()]);
-      claimed.push((await getWriteRequestById(engine, admitted.id))!);
-    }
-    const consumer = new PersistenceConsumer(engine, { engine: 'pglite' }, async () => { throw new Error('unused'); }, { hostId: localHostId() });
-    // The first member's lease lapses and another claimant takes it between the consumer's read and its completion.
-    const transaction = engine.transaction.bind(engine);
-    let moved = false;
-    engine.transaction = (async (fn: Parameters<BrainEngine['transaction']>[0]) => {
-      if (!moved) { moved = true; await editRequest(engine, claimed[0]!.id, 'execution_token=$2::uuid', [randomUUID()]); }
-      return transaction(fn);
-    }) as BrainEngine['transaction'];
-    await (consumer as unknown as { failRefusedClaims(rows: unknown[], error: OperationError): Promise<boolean> })
-      .failRefusedClaims(claimed, new OperationError('owner_marker_missing', 'The ownership marker is missing.'));
-    engine.transaction = transaction;
-    const states = await engine.executeRaw<{ id: string; state: string; error_code: string | null }>(
-      'SELECT id::text AS id,state,error_code FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [fixture.sourceId]);
-    expect(states.map(row => [row.state, row.error_code])).toEqual([['running', null], ['failed', 'owner_marker_missing'], ['failed', 'owner_marker_missing']]);
-  } finally { await engine.disconnect(); }
-}, 60_000);
 
 test('#8368: owner_marker_missing stops a sync or connector run for the source instead of counting against one item', () => {
   const refusal = new OperationError('owner_marker_missing', 'The ownership marker is missing.');
