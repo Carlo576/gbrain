@@ -429,12 +429,13 @@ function neutralizeWithMap(text: string, header: boolean): { text: string; map: 
 const SUMMARY_RE = /\[tool calls?(?:: [^\]\n]*)?, arguments omitted\]/g;
 
 /**
- * GST-687: `text` holds a tool-call summary the stored page does not hold as text (`stored`: the stored text that carries
- * summaries), so it came from a reading shape (get_page, fetch, search) and writing it back would replace a stored call
- * with its summary.
+ * GST-687: `text` holds a tool-call summary more times than the stored page holds it as text (`stored`: the stored text
+ * that carries summaries), so at least one came from a reading shape (get_page, fetch, search) and writing it back would
+ * replace a stored call with its summary.
  */
 export function holdsSummarizedToolCalls(stored: string, text: string): boolean {
-  return [...new Set(text.match(SUMMARY_RE) ?? [])].some(s => !stored.includes(s));
+  const count = (haystack: string, s: string) => haystack.split(s).length - 1;
+  return [...new Set(text.match(SUMMARY_RE) ?? [])].some(s => count(text, s) > count(stored, s));
 }
 
 /**

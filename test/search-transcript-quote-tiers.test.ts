@@ -250,6 +250,28 @@ for (const backend of testBackends()) {
       expect((await engine.getPage(slug))!.compiled_truth).toBe(stored.compiled_truth);
     }, 120_000);
 
+    test('remote put_page counts summaries: a page holding one as text still refuses the read that summarized its call', async () => {
+      const slug = 'conversations/probe-literal-summary';
+      const literal = neutralizeToolCalls(TOOL_CALL);
+      expect(literal).toMatch(/^\[tool call: search, arguments omitted\]$/);
+      await ok('put_page', { slug, content: `${pageContent('conversation')}\n\n**bob-example** (2026-10-01 9:06 AM): earlier result ${literal}` });
+      const stored = (await engine.getPage(slug))!;
+      const chunks = await engine.executeRaw<{ n: number }>(
+        `SELECT count(*)::int AS n FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.slug = $1 AND cc.chunk_text LIKE '%, arguments omitted]%'`, [slug]);
+      expect(chunks[0]!.n).toBe(1);
+      const summarized = await ok('get_page', { slug });
+      const read = String(summarized.compiled_truth).split('\n').slice(2, -1).join('\n');
+      expect(read.split(literal).length - 1).toBe(2);
+      const res = await dispatchToolCall(engine, 'put_page',
+        { slug, content: `---\ntype: conversation\ntitle: Probe session\n---\n\n${read}`, expected_revision: summarized.revision }, remote);
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text).toContain('summarized');
+      expect((await engine.getPage(slug))!.compiled_truth).toBe(stored.compiled_truth);
+      const page = await ok('get_page', { slug, include_content: true });
+      await ok('put_page', { slug, content: page.content.replace('noted.', 'noted (checked).'), expected_revision: page.revision });
+      expect((await engine.getPage(slug))!.compiled_truth).toBe(stored.compiled_truth.replace('noted.', 'noted (checked).'));
+    }, 120_000);
+
     test('a remote round trip of an agent-written note stores the body, never the fence', async () => {
       const slug = SLUG['note-first'];
       const stored = (await engine.getPage(slug))!.compiled_truth;

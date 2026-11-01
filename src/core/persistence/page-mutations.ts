@@ -267,7 +267,8 @@ async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: s
   if (!summarized && (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? '')))) return unquoted;
   const [stored] = await engine.executeRaw<{ id: number; type: string | null; trust_tier: string | null }>(
     'SELECT id, type, trust_tier FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
-  // The stored page's own literal summaries, read from its chunks; a summary split across two chunks is missed, so that write is refused.
+  // The stored page's own literal summaries, read from its chunks; a summary split across two chunks is missed, so that write is refused,
+  // and one in the overlap of two chunks counts twice.
   const storedSummaries = async (pageId: number) => (await engine.executeRaw<{ chunk_text: string }>(
     `SELECT cc.chunk_text FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
       WHERE cc.page_id = $1 AND cc.chunk_text LIKE '%, arguments omitted]%' AND ${chunkVisibleFilter('p', 'cc')}`, [pageId])).map(r => r.chunk_text).join('\n');
