@@ -458,8 +458,8 @@ export interface ExtractiveFallback {
  * title + the excerpt window with the strongest query-term coverage, cited
  * `[slug]`. NEVER fabricates: every line quotes ONE gathered page and an
  * empty gather returns null (ENG-19 — no pages, no answer, ever).
- * GST-687: a chat page's excerpt is chosen with its tool-call blocks summarized and is fenced as quoted source
- * material, as think's prompt does (#8042); with `untrusted` (a remote caller) so is a page below the owner's tier.
+ * GST-687: with `untrusted` (a remote caller), a chat page's excerpt is chosen with its tool-call blocks summarized, and it
+ * and a page below the owner's tier are fenced as quoted source material, as think's prompt does (#8042); local is unchanged.
  */
 export function composeExtractiveFallback(
   pages: SearchResult[],
@@ -477,8 +477,8 @@ export function composeExtractiveFallback(
     const title = String(page.title ?? '') || slug;
     const slugIdentity = slug.split('/').pop()?.replace(/[-_]/g, ' ') ?? '';
     const raw = String(page.chunk_text ?? page.compiled_truth ?? page.snippet ?? '');
-    const quote = quoteLabel({ ...p, chunk_text: raw }, untrusted);
-    const content = quoteLabel({ ...p, chunk_text: raw }) !== null ? neutralizeToolCalls(raw) : raw;
+    const quote = untrusted ? quoteLabel({ ...p, chunk_text: raw }, true) : null;
+    const content = quote !== null && quoteLabel({ ...p, chunk_text: raw }) !== null ? neutralizeToolCalls(raw) : raw;
     const excerpt = selectRelevantExcerpt(
       content, question, EXTRACTIVE_EXCERPT_LEN, `${title} ${slugIdentity}`,
     ).trim();

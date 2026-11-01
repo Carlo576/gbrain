@@ -273,6 +273,20 @@ for (const backend of testBackends()) {
       expect((await engine.getPage(slug))!.compiled_truth).toBe(stored.compiled_truth.replace('noted.', 'noted (checked).'));
     }, 120_000);
 
+    test('remote put_page refuses a summarized read even after the page\'s literal summary was cut from it', async () => {
+      const slug = 'conversations/probe-literal-summary';
+      const stored = (await engine.getPage(slug))!;
+      const summarized = await ok('get_page', { slug });
+      const read = String(summarized.compiled_truth).split('\n').slice(2, -1).join('\n');
+      const cut = read.split('\n\n').filter(paragraph => !paragraph.includes('earlier result')).join('\n\n');
+      expect(cut.split(neutralizeToolCalls(TOOL_CALL)).length - 1).toBe(1);
+      const res = await dispatchToolCall(engine, 'put_page',
+        { slug, content: `---\ntype: conversation\ntitle: Probe session\n---\n\n${cut}`, expected_revision: summarized.revision }, remote);
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text).toContain('summarized');
+      expect((await engine.getPage(slug))!.compiled_truth).toBe(stored.compiled_truth);
+    }, 120_000);
+
     test('a remote round trip of an agent-written note stores the body, never the fence', async () => {
       const slug = SLUG['note-first'];
       const stored = (await engine.getPage(slug))!.compiled_truth;

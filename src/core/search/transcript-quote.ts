@@ -429,13 +429,26 @@ function neutralizeWithMap(text: string, header: boolean): { text: string; map: 
 const SUMMARY_RE = /\[tool calls?(?:: [^\]\n]*)?, arguments omitted\]/g;
 
 /**
- * GST-687: `text` holds a tool-call summary more times than the stored page holds it as text (`stored`: the stored text
- * that carries summaries), so at least one came from a reading shape (get_page, fetch, search) and writing it back would
- * replace a stored call with its summary.
+ * GST-687: `text` holds the summary of a tool call the stored page (`stored`: its body) holds as a call, and keeps fewer of
+ * those calls than the stored page does, so a reading shape (get_page, fetch, search) replaced at least one with its summary
+ * and writing it back would lose the call. Each string is scanned once, whatever the number of distinct summaries.
  */
 export function holdsSummarizedToolCalls(stored: string, text: string): boolean {
-  const count = (haystack: string, s: string) => haystack.split(s).length - 1;
-  return [...new Set(text.match(SUMMARY_RE) ?? [])].some(s => count(text, s) > count(stored, s));
+  const tally = (s: string) => {
+    const counts = new Map<string, number>();
+    for (const [summary] of s.matchAll(SUMMARY_RE)) counts.set(summary, (counts.get(summary) ?? 0) + 1);
+    return counts;
+  };
+  const calls = (s: string) => {
+    const counts = tally(neutralizeToolCalls(s));
+    for (const [summary, n] of tally(s)) counts.set(summary, (counts.get(summary) ?? 0) - n);
+    return counts;
+  };
+  const summaries = tally(text);
+  if (summaries.size === 0) return false;
+  const storedCalls = calls(stored);
+  const kept = calls(text);
+  return [...summaries.keys()].some(s => (kept.get(s) ?? 0) < (storedCalls.get(s) ?? 0));
 }
 
 /**

@@ -267,9 +267,12 @@ async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: s
   if (!summarized && (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? '')))) return unquoted;
   const [stored] = await engine.executeRaw<{ type: string | null; trust_tier: string | null }>(
     'SELECT type, trust_tier FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
-  // The stored body's own literal summaries; a segmented page reads NULL inline columns, so its summarized round trip is refused.
-  const storedText = async () => { const body = await readStoredBody(engine, sourceId, slug); return `${body?.compiled_truth ?? ''}\n${body?.timeline ?? ''}`; };
-  if (summarized && stored && isQuotedPageType(stored.type) && holdsSummarizedToolCalls(await storedText(), unquoted)) {
+  // Compared with the stored body's tool calls; a segmented page reads NULL inline columns, so its summarized round trip is refused.
+  const losesCalls = async () => {
+    const body = await readStoredBody(engine, sourceId, slug);
+    return body?.compiled_truth == null || holdsSummarizedToolCalls(`${body.compiled_truth}\n${body.timeline ?? ''}`, unquoted);
+  };
+  if (summarized && stored && isQuotedPageType(stored.type) && await losesCalls()) {
     throw new OperationError('invalid_params', `put_page: this content has tool calls that a read of ${slug} summarized; writing it would replace the stored calls with their summaries.`,
       'Nothing was written. Read the page with get_page include_content: true (its content keeps the stored text) and write that back, or change the page with edit_page.');
   }
