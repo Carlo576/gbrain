@@ -7,6 +7,8 @@
  *    `quoted_marker` only when the wrap alone would clear the page, and never edits it.
  * 2. Fails when: a real marker is wrapped (rows lost), an existing code span re-pairs, a wrap would show text the
  *    boundary hid, or the screen keeps `repeated_marker` for a page the repair clears.
+ *    The screen runs on the write path, so it stays linear: a page of 40,000 mentions (on separate lines or one line)
+ *    is screened in under two seconds; the per-mention prefix split and array copies made it quadratic (minutes at 24 MiB).
  * 3. Pure; no engine.
  */
 import { describe, expect, test } from 'bun:test';
@@ -107,5 +109,23 @@ describe('the screen reason', () => {
     const step = fenceStep(page(`We said ${B} starts a fence.\n\n${bad}\n`), ctx, { normalize: true });
     expect(step.status).toBe('residual');
     if (step.status === 'residual') expect(step.issues.map(i => i.reason)).not.toContain('quoted_marker');
+  });
+});
+
+describe('the screen stays linear in the page', () => {
+  const timed = (body: string) => {
+    const started = performance.now();
+    const quoted = quoteMarkerStep(page(body));
+    return { ms: performance.now() - started, fixes: quoted.fixes.length };
+  };
+  test('40,000 quoted markers on their own lines are screened in under two seconds', () => {
+    const run = timed(Array.from({ length: 40_000 }, () => `See the ${E} marker in prose here.`).join('\n') + '\n');
+    expect(run.fixes).toBe(40_000);
+    expect(run.ms).toBeLessThan(2_000);
+  });
+  test('40,000 quoted markers on one line are screened as fast', () => {
+    const run = timed(Array.from({ length: 40_000 }, () => `a ${E} b`).join(' ') + '\n');
+    expect(run.fixes).toBe(40_000);
+    expect(run.ms).toBeLessThan(2_000);
   });
 });

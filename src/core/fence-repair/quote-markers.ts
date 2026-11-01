@@ -68,21 +68,43 @@ function nextLine(text: string, lineEnd: number): string {
   return '';
 }
 
-/** The prose-quoted marker mentions of one section, in text order. */
+/** How many of the ascending `sorted` values are below `value`. */
+function countBelow(sorted: ReadonlyArray<number>, value: number): number {
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid]! < value) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+/** The prose-quoted marker mentions of one section, in text order. Linear in the section: lines come from one newline index. */
 function mentions(text: string, section: FenceSection): Mention[] {
   if (!hasFenceText(text)) return [];
   const code = scanMarkdownCode(text);
   const closesRows = new Set(extractRawRows(text, section).fences.filter(f => f.rows.length && f.end).map(f => f.end!.start));
+  const newlines: number[] = [];
+  for (let at = text.indexOf('\n'); at !== -1; at = text.indexOf('\n', at + 1)) newlines.push(at);
+  const nextLines = new Map<number, string>();
   const found: Mention[] = [];
   for (const { token, fence } of MARKERS) {
     for (let at = text.indexOf(token); at !== -1; at = text.indexOf(token, at + token.length)) {
       if (closesRows.has(at) || codeEndAt(code, at) !== -1 || text[at - 1] === '`' || text[at + token.length] === '`') continue;
-      const [lineStart, lineEnd] = lineBounds(text, at);
-      if (token.endsWith('begin -->') && /^\s*\|/.test(nextLine(text, lineEnd))) continue;
+      const index = countBelow(newlines, at);
+      const lineStart = index ? newlines[index - 1]! + 1 : 0;
+      let lineEnd = index < newlines.length ? newlines[index]! : text.length;
+      if (text[lineEnd - 1] === '\r') lineEnd--;
+      if (token.endsWith('begin -->')) {
+        if (!nextLines.has(lineEnd)) nextLines.set(lineEnd, nextLine(text, lineEnd));
+        if (/^\s*\|/.test(nextLines.get(lineEnd)!)) continue;
+      }
       const line = text.slice(lineStart, lineEnd);
       if (/^\s*\|/.test(line)) continue;
-      if (!text.slice(at + token.length, lineEnd).trim() && !/^ {0,3}>/.test(line)) continue;
-      found.push({ fence, at, length: token.length, lineStart, lineEnd, line: text.slice(0, at).split('\n').length });
+      const rest = /\S/g;
+      rest.lastIndex = at + token.length;
+      const after = rest.exec(text);
+      if ((!after || after.index >= lineEnd) && !/^ {0,3}>/.test(line)) continue;
+      found.push({ fence, at, length: token.length, lineStart, lineEnd, line: index + 1 });
     }
   }
   return found.sort((a, b) => a.at - b.at);
@@ -97,7 +119,8 @@ function wrapLine(line: string, offsets: ReadonlyArray<{ at: number; length: num
     from = at + length;
   }
   out += line.slice(from);
-  const shift = (pos: number) => pos + 2 * offsets.filter(o => o.at < pos).length;
+  const starts = offsets.map(o => o.at);
+  const shift = (pos: number) => pos + 2 * countBelow(starts, pos);
   const expected = [
     ...inlineCodeSpans(line).map(([s, e]) => [shift(s), shift(e)] as [number, number]),
     ...offsets.map(o => [shift(o.at), shift(o.at) + o.length + 2] as [number, number]),
@@ -111,7 +134,10 @@ type Inserts = number[];
 
 function quoteSection(text: string, section: FenceSection): { text: string; fixes: FenceFix[]; inserts: Inserts } {
   const byLine = new Map<number, Mention[]>();
-  for (const m of mentions(text, section)) byLine.set(m.lineStart, [...(byLine.get(m.lineStart) ?? []), m]);
+  for (const m of mentions(text, section)) {
+    const group = byLine.get(m.lineStart);
+    if (group) group.push(m); else byLine.set(m.lineStart, [m]);
+  }
   const inserts: Inserts = [];
   if (!byLine.size) return { text, fixes: [], inserts };
   let out = '';
