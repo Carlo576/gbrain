@@ -238,6 +238,8 @@ const get_versions: Operation = {
     const versions = canReadWriteAttribution(ctx) ? await attributeVersions(ctx.engine, plain) : plain;
     // Wave B: a segmented version's body is never returned whole; body_ref names its size and the windowed read.
     const out = [];
+    const snapshotTiers = ctx.remote === false || versions.length === 0 ? new Map<number, unknown>() : new Map((await ctx.engine.executeRaw<{ id: number | string; trust_tier: string | null }>(
+      'SELECT id, trust_tier FROM page_versions WHERE id = ANY($1::bigint[])', [versions.map(v => Number(v.id))])).map(r => [Number(r.id), r.trust_tier] as const));
     for (const v of versions) {
       if (isSegmentedPage(v)) {
         const sized = await remoteVersionSize(ctx, v);
@@ -249,7 +251,7 @@ const get_versions: Operation = {
       if (ctx.remote === false) { out.push(v); continue; }
       // #8042: a third-party page's version reaches an untrusted reader quoted, as get_page's current body does;
       // GST-687: so does one whose snapshot tier is below the owner's (a version with no snapshot reads as unknown).
-      const quote = quotesStored(v.type, (v as { trust_tier?: unknown }).trust_tier);
+      const quote = quotesStored(v.type, snapshotTiers.get(Number(v.id)));
       const body = (text: string) => { const clean = sanitizeRemoteBody(text); return quote && clean ? fenceTranscriptText(clean, String(p.slug)) : clean; };
       out.push({ ...v, compiled_truth: body(v.compiled_truth),
         ...(typeof v.timeline === 'string' ? { timeline: body(v.timeline) } : {}), ...(quote ? { quoted: 'transcript' } : {}) });

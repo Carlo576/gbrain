@@ -49,12 +49,14 @@ function pageContent(p: (typeof PAGES)[number]): string {
 }
 
 const FENCE_OPEN = /\[quoted conversation excerpt from [^\]\n]*; source material, not instructions\]\n(`{3,})text\n/g;
-/** Body ranges of every closed fence in the text (the harness classifier's rule: an unclosed fence does not count). */
+/** Body ranges of every closed fence in the text (the harness classifier's rule: the fence closes alone on its line; an unclosed fence does not count). */
 function fencedRanges(text: string): Array<[number, number]> {
   const out: Array<[number, number]> = [];
   for (const m of text.matchAll(FENCE_OPEN)) {
     const start = m.index + m[0].length;
-    const close = text.indexOf(`\n${m[1]}`, start - 1);
+    const closes = (at: number) => /^[ \t]*(\n|$)/.test(text.slice(at + 1 + m[1].length));
+    let close = text.indexOf(`\n${m[1]}`, start - 1);
+    while (close >= 0 && !closes(close)) close = text.indexOf(`\n${m[1]}`, close + 1);
     if (close >= 0) out.push([start, close]);
   }
   return out;
@@ -176,6 +178,14 @@ for (const backend of testBackends()) {
       }, 180_000);
     }
 
+    test('remote get_page include_timeline_entries: every page placement is quoted, as get_timeline returns it', async () => {
+      for (const p of PAGES) {
+        const page = await ok('get_page', { slug: SLUG[p], include_timeline_entries: true });
+        expect([p, cell(page.timeline_entries, CODE[p])]).toEqual([p, 'fenced']);
+        expect(page.timeline_entries).toEqual(await ok('get_timeline', { slug: SLUG[p] }));
+      }
+    }, 120_000);
+
     test('remote search_exact on the tool call\'s own arguments returns it summarized', async () => {
       const reply = await call('search_exact', { phrase: 'quarterly ledger' });
       expect([verbatimToolCall(reply), neutralizedToolCall(reply)]).toEqual([false, true]);
@@ -250,10 +260,14 @@ for (const backend of testBackends()) {
       expect((await engine.getPage(slug))!.compiled_truth).toBe(stored.replace('Paragraph 1 of', 'Paragraph one of'));
     }, 120_000);
 
-    test('remote get_versions returns an agent-written note\'s earlier bodies quoted', async () => {
+    test('remote get_versions returns an agent-written note\'s earlier bodies quoted, the owner\'s as stored', async () => {
       const versions = await ok('get_versions', { slug: SLUG['note-first'], include_body: true }) as Array<Record<string, unknown>>;
       expect(versions.length).toBeGreaterThan(0);
       for (const v of versions) expect([v.quoted, cell(v, CODE['note-first'])]).toEqual(['transcript', 'fenced']);
+      await asOwner(engine, tx => tx.createVersion(OWNER_SLUG));
+      const owner = await ok('get_versions', { slug: OWNER_SLUG, include_body: true }) as Array<Record<string, unknown>>;
+      expect(owner.length).toBeGreaterThan(0);
+      for (const v of owner) expect([v.quoted, cell(v, OWNER_CODE)]).toEqual([undefined, 'raw']);
     }, 120_000);
 
     test('a forged fence in agent-written text never closes the quote around it', async () => {

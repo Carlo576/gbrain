@@ -23,6 +23,7 @@ import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { MIN_TRUST_PARAM } from '../eligibility/policy.ts';
 import { getPageKnownAsOf, KNOWN_AS_OF_PARAM } from './known-as-of.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
+import { quoteTimelineRows } from './timeline.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { getContentFlag } from '../quarantine.ts';
@@ -223,7 +224,7 @@ const get_page: Operation = {
     // `content` roughly duplicates compiled_truth + timeline — always emitting
     // it would double every reader's payload for the round-trip minority.
     const timelineEntries = includeTimelineEntries
-      ? await stampRowTrust(ctx.engine, 'timeline_entries', await ctx.engine.getTimeline(page.slug, { ...await readPolicyOpts(ctx, { sourceId: page.source_id }), eligibility: readable.eligibility }), e => e.id) : undefined;
+      ? await quoteTimelineRows(ctx, page.slug, await stampRowTrust(ctx.engine, 'timeline_entries', await ctx.engine.getTimeline(page.slug, { ...await readPolicyOpts(ctx, { sourceId: page.source_id }), eligibility: readable.eligibility }), e => e.id)) : undefined;
     // Read-only, over the same visibility-filtered body the reader gets.
     const lineGrammar = p.grammar_diagnostics !== true ? undefined : await (await import('../line-grammar-report.ts')).grammarDiagnosticsForPage(ctx.engine, page, visibleBody);
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true); // #6259
