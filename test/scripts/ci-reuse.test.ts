@@ -431,6 +431,11 @@ describe('ci-reuse remote-gate decision', () => {
     expect(await gateDeps(client({ head: { identities: ids } })).executed(r600)).toEqual({ tests: 3, failed: 1 });
     expect(await gateDeps(client({ head: {} })).executed(r600)).toEqual({ reason: "run 600's executed-identities.json has no head.identities list" });
     expect(await gateDeps(client(null, false)).executed(r600)).toEqual({ reason: "run 600 has no 'executed-identities' artifact" });
+    const download = (bytes: () => Promise<Uint8Array>): GitHubClient => ({ ...client(null), download: bytes });
+    expect(await gateDeps(download(async () => { throw new Error('HTTP 503'); })).executed(r600))
+      .toEqual({ reason: "reading run 600's 'executed-identities' artifact failed: HTTP 503", transient: true });
+    expect(await gateDeps(download(async () => zipOf('executed-identities.json', '{"head":'))).executed(r600))
+      .toEqual({ reason: expect.stringMatching(/^reading run 600's 'executed-identities' artifact failed: /) });
   });
 
   /** A run's receipts as scripts/lib/test-env.sh writes them: one artifact directory per job, one test file each. */

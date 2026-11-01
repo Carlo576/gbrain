@@ -812,19 +812,22 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
 }
 
 /**
- * The effect-side twin of the consumer's #6712 release: a pass whose claim loop lost its database connection (a pooler
- * drop, a failover) gives back the git effects it claimed and set aside for their root, as soon as the database answers
+ * The effect-side twin of the consumer's #6712 release: a pass whose claim loop or deferred flush lost its database
+ * connection (a pooler drop, a failover) gives back the git effects it claimed and had not finished, as soon as the database answers
  * again, so the next pass claims them at once instead of waiting out their 2-minute lease. Fenced on each claim's token,
- * so an effect another worker took over is untouched. Gives up after 30 s, leaving the lease to lapse as before.
+ * so an effect another worker took over is untouched. Stops after 30 s or on abort, checked between claims, leaving the
+ * rest to their lease as before; a retry resumes after the last claim given back.
  */
 async function releaseAfterConnectionLoss(engine: BrainEngine, effects: PersistenceEffect[], signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + 30_000;
-  for (let attempt = 0; effects.length && !signal?.aborted; attempt++) {
+  const live = () => !signal?.aborted && Date.now() < deadline;
+  let next = 0;
+  for (let attempt = 0; next < effects.length && live(); attempt++) {
     try {
-      for (const effect of effects) await retryEffect(engine, effect, 'database_contention', 0);
+      for (; next < effects.length && live(); next++) await retryEffect(engine, effects[next]!, 'database_contention', 0);
       return;
     } catch (error) {
-      if (!transientDatabaseFailure(error) || Date.now() >= deadline) return;
+      if (!transientDatabaseFailure(error)) return;
     }
     await new Promise(resolve => setTimeout(resolve, Math.min(2000, 250 * 2 ** attempt)));
   }
@@ -1045,8 +1048,10 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
     let setAside: PersistenceEffect | null = null;
     try {
       while (attempted < limit && !opts.signal?.aborted) {
+        setAside = null;
         const effect = await claimPersistenceEffect(engine, opts.hostId, opts.deadOwners);
         if (!effect) break;
+        setAside = effect;
         attempted++;
         touched.add(effect.request_id);
         let binding: WorktreeBinding | null = null;
@@ -1070,21 +1075,28 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
       throw error;
     }
     if (!deferred.length) break;
-    for (const { effects, binding, hardened } of deferred.splice(0)) {
-      const probe = await hardened;
-      if ('error' in probe) {
-        for (const effect of effects) await recordFailure(engine, effect, probe.error, opts.signal);
-        continue;
-      }
-      const durable = probe.durable;
-      if (durable && singleFileGitEffect(effects[0]!)) await commitGroup(effects, { ...binding, local_path: binding.local_path! });
-      else if (singleFileGitEffect(effects[0]!) && effects[0]!.worktree_id) await recordGroup(effects, binding);
-      // Coalesced siblings run with their own source's binding (sources can share a worktree).
-      else for (const effect of effects) {
-        let own: WorktreeBinding | null;
-        try { own = effect === effects[0] ? binding : await getWorktreeBinding(engine, effect.source_id, opts.hostId); }
-        catch (error) { await recordFailure(engine, effect, error, opts.signal); continue; }
-        await run(effect, own, durable);
+    const groups = deferred.splice(0);
+    for (let i = 0; i < groups.length; i++) {
+      const { effects, binding, hardened } = groups[i]!;
+      try {
+        const probe = await hardened;
+        if ('error' in probe) {
+          for (const effect of effects) await recordFailure(engine, effect, probe.error, opts.signal);
+          continue;
+        }
+        const durable = probe.durable;
+        if (durable && singleFileGitEffect(effects[0]!)) await commitGroup(effects, { ...binding, local_path: binding.local_path! });
+        else if (singleFileGitEffect(effects[0]!) && effects[0]!.worktree_id) await recordGroup(effects, binding);
+        // Coalesced siblings run with their own source's binding (sources can share a worktree).
+        else for (const effect of effects) {
+          let own: WorktreeBinding | null;
+          try { own = effect === effects[0] ? binding : await getWorktreeBinding(engine, effect.source_id, opts.hostId); }
+          catch (error) { await recordFailure(engine, effect, error, opts.signal); continue; }
+          await run(effect, own, durable);
+        }
+      } catch (error) {
+        if (transientDatabaseFailure(error)) await releaseAfterConnectionLoss(engine, groups.slice(i).flatMap(g => g.effects), opts.signal);
+        throw error;
       }
     }
   }
