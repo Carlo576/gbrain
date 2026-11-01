@@ -184,7 +184,7 @@ async function spoolWholePage(call: PagedCall, params: Record<string, unknown>, 
     if (bytes !== size.total_bytes || hash.digest('hex') !== size.sha256) {
       throw new Error(`The paged copy of ${String(params.slug)} does not match the size and sha256 the host reported; the page was not printed.`);
     }
-    return { lengths, revision, fence: quoted ? transcriptFence(String(params.slug), longest) : null };
+    return { lengths, revision, fence: quoted ? transcriptFence(String(r.slug), longest) : null };
   }
   throw new Error(`${String(params.slug)} kept changing while it was being read (${MAX_RESTARTS + 1} attempts); the page was not printed. Try again.`);
 }

@@ -66,7 +66,7 @@ const add_timeline_entry: Operation = {
       throw badDate(`Invalid calendar date "${date}"`);
     }
     // #8377: an entry an agent copied out of a quoted read (get_timeline, chronicle) is stored without the fence, so its replay key matches.
-    const unquote = (v: unknown) => typeof v === 'string' && ctx.remote !== false ? unquoteTranscriptText(v, String(p.slug)) : v;
+    const unquote = (v: unknown) => typeof v === 'string' && ctx.remote !== false ? unquoteTranscriptText(v, String(p.slug).toLowerCase()) : v;
     return submitPageMutation(ctx, { operation: 'add_timeline_entry', params: { ...p, summary: unquote(p.summary), ...(p.detail !== undefined ? { detail: unquote(p.detail) } : {}) } });
   },
   cliHints: { name: 'timeline-add', positional: ['slug', 'date', 'summary'] },

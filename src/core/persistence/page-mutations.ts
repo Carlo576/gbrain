@@ -263,20 +263,33 @@ export async function submitPageMutation(ctx: OperationContext,
  * GST-687: content carrying a tool-call summary that only the neutralized read of the stored chat page holds (get_page's
  * reading shape, fetch) is refused, so a read-then-write never replaces a stored tool call with its summary.
  */
-/** #8377: a quoted read fences the title and each frontmatter string as `slug`'s; YAML indents those fences, so the body's unquote misses them. */
-function unquotedFrontmatter(content: string, slug: string): string {
+/**
+ * #8377: a quoted read's reading shape fences the title and each frontmatter string as `slug`'s (a whole-markdown read is
+ * fenced once instead, and its metadata is the page's own). YAML indents those fences, so the body's unquote misses them:
+ * each key that held one is rewritten unfenced, and every other frontmatter line is kept byte for byte.
+ */
+function unquotedFrontmatter(sent: string, content: string, slug: string): string {
   const offset = frontmatterBodyOffset(content);
-  if (!offset || !content.slice(0, offset).includes('```text')) return content;
-  const { frontmatter } = parseMarkdownHead(content);
+  if (!offset || !frontmatterBodyOffset(sent) || !content.slice(0, offset).includes('```text')) return content;
   const unquote = (v: unknown): unknown => typeof v === 'string' ? unquoteTranscriptText(v, slug)
     : Array.isArray(v) ? v.map(unquote)
     : v && typeof v === 'object' && !(v instanceof Date) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, unquote(x)])) : v;
-  const data = unquote(frontmatter) as Record<string, unknown>;
-  return JSON.stringify(data) === JSON.stringify(frontmatter) ? content : dataFrontmatter.stringify('', data) + content.slice(offset);
+  const lines = content.slice(0, offset).split('\n');
+  for (const [key, value] of Object.entries(parseMarkdownHead(content).frontmatter)) {
+    const plain = unquote(value);
+    if (JSON.stringify(plain) === JSON.stringify(value)) continue;
+    const at = lines.findIndex((l, i) => i > 0 && l.startsWith(`${key}:`));
+    if (at < 0) return content;
+    let end = at + 1;
+    while (end < lines.length && lines[end] !== '---' && (lines[end] === '' || /^\s/.test(lines[end]) || lines[end].startsWith('-'))) end++;
+    const dumped = dataFrontmatter.stringify('', { [key]: plain }).split('\n');
+    lines.splice(at, end - at, ...dumped.slice(1, dumped.lastIndexOf('---')));
+  }
+  return lines.join('\n') + content.slice(offset);
 }
 
 async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: string, content: string): Promise<string> {
-  const unquoted = unquotedFrontmatter(unquoteTranscriptText(content, slug), slug);
+  const unquoted = unquotedFrontmatter(content, unquoteTranscriptText(content, slug), slug);
   const summarized = /, arguments omitted\]/.test(unquoted);
   const quotedType = isQuotedPageType(String(parseMarkdownHead(unquoted).frontmatter.type ?? ''));
   if (!summarized && (unquoted === content || quotedType)) return unquoted;

@@ -23,7 +23,7 @@ Before, #8367 left `chronicle_day`, `chronicle_since`, `chronicle_on_this_day`, 
 - A thin client's paged `gbrain get` of a quoted page (above the inline limit) prints the page, and its `--json` content, inside one quote fence after verifying size and sha256.
 - The per-turn push hook and the pushed context pack quote hot and entity facts below the owner's tier; a fact injected before this change is not injected again.
 - `context_pack` counts the entity facts it withholds when the quote lookup fails (`suppressed`) instead of dropping them silently.
-- Remote `remember` stores a fact copied out of a quoted read without the fence, and remote `add_timeline_entry` stores an entry copied out of `get_timeline` without it, so the replay key matches and the entry is not duplicated.
+- Remote `remember` stores a fact copied out of a quoted read without the fence, and remote `add_timeline_entry` stores an entry copied out of `get_timeline` without it, so the replay key matches and the entry is not duplicated. `takes_add`, `takes_update` and `takes_supersede` do the same for a claim or source copied out of a quoted takes read.
 - The `put_page` tool-call guard counts only summaries outside the content's own tool-call blocks, and admits a new turn that quotes a summary while every stored call stays; its refusal names `edit_page` first.
 - Tests: `test/search-transcript-quote-followups.test.ts` (every item, red on master for the changed reads and writes) and `test/trust-keep-maintenance-reimport-8352.test.ts` (maintenance re-imports keep an owner note's tier), both on PGLite and Postgres.
 

@@ -11,7 +11,7 @@ import { MERGE_PRECONDITION_PARAMS, WRITE_REQUEST_PARAM } from '../persistence/p
 import { opError, type Operation, type OperationContext } from './contract.ts';
 import { MIN_TRUST_PARAM, resolveReadEligibility } from '../eligibility/policy.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
-import { fenceTranscriptText, quotesTier } from '../search/transcript-quote.ts';
+import { fenceTranscriptText, quotesTier, unquoteTranscriptText } from '../search/transcript-quote.ts';
 import { opTransport, paramUse } from './op-fix.ts';
 import {
   readPolicyOpts,
@@ -68,6 +68,14 @@ function quoteTakes<T extends { claim: string; page_slug: string; trust_tier: st
     const fence = (text: string) => fenceTranscriptText(text, r.page_slug);
     return { ...r, claim: fence(r.claim), ...(r.source ? { source: fence(r.source) } : {}), ...(r.resolved_source ? { resolved_source: fence(r.resolved_source) } : {}), quoted: 'transcript' as const };
   });
+}
+
+/** #8377: a claim or source an agent copied out of a quoted takes read is written without the fence. */
+function unquotedTakeParams(ctx: OperationContext, p: Record<string, unknown>): Record<string, unknown> {
+  if (ctx.remote === false) return p;
+  const slug = String(p.slug).toLowerCase();
+  const unquote = (key: string) => typeof p[key] === 'string' ? { [key]: unquoteTranscriptText(p[key] as string, slug) } : {};
+  return { ...p, ...unquote('claim'), ...unquote('source') };
 }
 
 // --- v0.28: Takes ---
@@ -478,7 +486,7 @@ const takes_add: Operation = {
     enforceClientSlugFence(ctx, slug, 'takes_add');
     validatePageSlug(slug); // defense-in-depth, matching put_page
     if (ctx.dryRun) return { dry_run: true, action: 'takes_add', slug };
-    return submitPageMutation(ctx, { operation: 'takes_add', params: p });
+    return submitPageMutation(ctx, { operation: 'takes_add', params: unquotedTakeParams(ctx, p) });
   },
 };
 
@@ -509,7 +517,7 @@ const takes_update: Operation = {
     enforceClientSlugFence(ctx, slug, 'takes_update');
     validatePageSlug(slug); // defense-in-depth, matching put_page
     if (ctx.dryRun) return { dry_run: true, action: 'takes_update', slug, row_num: p.row_num };
-    return submitPageMutation(ctx, { operation: 'takes_update', params: p });
+    return submitPageMutation(ctx, { operation: 'takes_update', params: unquotedTakeParams(ctx, p) });
   },
 };
 
@@ -543,7 +551,7 @@ const takes_supersede: Operation = {
     enforceClientSlugFence(ctx, slug, 'takes_supersede');
     validatePageSlug(slug); // defense-in-depth, matching put_page
     if (ctx.dryRun) return { dry_run: true, action: 'takes_supersede', slug, row_num: p.row_num };
-    const out = await submitPageMutation(ctx, { operation: 'takes_supersede', params: p });
+    const out = await submitPageMutation(ctx, { operation: 'takes_supersede', params: unquotedTakeParams(ctx, p) });
     recordFunnelEvent('correction');
     return out;
   },

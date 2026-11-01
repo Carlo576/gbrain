@@ -256,6 +256,42 @@ for (const backend of testBackends()) {
       expect((await engine.getPage(CHAT_SLUG))!.compiled_truth).toContain('[tool call: lookup, arguments omitted] there.');
       expect((await engine.getPage(CHAT_SLUG))!.compiled_truth).toContain('"name":"put_page"');
     }, 120_000);
+
+    test('item 3: a whole-markdown round trip keeps a frontmatter value that quotes the page itself', async () => {
+      const slug = 'notes/quote-example';
+      const example = fenceTranscriptText('a quoted sample', slug);
+      await engine.putPage(slug, { type: 'note', title: 'Quote example', compiled_truth: 'Body.', timeline: '', frontmatter: { example } });
+      const read = await ok('get_page', { slug, include_content: true, content_only: true });
+      expect(read.content).toContain(MARKER);
+      await ok('put_page', { slug, content: read.content, expected_revision: read.revision });
+      expect((await engine.getPage(slug))!.frontmatter.example).toBe(example);
+    }, 120_000);
+
+    test('item 3: a fenced title pasted into hand-written frontmatter is stored unfenced, every other value unchanged', async () => {
+      const head = (title: string) => `---\ntype: note\ntitle: ${title}\nwhen: 2024-06-01\ncode: 0123\n---\n\nPasted body.\n`;
+      for (const slug of ['notes/pasted-plain', 'notes/pasted-fenced']) await ok('put_page', { slug, content: head('Pasted') });
+      const fenced = fenceTranscriptText('Pasted', 'notes/pasted-fenced').split('\n').map(l => `  ${l}`).join('\n');
+      const { revision } = await ok('get_page', { slug: 'notes/pasted-fenced' });
+      await ok('put_page', { slug: 'notes/pasted-fenced', expected_revision: revision, content: head(`|-\n${fenced}`) });
+      const [plain, unfenced] = [await engine.getPage('notes/pasted-plain'), await engine.getPage('notes/pasted-fenced')];
+      expect([unfenced!.title, unfenced!.frontmatter, unfenced!.compiled_truth]).toEqual([plain!.title, plain!.frontmatter, plain!.compiled_truth]);
+    }, 120_000);
+
+    test('item 8: add_timeline_entry unquotes by the page slug however the caller cased it', async () => {
+      const text = `Cased entry ${CODE.timeline}-cased`;
+      await ok('add_timeline_entry', { slug: AGENT_SLUG.toUpperCase(), date: '2026-10-03', summary: fenceTranscriptText(text, AGENT_SLUG) });
+      expect(await engine.executeRaw<{ summary: string }>('SELECT summary FROM timeline_entries WHERE summary LIKE $1', ['%-cased%'])).toEqual([{ summary: text }]);
+    }, 120_000);
+
+    test('item 2: a claim and source copied out of a quoted takes read are written unfenced', async () => {
+      const take = (await ok('takes_list', { page_slug: AGENT_SLUG }) as Array<{ claim: string; source: string; row_num: number }>).find(t => t.claim.includes(CODE.take))!;
+      expect([take.claim, take.source]).toEqual([expect.stringContaining(MARKER), expect.stringContaining(MARKER)]);
+      const rows = () => engine.executeRaw<{ claim: string; source: string | null }>('SELECT t.claim, t.source FROM takes t JOIN pages p ON p.id = t.page_id WHERE p.slug = $1 ORDER BY t.row_num', [AGENT_SLUG]);
+      await ok('takes_update', { slug: AGENT_SLUG, row_num: take.row_num, source: take.source });
+      expect((await rows())[0]!.source).toBe(`Probe source ${CODE.takeSource}`);
+      await ok('takes_supersede', { slug: AGENT_SLUG, row_num: take.row_num, claim: take.claim });
+      expect((await rows()).map(r => r.claim)).toEqual([`Probe claim ${CODE.take}`, `Probe claim ${CODE.take}`]);
+    }, 120_000);
   });
 }
 
@@ -277,5 +313,14 @@ describe('item 6: the thin client\'s paged read of a quoted page prints it insid
     await printPagedPage(host, { slug, json: true }, async text => { json += text; });
     expect(JSON.parse(json).content).toBe(fenceTranscriptText(total, slug));
     expect((await readWholePageMarkdown(host, { slug })).markdown).toBe(total);
+  });
+
+  test('a read through an alias prints the fence naming the page the host returned', async () => {
+    let out = '';
+    await printPagedPage(host, { slug: 'notes/old-name-alias' }, async text => { out += text; });
+    expect(out).toBe(fenceTranscriptText(total, slug));
+  });
+  test('a text with a million backtick runs is fenced without overflowing the stack', () => {
+    expect(fenceTranscriptText('`x'.repeat(1_000_000), slug).endsWith('\n```')).toBe(true);
   });
 });

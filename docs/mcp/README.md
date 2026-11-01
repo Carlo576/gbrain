@@ -140,7 +140,8 @@ answer, `context_pack`, hot memory and write receipts. The context gbrain's
 hooks inject (the per-turn hook and the pushed context pack) quotes facts below
 the owner's tier the same way, so hook output can hold quote fences. A fact or
 timeline entry an agent copies back from a quoted read into `remember` or
-`add_timeline_entry` is stored without the fence. A note saved before gbrain
+`add_timeline_entry`, or a claim or source copied into `takes_add`, `takes_update` or
+`takes_supersede`, is stored without the fence. A note saved before gbrain
 tracked trust reads as unverified, so it is quoted until the owner runs
 `gbrain trust claim-sources` or `gbrain trust backfill` (`gbrain doctor` names how
 many pages that is). Page titles are quoted on `get_page` and `fetch` only:

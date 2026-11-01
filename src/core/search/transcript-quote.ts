@@ -477,7 +477,9 @@ export function neutralizeToolCalls(text: string, header = false): string {
 export function fenceTranscriptText(text: string, slug: string, header = false): string {
   const head = headerLine(text, header);
   const body = text.slice(head.length);
-  const { open, close } = transcriptFence(slug, Math.max(0, ...(body.match(/`+/g) ?? []).map(run => run.length)));
+  let longest = 0;
+  for (const run of body.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
+  const { open, close } = transcriptFence(slug, longest);
   return `${head}${open}${body}${close}`;
 }
 
