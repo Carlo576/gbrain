@@ -590,6 +590,7 @@ describe('committed shard weights', () => {
   it.each([
     ['scripts/test-weights.json', 'scripts/test-weights.metadata.json', 'unit', 'milliseconds'],
     ['scripts/serial-weights.json', 'scripts/serial-weights.metadata.json', 'serial', 'seconds'],
+    ['scripts/e2e-weights.json', 'scripts/e2e-weights.metadata.json', 'e2e', 'milliseconds'],
   ])('%s matches the metadata the miner wrote beside it', (weightsPath, metadataPath, lane, unit) => {
     const root = join(import.meta.dir, '..', '..');
     const weights = JSON.parse(readFileSync(join(root, weightsPath), 'utf8')) as Record<string, number>;
