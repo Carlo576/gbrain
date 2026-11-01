@@ -23,7 +23,8 @@ const OUTSTANDING_STALL_S = 600;
  * The fix verifies through doctor and the read-scope `get_brain_health` band (#6696 B2).
  * #8368: an outstanding-request cap at 90% or more whose oldest outstanding request is over ten minutes old is a warning
  * too, naming the sources holding its slots (requests that never settle hold them, so raising the cap is not the fix); its
- * fix is the holder's read-only writer status. A healthy sync drain runs near the line with young requests and stays ok.
+ * fix is the read-only writer status of the holder with the most stalled requests. A healthy sync drain runs near the line
+ * with young requests and stays ok.
  */
 export async function checkPersistenceCapacity(engine: BrainEngine): Promise<Check> {
   try {
@@ -38,11 +39,12 @@ export async function checkPersistenceCapacity(engine: BrainEngine): Promise<Che
     for (const row of capacityDiagnostics(counters, limits)) {
       if (row.resource !== 'outstanding_count' || row.limit <= 0 || row.used < Math.ceil(row.limit * OUTSTANDING_WARN)) continue;
       const principal = /^principal:([^:]+):(.+)$/.exec(row.scope);
-      const holders = await engine.executeRaw<{ source_id: string; n: number | string; oldest_s: number | string }>(`SELECT source_id,count(*) AS n,
-        EXTRACT(EPOCH FROM now()-min(created_at)) AS oldest_s FROM persistence_requests
-        WHERE state IN ('queued','running','recovering')${principal ? ' AND principal_kind=$1 AND principal_id=$2' : ''} GROUP BY source_id ORDER BY count(*) DESC,source_id LIMIT 3`,
+      const stalled = `count(*) FILTER (WHERE created_at <= now()-interval '${OUTSTANDING_STALL_S} seconds')`;
+      const holders = await engine.executeRaw<{ source_id: string; n: number | string; stalled: number | string }>(`SELECT source_id,count(*) AS n,${stalled} AS stalled
+        FROM persistence_requests WHERE state IN ('queued','running','recovering')${principal ? ' AND principal_kind=$1 AND principal_id=$2' : ''}
+        GROUP BY source_id ORDER BY ${stalled} DESC,count(*) DESC,source_id LIMIT 3`,
         principal ? [principal[1], principal[2]] : []);
-      if (!holders.some(holder => Number(holder.oldest_s) >= OUTSTANDING_STALL_S)) continue;
+      if (!holders.length || Number(holders[0].stalled) === 0) continue;
       outstanding.push({ scope: row.scope, resource: row.resource, used: row.used, limit: row.limit, config_key: row.config_key,
         holders: holders.map(holder => ({ source_id: holder.source_id, outstanding: Number(holder.n) })) });
     }

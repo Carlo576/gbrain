@@ -102,13 +102,30 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
     const lock = await acquireWorktree((await getWorktreeBinding(engine, s.id))!, 0, undefined, engine); expect(lock).not.toBeNull(); await lock?.release();
   }), 120_000);
 
-  test('(a) requests refused for a missing marker end terminally, release every principal slot and name the restore', () => withEnv(env(), async () => {
+  test('(c) a birth time that only drifted within tolerance keeps the generic refusal the plain self-transfer would also refuse', () => withEnv(env(), async () => {
+    const s = await managedSource({ 'notes/a.md': note('A') });
+    const binding = (await getWorktreeBinding(engine, s.id))!;
+    const reservation = JSON.parse(readFileSync(physicalRootReservationPath(s.root), 'utf8'));
+    expect(BigInt(reservation.initialBirth)).toBeGreaterThan(0n);
+    writeFileSync(physicalRootReservationPath(s.root), JSON.stringify({ ...reservation, initialBirth: (BigInt(reservation.initialBirth) + 500n).toString() }), { mode: 0o600 });
+    rmSync(join(s.root, PHYSICAL_ROOT_MARKER));
+    const refusal = await acquireWorktree(binding, 0, undefined, engine).then(() => null, (error: unknown) => error as Record<string, any>);
+    expect(refusal).toMatchObject({ code: 'recovery_required' });
+    await expect(runPersistenceAdministration(engine, 'writer_transfer_prepare', { source_id: s.id, self_transfer: true,
+      ...await reviewedWriterIntent(engine, 'writer_transfer_prepare') })).rejects.toMatchObject({ code: 'recovery_required' });
+  }), 120_000);
+
+  for (const [code, fault] of [
+    ['owner_marker_missing', (root: string) => rmSync(join(root, PHYSICAL_ROOT_MARKER), { force: true })],
+    ['recovery_required', (root: string) => writeFileSync(join(root, PHYSICAL_ROOT_MARKER), JSON.stringify({ version: 1, token: randomUUID(), brainId: randomUUID(),
+      worktreeId: randomUUID(), root, device: '1', inode: '1', birth: '1' }), { mode: 0o600 })],
+  ] as const) test(`(a) requests refused ${code} by the ownership check end terminally, release every principal slot and name the fix`, () => withEnv(env(), async () => {
     const s = await managedSource({ 'notes/first.md': note('First') });
     expect((await performSync(engine, { sourceId: s.id, noPull: true, noEmbed: true, noExtract: true, drain: true })).status).toBe('first_sync');
     for (let i = 0; i < 40; i++) writeFileSync(join(s.root, 'notes', `n${i}.md`), note(`N${i}`));
     commit(s.root, 'more');
     // The marker goes missing while the drain runs: on Postgres the next publication group is claimed with its followers.
-    installFaultHook(async at => { if (at === 'sync:before_group_admission' || at === 'consumer:preparing') rmSync(join(s.root, PHYSICAL_ROOT_MARKER), { force: true }); });
+    installFaultHook(async at => { if (at === 'sync:before_group_admission' || at === 'consumer:preparing') fault(s.root); });
     try {
       const run = performSync(engine, { sourceId: s.id, noPull: true, noEmbed: true, noExtract: true, drain: true }).then(r => r, (e: unknown) => e);
       const outcome = await Promise.race([run, new Promise(resolve => setTimeout(() => resolve('timed_out'), 60_000))]);
@@ -118,9 +135,10 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
       `SELECT state,error_code,claim_expires_at IS NOT NULL AS claimed,request_id::text AS request_id,slug,operation,error_message,error_detail,intent->>'kind' AS intent_kind
        FROM persistence_requests WHERE source_id=$1 AND state<>'committed' ORDER BY sequence`, [s.id]);
     expect(rows.length).toBeGreaterThan(0);
-    for (const row of rows) expect(row).toMatchObject({ state: 'failed', error_code: 'owner_marker_missing', claimed: false });
+    for (const row of rows) expect(row).toMatchObject({ state: 'failed', error_code: code, claimed: false });
     const [principal] = await engine.executeRaw<{ outstanding: number }>(`SELECT max(outstanding_count)::int AS outstanding FROM persistence_counters WHERE key LIKE 'principal:%'`);
     expect(Number(principal!.outstanding)).toBe(0);
+    if (code !== 'owner_marker_missing') return;
     // The receipt's diagnosis is typed and names the restore step, then a read-only verify.
     const verdict = classifyTerminal({ ...rows[0]!, source_id: s.id, error_detail: rows[0]!.error_detail as object | null, recovery: null, blocked_reason: null, compacted: false, publication_started: false });
     expect(verdict).toMatchObject({ code: 'owner_marker_missing', class: 'systemic', needs_human: true });
@@ -179,6 +197,11 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
         expect(past!.message).toContain(`source ${stuck} holds 4`);
         // The stuck source cannot borrow back: it already holds more than its share.
         expect(await refusedWith(stuck)).toMatchObject({ code: 'queue_capacity' });
+        // Doctor names the source whose requests stopped settling first, even when a busier source with young requests outranks it.
+        await engine.executeRaw(`UPDATE persistence_requests SET created_at=now() WHERE source_id=$1 AND state IN ('queued','running')`, [stuck]);
+        await engine.executeRaw(`UPDATE persistence_requests SET created_at=now()-interval '1 hour' WHERE source_id=$1 AND state IN ('queued','running')`, [other]);
+        expect(await checkPersistenceCapacity(engine)).toMatchObject({ status: 'warn',
+          fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', other, '--json'] } });
         // The brain cap is never borrowed past.
         await engine.executeRaw(`UPDATE persistence_requests SET state='cancelled',execution_token=NULL WHERE source_id=$1 AND state='queued' AND id=(SELECT id FROM persistence_requests WHERE source_id=$1 AND state='queued' ORDER BY sequence DESC LIMIT 1)`, [other]);
         await engine.executeRaw(`UPDATE persistence_counters SET outstanding_count=outstanding_count-1 WHERE key='brain' OR key LIKE 'principal:%'`);

@@ -253,10 +253,11 @@ export function physicalRootDirectoryChangedError(): OperationError {
 export function assertPhysicalRootStamp(directory: string, reservation: PhysicalRootReservation): void {
   const value = readPrivate(join(directory, PHYSICAL_ROOT_MARKER)) as PhysicalRootStamp | null;
   const info = statSync(directory, { bigint: true });
-  // #8368: no stamp in a directory the reservation still identifies (device, inode, birth) lost only its marker; a recreated
-  // or staged directory, or one the reservation cannot identify, keeps the generic refusal and the relocated-root exit.
+  // #8368: no stamp in a directory the reservation still identifies exactly (device, inode, birth) lost only its marker, and
+  // the plain self-transfer re-creates it. A recreated or staged directory, one whose birth only drifted within tolerance
+  // (the self-transfer compares it exactly), or one the reservation cannot identify keeps the generic refusal.
   if (value === null && reservation.initialDevice === info.dev.toString() && reservation.initialInode === info.ino.toString()
-    && samePhysicalBirth(reservation.initialBirth, info.birthtimeNs)) throw ownerMarkerMissingError();
+    && reservation.initialBirth === info.birthtimeNs.toString()) throw ownerMarkerMissingError();
   if (!value || value.version !== 1 || value.token !== reservation.token || value.brainId !== reservation.brainId || value.worktreeId !== reservation.worktreeId
     || value.root !== reservation.root) throw physicalRootError();
   if (value.inode !== info.ino.toString() || !samePhysicalBirth(value.birth, info.birthtimeNs)) {
