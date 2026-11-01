@@ -113,7 +113,9 @@ export function capacityError(resource: string, outstanding?: { used: number; li
  * shared by every source's sync and maintenance on the host, so one source's requests that never settle could hold the
  * whole principal cap and starve every other source. At that cap, a source holding less than its fair share (the cap
  * divided by the sources holding outstanding requests on the principal, this one included) is still admitted; the brain
- * cap and every other principal's cap stay hard. A refusal names the source holding the most slots.
+ * cap and every other principal's cap stay hard. The share is checked before the admission, so a sync publication group
+ * larger than the share is admitted whole and a source passes its share by at most one group. A refusal names the source
+ * holding the most slots.
  */
 async function outstandingRefusal(tx: SqlEngine, row: Counter, principal: Principal, sourceId: string, need: number, limit: number): Promise<OperationError | null> {
   const used = Number(row.outstanding_count);
@@ -123,7 +125,7 @@ async function outstandingRefusal(tx: SqlEngine, row: Counter, principal: Princi
     WHERE principal_kind=$1 AND principal_id=$2 AND state IN ('queued','running','recovering') GROUP BY source_id ORDER BY count(*) DESC,source_id`, [principal.kind, principal.id]);
   const own = Number(holders.find(holder => holder.source_id === sourceId)?.n ?? 0);
   const sources = holders.length + (own > 0 ? 0 : 1);
-  if (sources > 1 && own + need <= Math.floor(limit / sources)) return null;
+  if (sources > 1 && own < Math.floor(limit / sources)) return null;
   const top = holders[0];
   return capacityError(`principal outstanding requests${top ? ` (source ${top.source_id} holds ${Number(top.n)})` : ''}`, { used, limit });
 }

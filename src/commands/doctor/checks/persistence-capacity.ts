@@ -22,7 +22,8 @@ const OUTSTANDING_STALL_S = 600;
  * A scope past the background pause line (A5) names the producers it pauses.
  * The fix verifies through doctor and the read-scope `get_brain_health` band (#6696 B2).
  * #8368: an outstanding-request cap at 90% or more whose oldest outstanding request is over ten minutes old is a warning
- * too, naming the sources holding its slots (requests that never settle hold them, so raising the cap is not the fix); its
+ * too, naming the sources holding its slots (requests that stopped settling, or wait behind a slow publication, hold them,
+ * so raising the cap is not the fix); its
  * fix is the read-only writer status of the holder with the most stalled requests. A healthy sync drain runs near the line
  * with young requests and stays ok.
  */
@@ -78,7 +79,7 @@ export async function checkPersistenceCapacity(engine: BrainEngine): Promise<Che
     const holder = outstanding.flatMap(row => row.holders)[0];
     const held = outstanding.length ? `${outstanding.length} outstanding-request cap(s) at or near the limit: ${outstanding.map(row => `${row.scope} ${row.used}/${row.limit}`
       + (row.holders.length ? ` held by ${row.holders.map(h => `source ${h.source_id} (${h.outstanding})`).join(', ')}` : '')).join('; ')}. `
-      + 'Admission refuses past the cap; requests that never settle hold it, so inspect the holder before raising anything. ' : '';
+      + 'Admission refuses past the cap; requests unsettled for over ten minutes hold it (stuck, or behind a slow publication), so inspect the holder before raising anything. ' : '';
     if (!resources.length && outstanding.length) return { name: 'persistence_capacity', status: 'warn', details,
       fix: { argv: holder ? ['gbrain', 'sources', 'writer', 'status', '--source', holder.source_id, '--json'] : ['gbrain', 'sources', 'writer', 'status', '--json'],
         consent: [], actor: 'host_admin', requires_exclusive: false, verify: capacityVerify(), docs: DOCS,

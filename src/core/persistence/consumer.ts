@@ -1225,16 +1225,24 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
    * #8368: a claimed group refused before it published by a deterministic ownership refusal (the checkout identity check
    * of the group's worktree lock) is finished the way the single path finishes one request: each member still running
    * under this claim, unpublished and without a recovery record, ends failed with the refusal's code, which releases its
-   * outstanding-request slot. Left running, every lease lapse re-claimed it into the same refusal, forever.
+   * outstanding-request slot. Left running, every lease lapse re-claimed it into the same refusal, forever. A member whose
+   * claim moved meanwhile is left to its new claimant; a connection loss gives the unfinished members back at once.
    */
   private async failRefusedClaims(rows: WriteRequest[], error: OperationError): Promise<boolean> {
     let progressed = false;
-    for (const row of rows) {
-      const current = await getWriteRequestById(this.engine, row.id);
-      if (!current || current.state !== 'running' || current.execution_token !== row.execution_token || current.recovery || current.publication_started) continue;
-      const done = await finishUnpublishedFailure(this.engine, current, error, 'publication');
-      if (done.state === 'failed') this.log('publication', done.error_code ?? error.code, failureLogText(done), '', row);
-      if (this.settled(done)) progressed = true;
+    for (const [index, row] of rows.entries()) {
+      try {
+        const current = await getWriteRequestById(this.engine, row.id);
+        if (!current || current.state !== 'running' || current.execution_token !== row.execution_token || current.recovery || current.publication_started) continue;
+        const done = await finishUnpublishedFailure(this.engine, current, error, 'publication');
+        if (done.state === 'failed') this.log('publication', done.error_code ?? error.code, failureLogText(done), '', row);
+        if (this.settled(done)) progressed = true;
+      } catch (failure) {
+        if (failure instanceof OperationError && failure.code === 'write_claim_lost') continue;
+        if (!transientDatabaseFailure(failure)) throw failure;
+        await this.releaseAfterConnectionLoss(rows.slice(index));
+        return progressed;
+      }
     }
     return progressed;
   }

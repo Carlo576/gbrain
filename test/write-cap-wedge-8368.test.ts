@@ -22,9 +22,12 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
 import { acquireWorktree, claimWorktree, getWorktreeBinding } from '../src/core/persistence/ownership.ts';
-import { registerLocalWriter } from '../src/core/persistence/identity.ts';
+import { localHostId, registerLocalWriter } from '../src/core/persistence/identity.ts';
 import { activatePersistence } from '../src/core/persistence/activation.ts';
-import { admitWrite, type WriteAdmission } from '../src/core/persistence/journal.ts';
+import { admitWrite, admitWriteGroupInTransaction, getWriteRequestById, type WriteAdmission } from '../src/core/persistence/journal.ts';
+import { PersistenceConsumer } from '../src/core/persistence/consumer.ts';
+import type { WriteRequest } from '../src/core/persistence/model.ts';
+import { editRequest, requestFixture } from './helpers/persistence-request-fixture.ts';
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
 import { PHYSICAL_ROOT_MARKER, physicalRootReservationPath } from '../src/core/persistence/physical-root-record.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
@@ -207,6 +210,14 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
         await engine.executeRaw(`UPDATE persistence_counters SET outstanding_count=outstanding_count-1 WHERE key='brain' OR key LIKE 'principal:%'`);
         await engine.setConfig('persistence.limits.brain_outstanding', '5');
         expect(await refusedWith(other)).toMatchObject({ code: 'queue_capacity', message: expect.stringContaining('brain outstanding') });
+        // A publication group larger than a starved source's share (4 / 3 sources = 1) is admitted whole, once.
+        await engine.unsetConfig('persistence.limits.brain_outstanding');
+        const third = await dbSource();
+        const group = async () => Promise.all(Array.from({ length: 3 }, () => admission(third)));
+        const members = await group();
+        expect(await engine.transaction(tx => admitWriteGroupInTransaction(tx, members))).toHaveLength(3);
+        const again = await group().then(members => engine.transaction(tx => admitWriteGroupInTransaction(tx, members))).then(() => null, (error: Record<string, any>) => error);
+        expect(again).toMatchObject({ code: 'queue_capacity' });
       } finally {
         await engine.unsetConfig('persistence.limits.principal_outstanding');
         await engine.unsetConfig('persistence.limits.brain_outstanding');
@@ -214,6 +225,34 @@ for (const kind of testBackends()) describe(`#8368 write-cap wedge (${kind})`, (
     }), 120_000);
   });
 });
+
+test('#8368: a refused group member whose claim moved is left to its claimant and the rest still end failed', async () => {
+  const engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
+  try {
+    const fixture = await requestFixture(engine);
+    // A claimed group: three members running under one claim.
+    const claimed: WriteRequest[] = [];
+    for (const slug of ['notes/one', 'notes/two', 'notes/three']) {
+      const admitted = await fixture.admit(slug);
+      await editRequest(engine, admitted.id, "state='running',execution_token=$2::uuid,claim_expires_at=now()+interval '1 hour'", [randomUUID()]);
+      claimed.push((await getWriteRequestById(engine, admitted.id))!);
+    }
+    const consumer = new PersistenceConsumer(engine, { engine: 'pglite' }, async () => { throw new Error('unused'); }, { hostId: localHostId() });
+    // The first member's lease lapses and another claimant takes it between the consumer's read and its completion.
+    const transaction = engine.transaction.bind(engine);
+    let moved = false;
+    engine.transaction = (async (fn: Parameters<BrainEngine['transaction']>[0]) => {
+      if (!moved) { moved = true; await editRequest(engine, claimed[0]!.id, 'execution_token=$2::uuid', [randomUUID()]); }
+      return transaction(fn);
+    }) as BrainEngine['transaction'];
+    await (consumer as unknown as { failRefusedClaims(rows: unknown[], error: OperationError): Promise<boolean> })
+      .failRefusedClaims(claimed, new OperationError('owner_marker_missing', 'The ownership marker is missing.'));
+    engine.transaction = transaction;
+    const states = await engine.executeRaw<{ id: string; state: string; error_code: string | null }>(
+      'SELECT id::text AS id,state,error_code FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [fixture.sourceId]);
+    expect(states.map(row => [row.state, row.error_code])).toEqual([['running', null], ['failed', 'owner_marker_missing'], ['failed', 'owner_marker_missing']]);
+  } finally { await engine.disconnect(); }
+}, 60_000);
 
 test('#8368: owner_marker_missing stops a sync or connector run for the source instead of counting against one item', () => {
   const refusal = new OperationError('owner_marker_missing', 'The ownership marker is missing.');
