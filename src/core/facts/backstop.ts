@@ -39,7 +39,8 @@
 
 import { observationDateFrom, resolveObservationDate, type ObservationDate } from '../ai/date-grounding.ts';
 import { factEventTime } from './event-time.ts';
-import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
+import type { BrainEngine, FactAttribution, FactInsertStatus, NewFact } from '../engine.ts';
+import { withSpeakerNote } from './speaker-context.ts';
 import type { ResolutionSource } from '../entities/resolve.ts';
 import { isFactsBackstopEligible } from './eligibility.ts';
 import type { PageType } from '../types.ts';
@@ -60,9 +61,9 @@ import { maintenanceTransaction } from '../persistence/attribution.ts';
 import type { FactNotabilityFilter } from './notability-filter.ts';
 import { intentContentOrigin } from '../trust/channel.ts';
 import { readTaintInputs, derivedWriteTrust, recordTaintEdges } from '../trust/taint.ts';
-import { applyGateDecision, derivedGateConfig, derivedGateInput, emptyGateTally, type GateTally } from '../trust/derived-gate.ts';
+import { applyGateDecision, derivedGateConfig, derivedGateInput, emptyGateTally, mergeGateTally, type GateTally } from '../trust/derived-gate.ts';
 import { decideFactWrite } from '../write-gate-store.ts';
-import { commitExtractionPlan, planExtraction, planSegmentedExtraction, readPageWatermark, type InputTruncated } from '../extraction-watermark.ts';
+import { commitExtractionPlan, planExtraction, readPageWatermark, type InputTruncated } from '../extraction-watermark.ts';
 
 // The notability-filter vocabulary lives in notability-filter.ts; re-exported for existing importers.
 export { NOTABILITY_FILTERS, coerceNotabilityFilter, type FactNotabilityFilter } from './notability-filter.ts';
@@ -83,6 +84,11 @@ function annotateUnverifiedResolution(
   if (inferred) return appendContextNote(context, inferenceNote(inferred));
   if (resolutionSource !== 'prefix_expansion') return context;
   return appendContextNote(context, 'entity matched by bare name only (prefix expansion) — unverified, please confirm');
+}
+
+/** #8064: a claim from an agent session's user side is the agent's ('other'); the assistant's own stays. The speaker note rides the context (withSpeakerNote). */
+export function asAgentSpoken<F extends { attributed_to?: FactAttribution | null }>(f: F): F {
+  return f.attributed_to === 'assistant' ? f : { ...f, attributed_to: 'other' };
 }
 
 export interface FactsBackstopCtx {
@@ -129,6 +135,12 @@ export interface FactsBackstopCtx {
   remote?: boolean;
   /** Optional entity hints (extract_facts MCP op forwards these). */
   entityHints?: string[];
+  /**
+   * #8064: the captured session's user turns were written by this agent
+   * (its speaker sidecar), not the owner. Its claims are saved as 'other'
+   * with a speaker note, never as the user's.
+   */
+  speaker?: { principal: string };
   /** Optional visibility tier (default 'private'). extract_facts forwards `world` when caller asks. */
   visibility?: 'private' | 'world';
   /** Override the chat model (extract_facts forwards user's model param when set). */
@@ -367,6 +379,9 @@ export async function runFactsBackstop(
       ? { mode: 'queue', enqueued: false, queueDepth: 0, skipped }
       : { mode: 'inline', inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped };
   }
+  // Facts extracted from a private page stay private, whatever the caller or the brain default says.
+  const { tightenToPage } = await import('./visibility.ts');
+  if (tightenToPage('world', parsedPage) === 'private') ctx = { ...ctx, visibility: 'private' };
   const { managedPersistenceEnabled } = await import('../persistence/ownership.ts');
   if (await managedPersistenceEnabled(ctx.engine)) {
     if (mode !== 'inline') {
@@ -588,19 +603,16 @@ async function runPipeline(
   ctx: FactsBackstopCtx,
   abortSignal?: AbortSignal,
 ): Promise<PipelineResult & { input_truncated?: InputTruncated }> {
+  if (parsedPage.segmentedPageId !== undefined) return runSegmentedPipeline(parsedPage, parsedPage.segmentedPageId, ctx, abortSignal);
   // Large pages A7: past the watermark the extractor reads only the appended
   // tail; without a usable one it reads the head and the receipt says so.
   const { MAX_TURN_TEXT_CHARS } = await import('./extract.ts');
   const { pageId, stored } = await readPageWatermark(ctx.engine, ctx.sourceId, parsedPage.slug, 'facts_backstop');
-  // A segmented page is planned over its segments; its whole body is never one string, so the turn text is the plan's.
-  const planOpts = { cap: MAX_TURN_TEXT_CHARS, pipeline: 'facts_backstop', emptyTail: 'skip' } as const;
-  const plan = parsedPage.segmentedPageId !== undefined
-    ? await planSegmentedExtraction(ctx.engine, parsedPage.segmentedPageId, stored, planOpts)
-    : planExtraction(parsedPage.compiled_truth, stored, planOpts);
+  const plan = planExtraction(parsedPage.compiled_truth, stored, { cap: MAX_TURN_TEXT_CHARS, pipeline: 'facts_backstop', emptyTail: 'skip' });
   if (!plan.text) return { inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], entity_slugs: [] };
   const result = await runPipelineWithBody(
     {
-      turnText: parsedPage.segmentedPageId !== undefined ? plan.text : parsedPage.compiled_truth,
+      turnText: parsedPage.compiled_truth,
       ...(plan.mode === 'full' ? {} : { extractText: plan.text }),
       isDreamGenerated: false,  // eligibility check already rejected dream pages
       ref: parsedPage.slug,
@@ -614,6 +626,27 @@ async function runPipeline(
   );
   if (pageId !== null && !result.skipped_reason && !abortSignal?.aborted) await commitExtractionPlan(ctx.engine, pageId, plan);
   return plan.truncated ? { ...result, input_truncated: plan.truncated } : result;
+}
+
+/**
+ * A segmented page (wave-b spec 8.2): the windows of its new occurrences only, newest first under the per-page spend
+ * cap (backstop-segments.ts), each through the pipeline as its own turn; the window results summed.
+ */
+async function runSegmentedPipeline(parsedPage: ParsedPageInput, pageId: number, ctx: FactsBackstopCtx, abortSignal?: AbortSignal): Promise<PipelineResult> {
+  const observationDate = resolveObservationDate({ slug: parsedPage.slug, frontmatter: parsedPage.frontmatter });
+  const { getFactsExtractionModel } = await import('./extract.ts');
+  const { runSegmentedBackstop } = await import('./backstop-segments.ts');
+  const { results } = await runSegmentedBackstop<PipelineResult>({ engine: ctx.engine, page: { id: pageId, body_storage: 'segmented' },
+    model: ctx.model ?? await getFactsExtractionModel(ctx.engine), observation: observationDate ? JSON.stringify(observationDate) : null, signal: abortSignal,
+    extract: text => runPipelineWithBody({ turnText: text, isDreamGenerated: false, ref: parsedPage.slug, pageSlug: parsedPage.slug, observationDate }, ctx, abortSignal) });
+  const sum = (a?: number, b?: number) => a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
+  return results.reduce<PipelineResult>((a, b) => ({
+    inserted: a.inserted + b.inserted, duplicate: a.duplicate + b.duplicate, superseded: a.superseded + b.superseded,
+    fact_ids: [...a.fact_ids, ...b.fact_ids], entity_slugs: [...new Set([...a.entity_slugs, ...b.entity_slugs])],
+    skipped_reason: a.skipped_reason ?? b.skipped_reason, write_gate: mergeGateTally(a.write_gate, b.write_gate),
+    fence_refused: sum(a.fence_refused, b.fence_refused), would_dedup_same_page: sum(a.would_dedup_same_page, b.would_dedup_same_page),
+    withdrawn_skipped: sum(a.withdrawn_skipped, b.withdrawn_skipped), refused: a.refused || b.refused ? [...a.refused ?? [], ...b.refused ?? []] : undefined,
+  }), { inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], entity_slugs: [] });
 }
 
 /**
@@ -733,7 +766,7 @@ async function runPipelineBodyInner(
   const derivation = await factsDerivation(ctx, input);
   const managed = await prepareManagedFactsSession(ctx, input, derivation);
   if (managed) {
-    managed.reportRefusals = true;
+    managed.reportRefusals = true; managed.entityMoveRetry = !ctx.requestId;
     const replay = await resumeManagedFacts(ctx.engine, managed);
     if (replay) return replay;
     const embedding = await resolveManagedFactsEmbedding(ctx.engine, managed.config);
@@ -761,7 +794,7 @@ async function runPipelineBodyInner(
     isDreamGenerated: input.isDreamGenerated,
     engine: ctx.engine,
     abortSignal,
-    model: ctx.model,
+    model: ctx.model, ...(ctx.speaker ? { userSpeaker: ctx.speaker.principal } : {}),
     notabilityAdmission, observationDate: input.observationDate ?? observationDateFrom(ctx.validFrom ?? ctx.turnAt ?? null),
     ...(managed ? { embedding: managed.embedding ?? null } : {}),
   });
@@ -799,7 +832,7 @@ async function runPipelineBodyInner(
   const { resolveDefaultVisibility } = await import('./visibility.ts');
   const visibility = ctx.visibility ?? (await resolveDefaultVisibility(ctx.engine));
   // #5888: one exact-duplicate check for the capture lanes, before either writer.
-  const { facts, dropped } = await dedupCapturedFacts(ctx, await inferMissingSubjects(ctx, outcome.facts, visibility, input.pageSlug, managed), visibility, resolveEntitySlugWithSource);
+  const { facts, dropped } = await dedupCapturedFacts(ctx, await inferMissingSubjects(ctx, ctx.speaker ? outcome.facts.map(f => asAgentSpoken(f)) : outcome.facts, visibility, input.pageSlug, managed), visibility, resolveEntitySlugWithSource);
   if (!managed) await assertAmbientCaptureAdmissible(ctx.engine, ctx.source);
   if (managed) return withCaptureDrops(dropped, facts.length || !dropped.length ? await publishManagedFacts(ctx.engine, managed, ctx, facts, visibility, input.pageSlug, { withdrawn: 'skip' }) : null);
 
@@ -940,7 +973,7 @@ async function runPipelineBodyInner(
       // DB-only row has no fence to name the page it came from, so the page
       // path's slug fills context when the caller passed no sourceSlug.
       valid_from: factEventTime(f, ctx),
-      context: annotateUnverifiedResolution(ctx.sourceSlug ?? input.pageSlug ?? null, resolutionSource, f.entity_inferred),
+      context: withSpeakerNote(ctx.speaker, annotateUnverifiedResolution(ctx.sourceSlug ?? input.pageSlug ?? null, resolutionSource, f.entity_inferred)),
     };
     await insertDerivedFact(newFact); // legacy DB-only fallback for unparented / thin-client facts (no entity page to fence onto)
   }
@@ -964,7 +997,7 @@ async function runPipelineBodyInner(
       source: f.source,
       // #4206: the caller's source_slug (which page/transcript the turn came
       // from) lands in the fence context cell — visible in recall projections.
-      context: annotateUnverifiedResolution(ctx.sourceSlug ?? null, resolutionSource, f.entity_inferred),
+      context: withSpeakerNote(ctx.speaker, annotateUnverifiedResolution(ctx.sourceSlug ?? null, resolutionSource, f.entity_inferred)),
       visibility,
       confidence: f.confidence,
       // #4206: extractor-derived date wins; then the caller's event time
@@ -1029,7 +1062,7 @@ async function runPipelineBodyInner(
           embedding_model: f.embedding_model ?? null, attributed_to: f.attributed_to ?? null,
           // #4206: caller event-time fallback + provenance context.
           valid_from: factEventTime(f, ctx),
-          context: ctx.sourceSlug ?? input.pageSlug ?? null,
+          context: withSpeakerNote(ctx.speaker, ctx.sourceSlug ?? input.pageSlug ?? null),
         };
         await insertDerivedFact(newFact); // stub-guard / unresolvable-target fallback for unprefixed or fallback-resolved entity slugs (no fenceable page or usable tree)
       }
@@ -1058,7 +1091,7 @@ async function runPipelineBodyInner(
           embedding_model: f.embedding_model ?? null, attributed_to: f.attributed_to ?? null,
           // #4206: caller event-time fallback + provenance context.
           valid_from: factEventTime(f, ctx),
-          context: result.databaseOnlyReason === 'file_database_drift' ? annotateUnverifiedResolution(ctx.sourceSlug ?? input.pageSlug ?? null, groupResolutionSource, f.entity_inferred) : ctx.sourceSlug ?? input.pageSlug ?? null,
+          context: withSpeakerNote(ctx.speaker, result.databaseOnlyReason === 'file_database_drift' ? annotateUnverifiedResolution(ctx.sourceSlug ?? input.pageSlug ?? null, groupResolutionSource, f.entity_inferred) : ctx.sourceSlug ?? input.pageSlug ?? null),
         };
         await insertDerivedFact(newFact); // DB-only fallback when the fence lane declined the write (write_through opt-out race / localPath echo)
       }

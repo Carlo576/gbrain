@@ -40,7 +40,7 @@ import { refreshFenceClear } from './worktree-refresh-schema.ts';
 export const NOOP_SETTLE_BATCH = 50;
 
 /** Guard failures that leave an effect for the runner, which records them as it does today. */
-const LEFT_FOR_RUNNER = new Set(['owner_unavailable', 'source_changed', 'recovery_required']);
+const LEFT_FOR_RUNNER = new Set(['owner_unavailable', 'source_changed', 'recovery_required', 'owner_marker_missing']);
 
 type Candidate = Pick<PersistenceEffect, 'id' | 'kind' | 'source_id' | 'source_incarnation' | 'worktree_id'>;
 
@@ -113,7 +113,7 @@ export async function settleNoopEmbeddingEffects(engine: BrainEngine, hostId: st
     }
     if (!ids.length) return { settled: 0, cursor, done };
     const settled = await tx.executeRaw(`UPDATE persistence_effects SET state='committed', error_code=NULL, attempts=attempts+1,
-        data=data-'retry_slugs'-'target_failures'-'failing_target', execution_token=NULL, claim_expires_at=NULL, outcome='{}'::jsonb, updated_at=now()
+        data=data-'retry_slugs'-'target_failures'-'failing_target', execution_token=NULL, claim_expires_at=NULL, claim_owner=NULL, outcome='{}'::jsonb, updated_at=now()
       WHERE id=ANY($1::text[]::bigint[]) AND state='queued' AND recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING id, request_id`, [ids]);
     await faultPoint('effect:embedding:settle', { effectId: ids[0] });
     for (const row of settled as Array<{ request_id: string }>) requestIds.push(row.request_id);

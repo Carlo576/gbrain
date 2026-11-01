@@ -19,7 +19,7 @@
 
 import { quarantineFilterFragment } from '../quarantine.ts';
 import { unverifiedExtractionFragment } from '../extraction-review.ts';
-import { privatePagesFilterFragment } from './private-visibility.ts';
+import { privatePagesFilterForCaller } from './private-visibility.ts';
 import { chunkVisibleFilter, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from './safe-chunks.ts';
 import { pageEligibleSql } from '../eligibility/sql.ts';
 import type { TrustTier } from '../trust/tier.ts';
@@ -205,7 +205,7 @@ export function buildVisibilityClause(
   // #4352 remediation: the predicate text lives ONCE in private-visibility.ts
   // (shared with listPages + the relational-arm hydrate) so it cannot drift.
   const privateClause = opts?.excludePrivate
-    ? ` AND ${privatePagesFilterFragment(pageAlias)}`
+    ? ` AND ${privatePagesFilterForCaller(pageAlias)}`
     : '';
   const chunksClause = requiresSafeChunks(opts) ? ` AND ${safeChunksFilter(pageAlias)}` : '';
   // C4: a pinned question's page holds only the question and owner notes; it is
@@ -364,13 +364,25 @@ export function buildOrFallbackWebsearchQuery(query: string): string | null {
   // F3 operator guard: any double quote, or a dash LEADING a token
   // (whitespace/start boundary — interior hyphens like "foo-bar" are fine).
   if (query.includes('"') || /(^|\s)-\S/.test(query)) return null;
-  const tokens = query
+  const tokens = orFallbackTokens(query);
+  return tokens.length < 2 ? null : tokens.join(' OR ');
+}
+
+/**
+ * The OR fallback's terms: word tokens without the literal OR/AND words, each
+ * once (case-insensitive, first spelling kept). A repeated word adds no match
+ * and only makes ts_rank evaluate the lexeme again on every matching row:
+ * 4.5 s against 0.55 s over a 16,840-page match set, with identical scores
+ * (#7135, diagnosed by @veltri-23 in #7136). Callers apply the operator guard.
+ */
+export function orFallbackTokens(query: string): string[] {
+  const seen = new Set<string>();
+  return query
     .normalize('NFKC')
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean)
-    .filter(t => { const u = t.toUpperCase(); return u !== 'OR' && u !== 'AND'; });
-  if (tokens.length < 2) return null;
-  return tokens.join(' OR ');
+    .filter(t => { const u = t.toUpperCase(); return u !== 'OR' && u !== 'AND'; })
+    .filter(t => { const k = t.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
 // ============================================================

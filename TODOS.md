@@ -1,5 +1,19 @@
 # TODOS
 
+## Write-cap wedge follow-ups (filed 2026-11-01, GBRA-271, #8368)
+
+- [ ] **P3 — `owner_marker_missing` can name the plain self-transfer when another process sees a drifted APFS birth time (#8381).** **What:** the refusal compares the reservation's birth time exactly in the refusing process, and the self-transfer compares it exactly in the CLI process; on APFS the two can read tens of ns apart (#6501), so a long-lived process that created the checkout and recorded its reservation can recommend a self-transfer the CLI then refuses `recovery_required`. Nothing is written either way. **Fix:** one identity rule for both sides. **Effort:** S. **Priority:** P3.
+- [ ] **P3 — Report a connection loss inside `failRefusedClaims`, and name page batches in the fair-share wording (#8383).** **What:** the group-refusal path releases the unfinished members on a transient database failure and returns without rethrowing, so the consumer's error report misses it; and the principal fair share also admits a `put_pages` or import batch whole, which the comment and `write-refusals.md` do not say. **Fix:** rethrow after the release; reword. **Effort:** S. **Priority:** P3.
+
+## RLS backfill follow-ups (filed 2026-10-26, GBRA-95, #7625)
+
+- [ ] **P1 — Guard triggers fail open under a scoped write role without lookup-table policies (#7632).**
+  **What:** make `gbrain_refuse_purging_derivation`, `gbrain_mark_derivation_scope_entry`, `gbrain_preserve_fact_withdrawal` and `gbrain_guard_inserted_facts` `SECURITY DEFINER`, owned by the schema owner with `search_path` pinned, through a new migration and the schema blob. **Why:** they run as SECURITY INVOKER, so a write role that neither owns the tables nor bypasses RLS, with write policies on the guarded table but none on `page_segment_derivation_purges` / `page_segment_derivation_purge_pages` / `fact_withdrawals`, reads no rows there: a purged derivation claim or a withdrawn fact can be stored again. Fresh installs already have RLS on those tables; v275 extends it to migrations-only brains. **Test:** e2e red/green under a scoped NOBYPASSRLS non-owner write role (red on master: the write succeeds; green: the guard refuses). **Effort:** M. **Priority:** P1.
+
+## Run-child heap follow-ups (filed 2026-10-24, GBRA-133)
+
+- [ ] **P3 — Heap growth of a managed sync/lint run-child after a history rewrite.** **What:** the per-child `--max-rss` cap from #7467 contains it, but the holder is unknown; synthetic lint --fix with 15k holds, a concurrent 60k-file sync drain plus lint, and a force-pushed rewrite with 15k `file_drift` holds all stayed flat, and every module-level cache is bounded. **Next:** a long-lived run-child across many cycles with a heap snapshot diff per publication. Reopen with the job's data if `ChildRssLimitError` fires. **Effort:** M. **Priority:** P3.
+
 ## LHF wave 2 follow-ups (filed 2026-10-15, GBRA-107)
 
 Context: gbrain-evals `docs/plans/2026-10-15-lhf-wave-2/PLAN.md` ("NOT in scope" and "Round-2 dispositions"), audits in `docs/plans/2026-10-15-lhf-wave-2/audit/`. Reviewer findings are in `docs/plans/2026-10-15-lhf-wave-2/reviews/`: round-2 ids (`ceo-native-N`, `eng-outside-N`, ...) are in `findings.jsonl` and the matching `<phase>-<voice>.md`; round-1 findings are in the `*.r1.md` files.

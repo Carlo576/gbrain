@@ -22,7 +22,7 @@ import { moveSlugBindings, recordRenameAlias } from '../page-state/rename-alias.
 import { segmentedRevertRefusal } from '../page-state/versions.ts';
 import { sanitizeText } from '../batch-rows.ts';
 import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion } from '../search/safe-chunks.ts';
-import { privatePagesFilterFragment, privateSnapshotFilterFragment } from '../search/private-visibility.ts';
+import { orPrivateReadableSource, privatePagesFilterFragment, privateSnapshotFilterFragment, privatePagesFilterForCaller } from '../search/private-visibility.ts';
 import { quarantineFilterFragment } from '../quarantine.ts';
 import { rederiveHiddenSql } from '../eligibility/sql.ts';
 import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, isMissingSchemaObject, warnOncePerProcess } from '../utils.ts';
@@ -33,8 +33,9 @@ import type { ScopedReadRunner } from './cjk-search.ts';
 import { compileRowNormalizer } from './normalize.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import { atomRetirementPurgeHold } from '../persistence/atom-retirement-hold.ts';
+import { derivedRetirementPurgeHold } from '../persistence/derived-retirement-hold.ts';
 import { createPageVersion } from '../page-state/versions.ts';
-import { renderFragment, sqlFragment, trustedSql } from './fragment.ts';
+import { renderFragment, sqlFragment, trustedSql, type SqlFragment } from './fragment.ts';
 import { frontmatterWhereFragment } from '../search/frontmatter-where.ts';
 import { quoteIdentifier, resolveWriteColumnFromConfigRows } from '../search/embedding-column.ts';
 import { pickCanonicalOrigin } from '../persistence/origin-guard.ts';
@@ -179,7 +180,7 @@ export async function putPage(
         import_filename       = COALESCE(EXCLUDED.import_filename,       pages.import_filename),
         chunker_version       = ${trustedSql(bodyWriteChunkVersion('EXCLUDED.compiled_truth', 'EXCLUDED.timeline'))},
         source_path           = COALESCE(EXCLUDED.source_path,           pages.source_path),
-        database_only_reason  = CASE WHEN EXCLUDED.source_path IS NOT NULL AND pages.database_only_reason IN ('detached', 'origin_twin') THEN NULL ELSE pages.database_only_reason END,
+        database_only_reason  = CASE WHEN EXCLUDED.source_path IS NOT NULL AND pages.database_only_reason IN ('detached', 'origin_twin', 'mirror_read_only') THEN NULL ELSE pages.database_only_reason END,
         source_kind           = COALESCE(EXCLUDED.source_kind,           pages.source_kind),
         source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
         ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
@@ -323,7 +324,8 @@ export async function purgeDeletedPages(
           AND deleted_at < now() - (${hours} || ' hours')::interval
           AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text
             AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)
-          AND ${trustedSql(atomRetirementPurgeHold('pages'))}${excluded}
+          AND ${trustedSql(atomRetirementPurgeHold('pages'))}
+          AND ${trustedSql(derivedRetirementPurgeHold('pages'))}${excluded}
         ORDER BY deleted_at ASC, slug ASC
       `);
       const pages = rows.map((r) => ({
@@ -345,7 +347,9 @@ export async function purgeDeletedPages(
           AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text
             AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)
           -- #7013: a restorable re-extraction retirement waits out its hold (atomRetirementPurgeHold).
-          AND ${trustedSql(atomRetirementPurgeHold('pages'))}${excluded}
+          AND ${trustedSql(atomRetirementPurgeHold('pages'))}
+          -- GBRA-161: every derived retirement waits out its hold (derivedRetirementPurgeHold).
+          AND ${trustedSql(derivedRetirementPurgeHold('pages'))}${excluded}
         RETURNING slug, source_id
       `);
       if (rows.length) await tx.run(sqlFragment`DELETE FROM page_body_stagings s USING unnest(${rows.map(r => r.source_id)}::text[], ${rows.map(r => r.slug)}::text[]) AS d(source_id, slug)
@@ -392,10 +396,12 @@ export async function updatePageContextualRetrievalState(
   sourceId: string,
   mode: string,
   corpusGeneration: string | null,
+  memo: <T>(key: string, read: () => Promise<T>) => Promise<T> = (_key, read) => read(),
 ): Promise<void> {
     if (mode === 'none') {
-      const { rows: config } = await exec.run<{ key: string; value: string }>(sqlFragment`
-        SELECT key,value FROM config WHERE key IN ('search_embedding_column','embedding_columns')`);
+      // GBRA-156: the same read, under the same memo key, as the chunk write of this page transaction (chunks.ts).
+      const config = await memo('config:embedding-write', async () => (await exec.run<{ key: string; value: string }>(
+        sqlFragment`SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns', 'embedding_model')`)).rows);
       const column = resolveWriteColumnFromConfigRows({
         searchEmbeddingColumn: config.find(row => row.key === 'search_embedding_column')?.value ?? null,
         embeddingColumnsJson: config.find(row => row.key === 'embedding_columns')?.value ?? null,
@@ -489,7 +495,7 @@ export async function listPages(exec: ScopedRead, filters?: PageFilters): Promis
       : sqlFragment`AND p.deleted_at IS NULL`;
     // #4352: untrusted-caller private-page filter (see PageFilters.excludePrivate).
     const privateCondition = filters?.excludePrivate === true
-      ? trustedSql(`AND ${privatePagesFilterFragment('p')}`)
+      ? trustedSql(`AND ${privatePagesFilterForCaller('p')}`)
       : sqlFragment``;
     const effectiveAfterCondition = filters?.effective_after
       ? sqlFragment`AND p.effective_date >= ${filters.effective_after}::timestamptz`
@@ -717,7 +723,7 @@ export async function resolveSlugs(
     // `get_page`.
     const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
     const scalar = opts?.sourceId ?? null;
-    const privacy = opts?.excludePrivate ? trustedSql(` AND ${privatePagesFilterFragment('pages')}`) : sqlFragment``;
+    const privacy = opts?.excludePrivate ? trustedSql(` AND ${privatePagesFilterForCaller('pages')}`) : sqlFragment``;
     const scopeFragment = sources
       ? sqlFragment` AND source_id = ANY(${sources}::text[])`
       : scalar
@@ -782,6 +788,11 @@ function stalePagesWhere(opts?: { sourceId?: string; versionTs?: string; attenda
     : opts?.held === 'only' ? sqlFragment` AND ${linkExtractionHeld(opts.versionTs)}` : sqlFragment``;
   // A quarantined page is hidden from search; it is neither re-extracted nor counted as stale.
   return sqlFragment`deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))} AND ${version}${source}${attendance}${held}`;
+}
+
+/** The pages (unaliased `pages` rows) link extraction still owes work: stale, not attendance-blocked, not held (rank_entities' remote coverage). */
+export function staleForExtractionSql(versionTs: string): SqlFragment {
+  return stalePagesWhere({ versionTs, attendance: 'exclude', held: 'exclude' });
 }
 
 /**
@@ -1000,7 +1011,7 @@ export async function getVersions<B extends boolean = true>(
   opts?: GetVersionsOpts<B>,
 ): Promise<PageVersionRows<B>> {
     const privacy = opts?.excludePrivate
-      ? trustedSql(`AND ${privatePagesFilterFragment('p')} AND ${privateSnapshotFilterFragment('pv')}`) : sqlFragment``;
+      ? trustedSql(`AND ${orPrivateReadableSource('p', `${privatePagesFilterFragment('p')} AND ${privateSnapshotFilterFragment('pv')}`)}`) : sqlFragment``;
     const scope = opts?.sourceIds && opts.sourceIds.length > 0
       ? sqlFragment`AND p.source_id = ANY(${opts.sourceIds}::text[])`
       : opts?.sourceId ? sqlFragment`AND p.source_id = ${opts.sourceId}` : sqlFragment``;
@@ -1116,7 +1127,7 @@ export async function resolveSlugWithAliasDetailed(
 ): Promise<{ canonical_slug: string; source_id: string } | null> {
     const sources = Array.isArray(sourceOrSources) ? sourceOrSources : [sourceOrSources];
     if (sources.length === 0) return null;
-    const privacy = opts?.excludePrivate ? trustedSql(`AND EXISTS (SELECT 1 FROM pages p WHERE p.slug = slug_aliases.canonical_slug AND p.source_id = slug_aliases.source_id AND p.deleted_at IS NULL AND ${privatePagesFilterFragment('p')})`) : sqlFragment``;
+    const privacy = opts?.excludePrivate ? trustedSql(`AND EXISTS (SELECT 1 FROM pages p WHERE p.slug = slug_aliases.canonical_slug AND p.source_id = slug_aliases.source_id AND p.deleted_at IS NULL AND ${privatePagesFilterForCaller('p')})`) : sqlFragment``;
     try {
       const { rows } = await exec.run<{ canonical_slug: string; source_id: string }>(sqlFragment`
         SELECT canonical_slug, source_id

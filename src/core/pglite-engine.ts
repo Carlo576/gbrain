@@ -124,7 +124,8 @@ import { PAGE_SORT_SQL } from './types.ts';
 import { finalizeLastSeen } from './chronicle/last-seen.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery, boundWebsearchQuery, collapseWebsearchDashRuns } from './search/sql-ranking.ts';
-import { privatePagesFilterFragment, privateSnapshotFilterFragment, privateLinkOriginFilterFragment, privateTimelineEventFilterFragment, privateProvenanceFilterFragment } from './search/private-visibility.ts';
+import { RARE_TERM_CHUNK_CAP, rankOrFallbackByRarity, rareTermPagesSql, type RareTermPages } from './search/keyword-or-rarity.ts';
+import { privatePagesFilterFragment, privateSnapshotFilterFragment, privateLinkOriginFilterFragment, privateTimelineEventFilterFragment, privateProvenanceFilterFragment, privatePagesFilterForCaller } from './search/private-visibility.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from './embed-skip.ts';
 import {
   vectorCastSuffix,
@@ -160,6 +161,7 @@ import * as chunksImpl from './engine-sql/chunks.ts';
 import * as pageBodyImpl from './engine-sql/page-body.ts';
 import type { BodyFlipInput, BodyFlipResult, BodyRegion, BodyStagingInput, BodyStagingState, ManifestRow, ManifestRowInput, SegmentChunkInput,
   SegmentedPageMeta, SegmentSweepOptions, SegmentSweepResult, SegmentTextInput } from './page-body/types.ts';
+import type { SegmentDerivationInput, SegmentDerivationKind, SegmentDerivationRow } from './page-body/derivations.ts';
 import { searchKeywordCJK } from './engine-sql/cjk-search.ts';
 import * as titlesImpl from './engine-sql/titles.ts';
 import * as keywordPagesImpl from './engine-sql/keyword-pages.ts';
@@ -1319,7 +1321,7 @@ export class PGLiteEngine implements BrainEngine {
     mode: string,
     corpusGeneration: string | null,
   ): Promise<void> {
-    return pagesImpl.updatePageContextualRetrievalState(this.engineSql, slug, sourceId, mode, corpusGeneration);
+    return pagesImpl.updatePageContextualRetrievalState(this.engineSql, slug, sourceId, mode, corpusGeneration, (key, read) => transactionMemo(this, key, read));
   }
 
   async migrateFactsToCanonical(
@@ -1483,11 +1485,12 @@ export class PGLiteEngine implements BrainEngine {
     // FTS config name (e.g. 'english', 'pt_br'). Validated by getFtsLanguage()
     // — safe to interpolate into raw SQL.
     const ftsLang = getFtsLanguage();
-    const rankParam = opts?.rankQuery ? `$${params.push(opts.rankQuery)}` : '$1';
+    const rankIdx = opts?.rankQuery ? params.push(opts.rankQuery) - 1 : opts?.orFallback ? params.push(params[0]) - 1 : 0;
+    const rankParam = `$${rankIdx + 1}`;
 
     const keywordSql =
       `WITH ranked AS (
-         SELECT
+         SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY page_id ORDER BY score DESC, chunk_id ASC) AS page_rank FROM (SELECT
            p.slug, p.id as page_id, p.title, p.type, p.source_id,
            p.effective_date, p.effective_date_source,
            CASE WHEN NULLIF(regexp_replace(p.frontmatter->>'message_id', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL
@@ -1506,7 +1509,7 @@ export class PGLiteEngine implements BrainEngine {
            -- v0.27.1: hide image rows from default text-keyword search so
            -- OCR text doesn't drown text-page hits. Image-similarity queries
            -- run a separate vector path on embedding_image.
-           AND cc.modality = 'text'
+           AND cc.modality = 'text') matched) per_page WHERE page_rank = 1
          ORDER BY score DESC, page_id ASC, chunk_id ASC
          LIMIT $2
        ),
@@ -1526,9 +1529,9 @@ export class PGLiteEngine implements BrainEngine {
     if (rows.length === 0 && opts?.orFallback) {
       const orQuery = buildOrFallbackWebsearchQuery(query);
       if (orQuery) {
-        const fallbackParams = [...params];
-        fallbackParams[0] = orQuery;
-        ({ rows } = await this.db.query(keywordSql, fallbackParams));
+        const run = async (matchQuery: string) => (await this.db.query(keywordSql, params.map((v, i) => i === 0 ? matchQuery : i === rankIdx && !opts?.rankQuery ? orQuery : v))).rows as Record<string, unknown>[];
+        rows = await rankOrFallbackByRarity({ query, rows: await run(orQuery), limit, offset, runRare: run,
+          readTermPages: async terms => (await this.db.query(rareTermPagesSql(ftsLang), [terms, RARE_TERM_CHUNK_CAP])).rows as RareTermPages[] });
         settle();
         // 2026-09 (#3617 follow-up): relaxed rows are TAGGED so hybrid's
         // fusion can demote them — an OR-of-common-terms match must not
@@ -1727,7 +1730,7 @@ export class PGLiteEngine implements BrainEngine {
         const bound = [...stmt.params];
         bound[stmt.innerLimitIdx] = requested;
         return readVectorPool((await tx.query<Record<string, unknown>>(scopeScan && stmt.scopeScanSql || indexWalk && stmt.indexWalkSql || stmt.sql, bound)).rows);
-      }, undefined, opts?.hnswIterativeScan, indexWalk && stmt.indexWalkSql ? stmt.indexWalkOverfetch : undefined));
+      }, undefined, opts?.hnswIterativeScan, indexWalk && stmt.indexWalkSql ? stmt.indexWalkOverfetch : undefined, !!stmt.indexWalkSql && !indexWalk && !(scopeScan && stmt.scopeScanSql)));
     const rows = await searchIndexWalk(stmt, limit, attempt) ?? await searchVectorPool(limit, stmt.innerLimit, iterative, stmt.indexed, 'pglite',
       attempt,
       async pool => {
@@ -1877,7 +1880,7 @@ export class PGLiteEngine implements BrainEngine {
     return chunksImpl.readEmbeddingStateCounts(scopedRead(this.engineSql), column, opts);
   }
 
-  async listEmbeddingStateRows(opts: { sourceIds?: string[]; states: readonly EmbeddingState[]; limit: number; purgeWindowHours: number }): Promise<EmbeddingStateRow[]> {
+  async listEmbeddingStateRows(opts: { sourceIds?: string[]; slugs?: string[]; states: readonly EmbeddingState[]; limit: number; purgeWindowHours: number }): Promise<EmbeddingStateRow[]> {
     const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
     return chunksImpl.listEmbeddingStateRows(scopedRead(this.engineSql), column, opts);
   }
@@ -2307,7 +2310,7 @@ export class PGLiteEngine implements BrainEngine {
     // v0.31.8 (D21): build WHERE clause dynamically. Without opts.sourceId,
     // no source filter (preserves pre-v0.31.8 cross-source read).
     const where: string[] = ['p.slug = $1'];
-    if (opts?.excludePrivate) where.push(privatePagesFilterFragment('p'));
+    if (opts?.excludePrivate) where.push(privatePagesFilterForCaller('p'));
     if (!opts?.includeDeleted) where.push('p.deleted_at IS NULL'); // raw_data follows the page soft-delete
     const params: unknown[] = [slug];
     if (source) {
@@ -2533,6 +2536,13 @@ export class PGLiteEngine implements BrainEngine {
   async openBodyStaging(input: BodyStagingInput): Promise<void> { return pageBodyImpl.openBodyStaging(this.engineSql, input); }
   async setBodyStagingState(id: string, state: BodyStagingState, opts?: { commitRequestId?: string | null }): Promise<void> { return pageBodyImpl.setBodyStagingState(this.engineSql, id, state, opts); }
   async sweepSegments(opts?: SegmentSweepOptions): Promise<SegmentSweepResult> { return pageBodyImpl.sweepSegments(this.engineSql, opts); }
+  async readSegmentDerivations(pageId: number, opts?: { kind?: SegmentDerivationKind; occurrenceIds?: readonly number[] }): Promise<SegmentDerivationRow[]> {
+    return pageBodyImpl.readSegmentDerivations(unscopedExecutor(this.engineSql, 'page-body: page-id keyed internal read'), pageId, opts);
+  }
+  async upsertSegmentDerivations(rows: readonly SegmentDerivationInput[]): Promise<void> { return pageBodyImpl.upsertSegmentDerivations(this.engineSql, rows); }
+  async retireSegmentDerivations(pageId: number, liveOccurrenceIds: readonly number[], opts?: { kind?: SegmentDerivationKind }): Promise<number> {
+    return pageBodyImpl.retireSegmentDerivations(this.engineSql, pageId, liveOccurrenceIds, opts);
+  }
 
   // ============================================================
   // v0.28: Takes (typed/weighted/attributed claims) + synthesis_evidence

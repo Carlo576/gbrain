@@ -16,7 +16,9 @@ import { EFFECT_FAULT_POINTS, type FaultPoint } from '../../src/core/persistence
 import { operationsByName } from '../../src/core/operations.ts';
 import { parseFactsFence } from '../../src/core/facts-fence.ts';
 import { parseTakesFence } from '../../src/core/takes-fence.ts';
+import { FACT_FENCE_KIND, TAKE_FENCE_KIND, fenceOwnerKey, readFenceBlocks } from '../../src/core/generations/fence.ts';
 import { isRegistryCode } from '../../src/core/error-catalogue.ts';
+import { unquoteTranscriptText } from '../../src/core/search/transcript-quote.ts';
 import { CONNECTOR_SLUG, contextFor, retryingRead, type OpDescriptor, type OpKind, type OpObservation, type World } from './ops.ts';
 
 /**
@@ -88,14 +90,14 @@ export class ReferenceModel {
   toJSON(): Record<string, unknown> {
     return { pages: [...this.pages].map(([k, p]) => [k, { ...p, markers: [...p.markers] }]), facts: [...this.facts],
       committedMarkers: [...this.committedMarkers], refusedMarkers: [...this.refusedMarkers], reasserted: [...this.reasserted],
-      revoked: [...this.revoked], violations: this.violations, pending: [...this.pending] };
+      revoked: [...this.revoked], violations: this.violations, pending: [...this.pending], projected: [...this.projected] };
   }
   static fromJSON(world: World, state: Record<string, any>): ReferenceModel {
     const m = new ReferenceModel(world);
     m.pages = new Map(state.pages.map(([k, p]: [string, any]) => [k, { ...p, markers: new Set(p.markers) }]));
     m.facts = new Map(state.facts); m.committedMarkers = new Map(state.committedMarkers);
     m.refusedMarkers = new Set(state.refusedMarkers); m.reasserted = new Set(state.reasserted);
-    m.revoked = new Set(state.revoked); m.violations = state.violations; m.pending = new Map(state.pending ?? []);
+    m.revoked = new Set(state.revoked); m.violations = state.violations; m.pending = new Map(state.pending ?? []); m.projected = new Map(state.projected ?? []);
     return m;
   }
   /** An interrupted op whose outcome is unknown: its marker may legally be visible, in its own source only. */
@@ -286,8 +288,9 @@ export class ReferenceModel {
   async recall(actor: string, source: string, entity: string): Promise<string[]> {
     try {
       const r = await this.retrying(() => operationsByName.recall.handler(contextFor(this.world, actor, source),
-        { entity, limit: 100, ...(actor === 'local' ? { source_id: source } : {}) })) as { facts?: { fact?: string }[] };
-      return (r.facts ?? []).map(f => String(f.fact ?? ''));
+        { entity, limit: 100, ...(actor === 'local' ? { source_id: source } : {}) })) as { facts?: { id?: number; fact?: string; quoted?: string }[] };
+      // GST-687: a remote reader gets an agent-written fact quoted; the stored text is what the receipt promised.
+      return (r.facts ?? []).map(f => f.quoted ? unquoteTranscriptText(String(f.fact ?? ''), `fact ${f.id}`) : String(f.fact ?? ''));
     } catch { return []; }
   }
 
@@ -338,6 +341,30 @@ export class ReferenceModel {
     }
   }
 
+  /** Each page fence's rows the last time they matched the fence, by page key and fence name. */
+  private projected = new Map<string, string>();
+
+  /**
+   * A fence must list exactly its page's rows, with one exception (GBRA-161 PR 2, B-5): a write that drops the whole
+   * section holds the fence `fence_absent` and keeps the rows. That page passes only while it has no fence block, the
+   * hold is recorded, and its rows are still the ones it had when they last matched the fence. A parsed fence with the
+   * hold still recorded fails, so a hold never outlives the fence that answers it.
+   */
+  private async checkFence(stage: string, row: { source_id: string; slug: string }, content: string, fence: 'facts' | 'takes', listed: string[], rows: string[]): Promise<void> {
+    const k = `${key(row.source_id, row.slug)}\u0000${fence}`;
+    const [hold] = await this.q<{ n: number }>(`SELECT count(*)::int AS n FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3
+      AND state='held' AND held_reason='fence_absent'`, [row.source_id, fence === 'facts' ? FACT_FENCE_KIND : TAKE_FENCE_KIND, fenceOwnerKey(row.slug)]);
+    const held = hold.n > 0;
+    const absent = readFenceBlocks({ compiled_truth: content }, fence).state === 'absent';
+    if (JSON.stringify(listed) === JSON.stringify(rows)) {
+      this.projected.set(k, JSON.stringify(rows));
+      if (held && !absent) this.violate({ class: 'projection_drift', detail: `${stage}: ${row.source_id}/${row.slug} ${fence} fence parses but its fence_absent hold is still recorded` });
+      return;
+    }
+    if (absent && held && this.projected.get(k) === JSON.stringify(rows)) return;
+    this.violate({ class: 'projection_drift', detail: `${stage}: ${row.source_id}/${row.slug} ${fence} fence ${JSON.stringify(listed)} != rows ${JSON.stringify(rows)}${held ? ' (held fence_absent)' : ''}` });
+  }
+
   private async checkProjection(stage: string, live: { id: number; source_id: string; slug: string }[]): Promise<void> {
     for (const row of live) {
       const page = await this.readPage('local', row.source_id, row.slug);
@@ -347,11 +374,11 @@ export class ReferenceModel {
         'SELECT row_num,claim,active FROM takes WHERE page_id=$1 ORDER BY row_num', [row.id]);
       const fence = takes.map(t => `${t.rowNum}:${t.claim}:${t.active}`).sort();
       const db = dbTakes.map(t => `${t.row_num}:${t.claim}:${t.active}`).sort();
-      if (JSON.stringify(fence) !== JSON.stringify(db)) this.violate({ class: 'projection_drift', detail: `${stage}: ${row.source_id}/${row.slug} takes fence ${JSON.stringify(fence)} != rows ${JSON.stringify(db)}` });
+      await this.checkFence(stage, row, content, 'takes', fence, db);
       const liveFacts = parseFactsFence(content).facts.filter(f => !f.forgotten && f.validUntil === undefined).map(f => f.claim).sort();
       const dbFacts = (await this.q<{ fact: string }>(`SELECT fact FROM facts WHERE source_id=$1 AND source_markdown_slug=$2
         AND expired_at IS NULL AND superseded_by IS NULL AND (valid_until IS NULL OR valid_until > now())`, [row.source_id, row.slug])).map(f => f.fact).sort();
-      if (JSON.stringify(liveFacts) !== JSON.stringify(dbFacts)) this.violate({ class: 'projection_drift', detail: `${stage}: ${row.source_id}/${row.slug} facts fence ${JSON.stringify(liveFacts)} != rows ${JSON.stringify(dbFacts)}` });
+      await this.checkFence(stage, row, content, 'facts', liveFacts, dbFacts);
     }
     const [orphans] = await this.q<{ takes: number; timeline: number }>(`SELECT
       (SELECT count(*)::int FROM takes t WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id=t.page_id)) AS takes,

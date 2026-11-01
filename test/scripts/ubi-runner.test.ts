@@ -75,7 +75,7 @@ describe("teardown waits for in-flight creates", () => {
       const proc = spawnRunner(["up"], { UBI_OWNER: "t1" });
       const started = await waitForEvent(api, /^create-start /);
       const name = started.split(" ")[1]!;
-      expect(name).toMatch(/^ubirun-t1-\d{10}-[0-9a-f]{8}$/);
+      expect(name).toMatch(/^ubirun-t1-\d{10}-[0-9a-f]{8}-t3$/);
       proc.kill(signal);
       expect(await proc.exited).toBe(130);
       expect(api.events).toEqual([`create-start ${name}`, `created ${name}`, `destroy ${name}`, `removed ${name}`]);
@@ -191,12 +191,29 @@ describe("stale sweep and ownership", () => {
     expect([...api.vms.keys()].sort()).toEqual(seed.slice(1).map((s) => s.name).sort());
   });
 
-  it("gc HOURS destroys only the caller's VMs older than HOURS and requires HOURS", async () => {
+  it("gc HOURS destroys only the caller's VMs older than HOURS; without HOURS it destroys nothing", async () => {
     const api = serve({ seed });
-    expect((await run(["gc"], { UBI_OWNER: "t1" })).code).toBe(1);
+    const none = await run(["gc"], { UBI_OWNER: "t1" });
+    expect(none.code).toBe(0);
+    expect(none.stderr).toContain("gc: no sweep");
+    expect(api.events).toEqual([]);
     const gc = await run(["gc", "1"], { UBI_OWNER: "t1" });
     expect(gc.code).toBe(0);
     expect(api.events).toEqual([`destroy ubirun-t1-${OLD}-aaaaaaaa`, `removed ubirun-t1-${OLD}-aaaaaaaa`]);
+  });
+
+  it("list --mine and gc also cover VMs this machine created under another owner tag", async () => {
+    const api = serve({ seed });
+    const other = `ubirun-other-${OLD}-cccccccc`;
+    execFileSync("mkdir", ["-p", join(dir, "state", other)]);
+    writeFileSync(join(dir, "state", other, "env"), `NAME=${other}\nLOCATION=eu-central-h1\n`);
+    const mine = await run(["list", "--mine"], { UBI_OWNER: "t1" });
+    expect(mine.stdout.trim().split("\n").map((l) => l.split(/\s+/)[1])).toEqual([`ubirun-t1-${OLD}-aaaaaaaa`, `ubirun-t1-${NOW}-bbbbbbbb`, other]);
+    expect(mine.stderr).toContain("list --mine: owner tag t1 plus VMs this machine created (also under: other)");
+    const gc = await run(["gc", "1"], { UBI_OWNER: "t1" });
+    expect(gc.code).toBe(0);
+    expect(api.events.filter((e) => e.startsWith("destroy ")).sort()).toEqual([`destroy ubirun-t1-${OLD}-aaaaaaaa`, `destroy ${other}`].sort());
+    expect(api.vms.has(`ubirun-${OLD}-dddddddd`)).toBe(true);
   });
 
   it("list --mine shows only the caller's VMs; usage sums vCPUs by owner", async () => {
@@ -209,6 +226,25 @@ describe("stale sweep and ownership", () => {
     expect(usage).toMatch(/^\(untagged\)\s+1\s+4$/m);
     expect(usage).toMatch(/^\(other\)\s+1\s+2$/m);
     expect(usage).toMatch(/^total\s+5\s+46$/m);
+  });
+
+  // macOS runs the one-true-awk, which rejected usage's vCPU loop (a comparison in an unparenthesized printf list).
+  it("usage prints the same table under every awk on PATH, the one-true-awk included where installed", async () => {
+    const awks = [["original-awk"], ["mawk"], ["gawk"], ["busybox", "awk"]].filter(([bin]) => Bun.which(bin!));
+    expect(awks.length).toBeGreaterThan(0);
+    const tables: string[] = [];
+    for (const awk of awks) {
+      serve({ seed });
+      const shim = join(dir, `awk-${awk[0]}`);
+      execFileSync("mkdir", ["-p", shim]);
+      writeFileSync(join(shim, "awk"), `#!/bin/sh\nexec ${awk.map((a) => Bun.which(a) ?? a).join(" ")} "$@"\n`, { mode: 0o755 });
+      const usage = await run(["usage"], { UBI_OWNER: "t1", PATH: `${shim}:${process.env.PATH ?? "/usr/bin:/bin"}` });
+      expect({ awk: awk.join(" "), code: usage.code, stderr: usage.stderr }).toEqual({ awk: awk.join(" "), code: 0, stderr: "" });
+      tables.push(usage.stdout);
+      mock?.stop();
+    }
+    expect(tables[0]).toMatch(/^t1\s+2\s+24\s+\(you\)$/m);
+    expect(new Set(tables).size).toBe(1);
   });
 });
 

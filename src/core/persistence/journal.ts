@@ -15,6 +15,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { backgroundPaused, backgroundWorktreeInactive, declaredBackground, readBackgroundPauseShare, resolveAdmissionOrigin, type AdmissionOrigin } from './admission-origin.ts';
 import { EFFECT_BYTES_SQL, RECEIPT_RESERVATION_FLOOR, receiptReservation, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
 import { writeHealth, type WriteHealthFacts } from './health.ts';
+import { OWNER_READ_BUDGET_MS, startOwnerRead } from './owner-activity.ts';
 import { assertBackgroundOwner } from './owner-verification.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
@@ -25,7 +26,7 @@ import { classifyHolderLiveness, syncLockId } from '../db-lock.ts';
 import { publicFailureDetail } from './publication-failure.ts';
 import { catalogueError } from '../error-catalogue.ts';
 import { ACTIVE_REFRESH_STATES_SQL, refreshFenceClear } from './worktree-refresh-schema.ts';
-import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, declarePersistenceProtocol, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
+import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, declarePersistenceProtocol, isPersistenceDeclaration, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertGraduationAdmission } from './graduation-custody.ts';
 import { schemaAdmissionRefusal } from './schema-admission.ts';
 import { CAPACITY_VERIFY } from './capacity-verify.ts';
@@ -106,6 +107,27 @@ export function capacityError(resource: string, outstanding?: { used: number; li
     'Inspect writer status and configured persistence limits. Existing requests retain their reserved completion space.');
   if (outstanding) error.detail = outstandingCapacityDetail(outstanding.used, outstanding.limit);
   return error;
+}
+/**
+ * #8368: the outstanding-request refusal for `row`, or null when the write may be admitted. The local CLI principal is
+ * shared by every source's sync and maintenance on the host, so one source's requests that never settle could hold the
+ * whole principal cap and starve every other source. At that cap, a source holding less than its fair share (the cap
+ * divided by the sources holding outstanding requests on the principal, this one included) is still admitted; the brain
+ * cap and every other principal's cap stay hard. The share is checked before the admission, so a sync publication group
+ * larger than the share is admitted whole and a source passes its share by at most one group. A refusal names the source
+ * holding the most slots.
+ */
+async function outstandingRefusal(tx: SqlEngine, row: Counter, principal: Principal, sourceId: string, need: number, limit: number): Promise<OperationError | null> {
+  const used = Number(row.outstanding_count);
+  if (used + need <= limit) return null;
+  if (row.key === 'brain' || principal.kind !== 'local_cli') return capacityError(`${row.key === 'brain' ? 'brain' : 'principal'} outstanding requests`, { used, limit });
+  const holders = await tx.executeRaw<{ source_id: string; n: number | string }>(`SELECT source_id,count(*) AS n FROM persistence_requests
+    WHERE principal_kind=$1 AND principal_id=$2 AND state IN ('queued','running','recovering') GROUP BY source_id ORDER BY count(*) DESC,source_id`, [principal.kind, principal.id]);
+  const own = Number(holders.find(holder => holder.source_id === sourceId)?.n ?? 0);
+  const sources = holders.length + (own > 0 ? 0 : 1);
+  if (sources > 1 && own < Math.floor(limit / sources)) return null;
+  const top = holders[0];
+  return capacityError(`principal outstanding requests${top ? ` (source ${top.source_id} holds ${Number(top.n)})` : ''}`, { used, limit });
 }
 /**
  * #6696 (A6): a cumulative cap refusal is `write_quota_exhausted` (host only;
@@ -241,7 +263,7 @@ export function assertReplayIntent(row: WriteRequest, expectedDigest: string): W
   return row;
 }
 export async function admitWrite(engine: BrainEngine, input: WriteAdmission, overrides?: Partial<JournalLimits>,
-  transaction: <T>(fn: (tx: BrainEngine) => Promise<T>) => Promise<T> = fn => engine.transaction(fn)): Promise<WriteRequest> {
+  transaction: <T>(fn: (tx: BrainEngine) => Promise<T>) => Promise<T> = fn => engine.transaction(fn, { pipelineFirst: isPersistenceDeclaration })): Promise<WriteRequest> {
   const { requestId, apply } = await prepareAdmission(engine, input, overrides);
   // #6355: a lent connection (the consumer's warm lane) whose session dropped is dead for every later attempt, so the
   // re-run takes a transaction from the engine's pool after the pool itself is rebuilt.
@@ -250,7 +272,7 @@ export async function admitWrite(engine: BrainEngine, input: WriteAdmission, ove
     const brain = await declareDurablePersistence(tx, `${Math.min(100, remaining)}ms`, `${remaining}ms`);
     if (input.brainId !== undefined && brain !== input.brainId) throw new PreadmitBrainChanged();
     return apply(tx);
-  }), undefined, async error => { run = fn => engine.transaction(fn); await engine.reconnect({ error }); });
+  }), undefined, async error => { run = fn => engine.transaction(fn, { pipelineFirst: isPersistenceDeclaration }); await engine.reconnect({ error }); });
 }
 /** Caller owns the transaction and retries its entire unit of work after rollback. */
 export async function admitWriteInTransaction(tx: BrainEngine, input: WriteAdmission, overrides?: Partial<JournalLimits>): Promise<WriteRequest> {
@@ -305,8 +327,8 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
     if (input.targetKind === 'skill_bundle') await assertSharedSkillPersistence(tx, input.sourceId);
     for (const row of counters) {
       const brain = row.key === 'brain';
-      const outstandingLimit = brain ? limits.brainOutstanding : limits.principalOutstanding;
-      if (Number(row.outstanding_count) + 1 > outstandingLimit) throw capacityError(`${brain ? 'brain' : 'principal'} outstanding requests`, { used: Number(row.outstanding_count), limit: outstandingLimit });
+      const outstanding = await outstandingRefusal(tx, row, input.principal, input.sourceId, 1, brain ? limits.brainOutstanding : limits.principalOutstanding);
+      if (outstanding) throw outstanding;
       if (Number(row.intent_bytes) + bytes > (brain ? limits.brainIntentBytes : limits.principalIntentBytes)) throw capacityError(`${brain ? 'brain' : 'principal'} intent bytes`);
       const scope = brain ? 'brain' : 'principal';
       if (Number(row.lifetime_ids) + 1 > limits[`${scope}LifetimeIds`]) throw await cumulativeCapacityError(tx, `${scope} permanent request IDs`,
@@ -389,8 +411,8 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
     const bytes = fresh.reduce((sum, item) => sum + item.bytes, 0), terminalBytes = fresh.reduce((sum, item) => sum + item.terminalBytes, 0);
     for (const row of counters) {
       const brain = row.key === 'brain', scope = brain ? 'brain' : 'principal';
-      const outstandingLimit = brain ? limits.brainOutstanding : limits.principalOutstanding;
-      if (Number(row.outstanding_count) + fresh.length > outstandingLimit) throw capacityError(`${scope} outstanding requests`, { used: Number(row.outstanding_count), limit: outstandingLimit });
+      const outstanding = await outstandingRefusal(tx, row, first.principal, first.sourceId, fresh.length, brain ? limits.brainOutstanding : limits.principalOutstanding);
+      if (outstanding) throw outstanding;
       if (Number(row.intent_bytes) + bytes > (brain ? limits.brainIntentBytes : limits.principalIntentBytes)) throw capacityError(`${scope} intent bytes`);
       if (Number(row.lifetime_ids) + fresh.length > limits[`${scope}LifetimeIds`]) throw await cumulativeCapacityError(tx, `${scope} permanent request IDs`,
         row.key, `${scope}LifetimeIds`, Number(row.lifetime_ids), limits[`${scope}LifetimeIds`]);
@@ -425,28 +447,52 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
  */
 /**
  * The publication group key of a request: a bulk sync's `intent.group`, the
- * batch id of a `put_pages` child (`intent.page_batch.id`, #6007), or the
- * batch id of a managed file import (`intent.import_batch`). Null when it
- * publishes alone.
+ * batch id of a `put_pages` child or of an `add_timeline_entry` admitted in
+ * the same batch (`intent.page_batch.id`, #6007), the batch id of a managed
+ * file import (`intent.import_batch`), the batch id of a maintenance run's
+ * page publications (`intent.maintenance_batch`, G6), or the activation id of
+ * a managed atom generation (its page members and its activation, G6). Null
+ * when it publishes alone. GROUP_KEY_SQL below is the same function in SQL.
+ *
+ * Every key is an independent group (`independentGroup`): one member's failure
+ * never cancels another. A maintenance batch is a set of unrelated page
+ * rewrites. An atom generation is already published one request at a time and
+ * crash-tolerant member by member (generations/managed.ts): creates land before
+ * the activation (an activation that never happens leaves orphan candidates),
+ * and overwrite and retire members each refuse unless pending on the live
+ * activated generation, a crash between them resuming on the next run. So a
+ * generation may activate with some members still pending; a member that fails
+ * in its group publishes or fails alone, exactly as it would ungrouped.
  */
 export function publicationGroupKey(row: Pick<WriteRequest, 'operation' | 'intent'>): string | null {
   if (typeof row.intent?.group === 'string') return `sync:${row.intent.group}`;
-  if (row.operation !== 'put_page') return null;
-  if (row.intent?.kind === 'managed_file_import') return typeof row.intent.import_batch === 'string' ? `import:${row.intent.import_batch}` : null;
+  const kind = row.intent?.kind;
+  if (row.operation === 'submit_job') {
+    if (kind === 'managed_maintenance_page') return typeof row.intent!.maintenance_batch === 'string' ? `maintenance:${row.intent!.maintenance_batch}` : null;
+    const atom = kind === 'managed_atom_page' || kind === 'managed_atom_delete'
+      || kind === 'managed_generation_activate' && (row.intent!.key as { kind?: unknown } | undefined)?.kind === 'atom';
+    return atom && typeof row.intent!.activationId === 'string' ? `generation:${row.intent!.activationId}` : null;
+  }
+  if (row.operation === 'put_page' && kind === 'managed_file_import') return typeof row.intent!.import_batch === 'string' ? `import:${row.intent!.import_batch}` : null;
+  if (row.operation !== 'put_page' && row.operation !== 'add_timeline_entry') return null;
   const batch = row.intent?.page_batch as { id?: unknown } | undefined;
-  return !row.intent?.kind && typeof batch?.id === 'string' ? `batch:${batch.id}` : null;
+  return !kind && typeof batch?.id === 'string' ? `batch:${batch.id}` : null;
 }
-/** Groups whose members are independent page writes: one member's failure never cancels the others. */
+/** Groups whose members are independent page writes: one member's failure never cancels the others (see publicationGroupKey). */
 export function independentGroup(key: string | null): boolean {
-  return key !== null && (key.startsWith('batch:') || key.startsWith('import:'));
+  return key !== null && ['batch:', 'import:', 'maintenance:', 'generation:'].some(prefix => key.startsWith(prefix));
 }
 /** #6712: a bulk managed-sync group key; such a group claims up to its admitted size (63 followers) and prepares four members at a time. */
 export function syncGroup(key: string | null): boolean {
   return key !== null && key.startsWith('sync:');
 }
-const GROUP_KEY_SQL = `CASE WHEN intent ? 'group' THEN 'sync:'||(intent->>'group')
+/** publicationGroupKey in SQL, over a persistence_requests row (test/git-door-g6-publication-groups.test.ts holds them equal). */
+export const GROUP_KEY_SQL = `CASE WHEN jsonb_typeof(intent->'group')='string' THEN 'sync:'||(intent->>'group')
+  WHEN operation='submit_job' AND intent->>'kind'='managed_maintenance_page' AND jsonb_typeof(intent->'maintenance_batch')='string' THEN 'maintenance:'||(intent->>'maintenance_batch')
+  WHEN operation='submit_job' AND (intent->>'kind' IN ('managed_atom_page','managed_atom_delete')
+    OR intent->>'kind'='managed_generation_activate' AND intent->'key'->>'kind'='atom') AND jsonb_typeof(intent->'activationId')='string' THEN 'generation:'||(intent->>'activationId')
   WHEN operation='put_page' AND intent->>'kind'='managed_file_import' AND jsonb_typeof(intent->'import_batch')='string' THEN 'import:'||(intent->>'import_batch')
-  WHEN operation='put_page' AND NOT (intent ? 'kind') AND jsonb_typeof(intent->'page_batch'->'id')='string' THEN 'batch:'||(intent->'page_batch'->>'id') END`;
+  WHEN operation IN ('put_page','add_timeline_entry') AND NOT (intent ? 'kind') AND jsonb_typeof(intent->'page_batch'->'id')='string' THEN 'batch:'||(intent->'page_batch'->>'id') END`;
 export async function claimGroupFollowers(engine: BrainEngine, head: WriteRequest, group: string, max: number, leaseMs = 30_000): Promise<WriteRequest[]> {
   if (!head.worktree_id || max <= 0) return [];
   return engine.transactionDirect(async tx => {
@@ -731,7 +777,7 @@ export async function claimNextWrite(engine: BrainEngine, hostId: string, leaseM
         CASE WHEN ${SYNC_KIND('persistence_requests')} THEN (SELECT max(sequence) FROM persistence_requests)::text END AS seen_sequence`,
     [row.id, token, leaseMs, claimPhaseStamp(startClaimPhase(), token)]);
     return claimed ? { ...claimed, previous_claim_phase: row.claim_phase } : null;
-  });
+  }, { pipelineFirst: isPersistenceDeclaration });
 }
 /**
  * #5984 lanes: claims the head of the next admitted group of lane run `run` in
@@ -914,6 +960,9 @@ export async function completeWrite(tx: SqlEngine, row: WriteRequest, state: 'co
     `The journal row of request ${row.request_id} in source ${row.source_id} disappeared before its completion was recorded, so no outcome was saved. Inspect the source's requests with the command in fix before submitting anything again.`,
     { fix: ownerStatusFix(row.source_id) });
   if (isTerminal(current)) return current;
+  // G7b: a strict write whose door commit landed before its row keeps naming that commit when it ends without committing.
+  const landed = (current.outcome as { persistence?: { landed_before_row?: boolean } } | null)?.persistence;
+  if (state !== 'committed' && landed?.landed_before_row === true && !('persistence' in outcome)) outcome = { ...outcome, persistence: landed };
   if (row.execution_token !== current.execution_token) throw opError('write_claim_lost', 'Write claim changed before completion.',
     `Another owner pass claimed request ${row.request_id} in source ${row.source_id} before this pass recorded its outcome, so this pass's completion was discarded; the current claim records the final outcome. Inspect the request with the command in fix instead of resubmitting it.`,
     { fix: requestInspectFix(row) });
@@ -1219,10 +1268,14 @@ export async function writeHealthFacts(engine: BrainEngine, rows: WriteRequest[]
     ) head ON true`, [roots], { signal: engine.kind === 'postgres' ? abort.signal : undefined })
     .catch(() => null).finally(() => { if (healthQueries.get(engine) === query) healthQueries.delete(engine); });
   healthQueries.set(engine, query);
+  // GBRA-248: owner facts read beside the head facts, inside the same 500 ms budget.
+  const ownerReadStarted = performance.now();
+  const settleOwners = startOwnerRead(engine, pending.flatMap(row => row.worktree_id ? [row.worktree_id] : []));
   let timer: ReturnType<typeof setTimeout> | undefined;
   const facts = await Promise.race([query, new Promise<null>(resolve => {
-    timer = setTimeout(() => { abort.abort(); resolve(null); }, 500);
+    timer = setTimeout(() => { abort.abort(); resolve(null); }, OWNER_READ_BUDGET_MS);
   })]).finally(() => { if (timer) clearTimeout(timer); });
+  const owners = await settleOwners(facts ? OWNER_READ_BUDGET_MS - (performance.now() - ownerReadStarted) : 0) ?? new Map();
   if (!facts) return result;
   const byRoot = new Map(facts.map(fact => [fact.root, fact]));
   for (const row of pending) {
@@ -1230,10 +1283,12 @@ export async function writeHealthFacts(engine: BrainEngine, rows: WriteRequest[]
     if (!fact) continue;
     // #5984 Phase 4.5: a foreground write publishing beside running lane groups (claimed sync jobs) is not waiting on them.
     const head = row.state === 'queued' ? fact.sequence : row.worktree_id && row.operation !== 'submit_job' ? fact.started_unlaned : fact.started_sequence;
+    const owner = row.worktree_id ? owners.get(row.worktree_id) : undefined;
     result.set(row.id, { observed_at, recovery_required: fact.recovery_required,
       owner_unavailable: fact.owner_unavailable,
       inspect_owner: fact.inspect_owner,
-      earlier_write: head != null && BigInt(head) < BigInt(row.sequence) });
+      earlier_write: head != null && BigInt(head) < BigInt(row.sequence),
+      ...(owner ? { owner } : {}) });
   }
   return result;
 }

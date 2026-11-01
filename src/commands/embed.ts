@@ -2,7 +2,7 @@ import { jsonRequested } from '../core/cli-force-exit.ts';
 import { prepareProseChunks } from '../core/markdown-chunks.ts';
 import type { FenceChunkOverlay } from '../core/eligibility/fence-overlay.ts';
 import { prepareEmbeddingProjections, countArchivedEmbeddingWork, reportBlockedProjections } from '../core/embedding-readiness.ts';
-import { embedStaleFacts, type EmbedFactsResult } from '../core/embed-facts.ts';
+import { embedStaleFacts, refusedFactsLine, type EmbedFactsResult } from '../core/embed-facts.ts';
 import { embedTakesForStaleDrain, type EmbedTakesResult } from '../core/embed-takes.ts';
 import { parseFactEmbedArgs } from './embed-facts-delegate.ts';
 import { readProjectionSnapshot, installPageProjection, installPageEmbeddings, PageProjectionConflictError, retryProjectionConflict } from '../core/page-state/projections.ts';
@@ -16,6 +16,7 @@ import { carryChunkMetadata, probeEmbedder, resolveProvenanceStamp, stampIfPageP
 import type { StaleImageSweepResult } from '../core/embed-stale-images.ts';
 import { resolveMaxChunkTokens } from '../core/embedding-input-limit.ts';
 import { healOversizedPageChunks, healedChunksToStaleRows } from '../core/embed-oversize-heal.ts';
+import { acquirePageEmbeddingLease, stillPendingChunks } from '../core/page-embedding-lease.ts';
 import { healAndReportOverLength, isSingleInputOverLengthError, statusFromCause } from '../core/embed-overlength-heal.ts';
 import {
   createEmbedStallWatchdog,
@@ -27,7 +28,7 @@ import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts'
 import { StaleChunkProgress } from '../core/embed-stale-progress.ts';
 import { assertEmbeddingEnabled } from '../core/embedding-dim-check.ts';
 import { writeCliError } from '../cli/cli-error.ts';
-import { countRestampOnlyChunks, invalidateStaleSignatureEmbeddingsGuarded } from '../core/embedding-invalidation.ts';
+import { countRestampOnlyChunks, hasSignatureDrift, invalidateStaleSignatureEmbeddingsGuarded } from '../core/embedding-invalidation.ts';
 import { contentDriftSweepLine, runContentDriftSweep, type ContentDriftSweepStatus } from '../core/content-drift-sweep.ts';
 import { loadConfig, type GBrainConfig } from '../core/config.ts';
 import { slog, serr } from '../core/console-prefix.ts';
@@ -896,6 +897,7 @@ export async function runEmbed(engine: BrainEngine, args: string[], selectedConf
   if (args.includes('--facts')) {
     const result = await embedStaleFacts(engine, parseFactEmbedArgs(args), selectedConfig);
     if (!jsonRequested(args)) console.log(JSON.stringify(result, null, 2));
+    if (result.refused_oversized) serr(refusedFactsLine(result)!);
     return result;
   }
   // Keyless clean refusal — see isKeylessStaleRefusal. Checked BEFORE the
@@ -1765,26 +1767,22 @@ async function embedAllStale(
   // stale selector excludes them, so NULLing them here (the migrate
   // embeddings drain path included) would be permanent loss.
   //
-  // #4283: NULLing is conditional on a WORKING embedder. The drift pre-count
+  // #4283: NULLing is conditional on a WORKING embedder. The drift pre-check
   // keeps the probe's one embed call off the no-drift common path; a failed
   // probe (bad key, unreachable provider, wrong-dims model) skips the
   // invalidation so a misresolved config can't strip vectors it can never
   // replace. validateEmbeddingCreds at runEmbedCore entry is a static env
   // check only — the probe is the live proof.
   if (!dryRun && signature) {
-    let signatureDrift = 0;
+    let drifted = false;
     try {
-      const sources = await engine.executeRaw<{ id: string }>('SELECT id FROM sources WHERE NOT archived AND ($1::text IS NULL OR id=$1) ORDER BY id', [sourceId ?? null]);
-      for (const source of sources) {
-        const wide = await engine.countStaleChunks({ sourceId: source.id, signature, ...(includeNullSig && { includeNullSignature: true }) });
-        const nullOnly = await engine.countStaleChunks({ sourceId: source.id });
-        signatureDrift += wide - nullOnly;
-      }
+      // #7148: one page-first EXISTS, never a count over every chunk, so a timeout can no longer read as "no drift".
+      drifted = await hasSignatureDrift(engine, { signature, ...(sourceId && { sourceId }), ...(includeNullSig && { includeNullSignature: true }) });
     } catch {
-      // Pre-count is best-effort; fall through as "no drift" (no NULLing).
+      // Pre-check is best-effort; fall through as "no drift" (no NULLing).
     }
     let invalidated = 0;
-    if (signatureDrift > 0) {
+    if (drifted) {
       const probeOk = await probeEmbedder(
         (texts, fnOpts) => embedBatchWithBackoff(texts, { abortSignal: fnOpts.abortSignal }),
         signature,
@@ -1801,7 +1799,7 @@ async function embedAllStale(
         });
       } else {
         serr(
-          `  [embed] WARNING: ${signatureDrift} chunk(s) drifted from signature ${signature} but the ` +
+          `  [embed] WARNING: embedded chunk(s) drifted from signature ${signature} but the ` +
           `embedder probe failed — SKIPPING invalidation (existing vectors preserved). ` +
           `Check embedding provider config/credentials.`,
         );
@@ -1822,20 +1820,23 @@ async function embedAllStale(
     // brain, so an unaffected run stays quiet.
     if (!includeNullSig) {
       try {
-        const wide = await engine.countStaleChunks({ ...sourceOpt, signature, includeNullSignature: true });
-        const narrow = await engine.countStaleChunks({ ...sourceOpt, signature });
-        // #5527: a NULL-signature page whose vectors already match the current
-        // model, width and text is only missing its stamp, not in another space.
-        const currentSpace = await countRestampOnlyChunks(engine, { signature, sourceId, includeNullSignature: true })
-          - await countRestampOnlyChunks(engine, { signature, sourceId });
-        const leftBehind = wide - narrow - currentSpace;
-        if (leftBehind > 0) {
-          serr(
-            `  [embed] WARNING: ${leftBehind} embedded chunk(s) sit on pages with no recorded ` +
-            `embedding signature and were NOT invalidated — they remain in the previous model's ` +
-            `embedding space. Re-run with --include-null-signature (or use ` +
-            `\`gbrain migrate embeddings\`) to re-embed them.`,
-          );
+        // Only a page with no recorded signature and an embedded chunk can be left behind; without one, skip the counts and the restamp-only md5 scan.
+        if (await hasSignatureDrift(engine, { signature, ...(sourceId && { sourceId }), nullSignatureOnly: true })) {
+          const wide = await engine.countStaleChunks({ ...sourceOpt, signature, includeNullSignature: true });
+          const narrow = await engine.countStaleChunks({ ...sourceOpt, signature });
+          // #5527: a NULL-signature page whose vectors already match the current
+          // model, width and text is only missing its stamp, not in another space.
+          const currentSpace = await countRestampOnlyChunks(engine, { signature, sourceId, includeNullSignature: true })
+            - await countRestampOnlyChunks(engine, { signature, sourceId });
+          const leftBehind = wide - narrow - currentSpace;
+          if (leftBehind > 0) {
+            serr(
+              `  [embed] WARNING: ${leftBehind} embedded chunk(s) sit on pages with no recorded ` +
+              `embedding signature and were NOT invalidated — they remain in the previous model's ` +
+              `embedding space. Re-run with --include-null-signature (or use ` +
+              `\`gbrain migrate embeddings\`) to re-embed them.`,
+            );
+          }
         }
       } catch {
         // The warning probe is best-effort; never break the embed run.
@@ -2079,6 +2080,8 @@ async function embedAllStale(
         try {
           const segmented = await observed(pacer, () => readSegmentedEmbedPage(engine, { sourceId: keySourceId, slug }));
           if (segmented) { await embedSegmented(engine, segmented, result, { dryRun: false, signal: effectiveSignal, signature }); processedPageKeys.add(key); return; }
+          await using lease = await acquirePageEmbeddingLease(engine, stale[0].page_id, { signal: effectiveSignal });
+          if (lease.busy) return;
           // SUP-3874: split legacy oversized chunk_text BEFORE the embed call.
           // `--stale` reuses stored rows; without this, one pre-cap chunk
           // (e.g. a long pre-cap notes page on a 512-token model) fails
@@ -2117,8 +2120,7 @@ async function embedAllStale(
           }
           const selected = new Map(stale.map(c => [c.chunk_index, c]));
           const existing = prepared.chunks;
-          stale = existing.filter(c => selected.get(c.chunk_index)?.chunk_text === c.chunk_text)
-            .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
+          stale = stillPendingChunks(existing, selected);
           if (!stale.length) return;
           const pageRow = prepared.snapshot.page;
           const metered = await meterPageBatch(engine, pageRow, existing.filter(c => !c.embedded_at), { signature, announceHeld: true });
@@ -2146,6 +2148,7 @@ async function embedAllStale(
           // work cannot commit between installation and title-tier demotion.
           const install = await observed(pacer, () => engine.transaction(async tx => {
             await staleOpts?.assertOwned?.(tx);
+            await lease.assertHeld(tx);
             const installed = await installPageEmbeddings(tx, prepared, merged);
             if (stamp && failed === 0) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
             if (failed === 0 && stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);

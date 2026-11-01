@@ -34,13 +34,20 @@ import {
   yamlAliasesWithinLimit,
   yamlBlockError,
 } from './markdown.ts';
-import { isMarkdownFilePath, isSyncable, pruneDir, repoSyncableOptions, slugifyPath } from './sync.ts';
+import { DEFAULT_METAFILE_PAGES_MODE, isMarkdownFilePath, isSyncable, pruneDir, readMetafilePagesMode, repoSyncableOptions, slugifyPath, type MetafilePagesMode } from './sync.ts';
+import { diskMetafileHeads, metafilePagePredicate } from './sync-metafile-pages.ts';
 
 export type { ParseValidationCode };
 
 /** Frontmatter validation is defined only for Markdown page files. */
-export function isFrontmatterScannablePath(path: string): boolean {
-  return isMarkdownFilePath(path) && isSyncable(path, { strategy: 'markdown' });
+export function isFrontmatterScannablePath(path: string, metafilePage?: (path: string) => boolean): boolean {
+  return isMarkdownFilePath(path) && isSyncable(path, { strategy: 'markdown', metafilePage });
+}
+
+/** GBRA-150: `isFrontmatterScannablePath` for paths relative to `root`, where a typed nested metafile is a page under `mode`. */
+export function frontmatterScannableUnder(root: string, mode: MetafilePagesMode = DEFAULT_METAFILE_PAGES_MODE): (path: string) => boolean {
+  const metafilePage = metafilePagePredicate(mode, diskMetafileHeads(root));
+  return path => isFrontmatterScannablePath(path, metafilePage);
 }
 
 export interface AuditFix {
@@ -642,6 +649,7 @@ export async function scanBrainSources(
   opts: ScanOpts = {},
 ): Promise<AuditReport> {
   const sources = await listSources(engine, opts.sourceId);
+  const metafilePages = await readMetafilePagesMode(engine);
   const totals: Partial<Record<ParseValidationCode, number>> = {};
   const recoverabilityTotals: RecoverabilityByCode = {};
   const perSource: PerSourceReport[] = [];
@@ -767,7 +775,7 @@ export async function scanBrainSources(
       break;
     }
 
-    const report = scanOneSource(src.id, src.local_path, opts);
+    const report = scanOneSource(src.id, src.local_path, opts, metafilePages);
     report.db_page_count = dbPageCount;
     perSource.push(report);
     grandTotal += report.total;
@@ -808,17 +816,19 @@ function scanOneSource(
   sourceId: string,
   sourcePath: string,
   opts: ScanOpts,
+  metafilePages: MetafilePagesMode,
 ): PerSourceReport {
   const errorsByCode: Partial<Record<ParseValidationCode, number>> = {};
   const recoverability: RecoverabilityByCode = {};
   const sample: PerSourceReport['sample'] = [];
   const repairable: RepairableReport = { files: 0, by_code: {}, sample: [] };
   const rootResolved = resolve(sourcePath);
+  const scannable = frontmatterScannableUnder(rootResolved, metafilePages);
   let scanned = 0;
   let total = 0;
   let ignoredMissingOpen = 0;
   let interrupted = false;
-  const syncableOptions = repoSyncableOptions(rootResolved, 'markdown');
+  const syncableOptions = { ...repoSyncableOptions(rootResolved, 'markdown'), metafilePage: metafilePagePredicate(metafilePages, diskMetafileHeads(rootResolved)) };
 
   const visitFile = (absPath: string): boolean | void => {
     // Per-file deadline + abort gate. Deadline is the load-bearing
@@ -835,9 +845,10 @@ function scanOneSource(
     // visitDir is consulted from walkDir directly (passed below). The
     // per-file visit closure doesn't need it.
     const relPath = relative(rootResolved, absPath);
-    // Apply both contracts: Markdown-only frontmatter scanning and
+    // Apply both contracts: Markdown-only frontmatter scanning (multimodal sync
+    // admits images, whose bytes would read as false NULL_BYTES findings) and
     // repository-local .gbrainignore exclusions.
-    if (!isFrontmatterScannablePath(relPath) || !isSyncable(relPath, syncableOptions)) return true;
+    if (!scannable(relPath) || !isSyncable(relPath, syncableOptions)) return true;
     scanned++;
     let content: string;
     try {
@@ -889,7 +900,7 @@ function scanOneSource(
     return true;
   };
 
-  const gitFiles = collectGitVisibleFiles(rootResolved, (rel) => isSyncable(rel, { strategy: 'markdown' }));
+  const gitFiles = collectGitVisibleFiles(rootResolved, scannable);
   if (gitFiles) {
     if (opts.visitDir) opts.visitDir(rootResolved);
     for (const absPath of gitFiles) {

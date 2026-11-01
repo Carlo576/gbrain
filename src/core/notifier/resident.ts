@@ -14,6 +14,7 @@ import { appendFileSync, mkdirSync, statSync, writeFileSync, readFileSync } from
 import { dirname } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { gbrainPath } from '../config.ts';
+import { registerCleanup } from '../process-cleanup.ts';
 import { SYNC_ON_COMMIT_KEY } from '../sync-config-keys.ts';
 import { localHostId } from '../persistence/identity.ts';
 import {
@@ -48,7 +49,8 @@ export function sqlNotifierStore(engine: BrainEngine): NotifierStore {
     liveJobs: async (ids) => new Set((await engine.executeRaw<{ id: unknown }>(
       "SELECT id FROM minion_jobs WHERE id = ANY($1::bigint[]) AND status IN ('waiting','active','delayed','waiting-children','paused')", [ids])).map(r => Number(r.id))),
     forward: async (sourceId, head) => { await upsertMarker(engine, { sourceId, intent: 'freshness', wantedHead: head, requestedBy: 'notifier' }); },
-    settleMarkers: (sourceId, read, run) => settleMarkers(engine, sourceId, read, run),
+    settleMarkers: async (sourceId, read, run) => settleMarkers(engine, sourceId, read,
+      { ...run, checkoutHead: await (await import('./nudge.ts')).checkoutHead(engine, sourceId).catch(() => null) }),
     readStates: (ids) => readNotifierSources(engine, ids),
     writeState: (sourceId, patch) => writeState(engine, sourceId, patch),
     writeCoverage: (sourceId, c) => writeCoverage(engine, sourceId, c),
@@ -134,7 +136,7 @@ export function runnerStart(engine: BrainEngine): Pick<CommitNotifierOptions, 's
       const hard = deadline ? Math.max(1, Math.round(deadline.deadlineMs / 1000)) : 3600;
       const timeoutSeconds = req.sliceSeconds ? Math.min(hard, Math.max(1, Math.round(req.sliceSeconds))) : hard;
       const start = await r.startDelegatedSync(engine, { sourceId, noPull: req.intent !== 'pull', ...(req.intent === 'full' ? { full: true } : {}), timeoutSeconds, origin: 'background' },
-        `on-commit-${randomUUID()}`, { registration: { id: local.id, credential: local.credential, lane: 'cli' } });
+        `on-commit-${randomUUID()}`, { registration: { id: local.id, credential: local.credential, lane: 'cli' }, logLines: true });
       if (start.ok && start.jobId) return { jobId: start.jobId };
       if (start.error === 'busy' || start.error === 'shutting_down') return { busy: true };
       return { refused: String(start.refusal?.message ?? start.error ?? 'refused') };
@@ -142,10 +144,16 @@ export function runnerStart(engine: BrainEngine): Pick<CommitNotifierOptions, 's
     jobStatus: (jobId) => {
       const s = runner?.getDelegatedSyncStatus(jobId);
       if (!s || !s.ok || !s.state) return null;
-      return { state: s.state, ...(s.drain ? { outcome: s.drain.outcome, ...(s.drain.stop_reason ? { reason: s.drain.stop_reason } : {}) } : {}), ...(s.jobError ? { error: s.jobError } : {}) };
+      return { state: s.state, ...(s.drain ? { outcome: s.drain.outcome, committed: s.drain.written + s.drain.waived > 0, ...(s.drain.stop_reason ? { reason: s.drain.stop_reason } : {}) } : {}),
+        ...(s.jobError ? { error: s.jobError } : {}) };
     },
     syncRunning: async () => (await load()).isDelegatedSyncRunning(),
-    drainHeld: async (sourceId) => (await (await import('../persistence/sync-lease.ts')).readDrainHolder(engine, sourceId)) !== null,
+    drainHeld: async (sourceId) => {
+      // #7614: a killed holder's lock row defers nothing; the sync this starts takes its expired lease over.
+      const { holderStalled, readLiveDrainLease } = await import('../persistence/sync-lease.ts');
+      const lease = await readLiveDrainLease(engine, sourceId);
+      return lease === null ? false : holderStalled(lease.holder, lease.db_now) ? 'stalled' : true;
+    },
   };
 }
 
@@ -185,9 +193,14 @@ export function startResidentNotifier(engine: BrainEngine, opts: ResidentNotifie
   const entry = { notifier, resident: opts.resident };
   active = entry;
   const stop = notifier.stop;
+  // GBRA-133 2b-d2: a termination signal the process does not own (SIGTERM/SIGHUP on serve, serve --http, the
+  // autopilot daemon) runs the cleanup pass and exits; stopping here releases the host's notifier lease first, so the
+  // next resident owns it at its first claim instead of after the lease expires. A SIGKILL still waits for expiry.
+  let deregisterCleanup = (): void => {};
   const wrapped: CommitNotifier = Object.assign(Object.create(Object.getPrototypeOf(notifier)), notifier, {
-    stop: async () => { if (active === entry) active = null; await stop(); },
+    stop: async () => { deregisterCleanup(); if (active === entry) active = null; await stop(); },
   });
+  deregisterCleanup = registerCleanup(`commit-notifier:${opts.resident}`, () => wrapped.stop());
   Object.defineProperties(wrapped, {
     enabled: { get: () => notifier.enabled }, owner: { get: () => notifier.owner }, decisions: { get: () => notifier.decisions },
   });
