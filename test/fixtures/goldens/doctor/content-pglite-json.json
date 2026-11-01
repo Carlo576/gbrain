@@ -573,6 +573,7 @@
               "window_days": 1
             },
             "inspected": 2,
+            "outstanding": [],
             "paused_producers": [],
             "resources": [],
             "truncated": false,
