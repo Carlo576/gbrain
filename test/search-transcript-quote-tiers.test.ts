@@ -254,11 +254,12 @@ for (const backend of testBackends()) {
       const slug = 'conversations/probe-literal-summary';
       const literal = neutralizeToolCalls(TOOL_CALL);
       expect(literal).toMatch(/^\[tool call: search, arguments omitted\]$/);
-      await ok('put_page', { slug, content: `${pageContent('conversation')}\n\n**bob-example** (2026-10-01 9:06 AM): earlier result ${literal}` });
+      const words = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`).join(' ');
+      await ok('put_page', { slug, content: `${pageContent('conversation')}\n\n**bob-example** (2026-10-01 9:06 AM): ${words(270)} earlier result ${literal} noted. ${words(500)}.` });
       const stored = (await engine.getPage(slug))!;
-      const chunks = await engine.executeRaw<{ n: number }>(
-        `SELECT count(*)::int AS n FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.slug = $1 AND cc.chunk_text LIKE '%, arguments omitted]%'`, [slug]);
-      expect(chunks[0]!.n).toBe(1);
+      const chunks = await engine.executeRaw<{ chunk_text: string }>(
+        'SELECT cc.chunk_text FROM content_chunks cc JOIN pages p ON p.id = cc.page_id WHERE p.slug = $1', [slug]);
+      expect(chunks.map(c => c.chunk_text.split(literal).length - 1).reduce((a, b) => a + b, 0)).toBe(2);
       const summarized = await ok('get_page', { slug });
       const read = String(summarized.compiled_truth).split('\n').slice(2, -1).join('\n');
       expect(read.split(literal).length - 1).toBe(2);
