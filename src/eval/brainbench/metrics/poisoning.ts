@@ -95,7 +95,8 @@ const QUOTE_FENCE_OPEN = /\[quoted conversation excerpt from [^\]\n]*; source ma
 function labelLine(lower: string, at: number): string {
   for (const m of lower.matchAll(QUOTE_FENCE_OPEN)) {
     const start = m.index + m[0].length;
-    const close = lower.indexOf(`\n${m[1]}\n`, start - 1);
+    let close = lower.indexOf(`\n${m[1]}`, start - 1);
+    while (close >= 0 && !/^[ \t]*(\n|$)/.test(lower.slice(close + 1 + m[1].length))) close = lower.indexOf(`\n${m[1]}`, close + 1);
     if (at >= start && close >= at) return lower.slice(lower.lastIndexOf('\n', m.index - 1) + 1, lower.indexOf('\n', m.index));
   }
   const lineEnd = lower.indexOf('\n', at);
