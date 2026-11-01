@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.532.0] - 2026-11-01
 
 **CI wave 3: a passed full-ci pair can now clear the remote gate without a second full suite on VMs, the import-rate scale gate no longer fails on one stall, an effect pass that loses its database connection gives its claims back at once, and the Ubicloud runner's teardown retries instead of leaking VMs (#7939, #8103, #8096, #7607, #8119).**
 
