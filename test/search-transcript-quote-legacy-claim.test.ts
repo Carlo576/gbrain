@@ -54,7 +54,12 @@ for (const backend of testBackends()) {
     }, 180_000);
     afterAll(async () => { await close?.(); });
 
+    let readBeforeClaim: { content: string; revision: string };
+
     test('before the claim: both legacy pages are unverified and quoted for a remote reader; doctor names the pages and the fix', async () => {
+      const res = await dispatchToolCall(engine, 'get_page', { slug: OWNER.slug, include_content: true }, remote);
+      readBeforeClaim = JSON.parse(res.content[0]!.text);
+      expect(readBeforeClaim.content).toContain(MARKER(OWNER.slug) + '\n```text\n');
       for (const p of [OWNER, AGENT]) {
         const read = await page(p.slug);
         expect([p.slug, read.trust_tier, read.quoted]).toEqual([p.slug, 'unknown', 'transcript']);
@@ -82,6 +87,13 @@ for (const backend of testBackends()) {
       const tiers = (await trustTiersEntry.run({ engine } as unknown as DoctorContext) as Check[])[0]!;
       expect(tiers.message).not.toContain('Remote MCP readers see');
       expect((await trustSourcesUnclaimedEntry.run({ engine } as unknown as DoctorContext) as Check[])[0]!.status).toBe('ok');
+    }, 120_000);
+
+    test('a remote read from before the claim, written back after it, stores the body without the read\'s fence', async () => {
+      const content = readBeforeClaim.content.replace('Legacy owner reference', 'Legacy owner reference (kept)');
+      const res = await dispatchToolCall(engine, 'put_page', { slug: OWNER.slug, content, expected_revision: readBeforeClaim.revision }, remote);
+      expect(res.isError, res.content[0]?.text).not.toBe(true);
+      expect((await engine.getPage(OWNER.slug))!.compiled_truth).toBe(OWNER.body.replace('Legacy owner reference', 'Legacy owner reference (kept)'));
     }, 120_000);
   });
 }

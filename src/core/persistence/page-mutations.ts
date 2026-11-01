@@ -257,7 +257,8 @@ export async function submitPageMutation(ctx: OperationContext,
  * #8042: a remote put_page (put_pages too) of a quoted page's get_page content writes the page body, not the fences
  * get_page added (search/transcript-quote.ts). A fence naming the page is removed when its stored type or the type the
  * new content declares is one get_page quotes (either, so a retype keeps the body), or (GST-687) when the stored page is
- * below the owner's tier, which get_page quotes too; an owner note's own fence-like text is kept.
+ * below the owner's tier, which get_page quotes too; an owner-tier note keeps a fence naming it only when its stored body
+ * already holds one, so a fence read before a claim raised the page's tier is never stored.
  * GST-687: content carrying a tool-call summary that only the neutralized read of the stored chat page holds (get_page's
  * reading shape, fetch) is refused, so a read-then-write never replaces a stored tool call with its summary.
  */
@@ -277,7 +278,13 @@ async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: s
       'Nothing was written. Read the page with get_page include_content: true (its content keeps the stored text) and write that back, or change the page with edit_page.');
   }
   if (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? ''))) return unquoted;
-  return stored && (isQuotedPageType(stored.type) || quotesTier(stored.trust_tier)) ? unquoted : content;
+  if (!stored) return content;
+  if (isQuotedPageType(stored.type) || quotesTier(stored.trust_tier)) return unquoted;
+  // An owner-tier page keeps a fence naming it only when its stored body already holds one: a fence read while the page sat
+  // below the owner's tier (before a claim or backfill raised it, or from a quoted version) is a read's, not the page's.
+  const body = await readStoredBody(engine, sourceId, slug);
+  const storedText = `${body?.compiled_truth ?? ''}\n${body?.timeline ?? ''}`;
+  return body?.compiled_truth != null && unquoteTranscriptText(storedText, slug) === storedText ? unquoted : content;
 }
 
 /**
