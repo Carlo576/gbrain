@@ -77,7 +77,8 @@ async function each(run: (engine: BrainEngine) => Promise<void>) {
 const HYPHEN = 'articles/outlet-example/a-headline-.md';
 const TWIN_LOWER = 'sources/meetings/2026-10-19-call-abcdefghxyz.md';
 const TWIN_MIXED = 'sources/meetings/2026-10-19-call-AbCdEfGhXyZ.md';
-const NESTED_INDEX = 'projects/acme-example/index.md';
+// Fork contract: index.md is authored content (SYNC_SKIP_FILES omits it), so the nested metafile is schema.md.
+const NESTED_INDEX = 'projects/acme-example/schema.md';
 
 test('the slug gbrain folds a trailing hyphen into resolves to the indexed page, not a missing one', () => each(async engine => {
   const s = await source(engine, { [HYPHEN]: note('Headline') });
@@ -123,7 +124,7 @@ test('under the default sync.metafile_pages typed, a typed nested index.md resol
   const s = await source(engine, { [NESTED_INDEX]: '---\ntype: project\nstatus: active\n---\nA synthetic project hub.\n', 'people/README.md': 'Folder notes.\n' });
   await s.sync();
   const [index, readme] = (await s.resolve(NESTED_INDEX, 'people/README.md')).paths;
-  expect(index).toMatchObject({ path: NESTED_INDEX, slug: 'projects/acme-example/index', in_synced_commit: true, skipped: null, hold: null, page: { slug: 'projects/acme-example/index', deleted: false } });
+  expect(index).toMatchObject({ path: NESTED_INDEX, slug: 'projects/acme-example/schema', in_synced_commit: true, skipped: null, hold: null, page: { slug: 'projects/acme-example/schema', deleted: false } });
   expect(['searchable', 'pending_embedding']).toContain(index!.state);
   expect(readme).toMatchObject({ state: 'skipped', page: null, skipped: { reason: 'metafile', typed_frontmatter: false } });
 }), 240_000);

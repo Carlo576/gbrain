@@ -122,7 +122,7 @@ describe('search op — types param (#3985)', () => {
     try {
       await expect(searchOp.handler(ctxOf(), {
         query: 'legacy telescope', source_id: '__all__', types: ['research'],
-      })).rejects.toThrow(/divergent schema packs/i);
+      })).rejects.toThrow(/different schema packs/i);
     } finally {
       await engine.setConfig('schema_pack', 'gbrain-base-v2');
     }

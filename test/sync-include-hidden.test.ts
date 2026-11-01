@@ -122,7 +122,8 @@ describe('sync.ts delta path threads includeHidden (#4027 merge guard)', () => {
   test('the hoisted syncOpts literal carries includeHidden', () => {
     const src = surfaceSource('sync');
     // GBRA-150: the literal also carries the sync.metafile_pages predicate.
-    expect(src).toMatch(/const syncOpts = \{ strategy: opts\.strategy, includeHidden: opts\.includeHidden, metafilePage \}/);
+    // Fork: the literal also spreads repoSyncableOptions (.gbrainignore) first.
+    expect(src).toMatch(/const syncOpts = \{ (?:\.\.\.repoSyncableOptions\(gitContextRoot, opts\.strategy\), )?strategy: opts\.strategy, includeHidden: opts\.includeHidden, metafilePage \}/);
     // The strategy-only form is the regression shape (pre-#4027 master): its
     // reappearance means a merge resolved the hoist without the threading.
     expect(src).not.toMatch(/const syncOpts = opts\.strategy \? \{ strategy: opts\.strategy \} : undefined/);

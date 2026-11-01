@@ -301,10 +301,11 @@ for (const backend of testBackends()) describe(`[${backend}] #8071: rows behind 
     expect(await doctor(engine)).toMatchObject({ name: CHECK, status: 'ok', readiness_state: 'unknown' });
   }, { databaseUrl, setup }), 240_000);
 
+  // Fork contract: index.md is authored content, so the nested typed metafile here is schema.md.
   test('nested typed index pages are screened with one batched head read per batch, not a Git read per page; a large one is read alone', () => managedBrain(async ({ engine, root }) => {
-    for (const dir of ['notes/s1', 'notes/s2', 'notes/s3']) { mkdirSync(join(root, dir), { recursive: true }); writeFileSync(join(root, dir, 'index.md'), note(dir, `The index of ${dir}.`)); }
+    for (const dir of ['notes/s1', 'notes/s2', 'notes/s3']) { mkdirSync(join(root, dir), { recursive: true }); writeFileSync(join(root, dir, 'schema.md'), note(dir, `The index of ${dir}.`)); }
     mkdirSync(join(root, 'notes/big'), { recursive: true });
-    writeFileSync(join(root, 'notes/big/index.md'), note('notes/big', 'A long index line.\n'.repeat(5_000)));
+    writeFileSync(join(root, 'notes/big/schema.md'), note('notes/big', 'A long index line.\n'.repeat(5_000)));
     commit(root, 'indexes');
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
     const trace = join(tmpdir(), `gbrain-rows-behind-trace-${randomUUID()}.log`);
