@@ -60,10 +60,14 @@ export async function takesHiddenFromResult(ctx: OperationContext, op: string, r
   return { pages: [...new Set(withTakes.map(c => c.slug))], count: withTakes.reduce((n, c) => n + c.count, 0) };
 }
 
-/** GST-687: a remote reader gets a claim below the owner's tier (an agent's take, an ingested one) quoted as its page's. */
-function quoteTakes<T extends { claim: string; page_slug: string; trust_tier: string }>(ctx: OperationContext, rows: T[]): Array<T | (T & { quoted: 'transcript' })> {
+/** GST-687: a remote reader gets a claim below the owner's tier (an agent's take, an ingested one) quoted as its page's, with its free-text sources. */
+function quoteTakes<T extends { claim: string; page_slug: string; trust_tier: string; source?: string | null; resolved_source?: string | null }>(ctx: OperationContext, rows: T[]): Array<T | (T & { quoted: 'transcript' })> {
   if (ctx.remote === false) return rows;
-  return rows.map(r => quotesTier(r.trust_tier) ? { ...r, claim: fenceTranscriptText(r.claim, r.page_slug), quoted: 'transcript' as const } : r);
+  return rows.map(r => {
+    if (!quotesTier(r.trust_tier)) return r;
+    const fence = (text: string) => fenceTranscriptText(text, r.page_slug);
+    return { ...r, claim: fence(r.claim), ...(r.source ? { source: fence(r.source) } : {}), ...(r.resolved_source ? { resolved_source: fence(r.resolved_source) } : {}), quoted: 'transcript' as const };
+  });
 }
 
 // --- v0.28: Takes ---

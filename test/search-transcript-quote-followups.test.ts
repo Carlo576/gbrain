@@ -13,7 +13,7 @@ import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { assembleContextPack, assembleTurnContext } from '../src/core/context/turn-context.ts';
 import { makeContextPackIpcHandler } from '../src/mcp/context-pack-handler.ts';
 import { withTrustPromotion } from '../src/core/persistence/context.ts';
-import { printPagedPage, readWholePageMarkdown } from '../src/cli/page-render.ts';
+import { formatGetPage, printPagedPage, readWholePageMarkdown } from '../src/cli/page-render.ts';
 import { fenceTranscriptText } from '../src/core/search/transcript-quote.ts';
 import { createHash } from 'node:crypto';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -22,7 +22,7 @@ import { requirePostgresTestDatabase, testBackends } from './helpers/test-backen
 
 const CODE = {
   title: 'gst8377-alder-prism-1201', frontmatter: 'gst8377-basalt-quiver-1302', body: 'gst8377-cedar-ripple-1403',
-  timeline: 'gst8377-dune-harrow-1504', take: 'gst8377-ember-lattice-1605', fact: 'gst8377-flint-meadow-1706',
+  timeline: 'gst8377-dune-harrow-1504', take: 'gst8377-ember-lattice-1605', fact: 'gst8377-flint-meadow-1706', takeSource: 'gst8377-gale-orchid-1807',
 };
 const OWNER = { timeline: 'gst8377-grove-anchor-2101', take: 'gst8377-hazel-beacon-2202', fact: 'gst8377-iris-cobble-2303' };
 const AGENT_SLUG = 'notes/agent-probe';
@@ -96,7 +96,7 @@ for (const backend of testBackends()) {
       await engine.setConfig('embedding_disabled', 'true');
       await ok('put_page', { slug: AGENT_SLUG, content: `---\ntype: note\ntitle: Probe ${CODE.title}\nsummary_line: Probe ${CODE.frontmatter}\n---\n\nReference for the probe: ${CODE.body}.` });
       await ok('add_timeline_entry', { slug: AGENT_SLUG, date: '2026-10-02', summary: `Probe entry ${CODE.timeline}.` });
-      await ok('takes_add', { slug: AGENT_SLUG, claim: `Probe claim ${CODE.take}`, kind: 'take', holder: 'world' });
+      await ok('takes_add', { slug: AGENT_SLUG, claim: `Probe claim ${CODE.take}`, kind: 'take', holder: 'world', source: `Probe source ${CODE.takeSource}` });
       await ok('remember', { fact: `Probe fact about acme-example: ${CODE.fact}.`, entity: ENTITY_SLUG, provenance: 'follow-up probe' });
       await asOwner(engine, tx => tx.putPage(OWNER_SLUG, { type: 'note', title: 'Owner probe', compiled_truth: 'The owner wrote this.', timeline: '', frontmatter: {} }));
       await asOwner(engine, tx => tx.addTimelineEntry(OWNER_SLUG, { date: '2026-10-02', source: 'owner', summary: `Owner entry ${OWNER.timeline}.`, detail: '' }));
@@ -130,9 +130,11 @@ for (const backend of testBackends()) {
     test('item 2: remote takes_list and takes_search quote an agent-written claim, not the owner\'s', async () => {
       const list = await call('takes_list', {});
       expect(cell(list, CODE.take)).toBe('fenced');
+      expect(cell(list, CODE.takeSource)).toBe('fenced');
       expect(cell(list, OWNER.take)).toBe('raw');
       expect(cell(await call('takes_search', { query: words(CODE.take) }), CODE.take)).toBe('fenced');
       expect(cell(await call('takes_list', {}, local), CODE.take)).toBe('raw');
+      expect(cell(await call('takes_list', {}, local), CODE.takeSource)).toBe('raw');
     }, 120_000);
 
     test('item 3: remote get_page and fetch quote a quoted page\'s title and frontmatter; the round trip stores the page unchanged', async () => {
@@ -150,6 +152,15 @@ for (const backend of testBackends()) {
       const after = await engine.getPage(AGENT_SLUG);
       expect([after!.title, after!.compiled_truth, after!.frontmatter]).toEqual([before!.title, before!.compiled_truth, before!.frontmatter]);
       expect(cell(await ok('get_page', { slug: AGENT_SLUG }, local), CODE.title)).toBe('raw');
+    }, 120_000);
+
+    test('item 3: a thin client\'s get then put of a quoted page stores its title and frontmatter unfenced', async () => {
+      const before = await engine.getPage(AGENT_SLUG);
+      const page = await ok('get_page', { slug: AGENT_SLUG });
+      const printed = formatGetPage(page);
+      await ok('put_page', { slug: AGENT_SLUG, content: printed, expected_revision: page.revision });
+      const after = await engine.getPage(AGENT_SLUG);
+      expect([after!.title, after!.compiled_truth, after!.frontmatter]).toEqual([before!.title, before!.compiled_truth, before!.frontmatter]);
     }, 120_000);
 
     test('item 4: a reading shape of a chat page holding a call and a literal summary of it is refused as a write', async () => {

@@ -18,8 +18,8 @@ Before, #8367 left `chronicle_day`, `chronicle_since`, `chronicle_on_this_day`, 
 
 ### Itemized changes
 
-- Chronicle reads quote each timeline row by its own page; `takes_list` and `takes_search` quote claims below the owner's tier.
-- Remote `get_page` and `fetch` quote a quoted page's title and every frontmatter string; `include_content` and fetch `text` fence the whole serialized markdown, and the `put_page` round trip still stores the page unchanged.
+- Chronicle reads quote each timeline row's summary and detail by its own page; `takes_list` and `takes_search` quote a claim below the owner's tier and its free-text `source` and `resolved_source`.
+- Remote `get_page` and `fetch` quote a quoted page's title and every frontmatter string; `include_content` and fetch `text` fence the whole serialized markdown, and the `put_page` round trip still stores the page unchanged. A thin client's `gbrain get` then `gbrain put`, or an agent that rebuilds the markdown from `title` and `frontmatter`, stores the title and frontmatter without the fences. Titles on search rows and context cards, and a chronicle entry's `kind`, are still returned as stored.
 - A thin client's paged `gbrain get` of a quoted page (above the inline limit) prints the page, and its `--json` content, inside one quote fence after verifying size and sha256.
 - The per-turn push hook and the pushed context pack quote hot and entity facts below the owner's tier; a fact injected before this change is not injected again.
 - `context_pack` counts the entity facts it withholds when the quote lookup fails (`suppressed`) instead of dropping them silently.

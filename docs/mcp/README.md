@@ -134,7 +134,7 @@ notes" (written by an agent, tool data, external, or unverified origin) comes
 back quoted on search, `query`, `recall`, `assemble_evidence`, `get_page`
 (title and frontmatter included; `include_content` fences the whole markdown),
 `fetch`, `get_timeline`, `chronicle_day`, `chronicle_since`,
-`chronicle_on_this_day`, `volunteer_chronicle`, `takes_list`, `takes_search`,
+`chronicle_on_this_day`, `volunteer_chronicle`, `takes_list`, `takes_search` (claim and source),
 `get_chunks`, `search_exact`, `get_versions`, `known_as_of`, `think`'s extractive
 answer, `context_pack`, hot memory and write receipts. The context gbrain's
 hooks inject (the per-turn hook and the pushed context pack) quotes facts below
@@ -143,7 +143,9 @@ timeline entry an agent copies back from a quoted read into `remember` or
 `add_timeline_entry` is stored without the fence. A note saved before gbrain
 tracked trust reads as unverified, so it is quoted until the owner runs
 `gbrain trust claim-sources` or `gbrain trust backfill` (`gbrain doctor` names how
-many pages that is). Local reads are unchanged.
+many pages that is). Page titles are quoted on `get_page` and `fetch` only:
+search rows and context cards return them as stored, and so is a chronicle
+entry's `kind`. Local reads are unchanged.
 
 `effective_date` is the page's own date and `effective_date_source` says
 which kind: `date`, `published` or `filename` is a document date,
