@@ -18,7 +18,7 @@
  * test/e2e/fence-census-postgres.test.ts (a second session holds a real open
  * transaction). Synthetic content only.
  */
-import { afterAll, beforeAll, describe, expect, setSystemTime, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, setSystemTime, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -90,6 +90,7 @@ for (const backend of backends) {
     }, 120_000);
 
     afterAll(async () => { await close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+    afterEach(() => { setSystemTime(); });
 
     async function source(files: Record<string, string> | null, opts: { git?: boolean } = {}) {
       const id = `cen-${randomUUID().replace(/-/g, '').slice(0, 12)}`;

@@ -12,7 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [Unreleased]
 
-**Master's fence-census suite passes again after the 2026 DST fallback.** The test 'the incremental pass in batches of one reads every page across a DST fallback in the session time zone' wrote fixed `updated_at` values in the 2026-11-01 New York fallback hour. The census only reads pages updated at or after its watermark (the database clock minus two minutes), so once the clock passed about 05:18Z on 2026-11-01 those pages fell behind the watermark, and the test has failed on every run since. It now uses the next fallback that is still ahead of the database clock and asserts that the four instants read 01:20-04, 01:40-04, 01:10-05 and 01:30-05 in the session time zone, so the DST coverage can't quietly disappear. It also runs with the clock pinned inside the 2026 and 2027 fallback hours.
+**Master's fence-census suite passes again after the 2026 DST fallback.** The test 'the incremental pass in batches of one reads every page across a DST fallback in the session time zone' wrote fixed `updated_at` values in the 2026-11-01 New York fallback hour. The census only reads pages updated at or after its watermark (the database clock minus two minutes), so once the clock passed about 05:22Z on 2026-11-01 those pages began falling behind the watermark, and the test has failed on every run since. It now uses the next fallback that is still ahead of the database clock and asserts that the four instants read 01:20-04, 01:40-04, 01:10-05 and 01:30-05 in the session time zone, so the DST coverage can't quietly disappear. It also runs with the clock pinned inside the 2026 and 2027 fallback hours.
 
 ### Itemized changes
 
