@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.533.0] - 2026-11-01
+## [0.60.534.0] - 2026-11-01
 
 **Merge train S: five sync, refresh and maintenance fixes land in one release.** Page writes create a missing source folder and name a missing checkout (#8106). A diverged managed checkout can publish itself on opt-in, and every refresh fetch is logged (#8102). Sync-lane wave 2 repairs quoted fence markers, releases agreeing file-drift holds, syncs plain directories and retires former-binding effects (#8077). The `synthesize` phase survives a local writer replace (#8111). A door commit during a refresh is waited out instead of failing the refresh as `refresh_dirty` (#8117).
 
@@ -110,6 +110,15 @@ A page that quotes a facts or takes marker in prose was held `invalid_fence` as 
 
 - `src/core/persistence/worktree-refresh.ts`: `fenceAndMerge` takes the checkout's commit lock (`brain-commit.lock` plus the legacy push lock, waiting `GBRAIN_COMMIT_LOCK_WAIT_SECONDS`, default 60) from the HEAD check through the merge. A lock still held past that wait aborts the fenced refresh as retryable `commit_lock_busy`. A git process outside the lock that holds `.git/index.lock` gets three short retries, then a retryable `git_index_locked` refusal instead of the caller-class `refresh_dirty`. Either way HEAD is unchanged and the next run starts fresh.
 - Test: `test/worktree-refresh-index-lock-8117.test.ts`.
+
+## [0.60.533.0] - 2026-11-01
+
+**A delegated sync no longer reports `done` while it is still finishing.** The serve's sync runner published `done` before it re-checked the wanted markers and scheduled the deferred embeds. A client polling in that window saw a finished job with no embed backlog queued yet, and a second `sync_start` could begin while the first run was still settling its markers. Since #7941 the marker re-check also reads the checkout HEAD through git, which widened the window enough to fail `test/serve-sync-runner.serial.test.ts` intermittently on master (#8354). Both lanes (the shared-secret lane and the verified lane) now set `done` only after those steps, and a deadline or client abort that arrives after the run has finished no longer marks it `aborting`.
+
+### Itemized changes
+
+- `src/core/serve-sync-runner.ts`: `job.state = 'done'` moves after `settleRunMarkers` and `scheduleDeferredSyncEmbeds` in both lanes (#8354); the deadline and `sync_abort` skip a job whose run already returned its result.
+- `test/serve-sync-runner.serial.test.ts`: a probe slows the post-run marker read and checks that `done` is only visible once the markers have settled and the deferred embeds are pending; a second probe aborts during that settle and checks the job still ends `done`. Both fail without the fix.
 
 ## [0.60.532.0] - 2026-11-01
 
