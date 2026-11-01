@@ -551,11 +551,13 @@ export function unquoteFactText(text: string): string {
 function unquoteMarked(text: string, find: (from: number) => { i: number; length: number } | null, unclosed = false): string {
   let out = '';
   let at = 0;
+  const work = { left: 2 * text.length + 1 };
   for (let found = find(0); found; found = find(at)) {
     const { i, length } = found;
     const open = /^(`{3,})text\n/.exec(text.slice(i + length));
     const start = i + length + (open?.[0].length ?? 0);
-    const close = open ? closingLine(text, start, open[1]) : null;
+    const close = open ? closingLine(text, start, open[1], work, true) ?? closingLine(text, start, open[1], work, false) : null;
+    if (close === 'spent') break;
     if (!close && unclosed && open && at === 0 && !text.slice(0, i).trim()) return text.slice(start);
     if (!close) { out += text.slice(at, i + length); at = i + length; continue; }
     out += (unclosed && at === 0 && !text.slice(0, i).trim() ? '' : text.slice(at, i)) + text.slice(start, close.end);
@@ -568,17 +570,21 @@ function unquoteMarked(text: string, find: (from: number) => { i: number; length
  * #8384: where the quote fence opened at `start` closes: the first line that is exactly `fence` (trailing blanks allowed,
  * or the next quote's marker right after it, as concatenated windows join) outside a code block the text opens itself,
  * so an agent's added block (```js … ```) is kept whole. A host's quoted text never holds a backtick run as long as its
- * fence, so a line of exactly `fence` inside a shorter or tilde block (an unclosed one in a cut window too) still closes it.
- * `end` is the newline before that line and `after` the end of the fence and its blanks.
+ * fence, so a line of exactly `fence` inside a shorter backtick block still closes it; a tilde block holds it only while
+ * `tilde` is set, and the caller searches again without it when the text leaves one unclosed (a host's cut window).
+ * `end` is the newline before that line and `after` the end of the fence and its blanks. Every search of one text shares
+ * `work` (twice the text's length): closes found are disjoint, so only fences that never close spend it twice, and past
+ * it ('spent') the rest of the text is kept as written, so hostile content of many unclosed markers stays linear.
  */
-function closingLine(text: string, start: number, fence: string): { end: number; after: number } | null {
+function closingLine(text: string, start: number, fence: string, work: { left: number }, tilde: boolean): { end: number; after: number } | null | 'spent' {
   let inner: { char: string; length: number } | null = null;
   for (let pos = start; pos <= text.length;) {
     const nl = text.indexOf('\n', pos);
     const line = text.slice(pos, nl < 0 ? text.length : nl);
+    if ((work.left -= line.length + 1) < 0) return 'spent';
     const bare = /^(`{3,}|~{3,})[ \t]*\r?$/.exec(line);
     const closes = bare?.[1] === fence || line.startsWith(`${fence}${MARKER_START}`);
-    if (pos > start && closes && (!inner || inner.char !== '`' || inner.length < fence.length)) return { end: pos - 1, after: pos + (bare ? line.replace(/\r$/, '').length : fence.length) };
+    if (pos > start && closes && (!inner || (inner.char === '`' ? inner.length < fence.length : !tilde))) return { end: pos - 1, after: pos + (bare ? line.replace(/\r$/, '').length : fence.length) };
     const run = /^(`{3,}|~{3,})/.exec(line)?.[1];
     if (inner) { if (bare && bare[1][0] === inner.char && bare[1].length >= inner.length) inner = null; }
     else if (run && !(run[0] === '`' && line.slice(run.length).includes('`'))) inner = { char: run[0], length: run.length };

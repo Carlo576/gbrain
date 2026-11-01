@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { __resetBackupNoticeForTests, dispatchToolCall } from '../src/mcp/dispatch.ts';
-import { fenceTranscriptText, unquoteTranscriptText } from '../src/core/search/transcript-quote.ts';
+import { fenceTranscriptText, unquoteFactText, unquoteTranscriptText } from '../src/core/search/transcript-quote.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { asOwner } from './helpers/owner-tier.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -54,6 +54,8 @@ for (const backend of testBackends()) {
       await asOwner(engine, tx => tx.putPage(ENTITY_SLUG, { type: 'person', title: 'Alice Example', compiled_truth: 'A person.', timeline: '', frontmatter: {} }));
       await ok('ontology_propose', { entity: ENTITY_SLUG, dimension: 'role', value: `advisor ${CODE.value}`, visibility: 'world' });
       await asOwner(engine, tx => tx.mergeOntologyFact({ entitySlug: ENTITY_SLUG, dimension: 'location', value: `Lisbon ${CODE.owner}`, source: 'manual', visibility: 'world' } as never));
+      await ok('ontology_propose', { entity: ENTITY_SLUG, dimension: 'expertise', value: `Lead ${CODE.value}`, source: 'notes/agent-8384', valid_from: '2026-05-01', visibility: 'world' });
+      await asOwner(engine, tx => tx.mergeOntologyFact({ entitySlug: ENTITY_SLUG, dimension: 'expertise', value: `Chief ${CODE.owner}`, source: 'notes/owner-8384', validFrom: '2026-01-01', visibility: 'world' } as never));
     }, 180_000);
     afterAll(async () => { await close?.(); });
 
@@ -77,7 +79,9 @@ for (const backend of testBackends()) {
 
     test('a code block an agent adds inside, in place of the closing fence, or after the read is stored intact', async () => {
       const block = '```js\nconst x = 1;\n```';
+      const tilde = '~~~md\n```\n~~~';
       const cases: Array<[string, (c: string) => string, string]> = [
+        ['notes/tilde-inside', c => c.replace('Second line.', `Second line.\n\n${tilde}`), `Second line.\n\n${tilde}`],
         ['notes/block-inside', c => c.replace('Second line.', `Second line.\n\n${block}`), `Second line.\n\n${block}`],
         ['notes/block-replaces-closer', c => `${dropCloser(c)}${block}\n`, `Second line.\n\n${block}`],
         ['notes/block-after', c => `${c}\n\n${block}\n`, `Second line.\n\n${block}`],
@@ -123,6 +127,11 @@ for (const backend of testBackends()) {
         expect(value(vals, 'location')).toBe(`Lisbon ${CODE.owner}`);
       }
       expect(value(await ok('ontology_get', { entity: ENTITY_SLUG }, local), 'role')).toBe(`advisor ${CODE.value}`);
+      const titles = async (opts: Opts) => (await ok('ontology_conflicts', {}, opts) as Array<{ entity_slug: string; dimension: string; values: Array<{ value: string }> }>)
+        .find(c => c.entity_slug === ENTITY_SLUG && c.dimension === 'expertise')?.values.map(v => v.value).sort();
+      const conflict = await titles(remote);
+      expect([conflict?.length, conflict?.[0], conflict?.[1]?.includes(MARKER), conflict?.[1]?.includes(CODE.value)]).toEqual([2, `Chief ${CODE.owner}`, true, true]);
+      expect(await titles(local)).toEqual([`Chief ${CODE.owner}`, `Lead ${CODE.value}`]);
       await ok('ontology_propose', { entity: ENTITY_SLUG, dimension: 'employer', value: value(got, 'role'), visibility: 'world' });
       expect(value(await ok('ontology_get', { entity: ENTITY_SLUG }, local), 'employer')).toBe(`advisor ${CODE.value}`);
     }, 120_000);
@@ -152,5 +161,14 @@ describe('#8384: a host\'s own quoted text unquotes exactly, whatever code fence
       expect([text, unquoteTranscriptText(fenced, 'slack/a'), unquoteTranscriptText(fenced + fenced, 'slack/a'), unquoteTranscriptText(fenced, 'slack/a', true)])
         .toEqual([text, text, text + text, text]);
     }
+  });
+
+  test('a megabyte of markers that never close is kept as written in linear time', () => {
+    const fence = fenceTranscriptText('x', 'slack/a').split('\n').slice(0, 2).join('\n');
+    const hostile = `intro\n${`${fence}\n`.repeat(Math.ceil(1_048_576 / (fence.length + 1)))}`;
+    const facts = `intro\n${`${fenceTranscriptText('y', 'fact 7').split('\n').slice(0, 2).join('\n')}\n`.repeat(12_000)}`;
+    const t0 = performance.now();
+    expect([unquoteTranscriptText(hostile, 'slack/a', true) === hostile, unquoteFactText(facts) === facts]).toEqual([true, true]);
+    expect(performance.now() - t0).toBeLessThan(1_000);
   });
 });

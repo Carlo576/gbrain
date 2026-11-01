@@ -35,7 +35,7 @@ function remoteTimeline(ctx: OperationContext, rows: ChronicleTimelineRow[]) {
   return quoteTimelineRows(ctx, r => r.page_slug, redactDiaryTimeline(ctx, rows));
 }
 /** #8384: ontology values a remote reader gets, each quoted by its fact's stored tier as recall quotes the fact (quoteFacts). */
-async function remoteOntology(ctx: OperationContext, values: OntologyValue[]): Promise<Array<OntologyValue & { quoted?: 'transcript' }>> {
+async function remoteOntology<V extends Pick<OntologyValue, 'value' | 'source' | 'fact_id'>>(ctx: OperationContext, values: V[]): Promise<Array<V & { quoted?: 'transcript' }>> {
   if (ctx.remote === false || values.length === 0) return values;
   const facts = await quoteFacts(ctx.engine, values.map(v => ({ id: v.fact_id, fact: v.value, source: v.source })), true);
   return values.map((v, i) => facts[i]!.quoted ? { ...v, value: facts[i]!.fact, quoted: 'transcript' as const } : v);
@@ -279,9 +279,10 @@ const ontology_conflicts: Operation = {
     if (ctx.remote === false) return conflicts;
     // Remote: redact diary-sourced values; drop conflicts that no longer have
     // ≥2 distinct values once diary provenance is removed (no leak via conflicts).
-    return conflicts
+    return Promise.all(conflicts
       .map((c) => ({ ...c, values: c.values.filter((v) => !(v.source ?? '').startsWith('life/diary/')) }))
-      .filter((c) => new Set(c.values.map((v) => v.value)).size >= 2);
+      .filter((c) => new Set(c.values.map((v) => v.value)).size >= 2)
+      .map(async (c) => ({ ...c, values: await remoteOntology(ctx, c.values) })));
   },
   cliHints: { name: 'ontology-contradictions' },
 };

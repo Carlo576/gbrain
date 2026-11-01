@@ -136,7 +136,7 @@ notes" (written by an agent, tool data, external, or unverified origin) comes
 back quoted on search, `query`, `recall`, `assemble_evidence`, `get_page`
 (title and frontmatter included; `include_content` fences the whole markdown),
 `fetch`, `get_timeline`, `chronicle_day`, `chronicle_since`,
-`chronicle_on_this_day`, `volunteer_chronicle` (its ontology values too), `ontology_get`, `takes_list`, `takes_search` (claim and source),
+`chronicle_on_this_day`, `volunteer_chronicle` (its ontology values too), `ontology_get`, `ontology_conflicts`, `takes_list`, `takes_search` (claim and source),
 where a timeline row's free-text `source` is quoted with its summary and detail,
 `get_chunks`, `search_exact`, `get_versions`, `known_as_of`, `think`'s extractive
 answer, `context_pack`, hot memory and write receipts. The context gbrain's
