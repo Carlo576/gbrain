@@ -11,6 +11,7 @@ import { MERGE_PRECONDITION_PARAMS, WRITE_REQUEST_PARAM } from '../persistence/p
 import { opError, type Operation, type OperationContext } from './contract.ts';
 import { MIN_TRUST_PARAM, resolveReadEligibility } from '../eligibility/policy.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
+import { fenceTranscriptText, quotesTier } from '../search/transcript-quote.ts';
 import { opTransport, paramUse } from './op-fix.ts';
 import {
   readPolicyOpts,
@@ -59,6 +60,12 @@ export async function takesHiddenFromResult(ctx: OperationContext, op: string, r
   return { pages: [...new Set(withTakes.map(c => c.slug))], count: withTakes.reduce((n, c) => n + c.count, 0) };
 }
 
+/** GST-687: a remote reader gets a claim below the owner's tier (an agent's take, an ingested one) quoted as its page's. */
+function quoteTakes<T extends { claim: string; page_slug: string; trust_tier: string }>(ctx: OperationContext, rows: T[]): Array<T | (T & { quoted: 'transcript' })> {
+  if (ctx.remote === false) return rows;
+  return rows.map(r => quotesTier(r.trust_tier) ? { ...r, claim: fenceTranscriptText(r.claim, r.page_slug), quoted: 'transcript' as const } : r);
+}
+
 // --- v0.28: Takes ---
 
 const takes_list: Operation = {
@@ -97,7 +104,7 @@ const takes_list: Operation = {
       takesHoldersAllowList: readHolders(ctx),
       eligibility,
     });
-    return stampRowTrust(ctx.engine, 'takes', rows, r => r.id);
+    return quoteTakes(ctx, await stampRowTrust(ctx.engine, 'takes', rows, r => r.id));
   },
   cliHints: { name: 'takes-list' },
 };
@@ -122,7 +129,7 @@ const takes_search: Operation = {
       takesHoldersAllowList: readHolders(ctx),
       eligibility,
     });
-    return stampRowTrust(ctx.engine, 'takes', hits, h => h.take_id);
+    return quoteTakes(ctx, await stampRowTrust(ctx.engine, 'takes', hits, h => h.take_id));
   },
   cliHints: { name: 'takes-search', positional: ['query'] },
 };

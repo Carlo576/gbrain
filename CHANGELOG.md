@@ -10,6 +10,23 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Agents connected over MCP now see the chronicle reads, takes reads and a quoted page's title and frontmatter quoted as source material, and the context gbrain's hooks inject quotes facts below "your notes" too.**
+
+Before, #8367 left `chronicle_day`, `chronicle_since`, `chronicle_on_this_day`, `volunteer_chronicle`'s timeline, `takes_list`, `takes_search` and a quoted page's title and frontmatter returning agent-written text raw, and gbrain's per-turn hook and pushed context pack injected agent-written facts raw. Now a remote reader gets that text quoted when its stored tier is below `operator_curated`; owner-tier text and local reads are unchanged. **Harness authors: hook output can now hold quote fences** (a marker line naming the fact, then a code fence that closes on its own line).
+
+### Itemized changes
+
+- Chronicle reads quote each timeline row by its own page; `takes_list` and `takes_search` quote claims below the owner's tier.
+- Remote `get_page` and `fetch` quote a quoted page's title and every frontmatter string; `include_content` and fetch `text` fence the whole serialized markdown, and the `put_page` round trip still stores the page unchanged.
+- A thin client's paged `gbrain get` of a quoted page (above the inline limit) prints the page, and its `--json` content, inside one quote fence after verifying size and sha256.
+- The per-turn push hook and the pushed context pack quote hot and entity facts below the owner's tier; a fact injected before this change is not injected again.
+- `context_pack` counts the entity facts it withholds when the quote lookup fails (`suppressed`) instead of dropping them silently.
+- Remote `remember` stores a fact copied out of a quoted read without the fence, and remote `add_timeline_entry` stores an entry copied out of `get_timeline` without it, so the replay key matches and the entry is not duplicated.
+- The `put_page` tool-call guard counts only summaries outside the content's own tool-call blocks, and admits a new turn that quotes a summary while every stored call stays; its refusal names `edit_page` first.
+- Tests: `test/search-transcript-quote-followups.test.ts` (every item, red on master for the changed reads and writes) and `test/trust-keep-maintenance-reimport-8352.test.ts` (maintenance re-imports keep an owner note's tier), both on PGLite and Postgres.
+
 ## [0.60.536.0] - 2026-11-01
 
 **Agents connected over MCP now see agent-written, ingested and unverified-origin text quoted as source material on search, recall, page, chunk, timeline, version and write-receipt reads, and conversation tool calls come back summarized on the reads that still returned them verbatim.**

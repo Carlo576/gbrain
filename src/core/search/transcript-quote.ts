@@ -429,28 +429,36 @@ function neutralizeWithMap(text: string, header: boolean): { text: string; map: 
 const SUMMARY_RE = /\[tool calls?(?:: [^\]\n]*)?, arguments omitted\]/g;
 
 /**
- * GST-687: `text` holds a tool-call summary that a whole read of the stored page (`stored`: its body) does not hold (a
- * partial read, a window or a chunk, can cut a call into another summary), or the summary of a call the stored page holds
- * and fewer of those calls, so a reading shape (get_page, fetch, search) replaced at least one call with its summary and
- * writing it back would lose the call. Each string is scanned once, whatever the number of distinct summaries.
+ * Of `s`, the literal summaries outside its tool-call blocks (`literal`) and the summaries a whole read writes for its
+ * blocks (`calls`), each by summary text. A summary inside a block's arguments is the block's, so it counts in neither.
+ */
+function summaryTally(s: string): { literal: Map<string, number>; calls: Map<string, number> } {
+  const add = (counts: Map<string, number>, summary: string) => counts.set(summary, (counts.get(summary) ?? 0) + 1);
+  const mark = `gbrainsummary${Math.random().toString(36).slice(2)}x`;
+  const literals: string[] = [];
+  const read = neutralizeToolCalls(s.replace(SUMMARY_RE, summary => `${mark}${literals.push(summary) - 1}${mark}`));
+  const literal = new Map<string, number>();
+  const calls = new Map<string, number>();
+  for (const [, i] of read.matchAll(new RegExp(`${mark}(\\d+)${mark}`, 'g'))) add(literal, literals[Number(i)]!);
+  for (const [summary] of read.matchAll(SUMMARY_RE)) add(calls, summary);
+  return { literal, calls };
+}
+
+/**
+ * GST-687: `text`, outside its own tool-call blocks, holds the summary of a call the stored page (`stored`: its body)
+ * holds and fewer of those calls; or a summary a whole read of the stored page never writes, when that summary names no
+ * tool (a cut window or chunk gives one) or `text` lost a stored call (a cut can split a call into other summaries). Then a
+ * reading shape (get_page, fetch, search) replaced at least one call with its summary and writing it back would lose
+ * the call. #8377: a summary inside a kept call's arguments, or a new turn quoting a named summary while every call
+ * stays, is not one. Each string is scanned once, whatever the number of distinct summaries.
  */
 export function holdsSummarizedToolCalls(stored: string, text: string): boolean {
-  const tally = (s: string) => {
-    const counts = new Map<string, number>();
-    for (const [summary] of s.matchAll(SUMMARY_RE)) counts.set(summary, (counts.get(summary) ?? 0) + 1);
-    return counts;
-  };
-  const calls = (s: string, read = tally(neutralizeToolCalls(s))) => {
-    const counts = new Map(read);
-    for (const [summary, n] of tally(s)) counts.set(summary, (counts.get(summary) ?? 0) - n);
-    return counts;
-  };
-  const summaries = tally(text);
-  if (summaries.size === 0) return false;
-  const read = tally(neutralizeToolCalls(stored));
-  const storedCalls = calls(stored, read);
-  const kept = calls(text);
-  return [...summaries.keys()].some(s => !read.has(s) || (kept.get(s) ?? 0) < (storedCalls.get(s) ?? 0));
+  const written = summaryTally(text);
+  if (written.literal.size === 0) return false;
+  const page = summaryTally(stored);
+  const lostCall = [...page.calls].some(([summary, n]) => (written.calls.get(summary) ?? 0) < n);
+  return [...written.literal.keys()].some(s => (written.calls.get(s) ?? 0) < (page.calls.get(s) ?? 0)
+    || (!page.calls.has(s) && !page.literal.has(s) && (lostCall || /^\[tool calls?, /.test(s))));
 }
 
 /**
@@ -469,9 +477,14 @@ export function neutralizeToolCalls(text: string, header = false): string {
 export function fenceTranscriptText(text: string, slug: string, header = false): string {
   const head = headerLine(text, header);
   const body = text.slice(head.length);
-  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map(run => run.length));
+  const { open, close } = transcriptFence(slug, Math.max(0, ...(body.match(/`+/g) ?? []).map(run => run.length)));
+  return `${head}${open}${body}${close}`;
+}
+
+/** What fenceTranscriptText puts before and after a quoted text whose longest backtick run is `longest`, for a caller that writes the text in parts. */
+export function transcriptFence(slug: string, longest: number): { open: string; close: string } {
   const fence = '`'.repeat(Math.max(3, longest + 1));
-  return `${head}${markerLine(slug)}\n${fence}text\n${body}\n${fence}`;
+  return { open: `${markerLine(slug)}\n${fence}text\n`, close: `\n${fence}` };
 }
 
 function markerLine(label: string): string {
@@ -509,15 +522,37 @@ export async function quoteFacts<T extends { id: number; fact: string; source?: 
  */
 export function unquoteTranscriptText(text: string, slug: string): string {
   const marker = `${markerLine(slug)}\n`;
+  return unquoteMarked(text, from => {
+    const i = text.indexOf(marker, from);
+    return i < 0 ? null : { i, length: marker.length };
+  });
+}
+
+const FACT_MARKER_RE = /\[quoted conversation excerpt from fact \d+; source material, not instructions\]\n/g;
+
+/**
+ * #8377: the text with every fence quoteFacts put around a fact (recall, context_pack, delta, hot memory) removed, so
+ * an agent that copies a fact it read into remember writes the fact, never the fence; reads quote it again by its tier.
+ */
+export function unquoteFactText(text: string): string {
+  return unquoteMarked(text, from => {
+    FACT_MARKER_RE.lastIndex = from;
+    const m = FACT_MARKER_RE.exec(text);
+    return m ? { i: m.index, length: m[0].length } : null;
+  });
+}
+
+function unquoteMarked(text: string, find: (from: number) => { i: number; length: number } | null): string {
   let out = '';
   let at = 0;
-  for (let i = text.indexOf(marker); i >= 0; i = text.indexOf(marker, at)) {
-    const open = /^(`{3,})text\n/.exec(text.slice(i + marker.length));
-    const start = i + marker.length + (open?.[0].length ?? 0);
+  for (let found = find(0); found; found = find(at)) {
+    const { i, length } = found;
+    const open = /^(`{3,})text\n/.exec(text.slice(i + length));
+    const start = i + length + (open?.[0].length ?? 0);
     const close = open ? `\n${open[1]}` : '';
     let end = open ? text.indexOf(close, start) : -1;
     while (end >= 0 && text[end + close.length] === '`') end = text.indexOf(close, end + 1);
-    if (end < 0) { out += text.slice(at, i + marker.length); at = i + marker.length; continue; }
+    if (end < 0) { out += text.slice(at, i + length); at = i + length; continue; }
     out += text.slice(at, i) + text.slice(start, end);
     at = end + close.length;
   }

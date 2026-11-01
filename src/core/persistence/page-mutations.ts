@@ -265,7 +265,8 @@ export async function submitPageMutation(ctx: OperationContext,
 async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: string, content: string): Promise<string> {
   const unquoted = unquoteTranscriptText(content, slug);
   const summarized = /, arguments omitted\]/.test(unquoted);
-  if (!summarized && (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? '')))) return unquoted;
+  const quotedType = isQuotedPageType(String(parseMarkdownHead(unquoted).frontmatter.type ?? ''));
+  if (!summarized && (unquoted === content || quotedType)) return unquoted;
   const [stored] = await engine.executeRaw<{ type: string | null; trust_tier: string | null }>(
     'SELECT type, trust_tier FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
   // Compared with the stored body's tool calls; a segmented page reads NULL inline columns, so its summarized round trip is refused.
@@ -275,9 +276,9 @@ async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: s
   };
   if (summarized && stored && isQuotedPageType(stored.type) && await losesCalls()) {
     throw new OperationError('invalid_params', `put_page: this content has tool calls that a read of ${slug} summarized; writing it would replace the stored calls with their summaries.`,
-      'Nothing was written. Read the page with get_page include_content: true (its content keeps the stored text) and write that back, or change the page with edit_page.');
+      'Nothing was written. Change the page with edit_page, or read it with get_page include_content: true (its content keeps the stored text) and write that back.');
   }
-  if (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? ''))) return unquoted;
+  if (unquoted === content || quotedType) return unquoted;
   if (!stored) return content;
   if (isQuotedPageType(stored.type) || quotesTier(stored.trust_tier)) return unquoted;
   // An owner-tier page keeps a fence naming it only when its stored body already holds one: a fence read while the page sat
