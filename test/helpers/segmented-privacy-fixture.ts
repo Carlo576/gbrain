@@ -9,6 +9,7 @@
 import { expect } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
+import { asOwner } from './owner-tier.ts';
 import { renderFactsTable, type ParsedFact } from '../../src/core/facts-fence.ts';
 import { holdFingerprint } from '../../src/core/write-gate-store.ts';
 import { fenceRowHoldTexts } from '../../src/core/eligibility/fence-overlay.ts';
@@ -99,7 +100,7 @@ export function pageContent(truth: string, timeline = ''): string {
 /** Import `content` with segmented storage on and return the page id; the page must come out segmented. */
 export async function importSegmented(engine: BrainEngine, slug: string, content: string): Promise<number> {
   await engine.setConfig('pages.segmented_storage', 'on');
-  await importFromContent(engine, slug, content, { sourceId: 'default', noEmbed: true });
+  await asOwner(engine, tx => importFromContent(tx, slug, content, { sourceId: 'default', noEmbed: true }));
   const [page] = await engine.executeRaw<{ id: number; body_storage: string }>('SELECT id, body_storage FROM pages WHERE source_id=$1 AND slug=$2', ['default', slug]);
   expect(page?.body_storage).toBe('segmented');
   return Number(page!.id);

@@ -264,9 +264,12 @@ async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: s
   const unquoted = unquoteTranscriptText(content, slug);
   const summarized = /, arguments omitted\]/.test(unquoted);
   if (!summarized && (unquoted === content || isQuotedPageType(String(parseMarkdownHead(content).frontmatter.type ?? '')))) return unquoted;
-  const [stored] = await engine.executeRaw<{ type: string | null; trust_tier: string | null; compiled_truth: string | null; timeline: string | null }>(
-    'SELECT type, trust_tier, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
-  if (summarized && stored && isQuotedPageType(stored.type) && holdsSummarizedToolCalls(`${stored.compiled_truth ?? ''}\n${stored.timeline ?? ''}`, unquoted)) {
+  const [stored] = await engine.executeRaw<{ id: number; type: string | null; trust_tier: string | null }>(
+    'SELECT id, type, trust_tier FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
+  // The stored page's own literal summaries, read from its chunks; a summary split across two chunks is missed, so that write is refused.
+  const storedSummaries = async (pageId: number) => (await engine.executeRaw<{ chunk_text: string }>(
+    "SELECT chunk_text FROM content_chunks WHERE page_id = $1 AND chunk_text LIKE '%, arguments omitted]%'", [pageId])).map(r => r.chunk_text).join('\n');
+  if (summarized && stored && isQuotedPageType(stored.type) && holdsSummarizedToolCalls(await storedSummaries(Number(stored.id)), unquoted)) {
     throw new OperationError('invalid_params', `put_page: this content has tool calls that a read of ${slug} summarized; writing it would replace the stored calls with their summaries.`,
       'Nothing was written. Read the page with get_page include_content: true (its content keeps the stored text) and write that back, or change the page with edit_page.');
   }

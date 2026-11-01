@@ -93,8 +93,12 @@ export interface GetPageProjectionOpts {
    * as quoted source material (text inside byte-exact; put_page removes the fences) and the response carries `quoted`.
    */
   quote?: boolean;
-  /** GST-687 (with `quote`): compiled_truth and timeline carry tool-call blocks summarized, unless `includeContent` asked for the round-trip shape, which stays byte-exact inside the fence. */
+  /**
+   * GST-687 (with `quote`): the reading shape carries tool-call blocks summarized. `includeContent` asks for the
+   * round-trip shape, which stays byte-exact inside the fence, unless `readingContent` (fetch's text is a reading shape).
+   */
   neutralize?: boolean;
+  readingContent?: boolean;
 }
 
 /**
@@ -113,14 +117,14 @@ export interface GetPageProjectionOpts {
 export function projectGetPage(stored: Page, o: GetPageProjectionOpts) {
   const { revision, tags, resolved_slug, content_flag, quarantined } = o;
   const fence = (text: string) => (text ? fenceTranscriptText(text, stored.slug) : text);
-  const read = (text: string) => fence(o.neutralize && !o.includeContent && text ? neutralizeToolCalls(text) : text);
+  const summarize = o.neutralize === true && (!o.includeContent || o.readingContent === true);
+  const read = (text: string) => fence(summarize && text ? neutralizeToolCalls(text) : text);
   const page = o.quote ? { ...stored, compiled_truth: read(stored.compiled_truth), timeline: read(stored.timeline) } : stored;
-  const roundTrip = o.quote ? { ...stored, compiled_truth: fence(stored.compiled_truth), timeline: fence(stored.timeline) } : stored;
   const omitted = quarantined?.body_omitted === true;
   const wrap = quarantined?.body_enveloped === true;
   const visibleBody = omitted ? { ...page, compiled_truth: '', timeline: '' }
     : wrap ? { ...page, compiled_truth: enveloped(page.compiled_truth, o.trust), timeline: enveloped(page.timeline, o.trust) } : page;
-  const content = () => wrap ? enveloped(serializePageToMarkdown(roundTrip, tags), o.trust) : serializePageToMarkdown(roundTrip, tags);
+  const content = () => wrap ? enveloped(serializePageToMarkdown(page, tags), o.trust) : serializePageToMarkdown(visibleBody, tags);
   const extras = {
     ...(quarantined ? { quarantined } : {}), ...(o.quote ? { quoted: 'transcript' as const } : {}),
     ...(o.timeline_entries !== undefined ? { timeline_entries: o.timeline_entries } : {}),
@@ -181,6 +185,5 @@ export async function pageTrustForRead(ctx: Pick<OperationContext, 'engine' | 'a
  * quoted with `quote` (#8042) and with tool-call blocks summarized with `neutralize` (GST-687: fetch is a reading shape).
  */
 export function projectFetchText(visibleBody: Page, tags: string[], quarantined: QuarantinedView | null, trust?: TrustFields, quote = false, neutralize = false): string {
-  const body = neutralize ? { ...visibleBody, compiled_truth: neutralizeToolCalls(visibleBody.compiled_truth ?? ''), timeline: neutralizeToolCalls(visibleBody.timeline ?? '') } : visibleBody;
-  return projectGetPage(body, { revision: '', tags, includeContent: true, contentOnly: true, quarantined, trust, quote }).content ?? '';
+  return projectGetPage(visibleBody, { revision: '', tags, includeContent: true, contentOnly: true, quarantined, trust, quote, neutralize, readingContent: true }).content ?? '';
 }
