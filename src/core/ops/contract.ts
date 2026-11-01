@@ -188,6 +188,14 @@ export interface OpErrorOpts {
  * positional and required. Use `OperationError.bare()` only when no next step
  * can be named at the throw site.
  */
+const notAdmittedWrites = new WeakSet<OperationError>();
+/**
+ * A write refusal raised after its admission transaction rolled back, so nothing was admitted: the agent contract's
+ * safe-recovery rule (only idempotent mutations read retryable) gives way for it. Only write admission marks errors.
+ */
+export function markNotAdmitted(error: OperationError): OperationError { notAdmittedWrites.add(error); return error; }
+export function provesNotAdmitted(error: unknown): boolean { return error instanceof OperationError && notAdmittedWrites.has(error); }
+
 export function opError(code: RegistryCode, message: string, suggestion: string, opts: OpErrorOpts = {}): OperationError {
   const e = new OperationError(opts.legacy_error ?? code, message, suggestion, opts.docs);
   if (opts.legacy_error !== undefined) e.canonical = code;
@@ -258,6 +266,8 @@ export interface ParamDef {
   fullSurfaceOnly?: boolean;
   /** An object param the CLI takes as repeated `--flag key=value` (`key=a,b` is a list); MCP passes the object. */
   cliKeyValue?: boolean;
+  /** An object window the CLI also takes as `N-M` (inclusive) or `N`: the [start, length] member names. */
+  cliRange?: readonly [string, string];
 }
 
 export interface Logger {
@@ -399,6 +409,13 @@ export interface AuthInfo {
    * but never lower it. Undefined = no floor (or a brain before the column).
    */
   minTrust?: TrustTier;
+  /**
+   * GBRA-156: the grant's `private_pages: granted_sources` axis, set at token
+   * verification from the live row. `sources` are the sources the grant names
+   * explicitly (`privatePagesSources`); MCP dispatch makes them the
+   * private-readable set of each non-mutating call. Undefined = `none`.
+   */
+  privatePages?: { mode: 'granted_sources'; sources: string[] };
   /** Current transport ceiling applied to this authenticated request. */
   effectiveSurface?: 'verbs' | 'starter' | 'full';
   /**

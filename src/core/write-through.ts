@@ -23,7 +23,7 @@ import { hasSourceFilesystemLock, withSourceFilesystemLock, assertSourceFilesyst
  */
 
 import { existsSync, statSync, mkdirSync, unlinkSync, readdirSync, readFileSync } from 'fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from 'path';
 import { atomicWriteFileSync } from './atomic-write.ts';
 import type { BrainEngine } from './engine.ts';
 import { isRelativeFileUri, serializePageToMarkdown, resolvePageFilePath, resolveSourceLocalFilePath } from './markdown.ts';
@@ -47,6 +47,8 @@ export interface WriteThroughLogger {
 export interface WriteThroughResult {
   written: boolean;
   path?: string;
+  /** The bytes written to `path` (set with `written: true`), so a caller can tell its own write from a later edit. */
+  content?: string;
   /**
    * True when the write was also committed to git (#2426). Only attempted on
    * repos hardened via `gbrain sources harden` (durability hook installed).
@@ -80,7 +82,7 @@ export interface WriteThroughResult {
    *     or DB work.
    *   - no_repo_configured: the resolved target (source `local_path` or, for a
    *     sole-source brain, `sync.repo_path`) is unset (DB-only by design).
-   *   - repo_not_found: target set but missing / not a directory.
+   *   - repo_not_found: target set but relative (#7630), missing, or not a directory.
    *   - source_repo_belongs_to_other_source: the assigned source has no
    *     `local_path`, and `sync.repo_path` is another source's own working tree
    *     — #2018: writing here would pollute that sibling's repo, so we skip.
@@ -117,6 +119,8 @@ export interface WritePageThroughOpts {
    * (`skipped: 'file_changed'`). Omitted: no preimage check.
    */
   expectedFileBytes?: string | null;
+  /** The caller commits the file itself (#8073: one commit per batch), so the hardened per-file commit is skipped. */
+  deferCommit?: boolean;
 }
 
 export function withNoRepoWriteThroughWarning<T extends { written: boolean; skipped?: string; warning?: string }>(result: T, sourceId: string, operation = 'put_page'): T {
@@ -284,16 +288,21 @@ export async function scannerSlugRootMode(engine: BrainEngine, sourceId: string,
  * #2018/#7203: the other source whose own working tree is `path` or contains
  * it, compared by filesystem identity, so a symlink, a trailing slash, or a
  * macOS case or /private alias still matches. A spelling that cannot be
- * resolved counts as a match: the leak guard fails closed.
+ * resolved counts as a match: the leak guard fails closed. `relativeOwns: false`
+ * leaves out live relative rows, for doctor to find an absolute owner beside them.
  */
-export async function otherSourceOwning(engine: BrainEngine, sourceId: string, path: string): Promise<string | null> {
-  const rows = await engine.executeRaw<{ id: string; local_path: string }>(
-    `SELECT id, local_path FROM sources WHERE id <> $1 AND local_path IS NOT NULL AND local_path <> '' ORDER BY id`,
+export async function otherSourceOwning(engine: BrainEngine, sourceId: string, path: string, relativeOwns = true): Promise<string | null> {
+  const rows = await engine.executeRaw<{ id: string; local_path: string; archived: boolean }>(
+    `SELECT id, local_path, archived IS TRUE AS archived FROM sources WHERE id <> $1 AND local_path IS NOT NULL AND local_path <> '' ORDER BY id`,
     [sourceId],
   );
   const identity = (spelling: string) => { try { return canonicalFilesystemPath(msysToNativePath(spelling)); } catch { return null; } };
   const target = identity(path);
   return rows.find(row => {
+    // #7630: a live source's relative local_path names no known tree, so like any unresolvable spelling it counts as a match.
+    // An absolute path written by another OS (C:\ on POSIX) is not relative, the same reading doctor and --clear use.
+    const native = msysToNativePath(row.local_path);
+    if (!posix.isAbsolute(native) && !win32.isAbsolute(native)) return relativeOwns && !row.archived;
     const other = identity(row.local_path);
     if (target === null || other === null) return true;
     const rel = relative(other, target);
@@ -372,7 +381,8 @@ export async function resolvePageWriteTarget(
   const recordedUri = pathRows[0]?.source_uri ?? null;
 
   if (sourceLocalPath) {
-    if (!existsSync(sourceLocalPath) || !statSync(sourceLocalPath).isDirectory()) {
+    // #7630: a relative local_path (a legacy ".") names whatever directory gbrain runs from, never the source's tree.
+    if (!isAbsolute(sourceLocalPath) || !existsSync(sourceLocalPath) || !statSync(sourceLocalPath).isDirectory()) {
       return { ok: false, skipped: 'repo_not_found' };
     }
     filePath = recordedPath
@@ -386,7 +396,7 @@ export async function resolvePageWriteTarget(
     if (!repoPath) {
       return { ok: false, skipped: 'no_repo_configured' };
     }
-    if (!existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
+    if (!isAbsolute(repoPath) || !existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
       return { ok: false, skipped: 'repo_not_found' };
     }
     const pageRoot = sourceId === 'default' ? repoPath : join(repoPath, '.sources', sourceId);
@@ -522,7 +532,7 @@ export async function writePageThrough(
     let lastPushStatus: PushLogOutcome | undefined;
     try {
       assertSourceFilesystemActive();
-      if (isDurabilityHardened(writeRoot)) {
+      if (!opts.deferCommit && isDurabilityHardened(writeRoot)) {
         committed = commitWriteThroughFile(writeRoot, filePath, slug);
         if (committed) {
           pushed = 'pending';
@@ -534,6 +544,7 @@ export async function writePageThrough(
     return {
       written: true,
       path: filePath,
+      content: md,
       ...(committed ? { committed, pushed, lastPushStatus } : {}),
     };
   } catch (e) {
@@ -601,7 +612,7 @@ export interface DeleteThroughResult {
 export async function deletePageThrough(
   engine: BrainEngine,
   slug: string,
-  opts: { sourceId?: string; logger?: WriteThroughLogger; target?: PageWriteTarget; expectedFileBytes?: string } = {},
+  opts: { sourceId?: string; logger?: WriteThroughLogger; target?: PageWriteTarget; expectedFileBytes?: string; deferCommit?: boolean } = {},
 ): Promise<DeleteThroughResult> {
   const sourceId = opts.sourceId ?? 'default';
   try {
@@ -638,7 +649,7 @@ export async function deletePageThrough(
     // never fails the delete (the DB row + the unlink are the durable state).
     let committed = false;
     try {
-      if (isDurabilityHardened(writeRoot)) {
+      if (!opts.deferCommit && isDurabilityHardened(writeRoot)) {
         committed = commitWriteThroughFile(writeRoot, filePath, slug, 'delete write-through');
       }
     } catch { /* best-effort */ }

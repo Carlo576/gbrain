@@ -72,9 +72,9 @@ export async function readIdentitySiblings(engine: BrainEngine, sourceId: string
     if (!policy.siblingMerge) return { pages: [], capped: false, verdict: 'disabled' };
     const pack = opts.pack !== undefined ? opts.pack : await loadSourcePack(engine, sourceId);
     const types = linkableTypesFor(pack, policy);
-    const { privatePagesFilterFragment } = await import('../search/private-visibility.ts');
+    const { privatePagesFilterForCaller } = await import('../search/private-visibility.ts');
     const { quarantineFilterFragment } = await import('../quarantine.ts');
-    const privacy = (opts.excludePrivate ? ` AND ${privatePagesFilterFragment('pages')}` : '')
+    const privacy = (opts.excludePrivate ? ` AND ${privatePagesFilterForCaller('pages')}` : '')
       + (opts.excludeQuarantined ? ` AND ${quarantineFilterFragment('pages')}` : '');
     const like = `%: ${subject.replace(/[\\%_]/g, m => `\\${m}`)}`;
     const rows = await engine.executeRaw<{ slug: string; title: string | null; type: string | null; identity: unknown }>(
@@ -106,10 +106,10 @@ export async function siblingCanonical(engine: BrainEngine, sourceId: string, sl
   try {
     const policy = await readMentionPolicy(engine);
     if (!policy.siblingMerge) return null;
-    const { privatePagesFilterFragment } = await import('../search/private-visibility.ts');
+    const { privatePagesFilterForCaller } = await import('../search/private-visibility.ts');
     const rows = await engine.executeRaw<{ slug: string; title: string | null; type: string | null; identity: unknown }>(
       `SELECT slug, title, type, frontmatter->>'identity' AS identity FROM pages
-        WHERE source_id = $1 AND deleted_at IS NULL AND slug = ANY($2::text[])${opts.excludePrivate ? ` AND ${privatePagesFilterFragment('pages')}` : ''}`,
+        WHERE source_id = $1 AND deleted_at IS NULL AND slug = ANY($2::text[])${opts.excludePrivate ? ` AND ${privatePagesFilterForCaller('pages')}` : ''}`,
       [sourceId, unique]);
     if (rows.length !== unique.length) return null;
     const pack = await loadSourcePack(engine, sourceId);
@@ -123,9 +123,12 @@ export async function siblingCanonical(engine: BrainEngine, sourceId: string, sl
 
 /**
  * Every `entity_slug` facts about this page may be stored under: the page,
- * its identity siblings and the slug of its title subject (what a fact saved
- * by name got before its siblings resolved). The entity card and recall read
- * all of them, so a saved fact shows up whichever sibling a reader asks for.
+ * its identity siblings, the slug of its title subject (what a fact saved
+ * by name got before its siblings resolved) and its bare basename
+ * (`companies/acme-example` -> `acme-example`, what a fact saved before the
+ * page existed got, #4828) when no other page claims that basename. The
+ * entity card and recall read all of them, so a saved fact shows up whichever
+ * sibling a reader asks for.
  */
 export async function factEntitySlugs(engine: BrainEngine, sourceId: string, slug: string, opts: { excludePrivate?: boolean } = {}): Promise<string[]> {
   const [page] = await engine.executeRaw<{ title: string | null }>(
@@ -134,5 +137,19 @@ export async function factEntitySlugs(engine: BrainEngine, sourceId: string, slu
   const siblings = await readIdentitySiblings(engine, sourceId, { slug, title: page.title }, { excludePrivate: opts.excludePrivate ?? true });
   const { slugify } = await import('../entities/resolve.ts');
   const subject = slugify(titleName(page.title ?? ''));
-  return [...new Set([slug, ...siblings.pages.map(p => p.slug), ...(subject && subject !== slug ? [subject] : [])])];
+  const basename = await unclaimedBasename(engine, sourceId, slug);
+  return [...new Set([slug, ...siblings.pages.map(p => p.slug), ...(subject && subject !== slug ? [subject] : []), ...(basename ? [basename] : [])])];
+}
+
+/** The page's bare basename, when no page sits at it or at the same basename under another entity directory. */
+async function unclaimedBasename(engine: BrainEngine, sourceId: string, slug: string): Promise<string | null> {
+  const cut = slug.lastIndexOf('/');
+  if (cut <= 0) return null;
+  const basename = slug.slice(cut + 1);
+  if (!basename) return null;
+  const { BASENAME_DIRS } = await import('../entities/resolve.ts');
+  const claimants = [basename, ...BASENAME_DIRS.map(dir => `${dir}/${basename}`)].filter(s => s !== slug);
+  const rows = await engine.executeRaw<{ slug: string }>(
+    'SELECT slug FROM pages WHERE source_id = $1 AND deleted_at IS NULL AND slug = ANY($2::text[]) LIMIT 1', [sourceId, claimants]).catch(() => null);
+  return rows && rows.length === 0 ? basename : null;
 }

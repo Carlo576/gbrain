@@ -7,9 +7,67 @@ import { isFrontmatterHoldMessage } from '../markdown.ts';
 import { fenceLocationFromMessage, fenceWhere } from '../fence-repair/refusal.ts';
 import { FACT_WITHDRAWN_SUGGESTION } from '../facts/withdrawal.ts';
 import { CHECKPOINT_MOVED_MESSAGE } from './sync-slug-mode.ts';
+import { PAGE_CHANGED_AFTER_READ_MESSAGE } from '../page-state/types.ts';
+import { readFix } from '../ops/op-fix.ts';
+import { ERROR_CATALOGUE } from '../error-catalogue.ts';
+import { SOURCE_CHECKOUT_MISSING, type CheckoutRefusalOrigin } from './publication-failure.ts';
+import { ownershipRecordNotPrivateError, physicalRootDirectoryChangedError } from './physical-root-record.ts';
+
+/** GST-465: a page write to a source whose canonical checkout is missing on this host. The path is left to the read-only fix, which a remote caller cannot run. */
+export function sourceCheckoutMissingRefusal(sourceId: string, slug: string | null): OperationError {
+  return opError('recovery_required', `The canonical checkout of source '${sourceId}' is missing on this host, so ${slug ? `the file of ${slug}` : 'the page file'} was not written.`,
+    'Nothing was written. Restore the checkout at the path the command in fix shows (from a backup or the machine it came from), then submit again with a new request_id; an empty directory recreated there does not help. How to recover the source is the user\'s decision.',
+    { detail: SOURCE_CHECKOUT_MISSING, docs: ERROR_CATALOGUE.source_checkout_missing.docs,
+      fix: readFix(`Shows source ${sourceId}'s canonical binding and the checkout path this host registered for it, read-only.`, { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] }) });
+}
+
+/**
+ * GST-465: the classified exit of a page write refused because of the checkout itself, rebuilt from the origin its receipt
+ * keeps. Re-stamping a recreated checkout and restoring a record's mode stay the owner's deliberate acts on the brain host:
+ * the check exists to catch a swapped checkout, so the agent tells the user and never runs them itself.
+ */
+export function storedCheckoutRefusal(origin: unknown, sourceId: string, slug: string | null): OperationError | undefined {
+  if (origin === SOURCE_CHECKOUT_MISSING) return sourceCheckoutMissingRefusal(sourceId, slug);
+  if (origin === 'ownership_record_not_private') {
+    const error = ownershipRecordNotPrivateError();
+    error.fix = { argv: ['gbrain', 'doctor', '--only', 'foreign_ownership_marker'], consent: [], actor: 'user', requires_exclusive: false,
+      why: 'Read-only on the brain host: names each ownership record other users can read and the chmod 600 that makes it private again.' };
+    error.docs = 'docs/guides/write-refusals.md#ownership_record_not_private';
+    return error;
+  }
+  if (origin !== ('physical_root_directory_changed' satisfies CheckoutRefusalOrigin)) return undefined;
+  const state = { name: 'admin_state', how: `admin_state from gbrain sources writer status ${sourceId} --json on the brain host, read again before each phase` };
+  const intent = (phase: string) => ['--self-transfer', '--confirm-relocated-root', '--admin-intent', `writer_transfer_${phase}`, '--expected-state', '<admin_state>'];
+  return Object.assign(physicalRootDirectoryChangedError(), {
+    suggestion: 'Nothing was written. Only if the checkout was restored, copied or recreated at its recorded path on purpose, the brain host\'s owner re-stamps it with the relocated-root self-transfer in fix, then you submit again with a new request_id. Never remove the ownership records to get past this.',
+    docs: 'docs/guides/write-refusals.md#recreated-root',
+    fix: { argv: ['gbrain', 'sources', 'writer', 'transfer', 'prepare', sourceId, ...intent('prepare')], inputs: [state], consent: [], actor: 'user', requires_exclusive: false,
+      why: 'Owner only, after confirming the move was deliberate: records the manifest of the directory now at the recorded path. The identity check exists to catch a swapped checkout.',
+      then: { argv: ['gbrain', 'sources', 'writer', 'transfer', 'accept', sourceId, '--path', '<checkout root>', '--expected-epoch', '<owner_epoch>', '--manifest', '<manifest digest printed by prepare>', ...intent('accept')],
+        inputs: [state, { name: 'checkout root', how: 'the local_path writer status prints for the source' }, { name: 'owner_epoch', how: 'the owner_epoch prepare printed' }],
+        consent: [], actor: 'user', requires_exclusive: false, why: 'Re-stamps the checkout identity at the same path; page writes publish again after it.' } } satisfies Action });
+}
 
 /** The refusal of a fact-batch completion request whose per-entity requests did not all commit (facts-prepare.ts). */
 export const FACTS_BATCH_INCOMPLETE_MESSAGE = 'Some extracted facts have not committed.';
+/** facts-prepare.ts: an entity request admitted at a revision another write moved (or a deleted or replaced entity page). */
+export const FACTS_ENTITY_CHANGED_MESSAGE = 'The fact entity changed after extraction admission.';
+export const FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE = 'The fact entity changed during preparation.';
+export const FACTS_DEDUP_CHANGED_MESSAGE = 'The fact deduplication state changed before publication.';
+/** The coordinator's refusal when the page moved between preparation and publication (coordinator.ts, group-publish.ts), also
+ * thrown when a staged large file no longer matches its stage (large-file.ts); fact requests never stage large files. */
+export const PAGE_CHANGED_DURING_PREPARATION_MESSAGE = 'The page changed during preparation.';
+/**
+ * #7602: entity request refusals a follow-up batch re-admits at the entity's current revision (facts-maintenance.ts), and
+ * that `gbrain repair failed-writes` lists. Stored receipts are matched by this exact text, so never reword these messages.
+ * PAGE_CHANGED_AFTER_READ_MESSAGE is how a move during preparation was stored before the fix.
+ */
+export const FACTS_ENTITY_MOVED_MESSAGES: readonly string[] = [FACTS_ENTITY_CHANGED_MESSAGE, FACTS_ENTITY_CHANGED_IN_PREPARATION_MESSAGE, FACTS_DEDUP_CHANGED_MESSAGE,
+  PAGE_CHANGED_DURING_PREPARATION_MESSAGE, PAGE_CHANGED_AFTER_READ_MESSAGE];
+
+export function isEntityMovedRefusal(row: { error_code: string | null; error_message: string | null }): boolean {
+  return row.error_code === 'revision_conflict' && FACTS_ENTITY_MOVED_MESSAGES.includes(row.error_message ?? '');
+}
 
 const FRONTMATTER_SLUG_CONFLICT = /^The frontmatter slug "[^"\n]{1,300}" in [^/"\n][^"\n]{0,1000} conflicts with its path, which expects slug "[^"\n]{1,300}"\. Remove `slug:` or make it match the path\.$/;
 
@@ -19,17 +77,26 @@ export function frontmatterSlugConflictMessage(path: string, found: string, expe
 }
 
 /** #5988: the page's canonical file is held by sync; the code says why gbrain cannot import it. Location-free, so receipts may keep it. */
-const HELD_FILE = /^(?:The canonical file is held by sync|A file held by sync) \(([a-z_]+)\) (and differs from the page|occupies the canonical page path); the page is read-only for put_page until the file is repaired\.$/;
+const HELD_FILE = /^(?:The canonical file is held by sync|A file held by sync) \(([a-z_]+)\) (and differs from the page|occupies the canonical page path); the page is read-only for put_page until the file is repaired\.(?: Hold row: source ([^ ,]+), incarnation ([0-9a-f-]+)\.)?$/;
 
 /** #6693: the refusal of a page write whose file holds a committed Git change sync has not imported yet (pending-import.ts). */
 /** #6858: the receipt prefix of a write `gbrain repair stuck-recovery --keep disk` abandoned: its canonical file was kept as edited on disk. */
 export const KEEP_DISK_ABANDONED_PREFIX = 'Publication abandoned by gbrain repair stuck-recovery --keep disk';
 export const PENDING_IMPORT_MESSAGE = 'The canonical file holds a committed Git change that sync has not imported yet.';
+/**
+ * GBRA-133: who imports a pending commit. Every pending-import refusal says this instead of naming a sync to run: an agent
+ * that started one beside a live serve put a second sync owner on the source.
+ */
+export const PENDING_IMPORT_OWNER = 'Do not start a sync for it: the source\'s running sync owner (gbrain serve, autopilot or a sync job) imports the commit on its next pass, '
+  + 'and a second sync beside it competes with that owner. Read-only: gbrain sync status --source <source> --json shows when the source has imported it; '
+  + 'if it shows no owner running, ask the user to sync the source on its host.';
 
-export function heldFileMessage(kind: 'drift' | 'occupied', code: string): string {
-  return kind === 'drift'
+/** #7364: `row` names the hold row the refusal read (its source and incarnation, still location-free), so a refusal naming a row that `sources retry-held` does not list shows which. */
+export function heldFileMessage(kind: 'drift' | 'occupied', code: string, row?: { sourceId: string; incarnation: string }): string {
+  const held = kind === 'drift'
     ? `The canonical file is held by sync (${code}) and differs from the page; the page is read-only for put_page until the file is repaired.`
     : `A file held by sync (${code}) occupies the canonical page path; the page is read-only for put_page until the file is repaired.`;
+  return row ? `${held} Hold row: source ${row.sourceId}, incarnation ${row.incarnation}.` : held;
 }
 
 /** The diagnostic of a held-file refusal message (null for any other message); `sourceId` fills the commands when the caller knows it. */
@@ -44,7 +111,8 @@ export function heldFileDiagnostic(message: string | null | undefined, sourceId 
     suggestion: `Sync holds this page's file because gbrain cannot import it; gbrain sources status ${sourceId} names the file${held[1] === 'invalid_fence' ? ', fence and reason' : ', line and key'}. `
       + 'The page keeps its last good revision and refuses put_page until the file is repaired, so retrying this write refuses the same way. '
       + `On the source host, repair the file first (${repair}), `
-      + 'then submit the intended write with a new request_id. Neither copy was overwritten.' };
+      + 'then submit the intended write with a new request_id. Neither copy was overwritten.'
+      + (held[3] ? ` The refusal read the sync-hold row of source ${held[3]}, incarnation ${held[4]}; gbrain sources retry-held ${held[3]} --dry-run --json lists the rows it reads (hold_rows).` : '') };
 }
 
 export function writeFailureDiagnostic(code: string, message?: string | null): { reason: string; message: string; suggestion: string } {
@@ -60,7 +128,8 @@ export function writeFailureDiagnostic(code: string, message?: string | null): {
     };
     if (message === PENDING_IMPORT_MESSAGE) return {
       reason: 'pending_import', message: 'A committed Git change to the page\'s file has not been imported yet; neither copy was overwritten.',
-      suggestion: 'A refused remember is replayed once by the first managed sync that imports the file; do not save it again. Any other write: after the next gbrain sync --source <source> --no-pull, read the page again and resubmit with a new request_id.',
+      suggestion: `A refused remember is kept and replayed once by the first managed sync that imports the file; do not save it again. ${PENDING_IMPORT_OWNER}`
+        + ' Any other write: once that import shows, read the page again and resubmit with a new request_id.',
     };
     if (['Newer working-tree bytes and the current page disagree with this pinned Git import.',
       'Newer code file bytes disagree with the pinned import.', 'Canonical sanitization cannot overwrite newer working-tree bytes.'].includes(message ?? '')) return {
@@ -148,20 +217,31 @@ const SEGMENTED_WRITE_SUGGESTION = 'The target page stores its body in segments 
   + 'For remember: save the claim without an entity (omit entity, infer_entity: false); it is filed under memory/unattributed, and remembering it with entity once that page accepts fact rows replaces that copy. '
   + "Read the page with get_page body: 'auto' or a window.";
 
-/** The next step of a `remember` refused because its entity page stores its body in segments: save the claim unattributed. */
-export function segmentedRememberFix(): Action {
-  return { argv: ['gbrain', 'remember', '<FACT>', '--provenance', '<PROVENANCE>', '--infer-entity', 'false'],
-    mcp: { tool: 'remember', arguments: { fact: '<FACT>', provenance: '<PROVENANCE>', infer_entity: false } },
-    inputs: [{ name: 'FACT', how: 'The claim you tried to remember, unchanged.' }, { name: 'PROVENANCE', how: 'The same provenance you passed.' }],
+/** What the unattributed retry must keep from the refused call, so the retry is never broader than the original. */
+export interface RememberCarry { visibility: 'world' | 'private'; kind?: string; ttl?: string; valid_from?: string }
+
+/**
+ * The next step of a `remember` refused because its entity page stores its body in segments: save the claim unattributed.
+ * With `carry` the retry names the refused call's resolved visibility, kind, ttl and valid_from; without it (a receipt-only
+ * refusal) visibility is an input the caller must fill, never left to the world default.
+ */
+export function segmentedRememberFix(carry?: RememberCarry): Action {
+  const extra: Record<string, string> = carry ? { visibility: carry.visibility, ...(carry.kind ? { kind: carry.kind } : {}),
+    ...(carry.ttl ? { ttl: carry.ttl } : {}), ...(carry.valid_from ? { valid_from: carry.valid_from } : {}) } : { visibility: '<VISIBILITY>' };
+  return { argv: ['gbrain', 'remember', '<FACT>', '--provenance', '<PROVENANCE>', '--infer-entity', 'false',
+    ...Object.entries(extra).flatMap(([key, value]) => [`--${key.replace('_', '-')}`, value])],
+    mcp: { tool: 'remember', arguments: { fact: '<FACT>', provenance: '<PROVENANCE>', infer_entity: false, ...extra } },
+    inputs: [{ name: 'FACT', how: 'The claim you tried to remember, unchanged.' }, { name: 'PROVENANCE', how: 'The same provenance you passed.' },
+      ...(carry ? [] : [{ name: 'VISIBILITY', how: 'The visibility you passed. If you passed none: private when the entity page is private or you are unsure, else world.' }])],
     consent: [], actor: 'agent', requires_exclusive: false,
     why: "Saves the claim without an entity: the entity page's facts fence cannot take a row while its body is stored in segments over 24 MiB. Remembering it with entity later replaces this copy." };
 }
 
 /** A `remember` whose entity (named or inferred) stores its body in segments: refused before admission with the unattributed-save fix. */
-export function segmentedRememberRefusal(slug: string, sourceId: string, inferred: boolean): OperationError {
+export function segmentedRememberRefusal(slug: string, sourceId: string, inferred: boolean, carry?: RememberCarry): OperationError {
   return opError('page_body_segmented',
     `remember: the entity page ${slug} (source ${sourceId})${inferred ? ', inferred from a mention in the fact,' : ''} stores its body in segments over the 24 MiB limit up to which remember reads it whole, so remember cannot add a row to its facts fence. Nothing was saved.`,
-    SEGMENTED_WRITE_SUGGESTION, { fix: segmentedRememberFix() });
+    SEGMENTED_WRITE_SUGGESTION, { fix: segmentedRememberFix(carry) });
 }
 
 const PURGED_SUGGESTION = 'Do not retry the same content. If it is still true, write it in new words; only the owner can clear a purge tombstone on the brain host.';
@@ -189,6 +269,8 @@ export async function runMemoryWrite<T>(run: () => Promise<T>): Promise<T> {
       // #6188: the frozen v1 code stays; the fence refusal's reason, location and issues ride along additively.
       if (error.canonicalCode === 'invalid_fence') Object.assign(frozen, { reason: error.reason, fence: error.fence, fenceIssues: error.fenceIssues });
       if (error.withdrawn) frozen.withdrawn = error.withdrawn;
+      // GBRA-133: a pending import keeps its read-only status fix (a remember's renders `next: wait`), additively.
+      if (frozen.detail === 'pending_import' && error.fix) Object.assign(frozen, { docs: error.docs, fix: error.fix });
       throw frozen;
     }
     // #5575: the frozen wire code stays invalid_params; the envelope's canonical code is purged_content.

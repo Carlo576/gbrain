@@ -51,6 +51,7 @@ import { pageActivationVerdicts, pageKey, suppressionSummary, type SuppressionSu
 import { renderTrustedInline, trustFields, type TrustFields } from '../eligibility/labels.ts';
 import { TURN_CONTEXT_ENVELOPE } from './turn-context-envelope.ts';
 import { neutralizeForPrompt } from '../think/sanitize.ts';
+import { quoteFacts, unquoteFactText } from '../search/transcript-quote.ts';
 
 /**
  * v0.45.7 ambient recall (issue #1). The per-turn assembler is extended into the
@@ -98,6 +99,8 @@ export interface TurnContextFact {
   /** #5575 A6: the fact's trust tier and short write origin (rendered as a compact label; absent from older serves). */
   trust_tier?: TrustTier;
   origin?: string;
+  /** #8042: a fact saved from a chat page, returned fenced as quoted source material (search/transcript-quote.ts). */
+  quoted?: 'transcript';
 }
 
 /**
@@ -228,6 +231,12 @@ export interface AssembleTurnContextOpts {
   priorContextText?: string;
   /** Opaque session identity — keys the hot-memory cache (CX2-11). */
   sessionId?: string;
+  /**
+   * `context.hot_memory.session_only`, read by the IPC handlers: hot facts
+   * come from this session only, never from the source's newest 24h facts
+   * when the session has none of its own.
+   */
+  sessionOnly?: boolean;
   maxBytes?: number;
   /** v0.46.15: lexical-arms kill switch — see ResolvePointersOpts.lexicalArms. */
   lexicalArms?: boolean;
@@ -262,6 +271,12 @@ export interface AssembleTurnContextOpts {
    * widens; anything else is world. The push hook path never sets this.
    */
   includePrivate?: boolean;
+  /**
+   * pack/delta (GST-687): the verb's caller is untrusted (MCP, `ctx.remote !== false`): hot and entity facts below the
+   * owner's tier come back quoted, in the structured facts and the rendered text alike. The push pack sets it too
+   * (#8377); the per-turn push hook always quotes its hot facts.
+   */
+  untrusted?: boolean;
   /** pack — cap on entity-card fan-out (default 8; push path passes smaller). */
   maxEntities?: number;
   /**
@@ -403,16 +418,19 @@ export async function assembleTurnContext(
         takesHoldersAllowList: ['world'],
         ...(policy.floor ? { auth: { minTrust: policy.floor } as OperationContext['auth'] } : {}),
       };
-      const meta = await getBrainHotMemoryMeta('turn_context', metaCtx);
+      // #8377 (decision A): the injected facts reach a model, so a fact below the owner's tier is quoted, as on every pull path.
+      const meta = await getBrainHotMemoryMeta('turn_context', metaCtx, { sessionOnly: opts.sessionOnly, untrusted: true });
       const hot = meta?.brain_hot_memory as { facts?: TurnContextFact[]; suppressed?: SuppressionSummary } | undefined;
       withheldFacts += hot?.suppressed?.withheld ?? 0;
       const all = Array.isArray(hot?.facts) ? [...hot.facts] : [];
       // Cross-turn dedupe, same contract as volunteered pages: a fact already
-      // injected this session is not repeated. Matched without the trailing
-      // confidence, which drifts as facts age.
+      // injected this session is not repeated. The key is the line render()
+      // emits (renderFactLine: attribution, label or data envelope included),
+      // without the trailing confidence, which drifts as facts age. Its
+      // unlabeled form still matches, so a fact injected before labels (or
+      // before its tier changed) stays injected.
       const prior = opts.priorContextText;
-      // The trust label is not part of the match: a fact injected before labels (or before its tier changed) stays injected.
-      return prior ? all.filter((f) => !prior.includes(renderFactLine({ ...f, trust_tier: undefined }).replace(/ \([0-9.]+\)$/, ' (').slice(2))) : all;
+      return prior ? all.filter((f) => !factDedupeKeys(f).some((k) => prior.includes(k))) : all;
     } catch {
       return [];
     }
@@ -505,13 +523,7 @@ function render(
       lines.push(`- **${v.display}** → \`${v.slug}\` (${v.confidence.toFixed(2)}, ${v.rationale})${syn}`);
     }
   }
-  if (facts.length) {
-    lines.push('', '## Hot memory (recent facts)');
-    for (const f of facts) {
-      const ent = f.entity_slug ? ` [${f.entity_slug}]` : '';
-      lines.push(`- ${f.trust_tier ? renderTrustedInline(neutralizeForPrompt(f.fact).text, labelOf(f)) : neutralizeForPrompt(f.fact).text}${ent} (${f.confidence.toFixed(2)})`);
-    }
-  }
+  if (facts.length) lines.push('', '## Hot memory (recent facts)', ...facts.map(renderFactLine));
   return lines.join('\n');
 }
 
@@ -582,7 +594,7 @@ async function fetchHotFacts(
       // #5575 CEO-18: the calling connection's floor keys and filters hot memory too.
       ...(floor ? { auth: { minTrust: floor } as OperationContext['auth'] } : {}),
     };
-    const meta = await getBrainHotMemoryMeta('turn_context', metaCtx);
+    const meta = await getBrainHotMemoryMeta('turn_context', metaCtx, { sessionOnly: opts.sessionOnly, untrusted: opts.untrusted === true });
     const hot = meta?.brain_hot_memory as { facts?: TurnContextFact[]; suppressed?: SuppressionSummary } | undefined;
     const facts = Array.isArray(hot?.facts) ? hot.facts.filter(f => !floor || admitsTrust(f.trust_tier ?? 'unknown', floor)) : [];
     return { facts, withheld: hot?.suppressed?.withheld ?? 0 };
@@ -667,7 +679,13 @@ async function assemblePack(
   const mentions = new Map(acc.mentions);
   const cards = acc.cards.map((c) => (mentions.has(keyOf(c)) ? { ...c, newer_mentions: mentions.get(keyOf(c)) } : c));
   const facts = [...acc.facts];
-  const entityFacts = [...acc.entityFacts];
+  // GST-687: an entity fact reaches an untrusted reader as hot memory does (quoteFacts); a failed lookup withholds them,
+  // counted in `suppressed` as recall counts its own (#8377).
+  let unquotable = 0;
+  const entityFacts = opts.untrusted === true
+    ? await quoteFacts(engine, [...acc.entityFacts], true).catch(() => { unquotable = acc.entityFacts.length; return []; })
+    : [...acc.entityFacts];
+  const withheld = acc.withheld + unquotable;
   // `since` filter (adversarial review: was documented but dead) — open-thread
   // events are cut to those after the cursor, matching the verb contract.
   const since = typeof opts.since === 'string' && opts.since.trim() ? opts.since : undefined;
@@ -686,7 +704,7 @@ async function assemblePack(
     mode: 'pack',
     ...(opts.checkpointLinks?.length ? { checkpointLinks: opts.checkpointLinks } : {}),
     ...(degradedReason ? { degradedReason } : {}),
-    ...(acc.withheld ? { suppressed: suppressionSummary(acc.withheld) } : {}),
+    ...(withheld ? { suppressed: suppressionSummary(withheld) } : {}),
   };
 }
 
@@ -794,11 +812,13 @@ async function assembleDelta(
         const members = new Map<number, number>();
         // #5888: duplicates collapse to their newest representative, as in hot memory.
         const collapsed = await collapseHotFacts(engine, opts.sourceId, kept, members);
+        // #8042: a remote reader gets a fact taken from third-party text quoted.
+        const shown: Array<(typeof collapsed)[number] & { quoted?: 'transcript' }> = remote ? await quoteFacts(engine, collapsed, opts.untrusted === true) : collapsed;
         acc.facts = {
           status: 'ok',
           raw: kept.map((r) => ({ id: r.id, at: iso(r), repId: members.get(r.id) ?? r.id })),
           overflowRow: probe ? { id: probe.id, at: iso(probe) } : null,
-          facts: collapsed.map((r) => ({
+          facts: shown.map((r) => ({
             id: r.id,
             fact: r.fact,
             kind: r.kind,
@@ -812,6 +832,7 @@ async function assembleDelta(
             confidence: r.confidence,
             ...(r.attributed_to ? { attributed_to: r.attributed_to } : {}),
             ...trustFields(r.trust_tier, r.write_origin),
+            ...(r.quoted ? { quoted: r.quoted } : {}),
           })),
         };
       } catch {
@@ -916,8 +937,17 @@ export const renderCardLine = (c: EntityCard, home?: string): string =>
   `- **${c.entity.title}** → \`${c.entity.slug}\`${sourceNote(c, home)}${c.summary ? ` — ${cardSummary(c, c.summary)}` : c.trust_tier ? ` — ${cardSummary(c, '')}` : ''}${c.relationship_note ? ` [${c.relationship_note}]` : ''} (use get_page/entity before relying on details)`;
 export const renderThreadLine = (t: EntityOpenThread): string =>
   `- [${t.kind}] ${labeled(t, t.text)}${t.date ? ` (${t.date})` : ''}`;
+/** A quoted fact's fence closes on its own line (GST-687): its label rides the marker line and the slug and confidence follow the fence. */
 export const renderFactLine = (f: TurnContextFact): string =>
-  `- ${f.attributed_to === 'assistant' ? '(assistant said) ' : ''}${labeled(f, neutralizeForPrompt(f.fact).text)}${f.entity_slug ? ` [${f.entity_slug}]` : ''} (${f.confidence.toFixed(2)})`;
+  `- ${f.attributed_to === 'assistant' ? '(assistant said) ' : ''}${labeled(f, f.quoted ? `${neutralizeForPrompt(f.fact).text}\n` : neutralizeForPrompt(f.fact).text)}${f.entity_slug ? ` [${f.entity_slug}]` : ''} (${f.confidence.toFixed(2)})`;
+/**
+ * #7023: the substrings that mark a fact as already injected: its rendered line, then its unlabeled form, each without the "- " bullet and the confidence.
+ * #8377: a quoted fact also matches its line from before the push hook quoted it.
+ */
+const factDedupeKeys = (f: TurnContextFact): string[] =>
+  [f, ...(f.quoted ? [{ ...f, fact: unquoteFactText(f.fact), quoted: undefined }] : [])]
+    .flatMap((g) => [g, { ...g, trust_tier: undefined }])
+    .map((g) => renderFactLine(g).slice(2).replace(/ \([0-9.]+\)$/, ' ('));
 export const renderPageLine = (p: DeltaPage): string => `- **${labeled(p, p.title)}** → \`${p.slug}\` (${p.updated_at})`;
 
 /** One card's newer-mentions block: a line naming the entity and its page date, then one line per page. [] when there are none. */

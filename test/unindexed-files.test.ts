@@ -27,7 +27,12 @@ import { unindexedFilesEntry } from '../src/commands/doctor/checks/unindexed-fil
 import { runUnindexedFilesPhase } from '../src/core/cycle/unindexed-files.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { SYNC_METAFILE_PAGES_KEY } from '../src/core/sync.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { hasCaseSensitiveTempFs } from './helpers/case-sensitive-fs.ts';
+
+// A case-insensitive filesystem (default macOS APFS) cannot hold notes/Case.md beside notes/case.md.
+const caseSensitive = hasCaseSensitiveTempFs();
 
 const backends = testBackends();
 const home = mkdtempSync(join(tmpdir(), 'gbrain-unindexed-'));
@@ -171,7 +176,13 @@ test('a file whose path slug belongs to a database-only page is not indexed: it 
   expect(scan).toMatchObject({ unindexed: 1, slug_taken: 1, samples: [{ path: 'notes/db-only.md', code: 'clean', slug_taken: true }] });
 }), 240_000);
 
-test('a titled file named like folder scaffolding is reported as metafile_skipped, never scheduled, and only an info finding with a user fix', () => each(async engine => {
+test('under sync.metafile_pages off, a titled file named like folder scaffolding is reported as metafile_skipped, never scheduled, and only an info finding with a user fix', () => each(async engine => {
+  // GBRA-150: the default (typed) imports such a file; off keeps the old skip, which this report names.
+  await engine.setConfig(SYNC_METAFILE_PAGES_KEY, 'off');
+  try { await titledScaffoldingSkipped(engine); } finally { await engine.executeRaw('DELETE FROM config WHERE key=$1', [SYNC_METAFILE_PAGES_KEY]); }
+}), 240_000);
+
+async function titledScaffoldingSkipped(engine: BrainEngine) {
   const s = await source(engine, { 'notes/a.md': note('A') });
   await s.sync();
   await s.legacy({ 'investors/fund-a/schema.md': '---\ntitle: Fund A\ntype: company\n---\nA synthetic fund overview.\n', 'notes/README.md': 'Plain scaffolding, no frontmatter.\n' });
@@ -186,6 +197,23 @@ test('a titled file named like folder scaffolding is reported as metafile_skippe
   expect(fix).toMatchObject({ actor: 'user', argv: ['gbrain', 'sync', '--source', s.id, '--no-pull'] });
   expect(fix.user_message).toContain('investors/fund-a/schema.md -> investors/fund-a.md');
   expect(fix.user_message).toContain('on purpose');
+  git(s.repo, 'mv', 'investors/fund-a/schema.md', 'investors/fund-a.md');
+  commit(s.repo);
+  await runSyncStep(engine, s.id, fix, s.sync);
+  expect(await engine.getPage('investors/fund-a', { sourceId: s.id })).not.toBeNull();
+}
+
+test('under the default sync.metafile_pages typed, a titled nested index.md is an unindexed file a sync imports, not metafile_skipped', () => each(async engine => {
+  const s = await source(engine, { 'notes/a.md': note('A') });
+  await s.sync();
+  await s.legacy({ 'investors/fund-a/index.md': '---\ntitle: Fund A\ntype: company\n---\nA synthetic fund overview.\n', 'notes/README.md': 'Plain scaffolding, no frontmatter.\n' });
+  const scan = await findUnindexedFiles(engine, s.id);
+  expect(scan).toMatchObject({ complete: true, scanned: 2, unindexed: 1, metafile_skipped: 0, metafile_samples: [] });
+  expect(scan.files.map(file => file.path)).toEqual(['investors/fund-a/index.md']);
+  expect(await retryUnindexed(engine, s.id)).toMatchObject({ scheduled: 1 });
+  await s.sync();
+  expect(await engine.getPage('investors/fund-a/index', { sourceId: s.id })).not.toBeNull();
+  expect(await engine.getPage('notes/readme', { sourceId: s.id })).toBeNull();
 }), 240_000);
 
 test('a bounded scan that stops early is incomplete and never clean; later passes resume and cover the late paths', () => each(async engine => {
@@ -210,9 +238,10 @@ test('slug collisions and deleted pages are reported for a person, never schedul
   const s = await source(engine, { 'notes/a-b.md': note('AB'), 'notes/Case.md': note('Case'), 'notes/gone.md': note('Gone') });
   await s.sync();
   await unmanaged(engine, () => engine.executeRaw("UPDATE pages SET deleted_at=now() WHERE source_id=$1 AND slug='notes/gone'", [s.id]));
-  await s.legacy({ 'notes/a b.md': note('A space B'), 'notes/case.md': note('Lower case') });
+  await s.legacy({ 'notes/a b.md': note('A space B'), ...(caseSensitive ? { 'notes/case.md': note('Lower case') } : {}) });
+  const taken = caseSensitive ? 2 : 1;
   const scan = await findUnindexedFiles(engine, s.id);
-  expect(scan).toMatchObject({ complete: true, unindexed: 3, slug_taken: 2, deleted_page: 1 });
+  expect(scan).toMatchObject({ complete: true, unindexed: taken + 1, slug_taken: taken, deleted_page: 1 });
   const phase = await runUnindexedFilesPhase(engine, { dryRun: false });
   expect(phase.details).toMatchObject({ scheduled_now: 0 });
   expect(await readGitHoldRetryPaths(engine, s.id, await incarnationOf(engine, s.id))).toEqual([]);
@@ -224,9 +253,9 @@ test('slug collisions and deleted pages are reported for a person, never schedul
   const [gone] = await engine.executeRaw<{ deleted_at: string | null }>("SELECT deleted_at FROM pages WHERE source_id=$1 AND slug='notes/gone'", [s.id]);
   expect(gone!.deleted_at).not.toBeNull();
   const check = await s.doctor();
-  expect(check).toMatchObject({ status: 'ok', severity: 'info', details: { sources: [{ state: 'ok', slug_taken: 2, deleted_page: 1 }] } });
+  expect(check).toMatchObject({ status: 'ok', severity: 'info', details: { sources: [{ state: 'ok', slug_taken: taken, deleted_page: 1 }] } });
   expect((check.fix as Action).actor).toBe('user');
-  expect(check.message).toContain('3 committed file(s) cannot be imported as they are');
+  expect(check.message).toContain(`${taken + 1} committed file(s) cannot be imported as they are`);
 }), 240_000);
 
 test('a stored incomplete scan whose target commit moved starts over instead of continuing its cursor', () => each(async engine => {

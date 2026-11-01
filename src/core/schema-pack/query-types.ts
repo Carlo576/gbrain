@@ -20,7 +20,7 @@ export async function expandEngineTypeFilters(
   const inputs = await Promise.all(sourceIds.map(sourceId => engineSchemaInput(engine, { remote: options.remote !== false, sourceId })));
   const names = new Set(inputs.map(input => resolveActivePackNameOnly(input).pack_name));
   if (names.size > 1) {
-    throw new SchemaPackTrustGateError('Type-filtered reads across sources with divergent schema packs are not supported. Query one source at a time.');
+    throw new SchemaPackTrustGateError('Type-filtered reads across sources with different schema packs are not supported. Query one source at a time.');
   }
   let pack;
   try {

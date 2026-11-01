@@ -190,8 +190,8 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     id: 'foreign_ownership_marker', resolution: 'operator', registration: 'wave',
     hostOnly: 'Ownership markers are private files beside the source checkouts on the brain host.',
     count: d => Number(d.count ?? 0),
-    impact: 'An ownership marker beside a source checkout names another brain or an unknown worktree, so claiming that checkout refuses recovery_required',
-    instruction: 'Confirm with the user that the recorded brain is retired, then remove exactly the marker file doctor names on the brain host and claim again (docs/guides/write-refusals.md#foreign-ownership-marker); never remove a marker of a brain still in use.',
+    impact: 'An ownership marker beside a source checkout names another brain or an unknown worktree, or other users can read it, so claiming or writing that checkout refuses recovery_required',
+    instruction: 'A marker other users can read: run the chmod 600 doctor names on the brain host, never remove it. A marker of another brain: confirm with the user that the recorded brain is retired, then remove exactly the marker file doctor names on the brain host and claim again (docs/guides/write-refusals.md#foreign-ownership-marker); never remove a marker of a brain still in use.',
     run: async engine => (await import('./checks/orphan-bindings.ts')).checkForeignOwnershipMarkers(engine),
   },
   {
@@ -323,6 +323,27 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/atom-retirements.ts')).atomRetirementsRestorableCheck(engine, scope.sourceIds),
   },
   {
+    id: 'generation_retirements', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Restoring a derived generation is a host-side, explicit-only repair.',
+    count: d => Number(d.items ?? 0),
+    impact: 'Live generations retired derived items inside the restore window; they stay restorable until the purge hold ends',
+    run: async (engine, scope) => (await import('./checks/generations.ts')).generationRetirementsCheck(engine, scope.sourceIds),
+  },
+  {
+    id: 'generation_held', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Releasing a held derived generation is a host-side, explicit-only repair.',
+    count: d => Number(d.count ?? 0),
+    impact: 'Some derived results were held instead of published, so their keys keep the previous generation',
+    run: async (engine, scope) => (await import('./checks/generations.ts')).generationHeldCheck(engine, scope.sourceIds),
+  },
+  {
+    id: 'generation_pending', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Pending generation members and orphan candidates are host-side state of managed derived writers.',
+    count: d => Number(d.pending ?? 0) + Number(d.orphans ?? 0),
+    impact: 'Some activated generations still wait on member requests, or pages were written for an activation that never happened',
+    run: async (engine, scope) => (await import('./checks/generations.ts')).generationPendingCheck(engine, scope.sourceIds),
+  },
+  {
     id: 'extractor_facts_expired', resolution: 'repair', registration: 'wave',
     hostOnly: 'Restoring expired extractor facts is a host-side, explicit-only repair.',
     count: d => Number(d.evidenced ?? 0) + Number(d.ambiguous ?? 0),
@@ -352,11 +373,24 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/captured-facts.ts')).capturedFactsCheck(engine, scope.sourceIds),
   },
   {
+    id: 'agent_session_facts', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Classifying agent-session facts reads the session corpus on the brain host; the repair is explicit-only and needs the user\'s agreement.',
+    count: d => Number(d.evidenced ?? 0) + Number(d.ambiguous ?? 0),
+    impact: 'Some active facts from agent-launched sessions are still attributed to the owner',
+    run: async (engine, scope) => (await import('./checks/agent-session-facts.ts')).agentSessionFactsCheck(engine, scope.sourceIds),
+  },
+  {
     id: 'facts_redaction_marker', resolution: 'repair', registration: 'wave',
     hostOnly: 'Restoring redacted fact text reads the facts\' source pages and versions on the brain host; the repair is explicit-only.',
     count: d => Number(d.affected ?? 0),
     impact: 'Some active facts lost words to the pre-fix prompt sanitizer and hold a [redacted] marker in their stored text',
     run: async (engine, scope) => (await import('./checks/facts-redaction-marker.ts')).factsRedactionMarkerCheck(engine, scope.sourceIds),
+  },
+  {
+    id: 'fact_bulk_dates', resolution: 'repair', registration: 'wave',
+    count: d => Array.isArray(d.days) ? d.days.reduce((sum: number, day: { facts?: number }) => sum + Number(day.facts ?? 0), 0) : 0,
+    impact: 'Some sources hold a large share of facts dated with the day a bulk load ran, which records when they were loaded, not when they happened',
+    run: async (engine, scope) => (await import('./checks/fact-bulk-dates.ts')).factBulkDatesCheck(engine, scope.sourceIds),
   },
   {
     id: 'loop_facts_drift', resolution: 'repair', registration: 'wave',
@@ -396,8 +430,8 @@ export function checkHealthUnknown(check: Check): boolean {
 export interface WaveFinding { spec: WaveCheckSpec; check: Check; state: 'ok' | 'finding' | 'unknown' }
 
 /** Run wave checks; a throwing check becomes an unknown finding instead of aborting the rest. */
-export async function runWaveChecks(engine: BrainEngine, opts: WaveScope & { only?: WaveCheckSpec['registration']; remote?: boolean } = {}): Promise<WaveFinding[]> {
-  const specs = WAVE_CHECKS.filter(spec => (!opts.only || spec.registration === opts.only) && (!opts.remote || !spec.hostOnly));
+export async function runWaveChecks(engine: BrainEngine, opts: WaveScope & { only?: WaveCheckSpec['registration']; ids?: ReadonlySet<string>; remote?: boolean } = {}): Promise<WaveFinding[]> {
+  const specs = WAVE_CHECKS.filter(spec => (!opts.only || spec.registration === opts.only) && (!opts.ids || opts.ids.has(spec.id)) && (!opts.remote || !spec.hostOnly));
   const findings: WaveFinding[] = [];
   for (const spec of specs) {
     let check: Check;

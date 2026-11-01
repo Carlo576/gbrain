@@ -26,7 +26,7 @@ import { embedBatchWithBackoff, restampIfDemotedToTitleTier } from './embed-retr
 import { wrapChunkTextsForStoredMode } from './embedding-context.ts';
 import { healOversizedPageChunks, healedChunksToStaleRows } from './embed-oversize-heal.ts';
 import { healAndReportOverLength } from './embed-overlength-heal.ts';
-import { invalidateStaleSignatureEmbeddingsGuarded, splitEmbeddingSignature, currentSpaceChunkPredicate } from './embedding-invalidation.ts';
+import { hasSignatureDrift, invalidateStaleSignatureEmbeddingsGuarded, splitEmbeddingSignature, currentSpaceChunkPredicate } from './embedding-invalidation.ts';
 import {
   resolveActiveEmbeddingColumnFromEngine,
   quoteIdentifier,
@@ -36,6 +36,7 @@ import { resolveStaleEmbedConcurrency } from './embed-concurrency.ts';
 import { AbortError } from './abort-check.ts';
 import { contentDriftSweepLine, runContentDriftSweep, type ContentDriftSweepStatus } from './content-drift-sweep.ts';
 import { meterPageBatch, spendGrant } from './page-embedding-budget.ts';
+import { acquirePageEmbeddingLease, stillPendingChunks } from './page-embedding-lease.ts';
 import { chunkGenerationFilter, chunkVisibleFilter } from './search/safe-chunks.ts';
 import { embedSegmentedPage, embedSegmentedRows, readSegmentedEmbedPage, type SegmentedEmbedOpts } from './page-body/segmented-embedding.ts';
 
@@ -280,8 +281,8 @@ async function embedSegmentedStaleRows(engine: BrainEngine, stale: readonly Stal
   opts: Omit<SegmentedEmbedOpts, 'beforeInstall'> & { stamp?: ProvenanceStamp; pacer: DbPacer; assertOwned?: (tx?: BrainEngine) => Promise<void>; stopped: () => boolean }): Promise<boolean> {
   const page = await observed(opts.pacer, () => readSegmentedEmbedPage(engine, { id: stale[0]!.page_id }));
   if (!page) return false;
-  const installed = await embedSegmentedRows(engine, page, stale, { ...opts,
-    beforeInstall: async tx => { await opts.assertOwned?.(tx); if (opts.stopped()) throw new AbortError(); } });
+  const installed = (await embedSegmentedRows(engine, page, stale, { ...opts,
+    beforeInstall: async tx => { await opts.assertOwned?.(tx); if (opts.stopped()) throw new AbortError(); } }))?.installed;
   if (opts.stamp && installed) await stampIfPageProvenanceComplete(engine, page.slug, page.source_id, opts.stamp);
   result.embedded += installed ?? 0;
   if (installed) result.pagesProcessed += 1;
@@ -324,11 +325,15 @@ export async function embedStalePages(
         if (page.embedded) result.pagesProcessed += 1;
         continue;
       }
+      const [page] = await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL', [sourceId, slug]);
+      if (!page) continue;
+      await using lease = await acquirePageEmbeddingLease(engine, page.id, { signal: opts.signal });
+      if (lease.busy) continue;
       // SUP-3874: split legacy oversized rows before embedding so a single
       // pre-cap chunk cannot permanently fail the page.
       await healOversizedPageChunks(engine, slug, { sourceId });
       const prepared = await readProjectionSnapshot(engine, slug, sourceId, { requireLiveSource: true });
-      if (!prepared) continue;
+      if (!prepared || prepared.snapshot.page.id !== page.id) continue;
       const existing = prepared.chunks;
       const staleIdx = new Set(
         (await engine.executeRaw<{ chunk_index: number }>(
@@ -360,6 +365,7 @@ export async function embedStalePages(
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
       const install = await engine.transaction(async tx => {
+        await lease.assertHeld(tx);
         const installed = await installPageEmbeddings(tx, prepared, merged,
           opts.embeddingSignature && stale.length === existing.length ? opts.embeddingSignature : undefined);
         if (stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, sourceId);
@@ -442,16 +448,15 @@ export async function embedStaleForSource(
   // the NULL cursor below re-embeds them. GRANDFATHER: NULL signature
   // untouched. Best-effort — a failure here must not abort the backfill.
   //
-  // #4283: NULLing is conditional on a WORKING embedder. The drift pre-count
-  // (two cheap COUNTs; probe only fires when drift exists) keeps the probe's
+  // #4283: NULLing is conditional on a WORKING embedder. The drift pre-check
+  // (one page-first EXISTS; probe only fires when drift exists) keeps the probe's
   // one embed call off the no-drift common path; a failed probe skips the
   // invalidation entirely so a misresolved worker can't strip a corpus it
   // can never re-embed.
   if (signature) {
     try {
-      const wide = await engine.countStaleChunks({ sourceId, signature });
-      const nullOnly = await engine.countStaleChunks({ sourceId });
-      if (wide - nullOnly > 0) {
+      // One page-first EXISTS: no chunk count before the probe, so a large drifted corpus cannot time the pre-check out (#7117 follow-up).
+      if (await hasSignatureDrift(engine, { signature, sourceId })) {
         await opts.assertOwned?.();
         if (stopped()) return { ...result, aborted: true };
         const probeOk = await probeEmbedder(embedFn, signature, signal);
@@ -471,7 +476,7 @@ export async function embedStaleForSource(
         } else {
           result.invalidationSkipped = 'embedder_probe_failed';
           process.stderr.write(
-            `\n  [embed-stale] ${wide - nullOnly} chunk(s) drifted from signature ${signature} but the embedder probe failed — ` +
+            `\n  [embed-stale] embedded chunk(s) drifted from signature ${signature} but the embedder probe failed — ` +
             `SKIPPING invalidation (existing vectors preserved). Check embedding provider config/credentials.\n`,
           );
         }
@@ -557,6 +562,8 @@ export async function embedStaleForSource(
       try {
         await opts.assertOwned?.();
         if (stopped() || await embedSegmentedStaleRows(engine, stale, result, { embedFn, signal, signature, stamp, pacer, assertOwned: opts.assertOwned, stopped })) return;
+        await using lease = await acquirePageEmbeddingLease(engine, stale[0].page_id, { signal, deadline: opts.deadline });
+        if (lease.busy) return;
         // SUP-3874: split legacy oversized chunk_text before embedding.
         const healed = await observed(pacer, () => engine.transaction(async tx => {
           await opts.assertOwned?.(tx);
@@ -582,8 +589,7 @@ export async function embedStaleForSource(
         if (!prepared) return;
         const selected = new Map(stale.map(c => [c.chunk_index, c]));
         const existing = prepared.chunks;
-        stale = existing.filter(c => selected.get(c.chunk_index)?.chunk_text === c.chunk_text)
-          .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
+        stale = stillPendingChunks(existing, selected);
         if (!stale.length) return;
         const pageRow = prepared.snapshot.page;
         const metered = await meterPageBatch(engine, pageRow, existing.filter(c => !c.embedded_at), { signature });
@@ -615,6 +621,7 @@ export async function embedStaleForSource(
         const install = await observed(pacer, () => engine.transaction(async tx => {
           await opts.assertOwned?.(tx);
           if (stopped()) throw new AbortError();
+          await lease.assertHeld(tx);
           const installed = await installPageEmbeddings(tx, prepared, merged);
           if (stamp) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
           if (stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);

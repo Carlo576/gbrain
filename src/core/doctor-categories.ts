@@ -20,7 +20,7 @@
  *             coherent?" question.
  *
  * Why this matters: the doctor's legacy `health_score` ( 100 − 20×fails −
- * 5×warns ) weights every check equally. A skill routing miss costs the same
+ * 5×warns, over the checks that finished: #7276 ) weights every check equally. A skill routing miss costs the same
  * as a corrupt embedding column. With categorization, the doctor surfaces a
  * brain_checks_score and category_scores so operators see signal-to-noise on
  * the question they're actually asking.
@@ -60,18 +60,30 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #7013: atoms an empty managed re-extraction retired that atoms-restore can bring back (doctor/checks/atom-retirements.ts).
   'atom_retirements_restorable',
   'captured_facts_active',
+  // #8064: owner-attributed capture facts from agent-launched sessions (doctor/checks/agent-session-facts.ts).
+  'agent_session_facts',
   // #7125: facts whose stored text holds a pre-fix sanitizer redaction marker (doctor/checks/facts-redaction-marker.ts).
   'facts_redaction_marker',
+  // #7247: a calendar day holding a bulk-loaded share of a source's facts as their valid_from (doctor/checks/fact-bulk-dates.ts).
+  'fact_bulk_dates',
   'conversation_label_facts',
   'conversation_outcomes_stale',
   'connector_checkpoints',
   'connector_held_items',
   'git_held_files',
   'fence_integrity',
+  // GBRA-221: live fence rows on imported pages whose body is outside-authored text (doctor/checks/outside-content-fences.ts).
+  'outside_content_fences',
+  // GBRA-161: derived items live generations retired in the restore window, and results held instead of published (doctor/checks/generations.ts).
+  'generation_held',
+  'generation_pending',
+  'generation_retirements',
   // #5575: stored trust tier counts, the legacy-row backfill, scan and source claims.
   'trust_tiers',
   'trust_scan',
   'trust_sources_unclaimed',
+  // #7656: index-existing trust releases confirmed before their preview showed the fence row's fields (doctor/checks/trust-release-unpreviewed.ts).
+  'trust_release_unpreviewed_fields',
   'credential_projection_pending',
   'derived_visibility',
   'extractor_facts_expired',
@@ -116,6 +128,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #5137: an env provider key shadowing a different config key.
   'embedding_key_source',
   'embedding_migration_state',
+  // GBRA-248 W0b: the config file disables embeddings over a database that holds vectors (doctor/checks/embedding-plane.ts).
+  'embedding_plane_disagreement',
   'embedding_provider',
   // #5691: query-instruction advisory for instruction-style embedding models.
   'embedding_query_prefix',
@@ -130,6 +144,10 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'extract_health',
   // Large pages A7: page extractions that read only part of their input.
   'extraction_input_truncated',
+  // PR 4 (Wave B incremental derivation, transcripts): conversation pages held because no format is detected over them.
+  'conversation_detection_ambiguous',
+  // PR 4 (Wave B incremental derivation, transcripts): segmented derivations held back by a model without a price.
+  'derivation_unpriced_model',
   'facts_embedding_width_consistency',
   'facts_extraction_health',
   'facts_health',
@@ -163,6 +181,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'parked_effects',
   // #6741: managed purges parked after repeated failures (doctor/checks/purge-parks.ts).
   'purge_parked_pages',
+  // Wave B PR 4: fact purge sweeps of stored derivation results still pending or stalled (doctor/checks/derivation-purge-sweeps.ts).
+  'derivation_purge_sweeps',
   'partial_embedding',
   'pglite_scratch_probe',
   'quarantined_pages',
@@ -191,10 +211,21 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'git_convergence',
   // #5186: an ownership marker committed to a source checkout's Git index.
   'tracked_ownership_marker',
+  // #7381: a source checkout behind its upstream, write-through files or staged files waiting for a commit, unpushed commits outside the source root (doctor/checks/git-writer.ts).
+  'checkout_lagging',
+  'dirty_age',
+  'commits_outside_source_root',
+  'quarantined_changes',
   'takes_count',
   'takes_weight_grid',
   // #5836: active facts with no entity (invisible to entity recall and the conflict sweep).
   'unlinked_facts',
+  // #7160: title-prefixed person pages that likely duplicate an unprefixed page (preview only).
+  'person_title_duplicates',
+  // Git-canonical G1: the database compared with the commit at HEAD per source, informational (doctor/checks/db-ahead-of-git.ts).
+  'db_ahead_of_git',
+  // Git-canonical G3: how far each strict source's index trails HEAD (doctor/checks/git-index-lag.ts).
+  'git_index_lag',
   'edge_validity',
   'text_projection_readiness',
   'timeline_coverage',
@@ -209,6 +240,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'ghost_pages',
   // #6948: files recorded by several live pages (origin twins) and the pages_live_origin_key index (doctor/checks/origin-twins.ts).
   'origin_twins',
+  // #7305: live pages whose slug their recorded file path does not derive, and whose file lacks the slug: stamp (doctor/checks/slug-path-mismatch.ts).
+  'slug_path_mismatch',
   // #6729: inexact renames whose identity sync did not keep, until the pair gets a disposition (doctor/checks/rename-identity-downgrades.ts).
   'rename_identity_downgrades',
   // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
@@ -217,8 +250,14 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'uncommitted_sync_deletions',
   // #6865: committed files of a managed Git source with no page and no hold, from the stored detector result (doctor/checks/unindexed-files.ts).
   'unindexed_files',
+  // GBRA-150: pages a managed sync committed past the freshness target that search cannot fully see (doctor/checks/landing-gaps.ts).
+  'sync_landing_gaps',
   // #6712: live pages whose database-only edit an incremental sync overwrote without a hold (doctor/checks/overwritten-edits.ts).
   'sync_overwritten_db_edits',
+  // #8071: rows a managed sync's checkpoint moved past, compared with the file at the checkpoint commit (doctor/checks/rows-behind.ts).
+  'sync_rows_behind_checkpoint',
+  // #7891: provenance stamps and trust markers a write removed before #7892 (doctor/checks/provenance-stamp-drift.ts).
+  'provenance_stamp_drift',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',
@@ -290,6 +329,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'google_api_access',
   'google_oauth',
   'home_dir_in_worktree',
+  // GBRA-108: cron commands that run gbrain without GBRAIN_HOME (doctor/checks/cron-gbrain-home.ts).
+  'cron_gbrain_home',
   'index_audit',
   'npm_squat',
   'oauth_client_scope_health',
@@ -323,8 +364,14 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'two_consumers_on_host',
   'consumers_without_heartbeat',
   'host_identity_mismatch',
+  // GBRA-248 W0a: managed writes waiting on an owner host quiet past the stale window (doctor/checks/owner-host-stale.ts).
+  'owner_host_stale',
   // #6696 C6: a live serve or worker on an older build than this checkout (doctor/checks/persistence-consumers.ts).
   'serve_build_drift',
+  // #7245: serve, the jobs supervisor, worker parents and job children on different builds (doctor/checks/runtime-build-skew.ts).
+  'runtime_build_skew',
+  // GBRA-156: the warm CLI socket refused CLI calls by identity part in the last 24 h (doctor/checks/cli-socket-refusals.ts).
+  'cli_socket_refusals',
   'stale_embedding_effects',
   'vector_plan',
   'keyword_plan',
@@ -365,6 +412,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'grant_new_ops_available',
   'reranker_health',
   'rls',
+  // #7632: every gbrain function that pins a search_path ends it with pg_temp.
+  'function_search_path',
   'rls_event_trigger',
   'search_mode',
   'decide_health',

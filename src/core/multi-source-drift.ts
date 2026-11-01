@@ -45,7 +45,8 @@
 import { readdirSync, lstatSync, statSync } from 'fs';
 import { join, relative } from 'path';
 import type { BrainEngine } from './engine.ts';
-import { pathToSlug, isSyncable, repoSyncableOptions } from './sync.ts';
+import { pathToSlug, isSyncable, readMetafilePagesMode, repoSyncableOptions, unsyncableReason } from './sync.ts';
+import { diskMetafileHeads, metafilePagePredicate } from './sync-metafile-pages.ts';
 import { readSlugRootMode } from './sync-anchor.ts';
 import { git } from './sync-git.ts';
 
@@ -181,28 +182,22 @@ function walkMarkdownAndMdxFiles(
  * Engine-agnostic: uses executeRaw with a VALUES clause. PGLite + Postgres
  * both support the shape.
  */
-async function batchProbeExistence(
+export async function batchProbeExistence(
   engine: BrainEngine,
   slugs: string[],
   sourceId: string,
 ): Promise<Map<string, Set<string>>> {
   if (slugs.length === 0) return new Map();
-  // Build a positional VALUES clause: ($1::text), ($2), ($3), ...
-  const valuePlaceholders = slugs.map((_, i) => `($${i + 1}::text)`).join(', ');
-  const sourceParamIdx = slugs.length + 1;
-  const sql = `
-    WITH candidates(slug) AS (VALUES ${valuePlaceholders})
+  // One array parameter, not one per slug: a source past 65,533 files exceeds the bind-parameter cap (#7388).
+  const rows = await engine.executeRaw<{ slug: string; source_id: string | null }>(`
+    WITH candidates(slug) AS (SELECT unnest($1::text[]))
     SELECT c.slug, p.source_id
     FROM candidates c
     LEFT JOIN pages p
       ON p.slug = c.slug AND p.deleted_at IS NULL
-         AND p.source_id IN ('default', $${sourceParamIdx}::text)
+         AND p.source_id IN ('default', $2::text)
     ORDER BY c.slug, p.source_id
-  `;
-  const rows = await engine.executeRaw<{ slug: string; source_id: string | null }>(
-    sql,
-    [...slugs, sourceId],
-  );
+  `, [slugs, sourceId]);
   const map = new Map<string, Set<string>>();
   for (const r of rows) {
     if (!map.has(r.slug)) map.set(r.slug, new Set());
@@ -250,6 +245,7 @@ export async function findMisroutedPages(
   const sample: MisroutedSample[] = [];
   const gitRootSkipped: string[] = [];
   const unreadable: MisroutedResult['unreadable_sources'] = [];
+  const metafilePages = await readMetafilePagesMode(engine);
 
   for (const src of sources) {
     if (src.id === 'default') continue;
@@ -275,12 +271,21 @@ export async function findMisroutedPages(
     // Drift must use the exact same repository admission boundary as sync.
     // Otherwise .gbrainignore paths, metafiles, and pruned directories look
     // "missing" forever even though sync intentionally excludes them.
-    const syncableOpts = repoSyncableOptions(src.local_path, 'markdown');
+    // A typed nested metafile is a page (GBRA-150), judged on its file below the source root.
+    const heads = diskMetafileHeads(src.local_path);
+    const syncableOpts = { ...repoSyncableOptions(src.local_path, 'markdown'), metafilePage: metafilePagePredicate(metafilePages, heads) };
     const admitted = files.filter((f) => isSyncable(f.relPath, syncableOpts));
     if (admitted.length === 0) continue;
 
     // Convert FS paths to canonical slugs (lowercased, extension stripped).
-    const slugs = Array.from(new Set(admitted.map(f => pathToSlug(prefix + f.relPath))));
+    // Sync refuses metafiles (root AGENTS.md/CLAUDE.md, README.md, ...), pruned
+    // dirs and malformed names at their synced path too, so they never become
+    // pages in this source and a same-slug page on default is not a misroute (#6681).
+    const metafilePage = metafilePagePredicate(metafilePages, path => heads(path.slice(prefix.length)), path => path.slice(prefix.length));
+    const slugs = Array.from(new Set(admitted
+      .map(f => prefix + f.relPath)
+      .filter(path => unsyncableReason(path, { strategy: 'markdown', metafilePage }) === null)
+      .map(path => pathToSlug(path))));
     const existenceMap = await batchProbeExistence(engine, slugs, src.id);
 
     for (const slug of slugs) {

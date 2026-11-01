@@ -29,6 +29,7 @@ import { inspectRelocatedPhysicalRoot, relocatePhysicalRoot } from './physical-r
 import { assertWriterAdminState, WRITER_INSPECTION_HINT } from './admin-intent.ts';
 import { assertWriterAdminUnlocked } from './admin-lock.ts';
 import { rebindContentReceipts } from '../shared-skills/receipt-root.ts';
+import { assertLinkedWorktreeIntact } from './worktree-link.ts';
 
 export interface SourceLifecycleInput {
   operation:'add'|'claim'|'archive'|'restore'|'remove'|'purge'|'rebind'|'reclone';
@@ -59,6 +60,7 @@ function localRoot(path:string,create=false):{source:string;worktree:string}{
     'The path names a file. Pass the directory that holds the source content, then rerun the command; nothing was changed.');
   let worktree=source;
   let ancestor=source;while(!existsSync(ancestor))ancestor=dirname(ancestor);
+  assertLinkedWorktreeIntact(ancestor);
   try{worktree=realpathSync(discoverGitRoot(ancestor));}catch{/* directory source */}
   return {source,worktree};
 }
@@ -132,7 +134,7 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
   if(prior) return topologyReceipt(prior);
   if(input.requireGitContent&&input.path&&(!isInsideGitRepo(input.path)||!hasTrackedContent(input.path)))
     throw opError('not_a_git_repo','The source path must contain committed Git content. Use --force to register an ordinary directory.',
-      `Commit the content in that directory with git first, or, if '${input.sourceId}' is meant to be a plain directory, rerun the add with --force; nothing was registered.`);
+      `Commit the content in that directory with git first, or, if '${input.sourceId}' is meant to be a plain directory, rerun the add with --force (sync then imports its files without Git; a file removed from it keeps its page); nothing was registered.`);
   if(input.operation==='reclone'||input.operation==='add'&&input.remoteUrl){
     const {runManagedSourceClone}=await import('./topology-clone.ts');
     return runManagedSourceClone(engine,input,principal,requestId,intent);

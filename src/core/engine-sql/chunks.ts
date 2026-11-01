@@ -34,7 +34,7 @@ import {
   EmbeddingColumnNotRegisteredError,
 } from '../search/embedding-column.ts';
 import { chunkDocumentOrder, chunkGenerationFilter, chunkManifestJoin, chunkVisibleFilter, chunkWriteInvalidations, currentTextProjectionFilter, movableChunkSql, requiresSafeChunks, safeChunksFilter } from '../search/safe-chunks.ts';
-import { privatePagesFilterFragment } from '../search/private-visibility.ts';
+import { privatePagesFilterForCaller } from '../search/private-visibility.ts';
 import { splitEmbeddingSignature, lockEmbeddingSources } from '../embedding-invalidation.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from '../embed-skip.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from '../quarantine.ts';
@@ -401,7 +401,7 @@ function chunkReadWhere(
     ? sqlFragment`p.source_id = ANY(${scope.sourceIds}::text[])`
     : sqlFragment`p.source_id = ${scope.sourceId}`;
   return sqlFragment`p.slug = ${slug} AND ${scopeSql}
-          ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
+          ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterForCaller('p')}`) : sqlFragment``}
           AND ${trustedSql(opts?.includeUnsealed ? chunkGenerationFilter('p', 'cc', opts.chunkManifest ?? true) : chunkVisibleFilter('p', 'cc'))}
           ${requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``}`;
 }
@@ -800,9 +800,11 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
   }
 
 /**
- * Shared chunkless-page-with-content predicate. Excludes quarantined +
- * embed_skip pages — both are intentionally chunkless by design, not drift
- * the safety net should repair.
+ * Shared chunkless-page-with-content predicate. Excludes quarantined pages,
+ * which are chunkless by design. An embed_skip page is not: every write keeps
+ * its chunks for keyword search (#6722), so one with none (an older gbrain's
+ * size skip, or a backfill rewrite that never landed) is drift the safety net
+ * chunks; its chunks get no vectors (#7174).
  */
 function chunklessPagesWhere(opts?: { sourceId?: string }): SqlFragment {
   const conds: SqlFragment[] = [
@@ -812,7 +814,6 @@ function chunklessPagesWhere(opts?: { sourceId?: string }): SqlFragment {
     // something to heal even with compiled_truth = ''. A segmented page's
     // body columns are NULL; its body_bytes says it has one.
     sqlFragment`(p.compiled_truth <> '' OR p.timeline <> '' OR (p.body_storage = 'segmented' AND p.body_bytes > 0))`,
-    sqlFragment`${trustedSql(EMBED_SKIP_FILTER_FRAGMENT)}`,
     sqlFragment`${trustedSql(QUARANTINE_FILTER_FRAGMENT)}`,
     sqlFragment`NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id)`,
   ];
@@ -870,11 +871,10 @@ function chunkEmbeddingState(column: string): SqlFragment {
       ELSE 'keyword_only' END`;
 }
 
-/** A live page with no chunk row: gated (quarantine, embed_skip), healable (`chunklessPagesWhere`), else empty. */
+/** A live page with no chunk row: quarantined, healable with a body (`chunklessPagesWhere`, embed_skip included: #7174), else empty. */
 function chunklessPageState(): SqlFragment {
   return sqlFragment`CASE
       WHEN NOT ${trustedSql(QUARANTINE_FILTER_FRAGMENT)} THEN 'quarantined'
-      WHEN NOT ${trustedSql(EMBED_SKIP_FILTER_FRAGMENT)} THEN 'keyword_only'
       WHEN ${chunklessPagesWhere()} THEN 'chunkless_healable'
       ELSE 'empty' END`;
 }
@@ -964,7 +964,6 @@ export async function readEmbeddingStateCounts(exec: ScopedRead, column: string,
     for (const state of EMBEDDING_STATES) counts[state] ??= 0;
     return { ...base, basis: 'exact', counts, omitted: [], eligible_embedded: eligibleEmbedded, deleted_overdue: deletedOverdue };
   }
-  add('keyword_only', embedSkip.chunkless ?? 0);
   const quarantined = await exec.run(sqlFragment`
       SELECT COALESCE(sum(GREATEST((SELECT count(*) FROM content_chunks cc WHERE cc.page_id = p.id), 1)), 0)::bigint AS n
         FROM pages p
@@ -1001,8 +1000,8 @@ const normalizeStateRow = compileRowNormalizer<EmbeddingStateRow>({ chunks: 'big
  * prints, to report completeness).
  */
 export async function listEmbeddingStateRows(exec: ScopedRead, column: string,
-  opts: { sourceIds?: string[]; states: readonly EmbeddingState[]; limit: number; purgeWindowHours: number }): Promise<EmbeddingStateRow[]> {
-  const scope = embeddingStateScope(opts.sourceIds);
+  opts: { sourceIds?: string[]; slugs?: string[]; states: readonly EmbeddingState[]; limit: number; purgeWindowHours: number }): Promise<EmbeddingStateRow[]> {
+  const scope = opts.slugs ? sqlFragment`${embeddingStateScope(opts.sourceIds)} AND p.slug = ANY(${opts.slugs}::text[])` : embeddingStateScope(opts.sourceIds);
   const { rows } = await exec.run(sqlFragment`
     SELECT r.slug, r.source_id, r.state, r.chunks, r.bytes, r.embed_skip_reason, r.marker_bytes, r.quarantine_reason, r.deleted_at, r.overdue
       FROM (
@@ -1096,8 +1095,8 @@ export function cosineByChunkIdsStatement(ids: number[], column: string, query: 
   const col = trustedSql(`cc.${quoteIdentifier(column)}`);
   const q = `[${Array.from(query).join(',')}]`;
   return renderFragment(sqlFragment`
-    SELECT cc.id, CASE WHEN vector_dims(${col}::vector) <> ${query.length}::int OR vector_norm(${col}::vector) = 0 OR vector_norm(${q}::vector) = 0
-                       THEN 0::float8 ELSE 1 - (${col}::vector <=> ${q}::vector) END AS cosine
+    SELECT cc.id, CASE WHEN vector_dims(${col}::vector) <> ${query.length}::int OR vector_norm(${col}::vector) = 0 OR vector_norm(${q}::text::vector) = 0
+                       THEN 0::float8 ELSE 1 - (${col}::vector <=> ${q}::text::vector) END AS cosine
       FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
      WHERE cc.id = ANY(${ids}::int[]) AND ${col} IS NOT NULL AND ${trustedSql(chunkVisibleFilter('p', 'cc'))}
   `);
@@ -1123,7 +1122,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
   const scopeSql = opts.sourceIds && opts.sourceIds.length > 0
     ? sqlFragment`AND p.source_id = ANY(${opts.sourceIds}::text[])`
     : opts.sourceId ? sqlFragment`AND p.source_id = ${opts.sourceId}` : sqlFragment``;
-  const privateSql = opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``;
+  const privateSql = opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterForCaller('p')}`) : sqlFragment``;
   const safeSql = requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``;
   const { rows } = await exec.run(sqlFragment`
     WITH req AS (

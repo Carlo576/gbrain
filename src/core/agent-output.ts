@@ -13,11 +13,12 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { VERSION } from '../version.ts';
-import { OperationError, __registerOperationErrorRenderer, type WithdrawnDetail } from './ops/contract.ts';
+import { OperationError, __registerOperationErrorRenderer, provesNotAdmitted, type WithdrawnDetail } from './ops/contract.ts';
 import { StructuredAgentError } from './errors.ts';
 import { canonicalCodeFor, codeEntry, codeClass, codeRetryable, exitCodeForCode } from './error-catalogue.ts';
 import { VERB_NAMES } from './verbs.ts';
 import { classifyPgAccessError, formatDbAccessMarker } from './pg-access-classify.ts';
+import { isReadOnlyTransactionError } from './postgres-engine/read-write-transactions.ts';
 import { redactConnectionInfo } from './audit/redact-connection-info.ts';
 import { redactUrlsInText } from './url-redact.ts';
 import { parseRepoBase } from './repo-base.ts';
@@ -85,6 +86,12 @@ export interface Notice {
    * alone. renderNotice never copies it, so it never reaches the wire.
    */
   dedupe_key?: string;
+  /**
+   * Unrendered (#7165): a coverage notice whose repeat of the same state is
+   * suppressed per session (NoticeLedger) and per one-shot CLI window, until
+   * `level` rises materially or the `key` (code, sources, kinds) is new.
+   */
+  escalation?: { key: string; level: number };
 }
 export interface RenderedNotice extends Omit<Notice, 'fix'> { fix?: RenderedAction; contract_version: 1 }
 
@@ -538,7 +545,7 @@ function recoveryFix(p: EnvelopeParts, ctx: AgentErrorContext, fields?: ReceiptF
 
 const REFRESH_REFUSALS: ReadonlySet<string> = new Set([
   'refresh_not_managed', 'refresh_not_owner', 'refresh_no_upstream', 'fetch_failed', 'refresh_diverged', 'refresh_dirty',
-  'sync_in_progress', 'refresh_in_progress', 'refresh_drain_timeout', 'refresh_source_changed', 'refresh_recovery_required',
+  'sync_in_progress', 'refresh_in_progress', 'refresh_drain_timeout', 'refresh_lock_timeout', 'refresh_source_changed', 'refresh_recovery_required',
   'worktree_refreshing',
 ]);
 
@@ -582,6 +589,11 @@ const ROWS: Row[] = [
       error: e.envelope.code, code: canonicalCodeFor(e.envelope.code), message: e.envelope.message,
       suggestion: e.envelope.hint, docs: e.envelope.docs_url,
     }),
+  },
+  {
+    match: isReadOnlyTransactionError,
+    map: (e: Error) => ({ error: 'connection_inherited_read_only', code: 'connection_inherited_read_only', message: e.message,
+      fix: registryTemplateFix('connection_inherited_read_only', {}) }),
   },
   {
     match: e => e instanceof Error && (e as { tag?: unknown }).tag === 'BUDGET_EXHAUSTED',
@@ -825,7 +837,7 @@ export function toAgentError(e: unknown, ctx: AgentErrorContext): AgentEnvelope 
     if (!parts.fix && (codeClass(parts.code) === 'server' || codeClass(parts.code) === 'unavailable')) {
       parts = { ...parts, fix: diagnosticFix(ctx, 'Doctor reports what is missing or failing on the brain host.') };
     }
-    if (ctx.mutating === true && ctx.idempotent !== true) parts = { ...parts, retryable: false };
+    if (ctx.mutating === true && ctx.idempotent !== true && !provesNotAdmitted(e)) parts = { ...parts, retryable: false };
     const env = buildEnvelope(parts, ctx.render);
     if (env.code === 'internal_error' || env.code === 'internal' || !env.suggestion) {
       recordAgentContractEvent({ transport: ctx.transport, op: ctx.op, command: ctx.command, code: env.code, has_suggestion: !!env.suggestion, outcome: ctx.outcome });

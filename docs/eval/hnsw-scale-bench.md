@@ -603,8 +603,8 @@ What the table shows:
 ## Reproduce
 
 ```bash
-# VM (Ubicloud standard-16, 320 GB): bootstrap Docker, Bun 1.4.2 and a tuned pgvector/pg16 on 127.0.0.1:5434
-UBI_OWNER=<thread> scripts/ubicloud/ubi-runner.sh up -s standard-16 -S 320
+# VM (Ubicloud standard-16, 320 GB): bootstrap Docker, Bun 1.4.4 and a tuned pgvector/pg16 on 127.0.0.1:5434
+UBI_OWNER=<thread> scripts/ubicloud/ubi-runner.sh up -s standard-16 -S 320 --ttl-hours 48
 scripts/ubicloud/ubi-runner.sh sync <vm> . && scripts/ubicloud/ubi-runner.sh ssh <vm> 'cd work/gbrain && bash scripts/bench/hnsw-scale-vm-setup.sh'
 export DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5434/postgres
 B=scripts/bench/hnsw-iterative-scan.ts
