@@ -275,7 +275,7 @@ function startDelegatedSyncScoped(
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   if (options.timeoutSeconds > 0) {
     deadlineTimer = setTimeout(() => {
-      if (!isTerminal(job.state)) {
+      if (!isTerminal(job.state) && !job.result) {
         log(`abort job=${job.id} reason=deadline after ${options.timeoutSeconds}s`);
         job.state = 'aborting';
         controller.abort();
@@ -484,7 +484,7 @@ export function abortDelegatedSync(jobId: string): SyncAbortResponse {
   if (!job || job.id !== jobId) {
     return { ok: false, protocol: 2, error: 'unknown_job' };
   }
-  if (!isTerminal(job.state)) {
+  if (!isTerminal(job.state) && !job.result) {
     log(`abort job=${job.id} reason=client`);
     job.state = 'aborting';
     job.controller.abort();

@@ -12,12 +12,12 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [Unreleased]
 
-**A delegated sync no longer reports `done` while it is still finishing.** The serve's sync runner published `done` before it re-checked the wanted markers and scheduled the deferred embeds. A client polling in that window saw a finished job with no embed backlog queued yet, and a second `sync_start` could begin while the first run was still settling its markers. Since #7941 the marker re-check also reads the checkout HEAD through git, which widened the window enough to fail `test/serve-sync-runner.serial.test.ts` intermittently on master (#8354). Both lanes (the shared-secret lane and the verified lane) now set `done` only after those steps.
+**A delegated sync no longer reports `done` while it is still finishing.** The serve's sync runner published `done` before it re-checked the wanted markers and scheduled the deferred embeds. A client polling in that window saw a finished job with no embed backlog queued yet, and a second `sync_start` could begin while the first run was still settling its markers. Since #7941 the marker re-check also reads the checkout HEAD through git, which widened the window enough to fail `test/serve-sync-runner.serial.test.ts` intermittently on master (#8354). Both lanes (the shared-secret lane and the verified lane) now set `done` only after those steps, and a deadline or client abort that arrives after the run has finished no longer marks it `aborting`.
 
 ### Itemized changes
 
-- `src/core/serve-sync-runner.ts`: `job.state = 'done'` moves after `settleRunMarkers` and `scheduleDeferredSyncEmbeds` in both lanes (#8354).
-- `test/serve-sync-runner.serial.test.ts`: a probe slows the post-run marker read and checks that `done` is only visible once the markers have settled and the deferred embeds are pending. It fails on master and passes with the fix.
+- `src/core/serve-sync-runner.ts`: `job.state = 'done'` moves after `settleRunMarkers` and `scheduleDeferredSyncEmbeds` in both lanes (#8354); the deadline and `sync_abort` skip a job whose run already returned its result.
+- `test/serve-sync-runner.serial.test.ts`: a probe slows the post-run marker read and checks that `done` is only visible once the markers have settled and the deferred embeds are pending; a second probe aborts during that settle and checks the job still ends `done`. Both fail without the fix.
 
 ## [0.60.532.0] - 2026-11-01
 
