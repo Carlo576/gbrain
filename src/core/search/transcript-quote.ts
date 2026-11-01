@@ -551,7 +551,7 @@ export function unquoteFactText(text: string): string {
 function unquoteMarked(text: string, find: (from: number) => { i: number; length: number } | null, unclosed = false): string {
   let out = '';
   let at = 0;
-  const work = { left: 2 * text.length + 1 };
+  const work = { left: 8 * text.length + 1 };
   for (let found = find(0); found; found = find(at)) {
     const { i, length } = found;
     const open = /^(`{3,})text\n/.exec(text.slice(i + length));
@@ -572,8 +572,9 @@ function unquoteMarked(text: string, find: (from: number) => { i: number; length
  * so an agent's added block (```js … ```) is kept whole. A host's quoted text never holds a backtick run as long as its
  * fence, so a line of exactly `fence` inside a shorter or tilde block (an unclosed one in a cut window too) still closes it.
  * `end` is the newline before that line and `after` the end of the fence and its blanks. Every search of one text shares
- * `work` (twice the text's length): closes found are disjoint, so only fences that never close spend it twice, and past
- * it ('spent') the rest of the text is kept as written, so hostile content of many unclosed markers stays linear.
+ * `work` (eight times the text's length): closes found are disjoint and a fence that never closes spends the rest of the
+ * text, so about seven such fences unquote as before; past it ('spent') the rest of the text is kept as written, so
+ * hostile content of many unclosed markers stays linear.
  */
 function closingLine(text: string, start: number, fence: string, work: { left: number }): { end: number; after: number } | null | 'spent' {
   let inner: { char: string; length: number } | null = null;

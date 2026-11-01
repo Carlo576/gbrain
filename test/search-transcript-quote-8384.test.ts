@@ -167,6 +167,12 @@ describe('#8384: a host\'s own quoted text unquotes exactly, whatever code fence
     expect(unquoteTranscriptText(parts.join('\n'), 'slack/a', true)).toBe([1, 2, 3, 4, 5].map(k => `${pad}window ${k}\n~~~\ncut code ${k}`).join('\n'));
   });
 
+  test('a whole quote after a few cut-off ones still unquotes', () => {
+    const head = (id: number) => fenceTranscriptText(`cut ${id}`, `fact ${id}`).replace(/\n`+$/, '');
+    const whole = 'real fact line\n'.repeat(200).trimEnd();
+    expect(unquoteFactText(`${head(1)}\n${head(2)}\n${head(3)}\n${fenceTranscriptText(whole, 'fact 4')}`).endsWith(`\n${whole}`)).toBe(true);
+  });
+
   test('a megabyte of markers that never close is kept as written in linear time', () => {
     const fence = fenceTranscriptText('x', 'slack/a').split('\n').slice(0, 2).join('\n');
     const hostile = `intro\n${`${fence}\n`.repeat(Math.ceil(1_048_576 / (fence.length + 1)))}`;

@@ -279,10 +279,12 @@ const ontology_conflicts: Operation = {
     if (ctx.remote === false) return conflicts;
     // Remote: redact diary-sourced values; drop conflicts that no longer have
     // ≥2 distinct values once diary provenance is removed (no leak via conflicts).
-    return Promise.all(conflicts
+    const kept = conflicts
       .map((c) => ({ ...c, values: c.values.filter((v) => !(v.source ?? '').startsWith('life/diary/')) }))
-      .filter((c) => new Set(c.values.map((v) => v.value)).size >= 2)
-      .map(async (c) => ({ ...c, values: await remoteOntology(ctx, c.values) })));
+      .filter((c) => new Set(c.values.map((v) => v.value)).size >= 2);
+    const quoted = await remoteOntology(ctx, kept.flatMap((c) => c.values));
+    let at = 0;
+    return kept.map((c) => ({ ...c, values: c.values.map(() => quoted[at++]!) }));
   },
   cliHints: { name: 'ontology-contradictions' },
 };
