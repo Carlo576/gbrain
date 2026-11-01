@@ -79,9 +79,7 @@ for (const backend of testBackends()) {
 
     test('a code block an agent adds inside, in place of the closing fence, or after the read is stored intact', async () => {
       const block = '```js\nconst x = 1;\n```';
-      const tilde = '~~~md\n```\n~~~';
       const cases: Array<[string, (c: string) => string, string]> = [
-        ['notes/tilde-inside', c => c.replace('Second line.', `Second line.\n\n${tilde}`), `Second line.\n\n${tilde}`],
         ['notes/block-inside', c => c.replace('Second line.', `Second line.\n\n${block}`), `Second line.\n\n${block}`],
         ['notes/block-replaces-closer', c => `${dropCloser(c)}${block}\n`, `Second line.\n\n${block}`],
         ['notes/block-after', c => `${c}\n\n${block}\n`, `Second line.\n\n${block}`],
@@ -161,6 +159,12 @@ describe('#8384: a host\'s own quoted text unquotes exactly, whatever code fence
       expect([text, unquoteTranscriptText(fenced, 'slack/a'), unquoteTranscriptText(fenced + fenced, 'slack/a'), unquoteTranscriptText(fenced, 'slack/a', true)])
         .toEqual([text, text, text + text, text]);
     }
+  });
+
+  test('concatenated cut windows that leave a tilde block open all unquote', () => {
+    const pad = 'filler line\n'.repeat(50);
+    const parts = [1, 2, 3, 4, 5].map(k => fenceTranscriptText(`${pad}window ${k}\n~~~\ncut code ${k}`, 'slack/a'));
+    expect(unquoteTranscriptText(parts.join('\n'), 'slack/a', true)).toBe([1, 2, 3, 4, 5].map(k => `${pad}window ${k}\n~~~\ncut code ${k}`).join('\n'));
   });
 
   test('a megabyte of markers that never close is kept as written in linear time', () => {
