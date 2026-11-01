@@ -374,7 +374,8 @@
           "page_id: number",
           "page_slug: string",
           "source: string",
-          "summary: string"
+          "summary: string",
+          "trust_tier: string | null"
         ],
         "name": "ChronicleTimelineRow"
       },
@@ -8722,7 +8723,8 @@
           "page_id: number",
           "page_slug: string",
           "source: string",
-          "summary: string"
+          "summary: string",
+          "trust_tier: string | null"
         ],
         "name": "ChronicleTimelineRow"
       },
