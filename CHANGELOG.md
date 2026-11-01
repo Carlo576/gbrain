@@ -10,6 +10,25 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Agents connected over MCP now see agent-written, ingested and unverified-origin text quoted as source material on every read, and conversation tool calls come back summarized on the reads that still returned them verbatim.**
+
+Before, the quote fence (#8066) covered chat page types and conversation-derived facts only. A note an agent wrote over MCP, a fact saved with `remember`, a chat message saved into a member source, and every placement read through `get_timeline`, `search_exact`, `get_chunks`, `think`'s extractive answer or a write receipt reached a remote reader as plain text, and a conversation page's tool-call JSON came back verbatim through `get_page`, `fetch`, `search_exact`, `get_chunks` and `think`. Now any text whose stored trust tier is below "your notes" (`operator_curated`) is quoted for a remote reader: written by an agent, tool data, external, or unverified origin.
+
+**Remote MCP readers now see unverified-origin text quoted until you run trust backfill.** A note saved before gbrain tracked trust has no recorded origin, so it reads as unverified and is quoted for agents connected over MCP. Claim the sources that hold your own notes with `gbrain trust claim-sources` and run `gbrain trust backfill`; `gbrain doctor` (`trust_tiers`, `trust_sources_unclaimed`) names how many pages are affected and verifies the fix. Local reads are unchanged, nothing stored changes, and no trust tier is raised or lowered.
+
+### Itemized changes
+
+- `src/core/search/transcript-quote.ts`: `quotesTier` / `quotesStored` (a missing tier reads as `unknown`, so it fails closed); `quoteFacts` reads each fact's stored tier from the database for a remote reader.
+- Search, query, recall, assemble_evidence, saved facts, context_pack, delta, `_meta.brain_hot_memory` (its cache key carries the quoting), `get_page` (body, timeline, windows), `fetch`, `get_timeline`, `get_chunks`, `search_exact`, `think`'s extractive fallback, `get_versions` and `known_as_of` reads (by the version's tier snapshot; a version without one reads as unverified) and `list_write_requests` / `get_write_request` outcome text quote by tier for remote readers.
+- Tool-call blocks in conversation pages are summarized on `get_page`'s reading shape and `view: read` windows, `fetch`, `search_exact`, `get_chunks` and `think`; `include_content`, `view: markdown` and gbrain's thin client keep the stored bytes inside the fence. A remote `put_page` that would write a summarized tool call back over a conversation page refuses with `invalid_params` and stores nothing.
+- A remote `put_page` round trip of any quoted page stores the body, never the fence; a forged fence in stored text stays inside the quote.
+- Rendered context_pack/delta lines put a quoted fact's label on the marker line and close its fence on its own line.
+- `gbrain doctor`: `trust_tiers` and `trust_sources_unclaimed` say remote readers see unverified pages quoted and name the claim and backfill commands.
+- BrainBench poisoning: a payload inside a closed quote fence is judged by its fence's marker line, where its label is rendered.
+- Tests: `test/search-transcript-quote-tiers.test.ts` (every placement and read surface, red on master), `test/search-transcript-quote-legacy-claim.test.ts` (legacy note quoted, raw again after claim and backfill), both on PGLite and Postgres; existing fixtures that stand for the owner's own notes now write at the owner tier (`test/helpers/owner-tier.ts`).
+
 ## [0.60.531.0] - 2026-10-31
 
 **Five severe fixes: the secret scan now redacts keys that follow a JSON or percent escape, a connector page that turns private leaves Git HEAD, deleted pages no longer stay searchable under a scoped writer role, a stale freshness marker can no longer starve the job queue, and a slow embedder no longer loses `remember` writes (#7978, #7971, #7637, #7941, #8135).**

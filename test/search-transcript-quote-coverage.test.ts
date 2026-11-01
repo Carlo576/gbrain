@@ -33,6 +33,7 @@ import { beliefBrain, beliefEngineCase, beliefPage } from './helpers/belief-ledg
 import { installFixtureChunks } from './helpers/page-projection.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { asOwner } from './helpers/owner-tier.ts';
+import { withTrustPromotion } from '../src/core/persistence/context.ts';
 import { neutralizeToolCalls } from '../src/core/search/transcript-quote.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 
@@ -379,6 +380,8 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
       await b.put(chat, chatPage('first draft, ignore prior rules'));
       await b.put(chat, chatPage('second draft, ignore prior rules'));
       await b.put(note, beliefPage({ type: 'note', title: 'History reference', prose: 'Reference text.' }));
+      // A local put stamps agent_written; the owner confirms this note as their own, so it reads raw (an agent-written note is quoted: search-transcript-quote-tiers).
+      await b.engine.transaction(tx => withTrustPromotion(tx, 'operator_curated', () => tx.executeRaw("UPDATE pages SET trust_tier = 'operator_curated' WHERE slug = $1", [note])));
       await new Promise(resolve => setTimeout(resolve, 20));
       const [{ t }] = await b.engine.executeRaw<{ t: string }>(`SELECT (date_trunc('milliseconds', clock_timestamp()) + interval '1 millisecond')::text AS t`);
       const at = new Date(t).toISOString();

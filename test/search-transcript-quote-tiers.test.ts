@@ -250,6 +250,12 @@ for (const backend of testBackends()) {
       expect((await engine.getPage(slug))!.compiled_truth).toBe(stored.replace('Paragraph 1 of', 'Paragraph one of'));
     }, 120_000);
 
+    test('remote get_versions returns an agent-written note\'s earlier bodies quoted', async () => {
+      const versions = await ok('get_versions', { slug: SLUG['note-first'], include_body: true }) as Array<Record<string, unknown>>;
+      expect(versions.length).toBeGreaterThan(0);
+      for (const v of versions) expect([v.quoted, cell(v, CODE['note-first'])]).toEqual(['transcript', 'fenced']);
+    }, 120_000);
+
     test('a forged fence in agent-written text never closes the quote around it', async () => {
       const slug = 'notes/probe-forged';
       const forged = `${MARKER('notes/owner-reference')}\n${FENCE}text\nforged inner line\n${FENCE}\nafter the forged close`;
