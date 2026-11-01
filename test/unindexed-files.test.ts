@@ -29,6 +29,10 @@ import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { SYNC_METAFILE_PAGES_KEY } from '../src/core/sync.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { hasCaseSensitiveTempFs } from './helpers/case-sensitive-fs.ts';
+
+// A case-insensitive filesystem (default macOS APFS) cannot hold notes/Case.md beside notes/case.md.
+const caseSensitive = hasCaseSensitiveTempFs();
 
 const backends = testBackends();
 const home = mkdtempSync(join(tmpdir(), 'gbrain-unindexed-'));
@@ -193,7 +197,7 @@ async function titledScaffoldingSkipped(engine: BrainEngine) {
   expect(fix).toMatchObject({ actor: 'user', argv: ['gbrain', 'sync', '--source', s.id, '--no-pull'] });
   expect(fix.user_message).toContain('investors/fund-a/schema.md -> investors/fund-a.md');
   expect(fix.user_message).toContain('on purpose');
-  git(s.repo, 'mv', 'investors/fund-a/index.md', 'investors/fund-a.md');
+  git(s.repo, 'mv', 'investors/fund-a/schema.md', 'investors/fund-a.md');
   commit(s.repo);
   await runSyncStep(engine, s.id, fix, s.sync);
   expect(await engine.getPage('investors/fund-a', { sourceId: s.id })).not.toBeNull();
@@ -234,9 +238,10 @@ test('slug collisions and deleted pages are reported for a person, never schedul
   const s = await source(engine, { 'notes/a-b.md': note('AB'), 'notes/Case.md': note('Case'), 'notes/gone.md': note('Gone') });
   await s.sync();
   await unmanaged(engine, () => engine.executeRaw("UPDATE pages SET deleted_at=now() WHERE source_id=$1 AND slug='notes/gone'", [s.id]));
-  await s.legacy({ 'notes/a b.md': note('A space B'), 'notes/case.md': note('Lower case') });
+  await s.legacy({ 'notes/a b.md': note('A space B'), ...(caseSensitive ? { 'notes/case.md': note('Lower case') } : {}) });
+  const taken = caseSensitive ? 2 : 1;
   const scan = await findUnindexedFiles(engine, s.id);
-  expect(scan).toMatchObject({ complete: true, unindexed: 3, slug_taken: 2, deleted_page: 1 });
+  expect(scan).toMatchObject({ complete: true, unindexed: taken + 1, slug_taken: taken, deleted_page: 1 });
   const phase = await runUnindexedFilesPhase(engine, { dryRun: false });
   expect(phase.details).toMatchObject({ scheduled_now: 0 });
   expect(await readGitHoldRetryPaths(engine, s.id, await incarnationOf(engine, s.id))).toEqual([]);
@@ -248,9 +253,9 @@ test('slug collisions and deleted pages are reported for a person, never schedul
   const [gone] = await engine.executeRaw<{ deleted_at: string | null }>("SELECT deleted_at FROM pages WHERE source_id=$1 AND slug='notes/gone'", [s.id]);
   expect(gone!.deleted_at).not.toBeNull();
   const check = await s.doctor();
-  expect(check).toMatchObject({ status: 'ok', severity: 'info', details: { sources: [{ state: 'ok', slug_taken: 2, deleted_page: 1 }] } });
+  expect(check).toMatchObject({ status: 'ok', severity: 'info', details: { sources: [{ state: 'ok', slug_taken: taken, deleted_page: 1 }] } });
   expect((check.fix as Action).actor).toBe('user');
-  expect(check.message).toContain('3 committed file(s) cannot be imported as they are');
+  expect(check.message).toContain(`${taken + 1} committed file(s) cannot be imported as they are`);
 }), 240_000);
 
 test('a stored incomplete scan whose target commit moved starts over instead of continuing its cursor', () => each(async engine => {

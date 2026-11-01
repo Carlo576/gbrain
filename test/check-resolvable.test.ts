@@ -494,7 +494,8 @@ function makeSkillWithoutTriggers(dir: string, name: string): void {
     join(dir, name, "SKILL.md"),
     "---\n" +
     `name: ${name}\n` +
-    "description: belongs to a different tool, no triggers field\n" +
+    // Fork contract: a standard description is a routing trigger, so a
+    // triggerless fixture carries neither field.
     "---\n" +
     "body\n"
   );
@@ -730,7 +731,9 @@ function writeSkillTree(skills: { name: string; triggers: string[]; resolverRow?
   for (const s of skills) {
     mkdirSync(join(dir, s.name), { recursive: true });
     const triggers = s.triggers.length ? `triggers:\n${s.triggers.map(t => `  - "${t}"`).join("\n")}\n` : "";
-    writeFileSync(join(dir, s.name, "SKILL.md"), `---\nname: ${s.name}\ndescription: fixture\n${triggers}---\n# ${s.name}\n`);
+    // Fork contract: description routes like triggers:, so a triggerless fixture skill has none.
+    const description = s.triggers.length ? "description: fixture\n" : "";
+    writeFileSync(join(dir, s.name, "SKILL.md"), `---\nname: ${s.name}\n${description}${triggers}---\n# ${s.name}\n`);
   }
   return dir;
 }

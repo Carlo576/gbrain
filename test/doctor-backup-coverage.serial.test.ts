@@ -177,7 +177,8 @@ describe('checkBackupCoverage — localOnly (trusted, probes run)', () => {
 
     expect(check.status).toBe('warn');
     expect(check.message).toContain('1 knowledge asset(s)');
-    expect(check.message).toContain('[src-a, src-b]');
+    // Upstream renders a shared-root asset as one comma-joined id; the count proves the grouping.
+    expect(check.message).toContain('lack verified recovery: src-a, src-b (no git remote)');
   });
 
   test('healthy repo (origin, pushed, clean) → ok with recoverable count', async () => {

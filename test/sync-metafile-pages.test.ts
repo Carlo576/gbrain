@@ -1,5 +1,6 @@
+// Fork contract: index.md is authored content (SYNC_SKIP_FILES omits it), so the nested metafile fixtures use schema.md.
 /**
- * GBRA-150: `sync.metafile_pages` (default `typed`). A nested file named like folder scaffolding (index.md,
+ * GBRA-150: `sync.metafile_pages` (default `typed`). A nested file named like folder scaffolding (schema.md,
  * README.md, schema.md, log.md, RESOLVER.md) whose frontmatter has a type: or title: is an ordinary page for classic
  * sync (incremental, --full and the bulk import walker); bare scaffolding at any depth and every root-level metafile
  * stay skipped, and off restores the skip-every-metafile behavior. A deleted typed nested metafile soft-deletes its
@@ -24,13 +25,13 @@ describe('metafileIsPage', () => {
   test('nested SYNC_SKIP_FILES names with a typed or titled closed frontmatter are pages under typed', () => {
     expect(DEFAULT_METAFILE_PAGES_MODE).toBe('typed');
     expect(SYNC_METAFILE_PAGES_KEY).toBe('sync.metafile_pages');
-    for (const path of ['projects/acme-example/index.md', 'a/README.md', 'a/b/schema.md', 'a/log.md', 'a/RESOLVER.md']) {
+    for (const path of ['projects/acme-example/schema.md', 'a/README.md', 'a/b/schema.md', 'a/log.md', 'a/RESOLVER.md']) {
       expect(metafileIsPage(path, TYPED_INDEX, 'typed')).toBe(true);
       expect(metafileIsPage(path, TITLED_README, 'typed')).toBe(true);
       expect(metafileIsPage(path, TYPED_INDEX, 'off')).toBe(false);
     }
-    expect(metafileIsPage('a/index.md', '\n\n---\r\ntype: hub\r\n---\r\nbody', 'typed')).toBe(true);
-    expect(metafileIsPage('a/index.md', '\uFEFF---\n"title": Quoted\n---\n', 'typed')).toBe(true);
+    expect(metafileIsPage('a/schema.md', '\n\n---\r\ntype: hub\r\n---\r\nbody', 'typed')).toBe(true);
+    expect(metafileIsPage('a/schema.md', '\uFEFF---\n"title": Quoted\n---\n', 'typed')).toBe(true);
   });
 
   test('bare, unclosed, empty-valued, nested-key and root metafiles are not pages', () => {
@@ -41,7 +42,7 @@ describe('metafileIsPage', () => {
     expect(metafileIsPage('a/README.md', '---\ntype: # comment\n---\n', 'typed')).toBe(false);
     expect(metafileIsPage('a/README.md', '---\nmeta:\n  type: hub\n---\n', 'typed')).toBe(false);
     expect(metafileIsPage('a/README.md', '# Title\n---\ntype: hub\n---\n', 'typed')).toBe(false);
-    expect(metafileIsPage('index.md', TYPED_INDEX, 'typed')).toBe(false);
+    expect(metafileIsPage('schema.md', TYPED_INDEX, 'typed')).toBe(false);
     expect(metafileIsPage('README.md', TYPED_INDEX, 'typed')).toBe(false);
     expect(metafileIsPage('AGENTS.md', TYPED_INDEX, 'typed')).toBe(false);
     expect(metafileIsPage('docs/AGENTS.md', TYPED_INDEX, 'typed')).toBe(false);
@@ -49,16 +50,16 @@ describe('metafileIsPage', () => {
   });
 
   test('isSyncable consults the predicate for metafile names only', () => {
-    const heads: Record<string, string> = { 'a/index.md': TYPED_INDEX, 'a/README.md': BARE_README, 'index.md': TYPED_INDEX };
+    const heads: Record<string, string> = { 'a/schema.md': TYPED_INDEX, 'a/README.md': BARE_README, 'schema.md': TYPED_INDEX };
     const read: string[] = [];
     const metafilePage = metafilePagePredicate('typed', path => { read.push(path); return heads[path]; });
-    expect(isSyncable('a/index.md', { metafilePage })).toBe(true);
+    expect(isSyncable('a/schema.md', { metafilePage })).toBe(true);
     expect(unsyncableReason('a/README.md', { metafilePage })).toBe('metafile');
-    expect(unsyncableReason('index.md', { metafilePage })).toBe('metafile');
+    expect(unsyncableReason('schema.md', { metafilePage })).toBe('metafile');
     expect(isSyncable('a/notes.md', { metafilePage })).toBe(true);
-    expect(isSyncable('a/index.md')).toBe(false);
-    expect(read.sort()).toEqual(['a/README.md', 'a/index.md']);
-    expect(isSyncable('a/index.md', { metafilePage: metafilePagePredicate('off', path => heads[path]) })).toBe(false);
+    expect(isSyncable('a/schema.md')).toBe(false);
+    expect(read.sort()).toEqual(['a/README.md', 'a/schema.md']);
+    expect(isSyncable('a/schema.md', { metafilePage: metafilePagePredicate('off', path => heads[path]) })).toBe(false);
   });
 });
 
@@ -79,101 +80,101 @@ describe('classic sync imports typed nested metafiles', () => {
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-metafile-pages-'));
     execSync('git init -q && git config user.email "test@example.invalid" && git config user.name "Test"', { cwd: repoPath, stdio: 'pipe' });
     write('topics/foo.md', '---\ntype: concept\ntitle: Foo\n---\n\nBaseline content.\n');
-    write('index.md', TYPED_INDEX);
+    write('schema.md', TYPED_INDEX);
     commit('initial');
   });
   afterEach(() => { if (repoPath) rmSync(repoPath, { recursive: true, force: true }); });
 
-  test('incremental sync imports a typed nested index.md and README.md; bare nested README.md and a typed root index.md stay skipped', async () => {
+  test('incremental sync imports a typed nested schema.md and README.md; bare nested README.md and a typed root schema.md stay skipped', async () => {
     await sync({ full: true });
-    write('projects/acme-example/index.md', TYPED_INDEX);
+    write('projects/acme-example/schema.md', TYPED_INDEX);
     write('widgets/README.md', TITLED_README);
     write('notes/README.md', BARE_README);
-    write('index.md', TYPED_INDEX.replace('hub', 'hub, edited'));
+    write('schema.md', TYPED_INDEX.replace('hub', 'hub, edited'));
     commit('metafiles');
     const result = await sync();
     expect(result.status).toBe('synced');
-    expect((await page('projects/acme-example/index'))?.title).toBe('Acme Example');
+    expect((await page('projects/acme-example/schema'))?.title).toBe('Acme Example');
     expect((await page('widgets/readme'))?.title).toBe('Widgets overview');
     expect(await page('notes/readme')).toBeNull();
-    expect(await page('index')).toBeNull();
+    expect(await page('schema')).toBeNull();
     expect(await page('topics/foo')).not.toBeNull();
   }, 60_000);
 
   test('the bulk import walker and sync --full agree with incremental sync', async () => {
-    write('projects/acme-example/index.md', TYPED_INDEX);
+    write('projects/acme-example/schema.md', TYPED_INDEX);
     write('notes/README.md', BARE_README);
     commit('metafiles');
-    expect(relativeFiles({ strategy: 'markdown' })).toEqual(['projects/acme-example/index.md', 'topics/foo.md']);
-    expect(relativeFiles({ strategy: 'markdown', includeGitignored: true })).toEqual(['projects/acme-example/index.md', 'topics/foo.md']);
+    expect(relativeFiles({ strategy: 'markdown' })).toEqual(['projects/acme-example/schema.md', 'topics/foo.md']);
+    expect(relativeFiles({ strategy: 'markdown', includeGitignored: true })).toEqual(['projects/acme-example/schema.md', 'topics/foo.md']);
     expect(relativeFiles({ strategy: 'markdown', metafilePages: 'off' })).toEqual(['topics/foo.md']);
     const first = await sync({ full: true });
     expect(['first_sync', 'synced']).toContain(first.status);
-    expect(await page('projects/acme-example/index')).not.toBeNull();
+    expect(await page('projects/acme-example/schema')).not.toBeNull();
     expect(await page('notes/readme')).toBeNull();
-    expect(await page('index')).toBeNull();
+    expect(await page('schema')).toBeNull();
     // A second full sync keeps the typed page (its reconcile reads the file) and the bare one stays out.
     await sync({ full: true });
-    expect((await live('projects/acme-example/index'))?.deleted_at).toBeNull();
+    expect((await live('projects/acme-example/schema'))?.deleted_at).toBeNull();
   }, 60_000);
 
   test('sync.metafile_pages off restores the skip for every metafile', async () => {
     await engine.setConfig(SYNC_METAFILE_PAGES_KEY, 'off');
     await sync({ full: true });
-    write('projects/acme-example/index.md', TYPED_INDEX);
+    write('projects/acme-example/schema.md', TYPED_INDEX);
     commit('typed');
     await sync();
-    expect(await page('projects/acme-example/index')).toBeNull();
+    expect(await page('projects/acme-example/schema')).toBeNull();
     await sync({ full: true });
-    expect(await page('projects/acme-example/index')).toBeNull();
+    expect(await page('projects/acme-example/schema')).toBeNull();
   }, 60_000);
 
   test('deleting a typed nested metafile soft-deletes its page; a bare legacy metafile page is kept (#1433)', async () => {
-    write('projects/acme-example/index.md', TYPED_INDEX);
+    write('projects/acme-example/schema.md', TYPED_INDEX);
     write('notes/README.md', BARE_README);
     commit('metafiles');
     await sync({ full: true });
-    expect(await page('projects/acme-example/index')).not.toBeNull();
+    expect(await page('projects/acme-example/schema')).not.toBeNull();
     await engine.putPage('notes/readme', { type: 'concept', title: 'Notes', compiled_truth: 'Indexed by an older gbrain.', timeline: '', frontmatter: { type: 'concept' } });
-    unlinkSync(join(repoPath, 'projects/acme-example/index.md'));
+    unlinkSync(join(repoPath, 'projects/acme-example/schema.md'));
     unlinkSync(join(repoPath, 'notes/README.md'));
     commit('remove metafiles');
     const result = await sync();
     expect(result.status).toBe('synced');
-    expect((await live('projects/acme-example/index'))?.deleted_at).not.toBeNull();
+    expect((await live('projects/acme-example/schema'))?.deleted_at).not.toBeNull();
     expect((await live('notes/readme'))?.deleted_at).toBeNull();
   }, 60_000);
 
   test('a legacy page at a typed nested metafile path refreshes when its file is edited', async () => {
-    write('projects/acme-example/index.md', TYPED_INDEX);
+    write('projects/acme-example/schema.md', TYPED_INDEX);
     commit('typed');
     await engine.setConfig(SYNC_METAFILE_PAGES_KEY, 'off');
     await sync({ full: true });
-    await engine.putPage('projects/acme-example/index', { type: 'project', title: 'Acme Example', compiled_truth: 'Stale text an older gbrain indexed.', timeline: '',
+    await engine.putPage('projects/acme-example/schema', { type: 'project', title: 'Acme Example', compiled_truth: 'Stale text an older gbrain indexed.', timeline: '',
       frontmatter: { type: 'project', title: 'Acme Example' } });
-    await engine.executeRaw("UPDATE pages SET source_path='projects/acme-example/index.md' WHERE slug='projects/acme-example/index'");
+    await engine.executeRaw("UPDATE pages SET source_path='projects/acme-example/schema.md' WHERE slug='projects/acme-example/schema'");
     await engine.setConfig(SYNC_METAFILE_PAGES_KEY, 'typed');
-    write('projects/acme-example/index.md', TYPED_INDEX.replace('The project hub', 'The edited project hub'));
+    write('projects/acme-example/schema.md', TYPED_INDEX.replace('The project hub', 'The edited project hub'));
     commit('edit typed');
     await sync();
-    expect((await page('projects/acme-example/index'))?.compiled_truth).toContain('The edited project hub');
+    expect((await page('projects/acme-example/schema'))?.compiled_truth).toContain('The edited project hub');
   }, 60_000);
 
   test('the first sync after the upgrade imports existing typed files and rewrites nothing else', async () => {
-    write('projects/acme-example/index.md', TYPED_INDEX);
+    write('projects/acme-example/schema.md', TYPED_INDEX);
     write('notes/README.md', BARE_README);
     commit('metafiles');
     // The brain synced under the old behavior: every metafile skipped.
     await engine.setConfig(SYNC_METAFILE_PAGES_KEY, 'off');
     await sync({ full: true });
-    expect(await page('projects/acme-example/index')).toBeNull();
+    expect(await page('projects/acme-example/schema')).toBeNull();
     const before = await engine.executeRaw<{ updated_at: string }>("SELECT updated_at::text FROM pages WHERE slug='topics/foo'");
     await engine.executeRaw('DELETE FROM config WHERE key=$1', [SYNC_METAFILE_PAGES_KEY]);
     // No new commit: the upgrade alone makes the typed file a page.
     const upgraded = await sync();
     expect(upgraded.status).toBe('synced');
     expect(upgraded.deleted).toBe(0);
-    expect(await page('projects/acme-example/index')).not.toBeNull();
+    expect(await page('projects/acme-example/schema')).not.toBeNull();
     expect(await page('notes/readme')).toBeNull();
     expect(await engine.executeRaw<{ updated_at: string }>("SELECT updated_at::text FROM pages WHERE slug='topics/foo'")).toEqual(before);
     // Once applied, a quiet sync is up to date again.

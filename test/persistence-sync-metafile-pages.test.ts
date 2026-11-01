@@ -1,3 +1,4 @@
+// Fork contract: index.md is authored content (SYNC_SKIP_FILES omits it), so the nested metafile fixtures use schema.md.
 /**
  * GBRA-150: managed sync under `sync.metafile_pages`. A typed nested metafile is a page for the managed level pass
  * (sync-pass.ts), discovery and the unindexed-file detector; a bare one is outside the level, so it never counts as
@@ -68,44 +69,44 @@ async function each(run: (engine: BrainEngine) => Promise<void>) {
   });
 }
 
-test('managed sync imports a typed nested index.md, skips bare and root metafiles, and the level pass converges', () => each(async engine => {
-  const s = await source(engine, { 'notes/a.md': note('A'), 'projects/acme-example/index.md': TYPED_INDEX, 'notes/README.md': BARE_README, 'index.md': TYPED_INDEX });
+test('managed sync imports a typed nested schema.md, skips bare and root metafiles, and the level pass converges', () => each(async engine => {
+  const s = await source(engine, { 'notes/a.md': note('A'), 'projects/acme-example/schema.md': TYPED_INDEX, 'notes/README.md': BARE_README, 'schema.md': TYPED_INDEX });
   const first = await s.sync();
   expect(first.status).toBe('first_sync');
-  expect(await engine.getPage('projects/acme-example/index', { sourceId: s.id })).not.toBeNull();
+  expect(await engine.getPage('projects/acme-example/schema', { sourceId: s.id })).not.toBeNull();
   expect(await engine.getPage('notes/readme', { sourceId: s.id })).toBeNull();
-  expect(await engine.getPage('index', { sourceId: s.id })).toBeNull();
+  expect(await engine.getPage('schema', { sourceId: s.id })).toBeNull();
   const level = await s.convergence();
   expect(level.counts).toEqual({ matched: 2 });
   expect((await s.sync()).status).toBe('up_to_date');
 }), 240_000);
 
 test('deleting a typed nested metafile soft-deletes its page in managed sync; a bare one is never in the level', () => each(async engine => {
-  const s = await source(engine, { 'notes/a.md': note('A'), 'projects/acme-example/index.md': TYPED_INDEX, 'notes/README.md': BARE_README });
+  const s = await source(engine, { 'notes/a.md': note('A'), 'projects/acme-example/schema.md': TYPED_INDEX, 'notes/README.md': BARE_README });
   await s.sync();
-  unlinkSync(join(s.repo, 'projects/acme-example/index.md'));
+  unlinkSync(join(s.repo, 'projects/acme-example/schema.md'));
   unlinkSync(join(s.repo, 'notes/README.md'));
   s.commit();
   const result = await s.sync();
   expect(result.deleted).toBe(1);
-  expect((await s.live('projects/acme-example/index'))?.deleted_at).not.toBeNull();
+  expect((await s.live('projects/acme-example/schema'))?.deleted_at).not.toBeNull();
   expect((await s.convergence()).counts).toEqual({ matched: 1 });
 }), 240_000);
 
 test('an existing typed file imports on the first managed sync after the upgrade; the unindexed detector schedules it instead of metafile_skipped', () => each(async engine => {
   await engine.setConfig(SYNC_METAFILE_PAGES_KEY, 'off');
-  const s = await source(engine, { 'notes/a.md': note('A'), 'projects/acme-example/index.md': TYPED_INDEX, 'notes/README.md': BARE_README });
+  const s = await source(engine, { 'notes/a.md': note('A'), 'projects/acme-example/schema.md': TYPED_INDEX, 'notes/README.md': BARE_README });
   await s.sync();
-  expect(await engine.getPage('projects/acme-example/index', { sourceId: s.id })).toBeNull();
-  expect(await findUnindexedFiles(engine, s.id)).toMatchObject({ unindexed: 0, metafile_skipped: 1, metafile_samples: ['projects/acme-example/index.md'] });
+  expect(await engine.getPage('projects/acme-example/schema', { sourceId: s.id })).toBeNull();
+  expect(await findUnindexedFiles(engine, s.id)).toMatchObject({ unindexed: 0, metafile_skipped: 1, metafile_samples: ['projects/acme-example/schema.md'] });
   await engine.executeRaw('DELETE FROM config WHERE key=$1', [SYNC_METAFILE_PAGES_KEY]);
   const scan = await findUnindexedFiles(engine, s.id);
   expect(scan).toMatchObject({ unindexed: 1, metafile_skipped: 0 });
-  expect(scan.files.map(file => file.path)).toEqual(['projects/acme-example/index.md']);
+  expect(scan.files.map(file => file.path)).toEqual(['projects/acme-example/schema.md']);
   const upgraded = await s.sync();
   expect(['synced', 'first_sync']).toContain(upgraded.status);
   expect(upgraded.deleted ?? 0).toBe(0);
-  expect(await engine.getPage('projects/acme-example/index', { sourceId: s.id })).not.toBeNull();
+  expect(await engine.getPage('projects/acme-example/schema', { sourceId: s.id })).not.toBeNull();
   expect(await engine.getPage('notes/readme', { sourceId: s.id })).toBeNull();
   expect((await s.convergence()).counts).toEqual({ matched: 2 });
 }), 240_000);
