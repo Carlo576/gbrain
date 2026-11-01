@@ -109,19 +109,18 @@ export function shouldProceed(config?: Partial<ThrottleConfig>): ThrottleResult 
   const load = getLoad();
   const memUsed = getMemoryUsage();
 
-  // Windows/unsupported: loadavg returns [0,0,0] — can't determine load, proceed
-  if (loadavg()[0] === 0 && loadavg()[1] === 0 && loadavg()[2] === 0) {
-    return { proceed: true, delay: 0, reason: 'Load data unavailable (Windows?), proceeding', load: 0, memoryUsed: memUsed };
-  }
-
-  // Concurrent process limit
+  // These controls use known local state and remain enforceable even when the
+  // platform cannot report CPU load (for example, os.loadavg() on Windows).
   if (_activeProcesses >= MAX_CONCURRENT) {
     return { proceed: false, delay: 5000, reason: `${_activeProcesses} batch processes active (max ${MAX_CONCURRENT})`, load, memoryUsed: memUsed };
   }
-
-  // Memory check
   if (memUsed > cfg.memoryStopPct) {
     return { proceed: false, delay: 30000, reason: `Memory ${(memUsed * 100).toFixed(0)}% > ${(cfg.memoryStopPct * 100).toFixed(0)}% threshold`, load, memoryUsed: memUsed };
+  }
+
+  // Windows/unsupported: loadavg returns [0,0,0] — can't determine load, proceed
+  if (loadavg()[0] === 0 && loadavg()[1] === 0 && loadavg()[2] === 0) {
+    return { proceed: true, delay: 0, reason: 'Load data unavailable (Windows?), proceeding', load: 0, memoryUsed: memUsed };
   }
 
   // CPU load checks

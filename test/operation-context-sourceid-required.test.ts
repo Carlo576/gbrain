@@ -18,23 +18,34 @@ import { buildOperationContext } from '../src/mcp/dispatch.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
-describe('OperationContext.sourceId — REQUIRED contract', () => {
-  test('omitting sourceId from an OperationContext literal is a type error', () => {
-    // @ts-expect-error — sourceId is required; this literal is missing it
-    const badCtx: OperationContext = {
-      engine: {} as BrainEngine,
-      config: { engine: 'pglite' } as any,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      dryRun: false,
-      remote: false,
-      // sourceId intentionally omitted — must be a compile error
-    };
-    // Reference badCtx so it isn't dead code; the @ts-expect-error is the
-    // assertion. Use a type-only access so runtime behavior doesn't matter.
-    void badCtx;
-    expect(true).toBe(true);
-  });
+// Compile-only negative contracts. The project typecheck includes test files,
+// so intentionally invalid assignments do not need vacuous runtime tests.
+const missingSourceId = {
+  engine: {} as BrainEngine,
+  config: { engine: 'pglite' } as any,
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  dryRun: false,
+  remote: false,
+};
+// @ts-expect-error — sourceId is required; this value lacks it
+const missingSourceIdContract: OperationContext = missingSourceId;
+void missingSourceId;
+void missingSourceIdContract;
 
+const undefinedSourceId = {
+  engine: {} as BrainEngine,
+  config: { engine: 'pglite' } as any,
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  dryRun: false,
+  remote: false,
+  sourceId: undefined,
+};
+// @ts-expect-error — undefined is not assignable to string
+const undefinedSourceIdContract: OperationContext = undefinedSourceId;
+void undefinedSourceId;
+void undefinedSourceIdContract;
+
+describe('OperationContext.sourceId — REQUIRED contract', () => {
   test('passing sourceId satisfies the contract', () => {
     const ctx: OperationContext = {
       engine: {} as BrainEngine,
@@ -47,19 +58,6 @@ describe('OperationContext.sourceId — REQUIRED contract', () => {
     expect(ctx.sourceId).toBe('default');
   });
 
-  test('passing undefined for sourceId is a type error', () => {
-    const ctx: OperationContext = {
-      engine: {} as BrainEngine,
-      config: { engine: 'pglite' } as any,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      dryRun: false,
-      remote: false,
-      // @ts-expect-error — undefined is not assignable to string
-      sourceId: undefined,
-    };
-    void ctx;
-    expect(true).toBe(true);
-  });
 });
 
 describe('buildOperationContext — auto-fill safety net', () => {

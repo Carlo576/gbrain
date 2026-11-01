@@ -514,7 +514,7 @@ describe('#1262 resolveWriteColumnFromConfigRows / vectorCastSuffix', () => {
 const dbUrl = process.env.DATABASE_URL;
 if (!dbUrl) {
   describe.skip('#1262 upsertChunks registry-aware writes (postgres — skipped: DATABASE_URL unset)', () => {
-    test('skipped', () => { expect(true).toBe(true); });
+    test.skip('requires DATABASE_URL for real Postgres parity', () => {});
   });
 } else {
   describe('#1262 upsertChunks registry-aware writes (postgres)', () => {

@@ -38,8 +38,8 @@ beforeAll(() => {
   // are already in the parent shell — out of scope for this test).
   // GBRAIN_HOME is hermetic; this config is private to this test run.
   writeFileSync(join(gbrainDir, 'config.json'), JSON.stringify({
-    database: 'pglite',
-    pglite_dir: join(gbrainDir, 'pglite'),
+    engine: 'pglite',
+    database_path: join(gbrainDir, 'pglite'),
     embedding_model: 'openai:text-embedding-3-small',
     embedding_dimensions: 1536,
   }, null, 2));
@@ -107,14 +107,13 @@ describe('v0.41.6.0 D1 E2E — gbrain sync preflight rejects missing OPENAI_API_
 
     const failuresPath = join(tmpHome, '.gbrain', 'sync-failures.jsonl');
     if (!existsSync(failuresPath)) {
-      // File never created — perfect outcome.
-      expect(true).toBe(true);
+      // Absence means no failures were recorded at all.
       return;
     }
     const lines = readFileSync(failuresPath, 'utf8').split('\n').filter(Boolean);
     // Pre-v0.41.6.0 wrote N entries per file. Post-fix should write 0 entries
     // for the missing-key case (preflight exits before import).
-    expect(lines.length).toBeLessThanOrEqual(1);
+    expect(lines).toEqual([]);
   });
 
   test('--no-embed bypasses the preflight (sync proceeds)', () => {

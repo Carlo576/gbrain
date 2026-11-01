@@ -25,7 +25,7 @@ import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 const dbUrl = process.env.DATABASE_URL;
 if (!dbUrl) {
   describe.skip('postgres E2E — embedding column (skipped: DATABASE_URL unset)', () => {
-    test('skipped', () => { expect(true).toBe(true); });
+    test.skip('requires DATABASE_URL for real Postgres parity', () => {});
   });
 } else {
   let engine: PostgresEngine;

@@ -128,12 +128,6 @@ describe('background-work registry', () => {
     expect(__listDrainerNamesForTest()).not.toContain('test-unreg');
   });
 
-  test('empty registry (no test drainers) resolves fast', async () => {
-    // Production sinks may be registered, but they fast-path on empty pending
-    // sets. This just asserts the call resolves without throwing.
-    await drainAllBackgroundWorkForCliExit({ timeoutMs: 10 });
-    expect(true).toBe(true);
-  });
 });
 
 describe('disconnect drain (#4143)', () => {

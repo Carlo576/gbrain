@@ -12,6 +12,12 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import type { GBrainConfig } from '../src/core/config.ts';
+
+const zeroEntropyConfigContract = {
+  engine: 'pglite',
+  zeroentropy_api_key: 'compile-time-contract',
+} satisfies Partial<GBrainConfig>;
 
 // Lane A — defaults sweep
 describe('v0.37 Lane A — defaults sweep', () => {
@@ -245,11 +251,8 @@ describe('v0.37 Lane C.3 — ZE key reaches buildGatewayConfig', () => {
     }
   });
 
-  test('GBrainConfig type includes zeroentropy_api_key field (TS compile guard)', async () => {
-    const { type } = await import('../src/core/config.ts').then(m => ({ type: undefined }));
-    // The type-level assertion happens at compile time. If this file
-    // compiles, the field exists. Body of the test is a runtime no-op.
-    expect(true).toBe(true);
+  test('GBrainConfig accepts zeroentropy_api_key in the file-plane contract', () => {
+    expect(zeroEntropyConfigContract.zeroentropy_api_key).toBe('compile-time-contract');
   });
 });
 

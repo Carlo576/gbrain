@@ -222,7 +222,6 @@ describeFn('v0.40.4 — graph_signals eval gates (longmemeval-mini A/B)', () => 
     if (process.env.GBRAIN_EVAL_VERBOSE) {
       console.log(`Gate 1: observedDelta=${result.observedDelta.toFixed(3)}, p=${result.pValue.toFixed(3)}`);
     }
-    expect(true).toBe(true);  // gate passed
   });
 
   test('Gate 2a (CHANGE-MAGNITUDE): mean Jaccard@5 >= 0.5', () => {
