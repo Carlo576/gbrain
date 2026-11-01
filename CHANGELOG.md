@@ -27,6 +27,20 @@ Before, #8367 left `chronicle_day`, `chronicle_since`, `chronicle_on_this_day`, 
 - The `put_page` tool-call guard counts only summaries outside the content's own tool-call blocks, and admits a new turn that quotes a summary while every stored call stays; its refusal names `edit_page` first.
 - Tests: `test/search-transcript-quote-followups.test.ts` (every item, red on master for the changed reads and writes) and `test/trust-keep-maintenance-reimport-8352.test.ts` (maintenance re-imports keep an owner note's tier), both on PGLite and Postgres.
 
+## [0.60.537.0] - 2026-11-01
+
+**One source's stuck writes can no longer starve another source's sync: a write refused for a missing ownership marker ends terminally with its own code and restore step, the shared local principal keeps a fair share for every source, and doctor names the source holding the slots (#8368)**
+
+On Postgres, a bulk sync group whose checkout failed the ownership check when its worktree lock was taken threw out of the consumer and stayed `running`; after each lease lapse the owner claimed it into the same refusal, forever, while the source kept admitting more. A hundred of them filled the local CLI principal's outstanding cap, which every source's sync shares, so another source's sync stopped `write_capacity` and doctor read `ok`. Now a deterministic ownership refusal finishes every claimed, unpublished member `failed` (the single path already did), which releases its slot; transient failures keep retrying as before. A missing `.gbrain-owner.json` is refused `owner_marker_missing` instead of the generic identity refusal, and its fix is the verified self-transfer that re-creates it. At the principal cap a source holding less than its fair share (the cap over the sources holding outstanding requests on the local CLI principal) is still admitted, a sync publication group or page batch whole, the brain cap stays hard, and a refusal names the source holding the most slots. `persistence_capacity` warns when an outstanding-request cap is at 90% or more and its oldest request has waited over ten minutes, and names the source holding the most stalled requests.
+
+### Itemized changes
+
+- `src/core/persistence/consumer.ts`: `failRefusedClaims` settles a claimed group refused `recovery_required` or `owner_marker_missing` before publication, fenced on the claim token, no recovery record and publication not started; a member whose claim moved is left to its claimant and a connection loss gives the rest back.
+- `src/core/persistence/owner-marker.ts`, `physical-root-record.ts`, `ownership.ts`: `owner_marker_missing` for an absent stamp under a reservation that identifies the directory exactly, with the self-transfer restore as its fix; a stamp naming another owner keeps `recovery_required`. Registered in `error-registry.ts`, `WRITE_ERROR_CODES`, the sync fault table and the terminal classifier (the receipt's fix is the restore step).
+- `src/core/persistence/journal.ts`: `outstandingRefusal` applies the local CLI principal fair share on single and group admission (checked before the admission, so a group larger than the share is admitted whole) and names the top holder.
+- `src/commands/doctor/checks/persistence-capacity.ts`: `details.outstanding[]` with holders; a holder's writer status as the fix when it is the only finding.
+- `test/write-cap-wedge-8368.test.ts` (PGLite and Postgres, with `test/e2e/write-cap-wedge-8368-postgres.test.ts`).
+
 ## [0.60.536.0] - 2026-11-01
 
 **Agents connected over MCP now see agent-written, ingested and unverified-origin text quoted as source material on search, recall, page, chunk, timeline, version and write-receipt reads, and conversation tool calls come back summarized on the reads that still returned them verbatim.**
