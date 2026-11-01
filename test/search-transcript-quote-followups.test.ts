@@ -277,6 +277,24 @@ for (const backend of testBackends()) {
       expect([unfenced!.title, unfenced!.frontmatter, unfenced!.compiled_truth]).toEqual([plain!.title, plain!.frontmatter, plain!.compiled_truth]);
     }, 120_000);
 
+    test('item 3: a CRLF reading shape with a fenced last key keeps its frontmatter', async () => {
+      const slug = 'notes/pasted-fenced';
+      const fenced = fenceTranscriptText('Crlf title', slug).split('\n').map(l => `  ${l}`);
+      const { revision } = await ok('get_page', { slug });
+      await ok('put_page', { slug, expected_revision: revision, content: ['---', 'type: note', 'title: |-', ...fenced, '---', '', 'Body line one.'].join('\r\n') });
+      const page = await engine.getPage(slug);
+      expect([page!.type, page!.title, page!.compiled_truth.trim()]).toEqual(['note', 'Crlf title', 'Body line one.']);
+    }, 120_000);
+
+    test('item 3: an owner-tier page\'s frontmatter value that quotes the page itself survives a round trip', async () => {
+      const slug = 'notes/owner-quote-example';
+      const example = fenceTranscriptText('an owner sample', slug);
+      await asOwner(engine, tx => tx.putPage(slug, { type: 'note', title: 'Owner quote example', compiled_truth: 'Owner body.', timeline: '', frontmatter: { example } }));
+      const read = await ok('get_page', { slug, include_content: true, content_only: true });
+      await ok('put_page', { slug, content: read.content, expected_revision: read.revision });
+      expect((await engine.getPage(slug))!.frontmatter.example).toBe(example);
+    }, 120_000);
+
     test('item 8: add_timeline_entry unquotes by the page slug however the caller cased it', async () => {
       const text = `Cased entry ${CODE.timeline}-cased`;
       await ok('add_timeline_entry', { slug: AGENT_SLUG.toUpperCase(), date: '2026-10-03', summary: fenceTranscriptText(text, AGENT_SLUG) });

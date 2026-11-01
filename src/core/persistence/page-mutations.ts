@@ -263,38 +263,33 @@ export async function submitPageMutation(ctx: OperationContext,
  * GST-687: content carrying a tool-call summary that only the neutralized read of the stored chat page holds (get_page's
  * reading shape, fetch) is refused, so a read-then-write never replaces a stored tool call with its summary.
  */
+/** Every string in `value` with the fences naming `slug` removed (get_page's quotedPageMeta, reversed). */
+function unquotedStrings(value: unknown, slug: string): unknown {
+  return typeof value === 'string' ? unquoteTranscriptText(value, slug)
+    : Array.isArray(value) ? value.map(v => unquotedStrings(v, slug))
+    : value && typeof value === 'object' && !(value instanceof Date) ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, unquotedStrings(v, slug)])) : value;
+}
+
 /**
  * #8377: a quoted read's reading shape fences the title and each frontmatter string as `slug`'s (a whole-markdown read is
- * fenced once instead, and its metadata is the page's own). YAML indents those fences, so the body's unquote misses them:
- * each key that held one is rewritten unfenced, and every other frontmatter line is kept byte for byte.
+ * fenced once instead, and its metadata is the page's own). YAML indents those fences, so the body's unquote misses them.
  */
 function unquotedFrontmatter(sent: string, content: string, slug: string): string {
   const offset = frontmatterBodyOffset(content);
   if (!offset || !frontmatterBodyOffset(sent) || !content.slice(0, offset).includes('```text')) return content;
-  const unquote = (v: unknown): unknown => typeof v === 'string' ? unquoteTranscriptText(v, slug)
-    : Array.isArray(v) ? v.map(unquote)
-    : v && typeof v === 'object' && !(v instanceof Date) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, unquote(x)])) : v;
-  const lines = content.slice(0, offset).split('\n');
-  for (const [key, value] of Object.entries(parseMarkdownHead(content).frontmatter)) {
-    const plain = unquote(value);
-    if (JSON.stringify(plain) === JSON.stringify(value)) continue;
-    const at = lines.findIndex((l, i) => i > 0 && l.startsWith(`${key}:`));
-    if (at < 0) return content;
-    let end = at + 1;
-    while (end < lines.length && lines[end] !== '---' && (lines[end] === '' || /^\s/.test(lines[end]) || lines[end].startsWith('-'))) end++;
-    const dumped = dataFrontmatter.stringify('', { [key]: plain }).split('\n');
-    lines.splice(at, end - at, ...dumped.slice(1, dumped.lastIndexOf('---')));
-  }
-  return lines.join('\n') + content.slice(offset);
+  const { frontmatter } = parseMarkdownHead(content);
+  const data = unquotedStrings(frontmatter, slug) as Record<string, unknown>;
+  return JSON.stringify(data) === JSON.stringify(frontmatter) ? content : dataFrontmatter.stringify('', data) + content.slice(offset);
 }
 
 async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: string, content: string): Promise<string> {
-  const unquoted = unquotedFrontmatter(content, unquoteTranscriptText(content, slug), slug);
+  const bodyUnquoted = unquoteTranscriptText(content, slug);
+  const unquoted = unquotedFrontmatter(content, bodyUnquoted, slug);
   const summarized = /, arguments omitted\]/.test(unquoted);
   const quotedType = isQuotedPageType(String(parseMarkdownHead(unquoted).frontmatter.type ?? ''));
   if (!summarized && (unquoted === content || quotedType)) return unquoted;
-  const [stored] = await engine.executeRaw<{ type: string | null; trust_tier: string | null }>(
-    'SELECT type, trust_tier FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
+  const [stored] = await engine.executeRaw<{ type: string | null; trust_tier: string | null; title: string | null; frontmatter: unknown }>(
+    'SELECT type, trust_tier, title, frontmatter FROM pages WHERE source_id = $1 AND slug = $2', [sourceId, slug]);
   // Compared with the stored body's tool calls; a segmented page reads NULL inline columns, so its summarized round trip is refused.
   const losesCalls = async () => {
     const body = await readStoredBody(engine, sourceId, slug);
@@ -309,9 +304,12 @@ async function unquotedPutContent(engine: BrainEngine, sourceId: string, slug: s
   if (isQuotedPageType(stored.type) || quotesTier(stored.trust_tier)) return unquoted;
   // An owner-tier page keeps a fence naming it only when its stored body already holds one: a fence read while the page sat
   // below the owner's tier (before a claim or backfill raised it, or from a quoted version) is a read's, not the page's.
+  // Its title and frontmatter are judged the same way, by the stored title and frontmatter.
   const body = await readStoredBody(engine, sourceId, slug);
   const storedText = `${body?.compiled_truth ?? ''}\n${body?.timeline ?? ''}`;
-  return body?.compiled_truth != null && unquoteTranscriptText(storedText, slug) === storedText ? unquoted : content;
+  const kept = body?.compiled_truth != null && unquoteTranscriptText(storedText, slug) === storedText ? bodyUnquoted : content;
+  const storedMeta = [stored.title, typeof stored.frontmatter === 'string' ? JSON.parse(stored.frontmatter) : stored.frontmatter];
+  return JSON.stringify(unquotedStrings(storedMeta, slug)) === JSON.stringify(storedMeta) ? unquotedFrontmatter(content, kept, slug) : kept;
 }
 
 /**
